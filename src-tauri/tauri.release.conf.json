@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "active": true,
+    "resources": {
+      "../python-engine/dist/video-engine/": "video-engine/"
+    }
+  }
+}
