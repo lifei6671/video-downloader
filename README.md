@@ -102,3 +102,7 @@ git push origin v0.1.0
 三个构建全部成功后，使用仓库自带 `GITHUB_TOKEN` 创建草稿、上传 Windows NSIS `.exe` 和两种 macOS `.dmg`，随后公开 Release。构建失败不发布；已有同名 Release 不覆盖。若上传中断留下草稿，先检查并删除该草稿，再重跑失败的发布 job。Actions artifacts 保留 14 天。仓库/组织策略须允许该 workflow 的 `contents: write`，无需新增发布 Token。
 
 当前未配置 Windows 代码签名或 Apple Developer ID/公证；macOS 仅 ad-hoc 签名。自动构建和离线启动检查不代表安装验收：全新无 Python Windows、两种 macOS 安装/启动、双平台在线下载与签名公证仍待验证。首次标签 CI 运行结果需单独确认。
+
+## 持续集成
+
+[CI 工作流](.github/workflows/ci.yml) 在推送到 `master` 时自动触发，在 Windows x64、macOS Intel / Apple Silicon 上运行离线 Python/Rust 测试、Rust Clippy、打包引擎启动检查，以及前端类型检查和桌面 Release 编译（不生成安装器、不发布 Release）。同一分支的新推送会取消仍在运行的旧 CI。CI 不使用真实 Cookie 或执行平台在线下载；实际 GitHub runner 结果以 Actions 为准。

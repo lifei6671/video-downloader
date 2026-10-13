@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1440, initial-scale=1.0">
+  <title>下载任务 - 映取</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;650;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            app: {
+              bg: '#0D121A',
+              sidebar: '#101721',
+              surface: '#141C28',
+              'surface-raised': '#1B2635',
+              'surface-input': '#111A25',
+              'surface-hover': '#202D3D',
+              'surface-selected': '#1D2F46',
+              border: '#2B394A',
+              'border-strong': '#43556A',
+              primary: '#76B4FF',
+              'primary-hover': '#91C4FF',
+              'primary-pressed': '#5799EF',
+              'on-primary': '#071B34',
+              'text-primary': '#EAF1FA',
+              'text-secondary': '#AFBED0',
+              'text-muted': '#8294AB',
+              success: '#60D5B1',
+              warning: '#F0C878',
+              error: '#F38B9D',
+              'progress-track': '#2A3C50',
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+            mono: ['Inter', 'SFMono-Regular', 'Consolas', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #0D121A;
+      color: #EAF1FA;
+      font-family: 'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #2B394A;
+      border-radius: 9999px;
+    }
+  </style>
+</head>
+<body class="bg-app-bg text-app-text-primary antialiased flex h-screen w-screen overflow-hidden">
+
+  <!-- 左侧固定导航栏 (224px) -->
+  <aside class="w-[224px] min-w-[224px] max-w-[224px] h-full bg-app-sidebar border-r border-app-border flex flex-col justify-between select-none z-20">
+    <!-- 顶部 Brand & 导航区 -->
+    <div class="flex flex-col">
+      <!-- 品牌标识与名称 (84px高度) -->
+      <div class="h-[84px] px-6 flex items-center gap-3 border-b border-app-border/40">
+        <div class="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-400 to-app-primary flex items-center justify-center shadow-inner shadow-white/20">
+          <svg class="w-4 h-4 text-app-on-primary fill-current" viewBox="0 0 24 24">
+            <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6zM10 19c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z" style="display:none;"/>
+            <!-- 几何化“播放三角形+向下箭头”组合图标 -->
+            <path d="M5 4.5l14 7.5-14 7.5V4.5z" opacity="0.3"/>
+            <path d="M12 3v11m0 0l-4-4m4 4l4-4M5 20h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+        </div>
+        <div class="flex items-center">
+          <span class="text-[18px] font-[650] tracking-tight text-app-text-primary font-sans">映取</span>
+          <span class="ml-2 text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-app-surface-raised text-app-primary border border-app-border/60">v1.0</span>
+        </div>
+      </div>
+
+      <!-- 四项核心导航 -->
+      <nav class="p-3 space-y-1.5 pt-4">
+        <!-- 1. 下载视频 (非激活态) -->
+        <a href="#" class="h-[44px] px-3.5 rounded-[10px] flex items-center justify-between text-app-text-secondary hover:bg-app-surface-hover hover:text-app-text-primary transition-colors text-[14px] font-medium group">
+          <div class="flex items-center gap-3">
+            <svg class="w-[18px] h-[18px] stroke-current text-app-text-muted group-hover:text-app-text-secondary" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <span>下载视频</span>
+          </div>
+        </a>
+
+        <!-- 2. 下载任务 (当前高亮项 + 数量徽标 [2]) -->
+        <a href="#" class="h-[44px] px-3.5 rounded-[10px] flex items-center justify-between bg-app-surface-selected text-app-primary text-[14px] font-[600] border border-app-primary/20 shadow-sm shadow-blue-500/5">
+          <div class="flex items-center gap-3">
+            <svg class="w-[18px] h-[18px] stroke-current" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="8" y1="6" x2="21" y2="6"/>
+              <line x1="8" y1="12" x2="21" y2="12"/>
+              <line x1="8" y1="18" x2="21" y2="18"/>
+              <line x1="3" y1="6" x2="3.01" y2="6"/>
+              <line x1="3" y1="12" x2="3.01" y2="12"/>
+              <line x1="3" y1="18" x2="3.01" y2="18"/>
+            </svg>
+            <span>下载任务</span>
+          </div>
+          <!-- 数字徽标 2 -->
+          <span class="inline-flex items-center justify-center min-w-[20px] h-[20px] px-1.5 text-[11px] font-mono font-semibold rounded-full bg-app-primary text-app-on-primary shadow-xs">2</span>
+        </a>
+
+        <!-- 3. 已完成 -->
+        <a href="#" class="h-[44px] px-3.5 rounded-[10px] flex items-center justify-between text-app-text-secondary hover:bg-app-surface-hover hover:text-app-text-primary transition-colors text-[14px] font-medium group">
+          <div class="flex items-center gap-3">
+            <svg class="w-[18px] h-[18px] stroke-current text-app-text-muted group-hover:text-app-text-secondary" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+              <polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+            <span>已完成</span>
+          </div>
+        </a>
+
+        <!-- 4. 设置 -->
+        <a href="#" class="h-[44px] px-3.5 rounded-[10px] flex items-center justify-between text-app-text-secondary hover:bg-app-surface-hover hover:text-app-text-primary transition-colors text-[14px] font-medium group">
+          <div class="flex items-center gap-3">
+            <svg class="w-[18px] h-[18px] stroke-current text-app-text-muted group-hover:text-app-text-secondary" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+            <span>设置</span>
+          </div>
+        </a>
+      </nav>
+    </div>
+
+    <!-- 侧栏底部状态文案 -->
+    <div class="p-3 border-t border-app-border/40">
+      <div class="h-10 px-3 rounded-[8px] bg-app-surface/60 border border-app-border/40 flex items-center justify-between text-[12px] text-app-text-muted">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-app-success animate-pulse"></span>
+          <span>本地运行</span>
+        </div>
+        <span class="font-mono text-[11px] text-app-text-secondary/70">127.0.0.1</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 右侧主内容区域 -->
+  <main class="flex-1 h-full bg-app-bg overflow-y-auto custom-scrollbar flex flex-col">
+    <!-- 内容主容器 (max-w-[1120px] 32px内边距) -->
+    <div class="w-full max-w-[1120px] px-8 py-8 flex flex-col flex-1">
+      
+      <!-- 页面顶部标题与工具栏 -->
+      <header class="flex items-center justify-between pb-6 border-b border-app-border/40">
+        <div>
+          <div class="flex items-center gap-3">
+            <h1 class="text-[28px] font-[650] tracking-tight text-app-text-primary leading-tight font-sans">下载任务</h1>
+            <span class="text-xs font-mono font-medium px-2 py-0.5 rounded-full bg-app-surface-raised border border-app-border text-app-text-secondary">3 个任务</span>
+          </div>
+          <p class="text-[14px] text-app-text-secondary mt-1">查看正在下载与等待处理的任务</p>
+        </div>
+
+        <!-- 顶部右侧筛选条件 (全部 / 进行中 / 失败) -->
+        <div class="flex items-center gap-2">
+          <div class="inline-flex p-1 rounded-[10px] bg-app-surface border border-app-border text-[13px] font-medium">
+            <button class="px-3.5 py-1.5 rounded-[7px] bg-app-surface-selected text-app-primary font-semibold transition-colors shadow-xs">全部 (3)</button>
+            <button class="px-3.5 py-1.5 rounded-[7px] text-app-text-secondary hover:text-app-text-primary hover:bg-app-surface-hover transition-colors">进行中 (2)</button>
+            <button class="px-3.5 py-1.5 rounded-[7px] text-app-text-secondary hover:text-app-text-primary hover:bg-app-surface-hover transition-colors">失败 (1)</button>
+          </div>
+        </div>
+      </header>
+
+      <!-- 任务列表容器：规整高密度的桌面任务行列表 -->
+      <section class="mt-6 space-y-3.5 flex-1 pb-10">
+
+        <!-- 任务 1：TikTok 视频“雨后的东京街头” (状态：下载中 68%) -->
+        <article class="p-4 rounded-[14px] bg-app-surface border border-app-border hover:border-app-border-strong transition-all duration-150 flex items-center justify-between gap-5 group">
+          <!-- 左侧：缩略图 (9:16比例微缩，约 54 × 80px) -->
+          <div class="flex items-center gap-4 flex-1 min-w-0">
+            <div class="relative w-[54px] h-[80px] min-w-[54px] rounded-[10px] overflow-hidden border border-app-border bg-app-surface-input flex-shrink-0 shadow-sm">
+              <img src="https://lh3.googleusercontent.com/aida-public/AB6AXuANskfDhyZAtTT-_mlAFyOKRpqvu76G3TgXSsl12vu8IUc0jIS9x3v9btLBgoyZZgxTQaWeZ5dvWaxO-VzrrcsO567m3qDvpqINJ0ZeZSRKd8SSQfhQ3BIL_qzuiHl3STXNuI2kFw5HVfaDAD5RO9JKzxFcFneO_oCSn14sXlYmTUYsyhPAz1uvHKNnf0UtU4VcErBYxz82o6CDLaTcO0NCJ9QEfm1nfP-SI-vIxBAKmDHQYF_XTjHzBw" alt="雨后的东京街头 封面" class="w-full h-full object-cover">
+              <span class="absolute bottom-1 right-1 px-1 py-0.2 bg-black/75 rounded text-[10px] font-mono font-medium text-white/90 leading-tight">00:38</span>
+            </div>
+
+            <!-- 中间：标题、作者、标签与下载进度 -->
+            <div class="flex flex-col flex-1 min-w-0 pr-4">
+              <!-- 标题与平台 -->
+              <div class="flex items-center gap-2.5 mb-1.5">
+                <span class="px-2 py-0.5 rounded-[6px] text-[11px] font-medium bg-app-surface-raised text-app-text-secondary border border-app-border/80">TikTok</span>
+                <h3 class="text-[15px] font-[600] text-app-text-primary truncate" title="雨后的东京街头 · 霓虹雨夜氛围感记录">雨后的东京街头 · 霓虹雨夜氛围感记录</h3>
+                <span class="text-[13px] text-app-text-muted truncate">@tokyovibes</span>
+              </div>
+
+              <!-- 进度条与指标遥测 -->
+              <div class="space-y-1.5 mt-0.5">
+                <!-- 进度条轨道 -->
+                <div class="w-full h-[6px] rounded-full bg-app-progress-track overflow-hidden">
+                  <div class="h-full bg-app-primary rounded-full transition-all duration-300" style="width: 68%;"></div>
+                </div>
+
+                <!-- 遥测指标 (下载速度、已下载/总计、百分比) -->
+                <div class="flex items-center justify-between text-[12px] font-mono text-app-text-muted">
+                  <div class="flex items-center gap-3">
+                    <span class="text-app-primary font-semibold">68%</span>
+                    <span>83.4 / 122.0 MB</span>
+                    <span class="text-app-text-secondary font-medium flex items-center gap-1">
+                      <svg class="w-3.5 h-3.5 text-app-primary stroke-current" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="7 13 12 18 17 13"></polyline>
+                        <line x1="12" y1="6" x2="12" y2="18"></line>
+                      </svg>
+                      4.8 MB/s
+                    </span>
+                  </div>
+                  <span class="text-[11px] text-app-text-muted">剩余约 8 秒</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右侧：状态胶囊与上下文动作 -->
+          <div class="flex items-center gap-4 flex-shrink-0 pl-2 border-l border-app-border/40">
+            <!-- 状态徽标 -->
+            <div class="flex items-center gap-2 min-w-[76px]">
+              <span class="relative flex h-2 w-2">
+                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-app-primary opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-2 w-2 bg-app-primary"></span>
+              </span>
+              <span class="text-[13px] font-medium text-app-primary">下载中</span>
+            </div>
+
+            <!-- 操作按钮：取消 -->
+            <button class="h-[36px] px-3.5 rounded-[8px] bg-app-surface-raised hover:bg-app-surface-hover text-app-text-secondary hover:text-app-text-primary text-[13px] font-medium border border-app-border transition-colors flex items-center gap-1.5" title="取消下载任务">
+              <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+              <span>取消</span>
+            </button>
+          </div>
+        </article>
+
+        <!-- 任务 2：抖音视频“厨房里的五分钟晚餐” (状态：等待中) -->
+        <article class="p-4 rounded-[14px] bg-app-surface border border-app-border hover:border-app-border-strong transition-all duration-150 flex items-center justify-between gap-5 group">
+          <!-- 左侧：缩略图 (9:16比例微缩，约 54 × 80px) -->
+          <div class="flex items-center gap-4 flex-1 min-w-0">
+            <div class="relative w-[54px] h-[80px] min-w-[54px] rounded-[10px] overflow-hidden border border-app-border bg-app-surface-input flex-shrink-0 shadow-sm opacity-90">
+              <img src="https://lh3.googleusercontent.com/aida-public/AB6AXuBbiuwqUK7IQZV5VVXN6R8OOHDFqoo0-RwaWEjJVbxHSJVjLTP0yvYm1u_uZKFKNvFL7ZklV19Uy_-ks2CYnjvbdNM8D-_hOGzfqBUBJAu7wjIvN_OM_XaPzcjHV_sVsA_85Ii7nm03Ht5kMQ4Nctf6C5smuOmGiyEnKnoIhvFTIco81XBhP5fWT-2NrXAbkn8IRbRTYUYVjtbsbxDR8lrHs_ra0F3ofeVZzsDGTnSvdQzMrGYYuoSXRA" alt="厨房里的五分钟晚餐 封面" class="w-full h-full object-cover">
+              <span class="absolute bottom-1 right-1 px-1 py-0.2 bg-black/75 rounded text-[10px] font-mono font-medium text-white/90 leading-tight">01:15</span>
+            </div>
+
+            <!-- 中间：标题、作者、标签与等待状态说明 (无伪造速度与假进度) -->
+            <div class="flex flex-col flex-1 min-w-0 pr-4">
+              <!-- 标题与平台 -->
+              <div class="flex items-center gap-2.5 mb-1.5">
+                <span class="px-2 py-0.5 rounded-[6px] text-[11px] font-medium bg-app-surface-raised text-app-text-secondary border border-app-border/80">抖音</span>
+                <h3 class="text-[15px] font-[600] text-app-text-primary truncate" title="厨房里的五分钟晚餐 · 治愈系独居食谱">厨房里的五分钟晚餐 · 治愈系独居食谱</h3>
+                <span class="text-[13px] text-app-text-muted truncate">@暖食记</span>
+              </div>
+
+              <!-- 静态轨道与排队状态 -->
+              <div class="space-y-1.5 mt-0.5">
+                <!-- 空进度条轨道 -->
+                <div class="w-full h-[6px] rounded-full bg-app-progress-track/60 overflow-hidden">
+                  <div class="h-full bg-transparent w-0"></div>
+                </div>
+
+                <!-- 遥测说明：真实不造假 -->
+                <div class="flex items-center justify-between text-[12px] font-mono text-app-text-muted">
+                  <div class="flex items-center gap-3">
+                    <span class="text-app-text-muted">排队中 (等待当前并发完成)</span>
+                    <span>预计 54.2 MB</span>
+                  </div>
+                  <span class="text-[11px] text-app-text-muted">速度：—</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右侧：状态胶囊与上下文动作 -->
+          <div class="flex items-center gap-4 flex-shrink-0 pl-2 border-l border-app-border/40">
+            <!-- 状态徽标 -->
+            <div class="flex items-center gap-2 min-w-[76px]">
+              <span class="w-2 h-2 rounded-full bg-app-text-muted"></span>
+              <span class="text-[13px] font-medium text-app-text-muted">等待中</span>
+            </div>
+
+            <!-- 操作按钮：取消等待 -->
+            <button class="h-[36px] px-3.5 rounded-[8px] bg-app-surface-raised hover:bg-app-surface-hover text-app-text-secondary hover:text-app-text-primary text-[13px] font-medium border border-app-border transition-colors flex items-center gap-1.5" title="取消排队任务">
+              <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+              <span>取消</span>
+            </button>
+          </div>
+        </article>
+
+        <!-- 任务 3：抖音视频“山间云海记录” (状态：失败) -->
+        <article class="p-4 rounded-[14px] bg-app-surface border border-app-border hover:border-app-border-strong transition-all duration-150 flex items-center justify-between gap-5 group">
+          <!-- 左侧：缩略图 (9:16比例微缩，约 54 × 80px) -->
+          <div class="flex items-center gap-4 flex-1 min-w-0">
+            <div class="relative w-[54px] h-[80px] min-w-[54px] rounded-[10px] overflow-hidden border border-app-border bg-app-surface-input flex-shrink-0 shadow-sm opacity-80">
+              <img src="https://lh3.googleusercontent.com/aida-public/AB6AXuBwNODsG3NeDNQGhP8KU5fNQBj4AX2C1TG8b5thpv1wU4tzEb27H8xbsktYS2G8hjqjYPD4e70esNvBPyn5WTv1xwgNM5cowcEH6eBGpUYI2RvPuAwxymYN6b7OGg87tSoGbe_XSIF2Hki-maQ_rDNc4XKxq0-CFIr8c97VmPPXGjmhjUCDgH7_hMNVLyD3-uAoyQ8xUNLn5zreAXcNFz2rbbd8o3z_r1XcYG_uGlL9xXMjq77jp7nrYA" alt="山间云海记录 封面" class="w-full h-full object-cover grayscale-[30%]">
+              <span class="absolute bottom-1 right-1 px-1 py-0.2 bg-black/75 rounded text-[10px] font-mono font-medium text-white/90 leading-tight">00:49</span>
+            </div>
+
+            <!-- 中间：标题、作者、标签与失败具体错误原因 -->
+            <div class="flex flex-col flex-1 min-w-0 pr-4">
+              <!-- 标题与平台 -->
+              <div class="flex items-center gap-2.5 mb-1.5">
+                <span class="px-2 py-0.5 rounded-[6px] text-[11px] font-medium bg-app-surface-raised text-app-text-secondary border border-app-border/80">抖音</span>
+                <h3 class="text-[15px] font-[600] text-app-text-primary truncate" title="山间云海记录 · 徒步摄影短片">山间云海记录 · 徒步摄影短片</h3>
+                <span class="text-[13px] text-app-text-muted truncate">@山野拾光</span>
+              </div>
+
+              <!-- 失败明确提示（局部克制强调，不泛滥红色背景） -->
+              <div class="flex items-center gap-2 mt-1">
+                <svg class="w-3.5 h-3.5 text-app-error flex-shrink-0 stroke-current" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="12" y1="8" x2="12" y2="12"></line>
+                  <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+                <span class="text-[13px] text-app-error font-medium">下载链接已过期，请重新解析</span>
+                <span class="text-[12px] font-mono text-app-text-muted ml-2">错误码: HTTP 410 Expired</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右侧：状态胶囊与上下文动作 (重试 + 更多操作) -->
+          <div class="flex items-center gap-4 flex-shrink-0 pl-2 border-l border-app-border/40">
+            <!-- 状态徽标 -->
+            <div class="flex items-center gap-2 min-w-[76px]">
+              <span class="w-2 h-2 rounded-full bg-app-error"></span>
+              <span class="text-[13px] font-medium text-app-error">失败</span>
+            </div>
+
+            <!-- 操作按钮：重试 (高亮操作) -->
+            <div class="flex items-center gap-2">
+              <button class="h-[36px] px-3.5 rounded-[8px] bg-app-surface-raised hover:bg-app-surface-hover text-app-text-primary text-[13px] font-medium border border-app-border transition-colors flex items-center gap-1.5" title="重新尝试下载">
+                <svg class="w-3.5 h-3.5 stroke-current" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+                </svg>
+                <span>重试</span>
+              </button>
+              
+              <!-- 次级操作：移除失败记录 -->
+              <button class="h-[36px] w-[36px] rounded-[8px] hover:bg-app-surface-hover text-app-text-muted hover:text-app-text-secondary transition-colors flex items-center justify-center border border-transparent hover:border-app-border" title="移除此记录">
+                <svg class="w-4 h-4 stroke-current" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </article>
+
+      </section>
+
+      <!-- 页面底部辅助状态与配置提示 -->
+      <footer class="pt-4 border-t border-app-border/40 flex items-center justify-between text-[12px] text-app-text-muted">
+        <div class="flex items-center gap-2">
+          <svg class="w-4 h-4 stroke-current text-app-text-secondary/70" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="16" x2="12" y2="12"></line>
+            <line x1="12" y1="8" x2="12.01" y2="8"></line>
+          </svg>
+          <span>最大同时下载任务数：2（可在“设置”中修改并发与下载目录）</span>
+        </div>
+        <div class="flex items-center gap-4">
+          <span class="font-mono">全局速度: 4.8 MB/s</span>
+          <span>存储空间剩余: 142.8 GB 可用</span>
+        </div>
+      </footer>
+
+    </div>
+  </main>
+
+</body>
+</html>

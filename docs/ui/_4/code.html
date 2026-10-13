@@ -1,0 +1,543 @@
+<!DOCTYPE html><html lang="zh-CN" style=""><head>
+<meta charset="utf-8">
+<meta content="width=1440, initial-scale=1.0" name="viewport">
+<title>下载任务 - 映取</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com" rel="preconnect">
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;650;700&amp;family=Noto+Sans+SC:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<script id="tailwind-config">
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            app: {
+              bg: '#0D121A',
+              sidebar: '#101721',
+              surface: '#141C28',
+              'surface-raised': '#1B2635',
+              'surface-input': '#111A25',
+              'surface-hover': '#202D3D',
+              'surface-selected': '#1D2F46',
+              border: '#2B394A',
+              'border-strong': '#43556A',
+              primary: '#76B4FF',
+              'primary-hover': '#91C4FF',
+              'primary-pressed': '#5799EF',
+              'on-primary': '#071B34',
+              'text-primary': '#EAF1FA',
+              'text-secondary': '#AFBED0',
+              'text-muted': '#8294AB',
+              success: '#60D5B1',
+              warning: '#F0C878',
+              error: '#F38B9D',
+              'progress-track': '#2A3C50',
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+            mono: ['Inter', 'SFMono-Regular', 'Consolas', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+<style>
+    body {
+      background-color: #0D121A;
+      color: #EAF1FA;
+      font-family: 'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #2B394A;
+      border-radius: 9999px;
+    }
+  </style>
+<meta content="web_dashboard" name="shell-type"></head>
+<body class="bg-app-bg text-app-text-primary antialiased flex h-screen w-screen overflow-hidden">
+<!-- 左侧固定导航栏 (224px) -->
+<aside class="w-[224px] min-w-[224px] max-w-[224px] h-full bg-app-sidebar border-r border-app-border flex flex-col justify-between select-none z-20">
+<!-- 顶部 Brand & 导航区 -->
+<div class="flex flex-col">
+<!-- 品牌标识与名称 (84px高度) -->
+<div class="h-[84px] px-6 flex items-center gap-3 border-b border-app-border/40"><div class="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-400 to-app-primary flex items-center justify-center shadow-inner shadow-white/20 flex-shrink-0"><svg class="w-4 h-4 text-app-on-primary fill-current" viewBox="0 0 24 24"><path d="M5 4.5l14 7.5-14 7.5V4.5z" opacity="0.3"></path><path d="M12 3v11m0 0l-4-4m4 4l4-4M5 20h14" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2"></path></svg></div><div class="flex items-center gap-2 whitespace-nowrap min-w-0"><span class="text-[18px] font-[650] tracking-tight text-app-text-primary font-sans leading-none">映取</span><span class="text-[11px] font-mono font-medium px-1.5 py-0.5 rounded bg-app-surface-raised text-app-primary border border-app-border/60 leading-none">v1.0</span></div></div>
+<!-- 四项核心导航 -->
+<nav class="p-3 space-y-1.5 pt-4">
+<!-- 1. 下载视频 (非激活态) -->
+<a class="h-[44px] px-3.5 rounded-[10px] flex items-center justify-between text-app-text-secondary hover:bg-app-surface-hover hover:text-app-text-primary transition-colors text-[14px] font-medium group" href="#">
+<div class="flex items-center gap-3">
+<svg class="w-[18px] h-[18px] stroke-current text-app-text-muted group-hover:text-app-text-secondary" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" viewBox="0 0 24 24">
+<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+<polyline points="7 10 12 15 17 10"></polyline>
+<line x1="12" x2="12" y1="15" y2="3"></line>
+</svg>
+<span class="">下载视频</span>
+</div>
+</a>
+<!-- 2. 下载任务 (当前高亮项 + 数量徽标 [2]) -->
+<a class="h-[44px] px-3.5 rounded-[10px] flex items-center justify-between text-app-text-secondary hover:bg-app-surface-hover hover:text-app-text-primary transition-colors text-[14px] font-medium group" href="#"><div class="flex items-center gap-3"><svg class="w-[18px] h-[18px] stroke-current text-app-text-muted group-hover:text-app-text-secondary" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" viewBox="0 0 24 24"><line x1="8" x2="21" y1="6" y2="6"></line><line x1="8" x2="21" y1="12" y2="12"></line><line x1="8" x2="21" y1="18" y2="18"></line><line x1="3" x2="3.01" y1="6" y2="6"></line><line x1="3" x2="3.01" y1="12" y2="12"></line><line x1="3" x2="3.01" y1="18" y2="18"></line></svg><span class="">下载任务</span></div><span class="inline-flex items-center justify-center min-w-[20px] h-[20px] px-1.5 text-[11px] font-mono font-medium rounded-full bg-app-surface-raised text-app-text-muted border border-app-border/40">2</span></a>
+<!-- 3. 已完成 -->
+<a class="h-[44px] px-3.5 rounded-[10px] flex items-center justify-between bg-app-surface-selected text-app-primary text-[14px] font-[600] border border-app-primary/20 shadow-sm shadow-blue-500/5" href="#"><div class="flex items-center gap-3"><svg class="w-[18px] h-[18px] stroke-current" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg><span class="">已完成</span></div></a>
+<!-- 4. 设置 -->
+<a class="h-[44px] px-3.5 rounded-[10px] flex items-center justify-between text-app-text-secondary hover:bg-app-surface-hover hover:text-app-text-primary transition-colors text-[14px] font-medium group" href="#">
+<div class="flex items-center gap-3">
+<svg class="w-[18px] h-[18px] stroke-current text-app-text-muted group-hover:text-app-text-secondary" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" viewBox="0 0 24 24">
+<circle cx="12" cy="12" r="3"></circle>
+<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+</svg>
+<span class="">设置</span>
+</div>
+</a>
+</nav>
+</div>
+<!-- 侧栏底部状态文案 -->
+<div class="px-4 pb-5 pt-3 border-t border-app-border/40"><div class="h-10 px-3 rounded-[8px] bg-app-surface/60 border border-app-border/40 flex items-center justify-between text-[12px] text-app-text-muted"><div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-app-success animate-pulse"></span><span class="">本地运行</span></div><span class="font-mono text-[11px] text-app-text-secondary/70">127.0.0.1</span></div></div>
+</aside>
+<!-- 右侧主内容区域 -->
+<main class="flex-1 h-full bg-app-bg overflow-y-auto custom-scrollbar flex flex-col"><div class="flex flex-col w-full">
+<!-- Interactive Navigation Sync with Global Shell -->
+<script>
+    (function syncNavigationState() {
+      try {
+        const navLinks = window.parent.document.querySelectorAll('aside nav a') || document.querySelectorAll('aside nav a');
+        navLinks.forEach((link) => {
+          const text = link.innerText || '';
+          if (text.includes('已完成')) {
+            link.className = 'h-[44px] px-3.5 rounded-[10px] flex items-center justify-between bg-app-surface-selected text-app-primary text-[14px] font-[600] shadow-sm';
+            const icon = link.querySelector('svg');
+            if (icon) {
+              icon.classList.remove('text-app-text-muted');
+              icon.classList.add('text-app-primary');
+            }
+          } else if (text.includes('下载任务')) {
+            link.className = 'h-[44px] px-3.5 rounded-[10px] flex items-center justify-between text-app-text-secondary hover:bg-app-surface-hover hover:text-app-text-primary transition-colors text-[14px] font-medium group';
+            const badge = link.querySelector('span:last-child');
+            if (badge && !badge.innerText.includes('下载')) {
+              badge.remove();
+            }
+          }
+        });
+      } catch (e) {
+        // Fallback for sandboxed preview contexts
+      }
+    })();
+  </script>
+<!-- Page Viewport Content (Max 1120px Container) -->
+<div class="w-full max-w-[1120px] mx-auto p-8 flex flex-col gap-6">
+<!-- Top Action & Filter Bar -->
+<header class="flex flex-col md:flex-row md:items-end justify-between gap-4">
+<!-- Title & Context -->
+<div class="flex flex-col gap-1"><div class="flex items-center gap-2.5"><h1 class="text-[28px] font-[650] tracking-tight text-on-surface leading-none">已完成</h1><span class="inline-flex items-center justify-center min-w-[20px] h-[20px] px-2 text-[11px] font-mono font-medium rounded-full bg-surface-container-high text-on-surface-muted border border-border">4</span></div><p class="text-[14px] text-on-surface-muted leading-tight mt-1">4 个本地媒体 · 241.6 MB · 已保存至本地存储</p></div>
+<!-- Right Controls: Search & Sort Filter -->
+<div class="flex items-center gap-3">
+<!-- Search Input Well -->
+<div class="relative w-64 h-[38px] rounded-lg bg-surface-input flex items-center px-3 group focus-within:bg-surface-container transition-colors">
+<span class="material-symbols-outlined text-[18px] text-on-surface-muted group-focus-within:text-primary transition-colors select-none mr-2">search</span>
+<input class="w-full bg-transparent font-body text-[13px] leading-tight text-on-surface placeholder:text-on-surface-muted outline-none" id="search-input" placeholder="搜索视频标题或作者" type="text">
+<button aria-label="清空搜索" class="hidden text-on-surface-muted hover:text-on-surface" id="clear-search" type="button">
+<span class="material-symbols-outlined text-[16px]">close</span>
+</button>
+</div>
+<!-- Sort Selector -->
+<div class="relative">
+<button class="h-[38px] px-3.5 rounded-lg bg-surface-container hover:bg-surface-hover text-on-surface flex items-center gap-2 font-label text-label transition-colors" id="sort-trigger" type="button">
+<span class="text-on-surface-secondary">排序:</span>
+<span class="text-on-surface font-body-emphasis" id="current-sort">最近完成</span>
+<span class="material-symbols-outlined text-[18px] text-on-surface-muted">expand_more</span>
+</button>
+<!-- Dropdown Menu Popover -->
+<div class="hidden absolute right-0 mt-1.5 w-36 rounded-xl bg-surface-container-high shadow-xl py-1 z-30 flex-col" id="sort-menu">
+<button class="sort-option w-full px-3 py-2 text-left font-body text-caption text-on-surface hover:bg-surface-hover flex items-center justify-between" data-sort="recent" type="button">
+<span class="">最近完成</span>
+<span class="material-symbols-outlined text-[16px] text-primary">check</span>
+</button>
+<button class="sort-option w-full px-3 py-2 text-left font-body text-caption text-on-surface-secondary hover:bg-surface-hover flex items-center justify-between" data-sort="size" type="button">
+<span class="">文件大小</span>
+<span class="material-symbols-outlined text-[16px] hidden">check</span>
+</button>
+<button class="sort-option w-full px-3 py-2 text-left font-body text-caption text-on-surface-secondary hover:bg-surface-hover flex items-center justify-between" data-sort="duration" type="button">
+<span class="">时长</span>
+<span class="material-symbols-outlined text-[16px] hidden">check</span>
+</button>
+</div>
+</div>
+<!-- Batch Folder Open Action -->
+<button class="h-[38px] px-3 rounded-lg bg-surface-container hover:bg-surface-hover text-on-surface flex items-center justify-center transition-colors" id="btn-open-dir" title="在访达中显示下载文件夹" type="button">
+<span class="material-symbols-outlined text-[19px] text-on-surface-secondary">folder_open</span>
+</button>
+</div>
+</header>
+<!-- Main List Container (Restrained High-Density Desktop Rows) -->
+<section aria-label="已完成下载列表" class="flex flex-col gap-2.5" id="records-list"><!-- Item 1: TikTok - Ocean Breeze (Ready & Offline) -->
+<article class="p-3.5 rounded-[14px] bg-surface border border-app-border hover:bg-surface-hover/80 transition-all flex items-center justify-between group relative shadow-xs" data-item-id="1">
+  <div class="flex items-center gap-4 min-w-0 pr-4 flex-1">
+    <!-- 9:16 Thumbnail with Hover Play Overlay -->
+    <div class="relative w-[52px] h-[72px] min-w-[52px] rounded-lg overflow-hidden bg-surface-input flex-shrink-0 group/cover cursor-pointer shadow-inner">
+      <img alt="视频缩略图" class="w-full h-full object-cover group-hover/cover:scale-105 transition-transform duration-300" data-alt="Vertical 9:16 aesthetic frame of tranquil twilight ocean waves colliding with rocky coastal cliffs during the blue hour, cool cyan and deep navy color tones, gentle ambient ocean mist, minimal cinematic photography." src="https://lh3.googleusercontent.com/aida-public/AB6AXuC9qtmZ5o6NVBYh6rGa3L_fohY2EoVqUTqqq65bwWLmwQwKGBYaiOFYNXxXnuAwoFMT4EH3FGImbrz4ZRTr0Oqr02rCDT2pfDaGXXYAjt4RR_Vot-Qng3yf7__m6wk7jVAygezebWPNSzmVlUB2KEXRducVF0BmLMVFEDO95EhRcIfJr0v5T2sh3QfCTGo97ynFL6lYmhtq0WWeMetsvnjo6igoNJy005rBjGcxm77l1LDyokaA_C79Tw">
+      <div class="absolute inset-0 bg-backdrop/40 opacity-0 group-hover/cover:opacity-100 flex items-center justify-center transition-opacity">
+        <span class="material-symbols-outlined text-[20px] text-white drop-shadow">play_circle</span>
+      </div>
+      <div class="absolute bottom-1 right-1 px-1 py-0.2 rounded bg-backdrop/90 font-mono text-[9px] text-on-surface font-medium leading-tight select-none">
+        00:35
+      </div>
+    </div>
+    <!-- Main Metadata Section -->
+    <div class="flex flex-col min-w-0 justify-between gap-1 flex-1">
+      <div class="flex items-center gap-2.5">
+        <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-surface-container-high text-on-surface-secondary border border-app-border/40 select-none uppercase">
+          TikTok
+        </span>
+        <h2 class="font-title-card text-[15px] font-semibold text-on-surface truncate group-hover:text-primary transition-colors cursor-pointer" title="蓝调时刻的海边 · 听浪花拍打礁石的声音">
+          蓝调时刻的海边 · 听浪花拍打礁石的声音
+        </h2>
+      </div>
+      <!-- Tech Specs & Time Capsule -->
+      <div class="flex items-center gap-2 text-caption text-on-surface-muted flex-wrap font-telemetry">
+        <span class="text-on-surface-secondary font-medium">@ocean_breeze</span>
+        <span class="opacity-30">•</span>
+        <span class="px-1.5 py-0.2 rounded bg-surface-container-high text-[10px] font-mono text-on-surface-secondary border border-app-border/30">MP4 · 1080P</span>
+        <span class="opacity-30">•</span>
+        <span class="font-mono text-on-surface-secondary">42.8 MB</span>
+        <span class="opacity-30">•</span>
+        <span class="text-[11px]">入库: 今天 14:22</span>
+      </div>
+      <!-- Local Path Info -->
+      <div class="flex items-center gap-1.5 text-[11px] font-mono text-on-surface-muted/80 truncate">
+        <span class="material-symbols-outlined text-[13px] text-on-surface-muted/70 flex-shrink-0">folder</span>
+        <span class="truncate hover:text-on-surface-secondary select-all cursor-text">~/Downloads/Yingqu/ocean_breeze_20241029_1080p.mp4</span>
+      </div>
+    </div>
+  </div>
+  <!-- Desktop Local Media Operations -->
+  <div class="flex items-center gap-3 flex-shrink-0 ml-2">
+    <!-- Primary Play Button -->
+    <button class="h-8 px-3 rounded-lg bg-surface-container hover:bg-surface-selected text-primary hover:text-primary-hover border border-app-border/40 flex items-center gap-1.5 text-[12px] font-medium transition-colors" title="使用本地默认播放器打开" type="button">
+      <span class="material-symbols-outlined text-[17px]">play_arrow</span>
+      <span class="">播放</span>
+    </button>
+    <!-- Open in Folder Button -->
+    <button class="h-8 px-2.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface-secondary hover:text-on-surface border border-app-border/40 flex items-center gap-1.5 text-[12px] font-medium transition-colors" title="在系统文件管理器中显示" type="button">
+      <span class="material-symbols-outlined text-[16px] text-on-surface-muted">folder_open</span>
+      <span class="">定位</span>
+    </button>
+    <!-- Secondary Actions -->
+    <div class="flex items-center gap-0.5 border-l border-app-border/40 pl-2">
+      <button aria-label="复制本地路径" class="w-8 h-8 rounded-lg flex items-center justify-center text-on-surface-muted hover:text-on-surface hover:bg-surface-container transition-colors" title="复制本地文件路径" type="button">
+        <span class="material-symbols-outlined text-[17px]">content_copy</span>
+      </button>
+      <button aria-label="更多操作" class="w-8 h-8 rounded-lg flex items-center justify-center text-on-surface-muted hover:text-on-surface hover:bg-surface-container transition-colors" title="更多操作 (复制原链接 / 移除)" type="button">
+        <span class="material-symbols-outlined text-[18px]">more_vert</span>
+      </button>
+    </div>
+  </div>
+</article>
+
+<!-- Item 2: Douyin - City Lights (Ready & Offline) -->
+<article class="p-3.5 rounded-[14px] bg-surface border border-app-border hover:bg-surface-hover/80 transition-all flex items-center justify-between group relative shadow-xs" data-item-id="2">
+  <div class="flex items-center gap-4 min-w-0 pr-4 flex-1">
+    <!-- 9:16 Thumbnail with Hover Play Overlay -->
+    <div class="relative w-[52px] h-[72px] min-w-[52px] rounded-lg overflow-hidden bg-surface-input flex-shrink-0 group/cover cursor-pointer shadow-inner">
+      <img alt="视频缩略图" class="w-full h-full object-cover group-hover/cover:scale-105 transition-transform duration-300" data-alt="Vertical 9:16 shot of an elevated metropolitan monorail speeding through futuristic illuminated glass skyscrapers at night, vibrant neon bokeh, sleek dark moody aesthetic with deep charcoal shadows and cold blue rim lighting." src="https://lh3.googleusercontent.com/aida-public/AB6AXuDsK9lWurEjm0lUhY71kMTiwGOOuBGQbi4-zoyFndsxH__J1PxKkEffd7a3n7RKOrfz-OgRehNDHvrcbZ5nWjFyUDH2EJbbauG74-1jKXl-gB4KSBYlCxOoERaTjpIjCo7G3MPefJFj7tsW4S7lW3LTxIRab-pfetVHwGh9iEzA4_i-b-Nxhk_8jMcqI7EZH-1UwPv9IDc3g0dNwo7Oz3Z0eBXRki3MRDB9HrMboElAbX8xCtwWi0yPLQ">
+      <div class="absolute inset-0 bg-backdrop/40 opacity-0 group-hover/cover:opacity-100 flex items-center justify-center transition-opacity">
+        <span class="material-symbols-outlined text-[20px] text-white drop-shadow">play_circle</span>
+      </div>
+      <div class="absolute bottom-1 right-1 px-1 py-0.2 rounded bg-backdrop/90 font-mono text-[9px] text-on-surface font-medium leading-tight select-none">
+        00:58
+      </div>
+    </div>
+    <!-- Main Metadata Section -->
+    <div class="flex flex-col min-w-0 justify-between gap-1 flex-1">
+      <div class="flex items-center gap-2.5">
+        <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-surface-container-high text-on-surface-secondary border border-app-border/40 select-none uppercase">
+          抖音
+        </span>
+        <h2 class="font-title-card text-[15px] font-semibold text-on-surface truncate group-hover:text-primary transition-colors cursor-pointer" title="夜晚的城市轻轨 · 穿行在流光溢彩的楼宇之间">
+          夜晚的城市轻轨 · 穿行在流光溢彩的楼宇之间
+        </h2>
+      </div>
+      <!-- Tech Specs & Time Capsule -->
+      <div class="flex items-center gap-2 text-caption text-on-surface-muted flex-wrap font-telemetry">
+        <span class="text-on-surface-secondary font-medium">@city_lights</span>
+        <span class="opacity-30">•</span>
+        <span class="px-1.5 py-0.2 rounded bg-surface-container-high text-[10px] font-mono text-on-surface-secondary border border-app-border/30">MP4 · 1080P</span>
+        <span class="opacity-30">•</span>
+        <span class="font-mono text-on-surface-secondary">68.2 MB</span>
+        <span class="opacity-30">•</span>
+        <span class="text-[11px]">入库: 昨天 21:05</span>
+      </div>
+      <!-- Local Path Info -->
+      <div class="flex items-center gap-1.5 text-[11px] font-mono text-on-surface-muted/80 truncate">
+        <span class="material-symbols-outlined text-[13px] text-on-surface-muted/70 flex-shrink-0">folder</span>
+        <span class="truncate hover:text-on-surface-secondary select-all cursor-text">~/Downloads/Yingqu/city_lights_night_rail_1080p.mp4</span>
+      </div>
+    </div>
+  </div>
+  <!-- Desktop Local Media Operations -->
+  <div class="flex items-center gap-3 flex-shrink-0 ml-2">
+    <!-- Primary Play Button -->
+    <button class="h-8 px-3 rounded-lg bg-surface-container hover:bg-surface-selected text-primary hover:text-primary-hover border border-app-border/40 flex items-center gap-1.5 text-[12px] font-medium transition-colors" title="使用本地默认播放器打开" type="button">
+      <span class="material-symbols-outlined text-[17px]">play_arrow</span>
+      <span class="">播放</span>
+    </button>
+    <!-- Open in Folder Button -->
+    <button class="h-8 px-2.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface-secondary hover:text-on-surface border border-app-border/40 flex items-center gap-1.5 text-[12px] font-medium transition-colors" title="在系统文件管理器中显示" type="button">
+      <span class="material-symbols-outlined text-[16px] text-on-surface-muted">folder_open</span>
+      <span class="">定位</span>
+    </button>
+    <!-- Secondary Actions -->
+    <div class="flex items-center gap-0.5 border-l border-app-border/40 pl-2">
+      <button aria-label="复制本地路径" class="w-8 h-8 rounded-lg flex items-center justify-center text-on-surface-muted hover:text-on-surface hover:bg-surface-container transition-colors" title="复制本地文件路径" type="button">
+        <span class="material-symbols-outlined text-[17px]">content_copy</span>
+      </button>
+      <button aria-label="更多操作" class="w-8 h-8 rounded-lg flex items-center justify-center text-on-surface-muted hover:text-on-surface hover:bg-surface-container transition-colors" title="更多操作 (复制原链接 / 移除)" type="button">
+        <span class="material-symbols-outlined text-[18px]">more_vert</span>
+      </button>
+    </div>
+  </div>
+</article>
+
+<!-- Item 3: Douyin - Chef Daily (Ready & Offline) -->
+<article class="p-3.5 rounded-[14px] bg-surface border border-app-border hover:bg-surface-hover/80 transition-all flex items-center justify-between group relative shadow-xs" data-item-id="3">
+  <div class="flex items-center gap-4 min-w-0 pr-4 flex-1">
+    <!-- 9:16 Thumbnail with Hover Play Overlay -->
+    <div class="relative w-[52px] h-[72px] min-w-[52px] rounded-lg overflow-hidden bg-surface-input flex-shrink-0 group/cover cursor-pointer shadow-inner">
+      <img alt="视频缩略图" class="w-full h-full object-cover group-hover/cover:scale-105 transition-transform duration-300" data-alt="Vertical 9:16 cozy top-down perspective of fresh hand-twirled Italian pasta simmering in a dark matte skillet with olive oil, basil leaves, and grated cheese, warm soft ambient culinary kitchen lighting." src="https://lh3.googleusercontent.com/aida-public/AB6AXuDJeJdyY9oYMx4wchC7iiRRjyx1uheI3sJ1sdYaYwJQvNTVufxfdqXF211Y3YGRKZiHdF4r_V-iO5MUYAfOKKwtbPNF8GyPv3H2ZDfbvYhOzMuvf1Q4FjN4O4p7xkr8TF7mlfNUVaRngUFctC_wwsRpbDVCfUNynMceDg2ynPBaX3MHsdDUZycA0e4oTvaQTvuK5YYWFxK94ON5VUfisCIv59ZPM9mfsgPjcaWeKQuXSlADheBMZWd0tw">
+      <div class="absolute inset-0 bg-backdrop/40 opacity-0 group-hover/cover:opacity-100 flex items-center justify-center transition-opacity">
+        <span class="material-symbols-outlined text-[20px] text-white drop-shadow">play_circle</span>
+      </div>
+      <div class="absolute bottom-1 right-1 px-1 py-0.2 rounded bg-backdrop/90 font-mono text-[9px] text-on-surface font-medium leading-tight select-none">
+        01:20
+      </div>
+    </div>
+    <!-- Main Metadata Section -->
+    <div class="flex flex-col min-w-0 justify-between gap-1 flex-1">
+      <div class="flex items-center gap-2.5">
+        <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-surface-container-high text-on-surface-secondary border border-app-border/40 select-none uppercase">
+          抖音
+        </span>
+        <h2 class="font-title-card text-[15px] font-semibold text-on-surface truncate group-hover:text-primary transition-colors cursor-pointer" title="用一口锅做意面 · 简单美味的独居晚餐">
+          用一口锅做意面 · 简单美味的独居晚餐
+        </h2>
+      </div>
+      <!-- Tech Specs & Time Capsule -->
+      <div class="flex items-center gap-2 text-caption text-on-surface-muted flex-wrap font-telemetry">
+        <span class="text-on-surface-secondary font-medium">@chef_daily</span>
+        <span class="opacity-30">•</span>
+        <span class="px-1.5 py-0.2 rounded bg-surface-container-high text-[10px] font-mono text-on-surface-secondary border border-app-border/30">MP4 · 1080P</span>
+        <span class="opacity-30">•</span>
+        <span class="font-mono text-on-surface-secondary">94.5 MB</span>
+        <span class="opacity-30">•</span>
+        <span class="text-[11px]">入库: 3天前 19:40</span>
+      </div>
+      <!-- Local Path Info -->
+      <div class="flex items-center gap-1.5 text-[11px] font-mono text-on-surface-muted/80 truncate">
+        <span class="material-symbols-outlined text-[13px] text-on-surface-muted/70 flex-shrink-0">folder</span>
+        <span class="truncate hover:text-on-surface-secondary select-all cursor-text">~/Downloads/Yingqu/chef_daily_onepot_pasta.mp4</span>
+      </div>
+    </div>
+  </div>
+  <!-- Desktop Local Media Operations -->
+  <div class="flex items-center gap-3 flex-shrink-0 ml-2">
+    <!-- Primary Play Button -->
+    <button class="h-8 px-3 rounded-lg bg-surface-container hover:bg-surface-selected text-primary hover:text-primary-hover border border-app-border/40 flex items-center gap-1.5 text-[12px] font-medium transition-colors" title="使用本地默认播放器打开" type="button">
+      <span class="material-symbols-outlined text-[17px]">play_arrow</span>
+      <span class="">播放</span>
+    </button>
+    <!-- Open in Folder Button -->
+    <button class="h-8 px-2.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface-secondary hover:text-on-surface border border-app-border/40 flex items-center gap-1.5 text-[12px] font-medium transition-colors" title="在系统文件管理器中显示" type="button">
+      <span class="material-symbols-outlined text-[16px] text-on-surface-muted">folder_open</span>
+      <span class="">定位</span>
+    </button>
+    <!-- Secondary Actions -->
+    <div class="flex items-center gap-0.5 border-l border-app-border/40 pl-2">
+      <button aria-label="复制本地路径" class="w-8 h-8 rounded-lg flex items-center justify-center text-on-surface-muted hover:text-on-surface hover:bg-surface-container transition-colors" title="复制本地文件路径" type="button">
+        <span class="material-symbols-outlined text-[17px]">content_copy</span>
+      </button>
+      <button aria-label="更多操作" class="w-8 h-8 rounded-lg flex items-center justify-center text-on-surface-muted hover:text-on-surface hover:bg-surface-container transition-colors" title="更多操作 (复制原链接 / 移除)" type="button">
+        <span class="material-symbols-outlined text-[18px]">more_vert</span>
+      </button>
+    </div>
+  </div>
+</article>
+
+<!-- Item 4: TikTok - Autumn Leaves (Missing / Relocate State) -->
+<article class="p-3.5 rounded-[14px] bg-surface/60 border border-warning/30 hover:border-warning/50 hover:bg-surface/80 transition-all flex items-center justify-between group relative shadow-xs" data-item-id="4">
+  <div class="flex items-center gap-4 min-w-0 pr-4 flex-1">
+    <!-- 9:16 Desaturated Thumbnail with Missing File Icon -->
+    <div class="relative w-[52px] h-[72px] min-w-[52px] rounded-lg overflow-hidden bg-surface-input flex-shrink-0 grayscale opacity-50 shadow-inner">
+      <img alt="视频缩略图（文件丢失）" class="w-full h-full object-cover" data-alt="Vertical 9:16 quiet autumn boulevard lined with towering golden ginkgo trees, fallen yellow leaves covering the ground, soft overcast morning natural diffused sunlight, nostalgic atmospheric cinematic photograph." src="https://lh3.googleusercontent.com/aida-public/AB6AXuByC_ufEu80LsrWR1Iksznq7QWyPphg-CQ2SzAxdrjFFaJxL-iPE91CFY0inPUZ9C1LCY0KZZoK8eSPsD3waClir7K_Dkgwrd6MSK1vpqNId233nqVMqE9kjDqwmsX8P-52LvicMDIzn_gWQcXP8cyZXyHg5TwGylx92mH6a_eFvMrpK6XqBpbBrl_LzxToM2dMttB_bXhNVaj_PlTPWA5pCAJkZwfC-RQGRq4IwyS6KkKzahsHBeNvYg">
+      <div class="absolute inset-0 bg-backdrop/70 flex items-center justify-center">
+        <span class="material-symbols-outlined text-[20px] text-warning">link_off</span>
+      </div>
+      <div class="absolute bottom-1 right-1 px-1 py-0.2 rounded bg-backdrop/90 font-mono text-[9px] text-on-surface-muted font-medium leading-tight select-none">
+        00:45
+      </div>
+    </div>
+    <!-- Main Metadata Section with Warning Info -->
+    <div class="flex flex-col min-w-0 justify-between gap-1 flex-1">
+      <div class="flex items-center gap-2.5">
+        <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-surface-container-high text-on-surface-muted border border-app-border/40 select-none uppercase">
+          TikTok
+        </span>
+        <h2 class="font-title-card text-[15px] font-semibold text-on-surface-secondary truncate" title="秋天的树叶 · 漫步在金黄色的林荫道">
+          秋天的树叶 · 漫步在金黄色的林荫道
+        </h2>
+      </div>
+      <!-- Missing File Notice -->
+      <div class="flex items-center gap-2 text-caption text-warning flex-wrap font-telemetry">
+        <span class="inline-flex items-center gap-1 font-medium text-[11px] bg-warning/10 px-2 py-0.5 rounded border border-warning/20">
+          <span class="material-symbols-outlined text-[13px]">warning</span>
+          本地文件已丢失或移动
+        </span>
+        <span class="opacity-30 text-on-surface-muted">•</span>
+        <span class="font-mono text-on-surface-muted">36.1 MB</span>
+        <span class="opacity-30 text-on-surface-muted">•</span>
+        <span class="text-[11px] text-on-surface-muted">入库: 10月28日</span>
+      </div>
+      <!-- Last Known Path -->
+      <div class="flex items-center gap-1.5 text-[11px] font-mono text-on-surface-muted/60 truncate">
+        <span class="material-symbols-outlined text-[13px] text-warning/70 flex-shrink-0">search_off</span>
+        <span class="truncate select-all cursor-text line-through">~/Downloads/Yingqu/autumn_leaves_ginkgo.mp4</span>
+      </div>
+    </div>
+  </div>
+  <!-- Missing State Actions: Relocate & Remove Record (Play Disabled) -->
+  <div class="flex items-center gap-2.5 flex-shrink-0 ml-2">
+    <!-- Relocate File Button -->
+    <button class="h-8 px-3 rounded-lg bg-surface-container hover:bg-surface-container-high text-warning border border-warning/30 flex items-center gap-1.5 text-[12px] font-medium transition-colors" title="选择此视频在电脑上的新路径" type="button">
+      <span class="material-symbols-outlined text-[16px]">find_in_page</span>
+      <span class="">重新定位文件</span>
+    </button>
+    <!-- Clean Invalid Record Button -->
+    <button class="h-8 px-2.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface-muted hover:text-error border border-app-border/40 flex items-center gap-1.5 text-[12px] font-medium transition-colors" title="清理无效记录（不删除源文件）" type="button">
+      <span class="material-symbols-outlined text-[16px]">delete</span>
+      <span class="">清理记录</span>
+    </button>
+  </div>
+</article></section>
+<!-- Bottom Telemetry & Storage Baseline Metadata Bar -->
+<footer class="mt-4 pt-4 flex flex-col md:flex-row md:items-center justify-between gap-3 font-telemetry text-caption text-on-surface-muted">
+<!-- Path & Configuration Hint -->
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px] text-on-surface-muted">folder_open</span>
+<span class="">默认存储目录:</span>
+<code class="px-1.5 py-0.5 rounded bg-surface-input font-mono text-on-surface-secondary text-[11px]">
+          ~/Downloads/Yingqu
+        </code>
+<span class="text-on-surface-muted opacity-60">· 可在设置中修改</span>
+</div>
+<!-- Disk Telemetry & Record Summary -->
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-1.5">
+<span class="w-2 h-2 rounded-full bg-tertiary"></span>
+<span class="">存储剩余: <strong class="font-mono text-on-surface-secondary">142.8 GB</strong> 可用</span>
+</div>
+<span class="select-none opacity-30">|</span>
+<span class="">共归档 <strong class="font-mono text-on-surface">4</strong> 部视频 (241.6 MB)</span>
+</div>
+</footer>
+</div>
+<!-- Interactive Logic for Search, Sorting, and Context Menus -->
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+      // 1. Filter / Search Logic
+      const searchInput = document.getElementById('search-input');
+      const clearSearchBtn = document.getElementById('clear-search');
+      const rows = document.querySelectorAll('#records-list article');
+
+      if (searchInput && clearSearchBtn) {
+        searchInput.addEventListener('input', (e) => {
+          const val = e.target.value.trim().toLowerCase();
+          if (val.length > 0) {
+            clearSearchBtn.classList.remove('hidden');
+          } else {
+            clearSearchBtn.classList.add('hidden');
+          }
+
+          rows.forEach((row) => {
+            const text = row.innerText.toLowerCase();
+            if (text.includes(val)) {
+              row.style.display = 'flex';
+            } else {
+              row.style.display = 'none';
+            }
+          });
+        });
+
+        clearSearchBtn.addEventListener('click', () => {
+          searchInput.value = '';
+          clearSearchBtn.classList.add('hidden');
+          rows.forEach(r => r.style.display = 'flex');
+          searchInput.focus();
+        });
+      }
+
+      // 2. Sort Dropdown Interaction
+      const sortTrigger = document.getElementById('sort-trigger');
+      const sortMenu = document.getElementById('sort-menu');
+      const currentSortLabel = document.getElementById('current-sort');
+      const sortOptions = document.querySelectorAll('.sort-option');
+
+      if (sortTrigger && sortMenu) {
+        sortTrigger.addEventListener('click', (e) => {
+          e.stopPropagation();
+          sortMenu.classList.toggle('hidden');
+          sortMenu.classList.toggle('flex');
+        });
+
+        document.addEventListener('click', () => {
+          sortMenu.classList.add('hidden');
+          sortMenu.classList.remove('flex');
+        });
+
+        sortOptions.forEach((opt) => {
+          opt.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const sortName = opt.querySelector('span:first-child').innerText;
+            if (currentSortLabel) {
+              currentSortLabel.innerText = sortName;
+            }
+
+            sortOptions.forEach(o => {
+              const checkIcon = o.querySelector('.material-symbols-outlined');
+              if (checkIcon) checkIcon.classList.add('hidden');
+              o.classList.remove('text-on-surface');
+              o.classList.add('text-on-surface-secondary');
+            });
+
+            const currentCheck = opt.querySelector('.material-symbols-outlined');
+            if (currentCheck) currentCheck.classList.remove('hidden');
+            opt.classList.remove('text-on-surface-secondary');
+            opt.classList.add('text-on-surface');
+
+            sortMenu.classList.add('hidden');
+            sortMenu.classList.remove('flex');
+          });
+        });
+      }
+
+      // 3. Open Directory Simulation
+      const openDirBtn = document.getElementById('btn-open-dir');
+      if (openDirBtn) {
+        openDirBtn.addEventListener('click', () => {
+          openDirBtn.classList.add('scale-95');
+          setTimeout(() => openDirBtn.classList.remove('scale-95'), 120);
+        });
+      }
+    });
+  </script>
+</div></main>
+
+
+</body></html>
