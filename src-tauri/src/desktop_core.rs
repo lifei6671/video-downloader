@@ -84,6 +84,7 @@ struct Inner {
     settings: Settings,
     active: HashMap<String, Active>,
     downloads: HashSet<String>,
+    workers: Vec<tokio::task::JoinHandle<()>>,
     closing: bool,
 }
 pub struct Core {
@@ -256,6 +257,7 @@ impl Core {
                 settings,
                 active: HashMap::new(),
                 downloads: HashSet::new(),
+                workers: Vec::new(),
                 closing: false,
             }),
             program,
@@ -444,7 +446,8 @@ impl Core {
         );
         let core = self.clone();
         let id = task.id.clone();
-        tokio::spawn(async move {
+        inner.workers.retain(|worker| !worker.is_finished());
+        let worker = tokio::spawn(async move {
             let result = PythonBridge::operation_cancellable(
                 &core.program,
                 &core.args,
@@ -466,6 +469,7 @@ impl Core {
             core.finish(&id, result, false);
             let _ = done.send(true);
         });
+        inner.workers.push(worker);
         Ok(task)
     }
 
@@ -637,7 +641,8 @@ impl Core {
         active.done = done_rx;
         let core = self.clone();
         let id = id.to_owned();
-        tokio::spawn(async move {
+        inner.workers.retain(|worker| !worker.is_finished());
+        let worker = tokio::spawn(async move {
             let result = async {
                 std::fs::create_dir_all(&directory).context("IO_ERROR")?;
                 let stage = tempfile::Builder::new().prefix(&format!("yingqu-{id}-")).tempdir_in(&directory).context("IO_ERROR")?;
@@ -712,6 +717,7 @@ impl Core {
             }
             let _ = done.send(true);
         });
+        inner.workers.push(worker);
         Ok(())
     }
 
@@ -752,14 +758,15 @@ impl Core {
         Ok(())
     }
     pub async fn shutdown(self: &Arc<Self>) {
-        let active = {
+        let (active, workers) = {
             let mut inner = self.inner.lock().unwrap();
             inner.closing = true;
-            inner
+            let active = inner
                 .active
                 .iter()
                 .map(|(id, a)| (id.clone(), a.done.clone()))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (active, std::mem::take(&mut inner.workers))
         };
         let cancellations = active
             .iter()
@@ -776,6 +783,11 @@ impl Core {
         }
         for (_, mut done) in active {
             let _ = done.wait_for(|v| *v).await;
+        }
+        // Active entries and done signals precede worker destruction. Join even
+        // retired workers so their Core references cannot retain the database lock.
+        for worker in workers {
+            let _ = worker.await;
         }
     }
 }
@@ -837,6 +849,23 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert!(restarted.list()[0].file_missing);
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_allows_immediate_reopen_after_completion() {
+        let root = tempfile::tempdir().unwrap();
+        for _ in 0..16 {
+            let app = core(root.path());
+            let task = app.resolve("valid".into()).unwrap();
+            wait(&app, &task.id, Status::Ready).await;
+            app.download(&task.id, true).unwrap();
+            wait(&app, &task.id, Status::Completed).await;
+            app.shutdown().await;
+            drop(app);
+            // No retry or sleep: shutdown must release every worker reference.
+            let reopened = core(root.path());
+            assert!(reopened.list().iter().any(|t| t.id == task.id));
+        }
+    }
+
     #[tokio::test]
     async fn cancellation_waits_for_exit_and_removes_partial_file() {
         let root = tempfile::tempdir().unwrap();
