@@ -3,7 +3,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tauri::{Emitter, Manager, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, State,
+};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use yingqu_core::{
@@ -105,10 +109,39 @@ fn reveal_download(
         .reveal_item_in_dir(path)
         .map_err(|_| "IO_ERROR".into())
 }
+fn show_main_window(app: &tauri::AppHandle) {
+    if app.state::<AtomicBool>().load(Ordering::SeqCst) {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(error) = window
+            .show()
+            .and_then(|_| window.unminimize())
+            .and_then(|_| window.set_focus())
+        {
+            eprintln!("Unable to show main window: {error}");
+        }
+    }
+}
+
+fn request_exit(app: &tauri::AppHandle) {
+    if app.state::<AtomicBool>().swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let core = app.state::<AppCore>().inner().clone();
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        core.shutdown().await;
+        handle.exit(0);
+    });
+}
+
 fn main() {
-    let closing = Arc::new(AtomicBool::new(false));
-    let close_guard = closing.clone();
     tauri::Builder::default()
+        .manage(AtomicBool::new(false))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -143,6 +176,34 @@ fn main() {
                 },
             )?;
             app.manage(core);
+            let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出映取", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            TrayIconBuilder::with_id("main-tray")
+                .icon(
+                    app.default_window_icon()
+                        .expect("App icon is configured")
+                        .clone(),
+                )
+                .tooltip("映取")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => request_exit(app),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -163,32 +224,25 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("无法启动映取")
-        .run(move |app, event| match event {
+        .run(|app, event| match event {
             tauri::RunEvent::WindowEvent {
+                label,
                 event: tauri::WindowEvent::CloseRequested { api, .. },
                 ..
-            } => {
+            } if label == "main" => {
                 api.prevent_close();
-                if !close_guard.swap(true, Ordering::SeqCst) {
-                    let core = app.state::<AppCore>().inner().clone();
-                    let handle = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        core.shutdown().await;
-                        handle.exit(0);
-                    });
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(error) = window.hide() {
+                        eprintln!("Unable to hide main window: {error}");
+                    }
                 }
             }
             tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
                 api.prevent_exit();
-                if !closing.swap(true, Ordering::SeqCst) {
-                    let core = app.state::<AppCore>().inner().clone();
-                    let handle = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        core.shutdown().await;
-                        handle.exit(0);
-                    });
-                }
+                request_exit(app);
             }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_main_window(app),
             _ => {}
         });
 }

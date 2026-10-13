@@ -6,7 +6,7 @@ publish = false
 default-run = "yingqu"
 
 [features]
-desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-single-instance"]
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true , features = [] }
@@ -21,9 +21,10 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 keyring = { version = "3", features = ["windows-native", "apple-native"] }
-tauri = { version = "2", optional = true , features = [] }
+tauri = { version = "2", optional = true, features = ["tray-icon"] }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
 
 [[bin]]
 name = "yingqu"
