@@ -13,6 +13,12 @@
   <a href="docs/development.md">开发文档</a>
 </p>
 
+<p align="center">
+
+![home.png](./docs/assets/home.png)
+
+</p>
+
 ## 从分享链接，到你的本地收藏
 
 看到值得留下的视频，不必再从一长段分享文案里挑出链接。把整段内容粘贴到映取，确认作品后开始下载；视频、封面和完成记录，都可以在本机查看。
