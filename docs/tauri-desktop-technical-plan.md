@@ -1,14 +1,14 @@
 # 抖音 / TikTok 轻量桌面下载器技术方案
 
-日期：2026-10-13。当前决策：**后端解析与下载统一采用 yt-dlp，废弃原 dtk / wreq 方案及 Rust 媒体 HTTP 下载链路。**
+日期：2026-10-14。当前决策：**yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络及下载器，接入视频与图集 GUI 下载；不恢复旧 wreq/服务端或 Rust 媒体 HTTP 下载链路。**
 
-状态：M1 代码已统一为 yt-dlp，旧引擎与生产依赖已退役；离线测试与双平台源码/打包下载通过；抖音详情请求使用用户批准的最小签名补丁，用户已批准进入 M2；全新无 Python Windows 环境验收移至 M3，仍待验证。详见[当前 M1 验证](m1-validation.md)；[独立试验](ytdlp-validation.md)与[旧 M1 历史](m1-legacy-validation.md)分别保留。
+状态：双引擎与图集按用户新决定正式实现，当前验收见 [双引擎验收](dual-engine-validation.md)，细节见 [接入方案](dtk-dual-engine-plan.md)。以下 M1/M2 阶段描述保留历史：M1 曾统一为 yt-dlp，旧服务引擎与生产依赖已退役；离线测试与双平台源码/打包下载通过；抖音详情请求使用用户批准的最小签名补丁，用户已批准进入 M2；全新无 Python Windows 环境验收移至 M3，仍待验证。详见[当前 M1 验证](m1-validation.md)；[独立试验](ytdlp-validation.md)与[旧 M1 历史](m1-legacy-validation.md)分别保留。
 
 ## 1. 产品范围与决策
 
-目标技术栈：**Tauri 2 + React + TypeScript + Rust 应用核心 + Python/yt-dlp sidecar + SQLite**。界面名称“映取”，视觉与交互以 `DESIGN.md` 为准。
+目标技术栈：**Tauri 2 + React + TypeScript + Rust 应用核心 + Python/yt-dlp + DTK sidecar + SQLite**。界面名称“映取”，视觉与交互以 `DESIGN.md` 为准。
 
-用户已决定由 yt-dlp 取代原 `Evil0ctal/Douyin_TikTok_Download_API` 依赖。yt-dlp 同时承担平台提取、详情请求、媒体选择与下载；Rust 管理任务和文件最终提交，不再接手签名媒体 URL 发起第二条 HTTP 下载链路。首版两个平台都走 yt-dlp，不保留旧引擎回退。抖音在新引擎下仍须重新验收。
+默认视频由 yt-dlp 解析、图集由 DTK 底层切片解析，表单允许明确选择引擎；自动选择按作品类型决定，失败不切换引擎。yt-dlp 承担共用详情/媒体请求及 HTTP 下载；Rust 只管理任务与文件最终提交，不接收签名媒体 URL 发起另一条 HTTP 链路。DTK 不包含上游 UI、服务端、身份池或浏览器服务。
 
 | 能力 | 首版行为 |
 | --- | --- |
@@ -22,9 +22,9 @@
 | 持久化 | 重启恢复任务记录与已完成列表，不恢复网络下载 |
 | 分发 | Windows 11 x64 优先，随后 macOS Intel / Apple Silicon；用户无需安装 Python |
 
-不做作者批量采集、评论、平台内容搜索、图集、直播、身份池、自动游客身份、内置登录浏览器、浏览器 Cookie 自动读取、云同步、开放 API 或 MCP。不提供暂停、断点续传、退出后后台下载、自动重试、转码或分轨合并。历史列表搜索不等于平台内容搜索。
+不做作者批量采集、评论、平台内容搜索、直播、身份池、自动游客身份、内置登录浏览器、浏览器 Cookie 自动读取、云同步、开放 API 或 MCP。不提供暂停、断点续传、退出后后台下载、自动重试、转码或分轨合并。历史列表搜索不等于平台内容搜索。
 
-只选择同时包含音视频的单文件、直接 HTTP(S) 下载格式；无音轨作品可保存其单文件视频。仅有 HLS/DASH、分离音视频或需要外部后处理的作品返回 `UNSUPPORTED_CONTENT`。不为扩大 yt-dlp 站点覆盖而引入 FFmpeg、JS runtime、插件或自动更新服务。FFmpeg 仅用于开发验收解码，不随产品运行依赖分发。
+图集每张优先平台明确提供的原图，缺原图或原图 HTTP 404/410 时使用高清；其他网络、身份、风控错误不降级。保留原响应格式，不转码，实际来源逐张展示。视频只选择同时包含音视频的单文件、直接 HTTP(S) 下载格式；无音轨作品可保存其单文件视频。仅有 HLS/DASH、分离音视频或需要外部后处理的作品返回 `UNSUPPORTED_CONTENT`。不为扩大 yt-dlp 站点覆盖而引入 FFmpeg、JS runtime、插件或自动更新服务。FFmpeg 仅用于开发验收解码，不随产品运行依赖分发。
 
 ## 2. 当前证据与依赖取舍
 
@@ -39,7 +39,9 @@
 
 | 项目 | 决策 |
 | --- | --- |
-| `yt-dlp==2026.8.19` | 唯一平台解析与媒体下载引擎；后续升级显式锁定版本 |
+| `yt-dlp==2026.8.19` | 视频解析及共用网络、媒体下载器；显式锁定版本 |
+| DTK 5.1.3 白名单切片 | 第二解析引擎；图集及可选视频解析，仅复用平台参数、NativeSigner 与 parser |
+| pydantic / structlog / httpx | DTK 最小导入闭包必要依赖；精确版本和许可证随锁文件及 sidecar 分发 |
 | Python 标准库 | JSONL、CookieJar、输入校验及轻量协议映射 |
 | PyInstaller | 开发/构建依赖，打包项目自己的 Python bridge 与 yt-dlp |
 | pytest 等现有测试工具 | 按实际保留的测试使用，不混入运行依赖 |
@@ -69,7 +71,7 @@
 flowchart TD
     UI[React / TypeScript] -->|Tauri commands| Core[Rust 应用核心]
     Core -->|任务快照与进度| UI
-    Core <-->|stdin / stdout JSON Lines| Engine[Python bridge + yt-dlp]
+    Core <-->|stdin / stdout JSON Lines v3| Engine[Python bridge + yt-dlp + DTK]
     Engine --> Platform[抖音 / TikTok 详情与短链]
     Engine --> CDN[媒体 CDN]
     Engine --> Stage[任务独占暂存文件]
@@ -82,8 +84,8 @@ flowchart TD
 | --- | --- | --- |
 | React | 输入、预览、设置、任务与历史 | 不访问详情接口、不启动进程、不提交媒体 URL 或任意文件路径 |
 | Rust | 任务唯一状态源、队列、配置快照、进程生命周期、取消、进度归并、文件最终提交、数据库与凭据 | 不计算签名、不下载媒体、不另建平台提取器 |
-| Python bridge | 单链接识别、配置选择、调用 yt-dlp、结果及错误映射、脱敏事件 | 不维护业务队列、不写 SQLite、不读取浏览器或系统凭据 |
-| yt-dlp | 短链展开、平台提取、详情与媒体网络请求、流式保存暂存视频 | 仅启用两平台单视频提取器，不开放任意 CLI 参数或插件 |
+| Python bridge | 单链接识别、配置选择、调用选定解析引擎、结果及错误映射、脱敏事件 | 不维护业务队列、不写 SQLite、不读取浏览器或系统凭据 |
+| yt-dlp | 短链展开、平台提取、详情与媒体网络请求、流式保存暂存视频或图集 | yt-dlp 仅启用两平台单视频提取器，DTK 仅单作品解析，不开放任意 CLI 参数或插件 |
 | SQLite | 任务、路径、元数据、设置与 Cookie | 用户批准 Cookie 直接保存；不保存代理密码或带 token 的详情/媒体 URL |
 
 解析与下载均使用同一任务创建时的两平台配置快照；bridge 统一识别平台并只使用对应配置。设置修改只影响新任务。凭据经 stdin 进入专属子进程内存，平台 Cookie 限定到对应 HTTPS CookieJar 域，不能作为全局 Cookie header 发送给所有 CDN。
@@ -102,7 +104,7 @@ flowchart TD
 
 ## 5. 协议与进程生命周期
 
-以下为当前 M1 **协议 v2**，Rust 与 sidecar 已共同升级，不兼容旧 v1，不增加旧协议 fallback。
+当前为 **协议 v3**，引擎 0.3.0。Rust 与 sidecar 同步升级，不兼容旧 v1/v2，不增加旧协议 fallback。DTK 版本及 commit 以 vendor manifest 为准。
 
 ### 5.1 进程模型
 
@@ -116,17 +118,17 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 
 | 消息 | 字段与约定 |
 | --- | --- |
-| `ready` | `protocol_version=2`、`engine_version`、`yt_dlp_version`；Rust 校验与分发版本一致 |
-| `resolve_video` 请求 | `id`、单条 `input`、两平台配置快照；凭据只经 stdin |
-| `download_video` 请求 | `id`、规范作品链接、预期 platform/video_id、原任务配置快照、Rust 创建的专属 staging 目录 |
-| `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、cover_url、duration_ms、width、height、filesize、filesize_approx；可选字段可空 |
-| `progress` | 同一 `id`、downloaded_bytes、total_bytes、speed_bps；不包含上游原始 dict |
-| `download_finished` | 同一 `id`、平台/作品身份、staging 内相对文件名、实际字节数与容器；仅表示引擎文件写入结束 |
+| `ready` | `protocol_version=3`、`engine_version`、`yt_dlp_version`、`dtk_version`、`dtk_commit`；Rust 校验与分发版本一致 |
+| `resolve_video` 请求 | `id`、单条 `input`、`resolver`（auto/yt-dlp/dtk）、可选 Rust 专属 `preview_dir`、两平台配置快照；凭据只经 stdin |
+| `download_video` 请求 | `id`、规范作品链接、预期 platform/video_id/kind/image_count、实际 resolver、原任务配置快照、Rust 创建的专属 staging 目录 |
+| `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、cover_url、duration_ms、width、height、filesize、filesize_approx、kind/resolver、images（尺寸/来源/本地相对预览名）、music（title/author）；可选字段可空 |
+| `progress` | 同一 `id`、downloaded_bytes、total_bytes、speed_bps、completed_items/total_items；不包含上游原始 dict |
+| `download_finished` | 同一 `id`、平台/作品身份、staging 内相对文件名、实际字节数与容器；图集为 files 清单（每文件 bytes/hash/尺寸/来源），不含媒体 URL；仅表示引擎文件写入结束 |
 | `error` | 同一 `id`、稳定 code、脱敏 message、stage；可可靠获得时附 HTTP 状态 |
 
 请求和响应均包含 `protocol_version`。每个操作最多一个终端结果：解析以 `resolved` 结束、下载以 `download_finished` 结束，或以 `error` 结束。成功还必须伴随正常进程退出；EOF、超限、错 ID、错版本、重复终端消息、非零退出或缺失结果都明确失败。单条消息上限 1 MiB。
 
-`download_finished` 之后 Rust 校验路径确实位于所分配暂存目录，拒绝目录、符号链接/重解析跳转及非预期文件，再执行第 7 节文件提交。这个消息不直接映射为 UI 的 completed。
+`download_finished` 之后 Rust 校验路径确实位于所分配暂存目录，视频拒绝目录，图集核对专属 album 目录与全文件清单；两者均拒绝符号链接/重解析跳转及非预期文件，再执行第 7 节文件提交。这个消息不直接映射为 UI 的 completed。
 
 错误码：`INVALID_INPUT`、`UNSUPPORTED_PLATFORM`、`UNSUPPORTED_CONTENT`、`CONFIG_INVALID`、`ACCESS_DENIED`、`NOT_FOUND`、`RISK_CONTROL`、`NETWORK_ERROR`、`UPSTREAM_CHANGED`、`ENGINE_UNAVAILABLE`、`ENGINE_PROTOCOL_ERROR`、`TIMEOUT`、`IO_ERROR`、`INTERRUPTED`。只有可验证证据才细分登录、删除或风控；403 不自动解释为过期或 Cookie 无效。
 
@@ -136,7 +138,8 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 
 | Tauri 命令 | 行为 |
 | --- | --- |
-| `parse_video` | 输入分享文本，创建 task_id，异步解析并发出快照 |
+| `resolve_video` | 输入分享文本及 resolver，创建 task_id，异步解析并发出快照 |
+| `get_task_image` | 接收 task_id/index，从 Rust 所拥有预览或已完成清单读取图片字节 |
 | `start_download` | 仅接收 task_id，使用 Rust 保存的作品身份和任务配置排队 |
 | `cancel_task` | 取消等待或终止对应子进程，资源释放后进入终态 |
 | `retry_task` | 新建任务，重新解析与从零下载；原失败记录保留；无有效链接时要求重输 |
@@ -145,7 +148,7 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 | `select_download_directory` | 系统目录选择与可用性校验 |
 | `reveal_download` | 从记录定位文件，缺失则提示 |
 | `remove_history` | 仅移除终态记录 |
-| `delete_local_file` | 对应记录的明确二次确认后删除本地视频；保留记录并标记文件已删除，失败保留现状 |
+| `delete_local_file` | 对应记录的明确二次确认后删除本地作品；图集仅删除任务清单文件，保留用户额外文件；保留记录并标记文件已删除，失败保留现状 |
 
 事件 `task_updated` 返回完整展示快照：task_id、递增 revision、状态、预览、字节/速度、脱敏错误及完成路径。约 250 ms 合并进度，终态立即通知。前端先监听再读快照，按 revision 合并；重挂载重新查询。未完成最高显示 99%，文件与数据库提交后才显示 100%。
 
@@ -157,7 +160,7 @@ Cookie 在设置页通过 get_profile_cookie 专用命令回显多行输入，�
 
 `parsing → ready → queued → downloading → completed`。解析/下载可转 failed，解析、预览、排队和下载均可取消。终态不被迟到事件覆盖。
 
-Rust 是唯一状态所有者。降低并发限制不打断已开始的下载，仅约束后续调度。队列获得槽位后由 yt-dlp 重新提取作品。取消与完成串行裁决：完成已提交则保持 completed；取消先接受则不得再发布成功。重试创建新任务，使用新任务创建时的设置快照。
+Rust 是唯一状态所有者。降低并发限制不打断已开始的下载，仅约束后续调度。队列获得槽位后由保存的 resolver 重新提取作品。取消与完成串行裁决：完成已提交则保持 completed；取消先接受则不得再发布成功。重试创建新任务，使用新任务创建时的设置快照。
 
 ### 7.2 文件提交
 
@@ -185,7 +188,7 @@ Cookie 按 2026-10-13 用户决定直接存 SQLite 的平台设置表，普通�
 
 ## 8. 网络和凭据边界
 
-- 自有输入边界只接受两平台单作品链接；短链由对应 yt-dlp 提取器展开。禁用通用站点、用户主页、合集、直播、搜索和 playlist 路径，不把支持整个 yt-dlp 站点库作为产品能力。
+- 自有输入边界只接受两平台单作品链接；短链由 bridge 经受控网络展开。禁用通用站点、用户主页、合集、直播、搜索和 playlist 路径，不把支持整个 yt-dlp 站点库作为产品能力。
 - 代理按平台设置；显式直连不继承环境代理。HTTP/SOCKS5 都覆盖解析与媒体下载，设置修改不改变进行中任务。
 - Cookie 仅发送到其所属平台的 HTTPS 域，跨域重定向不能携带不适用的 Cookie/Authorization。日志和前端事件不包含代理密码、Cookie、媒体 URL 或自由文本异常。
 - 原有媒体目标、重定向与私网访问约束仍是迁移验收要求。移除旧 Rust HTTP 层后，检查必须覆盖 yt-dlp 的实际网络调用，不能仅保留 Rust 侧一个不再被使用的 URL 校验器。
@@ -199,9 +202,10 @@ Cookie 按 2026-10-13 用户决定直接存 SQLite 的平台设置表，普通�
 
 ```text
 python-engine/
-  bridge.py               # 协议 v2 与单操作生命周期
-  engine.py               # yt-dlp 适配、格式选择、Cookie 与事件映射
-  requirements.in         # yt-dlp 固定基线
+  bridge.py               # 协议 v3 与单操作生命周期
+  engine.py               # 引擎选择、yt-dlp 适配、Cookie 与事件映射
+  dtk_adapter.py          # DTK 解析与图集保存，复用 GuardedRH/HttpFD
+  requirements.in         # yt-dlp 与 DTK 最小依赖固定基线
   requirements.txt        # 生成锁文件
   requirements-dev.in
   requirements-dev.txt
@@ -211,18 +215,19 @@ src-tauri/src/
   main.rs                 # M1 探针；桌面阶段按现有结构接入命令
   lib.rs                  # 任务与文件提交；按实际复杂度分文件
 scripts/
-  run_m1.py                # 当前统一验证入口
+  run_m1.py                # 统一探针入口
+  update_dtk_vendor.py    # 固定源码同步、补丁与导入边界校验
 ```
 
-不保留 `vendor/dtk`、旧签名补丁和第二套 Rust HTTP 媒体下载器。测试目录保留有效协议、文件和任务行为用例，替换旧引擎专属测试。新来源清单记录 yt-dlp 版本、包哈希、Unlicense 与实际依赖许可证；删除旧代码时核对剩余资产，仍来自旧上游的文件继续保留适用声明。
+新 `vendor/dtk` 仅保存固定底层白名单及独立初始化补丁，不包含旧服务架构；不保留第二套 Rust HTTP 媒体下载器。测试目录保留有效协议、文件和任务行为用例，替换旧引擎专属测试。新来源清单记录 yt-dlp 版本、包哈希、Unlicense 与实际依赖许可证；删除旧代码时核对剩余资产，仍来自旧上游的文件继续保留适用声明。
 
 分发项目自己的 Python/yt-dlp bridge，不是直接把官方 CLI 当作 JSONL sidecar。使用 PyInstaller onedir，检查 yt-dlp 的动态提取器与 hook 收集，随包保留完整依赖目录。打包在各目标系统/架构分别完成；用户无需安装 Python、uv 或 yt-dlp。
 
 当前以 Tauri `bundle.resources` 目录映射分发整个 `video-engine/` onedir，通过 Rust 启动该目录内的引擎，不使用 `externalBin` 命名机制，不能只复制 exe。[Tauri 官方 sidecar 文档](https://v2.tauri.app/develop/sidecar/)
 
-Windows 验证 WebView2、无终端窗口、非管理员、中文/空格路径与父进程退出；macOS 分别验证两种架构、嵌套签名与公证。通过安装包更新固定引擎版本，不做运行时自更新。源码成功不代表打包成功。
+Windows 验证 WebView2、无终端窗口、非管理员、中文/空格路径与父进程退出；macOS 分别验证两种架构与嵌套 ad-hoc 签名；按用户决定不要求 Developer ID、证书或公证。通过安装包更新固定引擎版本，不做运行时自更新。源码成功不代表打包成功。
 
-## 10. 迁移步骤与验收
+## 10. M1 历史迁移步骤与当前验收
 
 ### M1：替换旧引擎并验证核心链路
 
@@ -245,7 +250,7 @@ Windows 验证 WebView2、无终端窗口、非管理员、中文/空格路径�
 
 | 范围 | 关键用例与证据 |
 | --- | --- |
-| 输入/提取 | 双平台长短链、分享文本、多链接、主页/playlist/图集/直播拒绝，缺字段、删除/私密/网络失败分类 |
+| 输入/提取 | 双平台长短链、分享文本、多链接、主页/playlist/直播拒绝，图集类型识别，缺字段、删除/私密/网络失败分类 |
 | yt-dlp 适配 | 真实提取器注册、格式限制、Cookie 域隔离、代理快照；不加载外部配置、插件或额外输出 |
 | Bridge v2 | 分片、多行、错版本/ID、超限、坏 JSON、非零退出、EOF、重复/缺失终端事件 |
 | 下载与文件 | 已知/未知长度、错误页面、截断、磁盘满、目录逃逸、同名不覆盖；hook finished 不提前完成 |
@@ -258,7 +263,7 @@ Windows 验证 WebView2、无终端窗口、非管理员、中文/空格路径�
 
 ## 11. 后续升级
 
-升级固定 yt-dlp 版本时核对两平台提取器、网络层、格式/进度 hook、依赖与许可证变化；刷新锁文件与来源清单，运行适配/bridge/文件离线回归及双平台在线冒烟，再做对应安装包验收。失败不自动切换回 dtk；用户可回退到上一已验收的完整应用发布版本。
+升级固定 yt-dlp 版本时核对两平台提取器、网络层、格式/进度 hook、依赖与许可证变化；刷新锁文件与来源清单，运行适配/bridge/文件离线回归及双平台在线冒烟，再做对应安装包验收。任一引擎失败不自动切换另一引擎；用户可回退到上一已验收的完整应用发布版本。
 
 不沿用旧“签名模块替换”和 vendor 补丁回放流程。原工期包含 Rust HTTP 与旧上游裁剪，已不适用；按实际打包、网络边界和桌面工作量重新估算。
 
@@ -311,3 +316,10 @@ Rust 使用每任务配置快照与独立取消/完成信号，下载槽位在�
 ### 系统托盘与单实例
 
 使用 Tauri 原生 TrayIcon/Menu，提供“显示窗口”和“退出映取”；左键图标恢复窗口。单实例采用首个注册的 `tauri-plugin-single-instance` 插件，第二次启动不进入业务初始化，通知已有实例显示、取消最小化并聚焦主窗口。退出复用 `Core::shutdown`，重入退出只发起一次清理；关闭窗口只隐藏，应用真正退出后不继续后台下载。macOS Reopen 恢复现有窗口。
+
+
+## 2026-10-14 图集与应用标识
+
+图集占一个现有下载槽位，按顺序下载；未知总量显示不确定进度，并展示实际字节和完成张数。全部文件通过类型、大小和 SHA-256 校验，在 commit_intents 保存完整清单后，以不覆盖的原子目录移动发布为 `平台_作品ID_任务ID/001.<实际格式>`，数据库提交后才标 completed。恢复提交意图必须验证全部文件及 hash；正常重启从保存清单读取本地图集，未完成任务仍按中断处理，不自动续传。预览使用 Rust 专属临时目录和字节读取命令，签名图片地址不进入数据库或前端。
+
+应用唯一标识改为 `me.disign.yingqu`。新目录不存在且旧数据库存在时迁移整个原数据目录，已有新目录不合并或覆盖。系统代理密码保留原凭据服务命名空间以维持既有引用。上游同步、补丁升级、生产切片、质量选择和具体命令见 [双引擎方案](dtk-dual-engine-plan.md)、[开发文档](development.md#解析模块同步与补丁升级)及 [UPSTREAM](../vendor/UPSTREAM.md)；在线 GUI、安装包和平台边界见 [双引擎验收](dual-engine-validation.md)。

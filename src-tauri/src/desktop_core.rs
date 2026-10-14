@@ -1,5 +1,5 @@
 use crate::{
-    files::{finalize_to, Video},
+    files::{finalize_album, finalize_to, validate_album, AlbumFile, Video},
     python_bridge::PythonBridge,
     settings::{self, Settings},
 };
@@ -52,6 +52,12 @@ pub struct Task {
     pub cover_path: Option<PathBuf>,
     #[serde(default)]
     pub cover_error: Option<String>,
+    #[serde(default)]
+    pub files: Vec<AlbumFile>,
+    #[serde(default)]
+    pub completed_items: Option<u64>,
+    #[serde(default)]
+    pub total_items: Option<u64>,
 }
 
 fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
@@ -77,6 +83,8 @@ struct Active {
     directory: PathBuf,
     cancel: watch::Sender<bool>,
     done: watch::Receiver<bool>,
+    preview: Option<tempfile::TempDir>,
+    preview_path: Option<PathBuf>,
 }
 struct Inner {
     db: Connection,
@@ -126,6 +134,17 @@ fn publish(inner: &mut Inner, task: Task, emit: &dyn Fn(TaskEvent)) -> Result<()
     Ok(())
 }
 
+fn close_preview(inner: &mut Inner, id: &str) -> Result<()> {
+    if let Some(preview) = inner.active.get_mut(id).and_then(|a| a.preview.take()) {
+        preview.close().context("IO_ERROR")?;
+        inner
+            .db
+            .execute("DELETE FROM task_staging WHERE task_id=?", [id])
+            .context("DATABASE_ERROR")?;
+    }
+    Ok(())
+}
+
 impl Core {
     pub fn open(
         db_path: &Path,
@@ -151,6 +170,15 @@ impl Core {
             CREATE TABLE IF NOT EXISTS task_staging(task_id TEXT PRIMARY KEY,path TEXT NOT NULL);",
         )
         .context("DATABASE_ERROR")?;
+        let has_manifest = db
+            .prepare("PRAGMA table_info(commit_intents)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|column| column == "manifest");
+        if !has_manifest {
+            db.execute("ALTER TABLE commit_intents ADD COLUMN manifest TEXT", [])?;
+        }
         let settings = settings::load(&db, directory)?;
         let mut tasks = {
             let mut query =
@@ -183,25 +211,43 @@ impl Core {
                 task.speed_bps = None;
                 task.revision += 1;
                 let intent = db.query_row(
-                    "SELECT source,target,size FROM commit_intents WHERE task_id=?",
+                    "SELECT source,target,size,manifest FROM commit_intents WHERE task_id=?",
                     [&task.id],
                     |r| {
                         Ok((
                             r.get::<_, String>(0)?,
                             r.get::<_, String>(1)?,
                             r.get::<_, i64>(2)? as u64,
+                            r.get::<_, Option<String>>(3)?,
                         ))
                     },
                 );
                 match intent {
-                    Ok((source, target, size))
+                    Ok((source, target, size, manifest))
                         if !Path::new(&source).exists()
-                            && std::fs::symlink_metadata(&target).is_ok_and(|m| {
-                                m.is_file() && !m.file_type().is_symlink() && m.len() == size
+                            && (if let Some(files) = manifest.as_ref() {
+                                serde_json::from_str::<Vec<AlbumFile>>(files)
+                                    .ok()
+                                    .is_some_and(|files| {
+                                        validate_album(Path::new(&target), &files)
+                                            .is_ok_and(|n| n == size)
+                                    })
+                            } else {
+                                std::fs::symlink_metadata(&target).is_ok_and(|m| {
+                                    m.is_file() && !m.file_type().is_symlink() && m.len() == size
+                                })
                             }) =>
                     {
                         task.status = Status::Completed;
                         task.error = None;
+                        if let Some(files) = manifest {
+                            task.files = serde_json::from_str(&files).context("DATABASE_ERROR")?;
+                            if let Some(video) = task.video.as_mut() {
+                                video["images"] = serde_json::to_value(&task.files)?;
+                            }
+                            task.completed_items = Some(task.files.len() as u64);
+                            task.total_items = task.completed_items;
+                        }
                         let target = PathBuf::from(target);
                         task.cover_path = ["jpg", "png", "webp"]
                             .iter()
@@ -209,6 +255,7 @@ impl Core {
                             .find(|path| path.is_file());
                         task.path = Some(target);
                         task.bytes = size;
+                        task.total_bytes = Some(size);
                         task.completed_at = Some(now());
                     }
                     Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
@@ -274,8 +321,24 @@ impl Core {
             .iter()
             .cloned()
             .map(|mut t| {
-                t.file_missing =
-                    t.status == Status::Completed && t.path.as_ref().is_none_or(|p| !p.is_file());
+                t.file_missing = t.status == Status::Completed
+                    && t.path.as_ref().is_none_or(|p| {
+                        if t.files.is_empty() {
+                            !p.is_file()
+                        } else {
+                            !std::fs::symlink_metadata(p)
+                                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+                                || t.files.iter().any(|file| {
+                                    !std::fs::symlink_metadata(p.join(&file.filename)).is_ok_and(
+                                        |m| {
+                                            m.is_file()
+                                                && !m.file_type().is_symlink()
+                                                && m.len() == file.bytes
+                                        },
+                                    )
+                                })
+                        }
+                    });
                 t
             })
             .collect()
@@ -318,11 +381,66 @@ impl Core {
     }
 
     pub fn resolve(self: &Arc<Self>, input: String) -> Result<Task> {
-        self.resolve_task(input, false)
+        self.resolve_task(input, false, "auto".into())
+    }
+
+    pub fn resolve_with_resolver(
+        self: &Arc<Self>,
+        input: String,
+        resolver: String,
+    ) -> Result<Task> {
+        if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk") {
+            bail!("CONFIG_INVALID");
+        }
+        self.resolve_task(input, false, resolver)
+    }
+
+    pub fn image(&self, id: &str, index: usize) -> Result<Vec<u8>> {
+        let path = {
+            let inner = self.inner.lock().unwrap();
+            let task = inner
+                .tasks
+                .iter()
+                .find(|t| t.id == id)
+                .context("TASK_NOT_FOUND")?;
+            if index >= 64 {
+                bail!("INVALID_INPUT");
+            }
+            if task.status == Status::Completed {
+                let file = task.files.get(index).context("FILE_MISSING")?;
+                task.path
+                    .as_ref()
+                    .context("FILE_MISSING")?
+                    .join(&file.filename)
+            } else {
+                let filename = task
+                    .video
+                    .as_ref()
+                    .and_then(|v| v["images"].get(index))
+                    .and_then(|v| v["preview_filename"].as_str())
+                    .context("FILE_MISSING")?;
+                let extension = filename
+                    .rsplit_once('.')
+                    .context("INVALID_ENGINE_RESULT")?
+                    .1;
+                if filename != format!("preview-{:03}.{extension}", index + 1)
+                    || !matches!(extension, "jpeg" | "png" | "webp" | "gif" | "heic" | "avif")
+                {
+                    bail!("INVALID_ENGINE_RESULT");
+                }
+                inner
+                    .active
+                    .get(id)
+                    .and_then(|a| a.preview_path.as_ref())
+                    .context("FILE_MISSING")?
+                    .join(filename)
+            }
+        };
+        crate::files::read_image(&path)
     }
 
     pub fn retry(self: &Arc<Self>, id: &str) -> Result<Task> {
-        let input = {
+        let (input, resolver) = {
             let inner = self.inner.lock().unwrap();
             let task = inner
                 .tasks
@@ -336,9 +454,9 @@ impl Core {
                 serde_json::from_value(task.video.clone().context("REPARSE_REQUIRED")?)
                     .context("INVALID_ENGINE_RESULT")?;
             video.validate()?;
-            video.canonical_url
+            (video.canonical_url, video.resolver)
         };
-        self.resolve_task(input, true)
+        self.resolve_task(input, true, resolver)
     }
 
     pub fn remove_history(&self, id: &str) -> Result<()> {
@@ -385,10 +503,41 @@ impl Core {
         let path = task.path.as_ref().context("FILE_MISSING")?;
         match std::fs::symlink_metadata(path) {
             Ok(metadata) => {
-                if !metadata.is_file() || metadata.file_type().is_symlink() {
-                    bail!("IO_ERROR");
+                if !task.files.is_empty() {
+                    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                        bail!("IO_ERROR");
+                    }
+                    let owned = task
+                        .files
+                        .iter()
+                        .map(|f| path.join(&f.filename))
+                        .collect::<Vec<_>>();
+                    for file in &owned {
+                        match std::fs::symlink_metadata(file) {
+                            Ok(m) if m.is_file() && !m.file_type().is_symlink() => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            _ => bail!("IO_ERROR"),
+                        }
+                    }
+                    for file in &owned {
+                        match std::fs::remove_file(file) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(_) => bail!("IO_ERROR"),
+                        }
+                    }
+                    // Preserve unrelated files a user may have put in this directory.
+                    match std::fs::remove_dir(path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+                        Err(_) => bail!("IO_ERROR"),
+                    }
+                } else {
+                    if !metadata.is_file() || metadata.file_type().is_symlink() {
+                        bail!("IO_ERROR");
+                    }
+                    std::fs::remove_file(path).context("IO_ERROR")?;
                 }
-                std::fs::remove_file(path).context("IO_ERROR")?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => bail!("IO_ERROR"),
@@ -402,7 +551,12 @@ impl Core {
         Ok(())
     }
 
-    fn resolve_task(self: &Arc<Self>, input: String, download_after_resolve: bool) -> Result<Task> {
+    fn resolve_task(
+        self: &Arc<Self>,
+        input: String,
+        download_after_resolve: bool,
+        resolver: String,
+    ) -> Result<Task> {
         if input.trim().is_empty() || input.len() > 8192 {
             bail!("INVALID_INPUT");
         }
@@ -429,6 +583,9 @@ impl Core {
             download_requested: download_after_resolve,
             cover_path: None,
             cover_error: None,
+            files: Vec::new(),
+            completed_items: None,
+            total_items: None,
         };
         let (cancel, mut cancellation) = watch::channel(false);
         let (done, done_rx) = watch::channel(false);
@@ -439,21 +596,28 @@ impl Core {
             Active {
                 download_after_resolve,
                 profiles: profiles.clone(),
-                directory,
+                directory: directory.clone(),
                 cancel,
                 done: done_rx,
+                preview: None,
+                preview_path: None,
             },
         );
         let core = self.clone();
         let id = task.id.clone();
         inner.workers.retain(|worker| !worker.is_finished());
         let worker = tokio::spawn(async move {
-            let result = PythonBridge::operation_cancellable(
+            let result = async {
+                std::fs::create_dir_all(&directory).context("IO_ERROR")?;
+                let stage = tempfile::Builder::new().prefix(&format!("yingqu-{id}-")).tempdir_in(&directory).context("IO_ERROR")?;
+                core.inner.lock().unwrap().db.execute("INSERT INTO task_staging VALUES(?1,?2)",
+                    params![id, stage.path().to_string_lossy()]).context("DATABASE_ERROR")?;
+                let result = PythonBridge::operation_cancellable(
                 &core.program,
                 &core.args,
                 &id,
                 "resolve_video",
-                json!({"input":input,"profiles":profiles}),
+                json!({"input":input,"profiles":profiles,"resolver":resolver,"preview_dir":stage.path()}),
                 |_| {},
                 async {
                     let _ = cancellation.wait_for(|v| *v).await;
@@ -466,6 +630,17 @@ impl Core {
                 video.validate()?;
                 Ok(result["result"].clone())
             });
+                if result.as_ref().is_ok_and(|v| v["kind"] == "image_album") {
+                    let mut inner = core.inner.lock().unwrap();
+                    let active = inner.active.get_mut(&id).context("INVALID_STATE")?;
+                    active.preview_path = Some(stage.path().to_owned());
+                    active.preview = Some(stage);
+                } else {
+                    stage.close().context("IO_ERROR")?;
+                    core.inner.lock().unwrap().db.execute("DELETE FROM task_staging WHERE task_id=?", [&id]).context("DATABASE_ERROR")?;
+                }
+                result
+            }.await;
             core.finish(&id, result, false);
             let _ = done.send(true);
         });
@@ -521,6 +696,12 @@ impl Core {
                     .unwrap_or(0)
                     + 1,
             );
+        }
+        if !matches!(task.status, Status::Ready | Status::Queued)
+            && close_preview(&mut inner, id).is_err()
+        {
+            task.status = Status::Failed;
+            task.error = Some("IO_ERROR".into());
         }
         task.canceling = false;
         task.speed_bps = None;
@@ -639,19 +820,24 @@ impl Core {
         let active = inner.active.get_mut(id).unwrap();
         active.cancel = cancel;
         active.done = done_rx;
+        let preview = active.preview.take();
         let core = self.clone();
         let id = id.to_owned();
         inner.workers.retain(|worker| !worker.is_finished());
         let worker = tokio::spawn(async move {
             let result = async {
                 std::fs::create_dir_all(&directory).context("IO_ERROR")?;
-                let stage = tempfile::Builder::new().prefix(&format!("yingqu-{id}-")).tempdir_in(&directory).context("IO_ERROR")?;
-                core.inner.lock().unwrap().db.execute("INSERT INTO task_staging VALUES(?1,?2)",
+                let stage = match preview { Some(stage) => stage, None => tempfile::Builder::new().prefix(&format!("yingqu-{id}-")).tempdir_in(&directory).context("IO_ERROR")? };
+                let media = stage.path().join("media");
+                std::fs::create_dir(&media).context("IO_ERROR")?;
+                core.inner.lock().unwrap().db.execute("INSERT OR REPLACE INTO task_staging VALUES(?1,?2)",
                     params![id,stage.path().to_string_lossy()]).context("DATABASE_ERROR")?;
                 let mut last = Instant::now() - Duration::from_secs(1);
                 let result = PythonBridge::operation_cancellable(&core.program, &core.args, &id, "download_video",
                     json!({"input":video["canonical_url"],"profiles":profiles,
-                        "expected":{"platform":video["platform"],"video_id":video["video_id"]},"staging_dir":stage.path()}),
+                        "resolver":video["resolver"].as_str().unwrap_or("yt-dlp"),
+                        "expected":{"platform":video["platform"],"video_id":video["video_id"],"kind":video["kind"].as_str().unwrap_or("video"),
+                            "image_count":video["images"].as_array().map(Vec::len)},"staging_dir":media}),
                     |event| {
                         if last.elapsed() < Duration::from_millis(250) { return; }
                         last = Instant::now();
@@ -661,6 +847,8 @@ impl Core {
                         task.bytes = event["bytes"].as_u64().unwrap_or(0);
                         task.total_bytes = event["total_bytes"].as_u64();
                         task.speed_bps = event["speed_bps"].as_f64();
+                        task.completed_items = event["completed_items"].as_u64();
+                        task.total_items = event["total_items"].as_u64();
                         task.revision += 1;
                         (core.emit)(TaskEvent::Updated(Box::new(task.clone())));
                     },
@@ -670,22 +858,37 @@ impl Core {
                     let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
                     if task.canceling { bail!("CANCELED"); }
                     let identity: Video = serde_json::from_value(video).context("INVALID_ENGINE_RESULT")?;
+                    let file = if identity.kind == "image_album" {
+                        let target = directory.join(format!("{}_{}_{}", identity.platform, identity.video_id, id));
+                        let file = finalize_album(&identity, &result, &media, &target, |source,size,files| {
+                            inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size,manifest) VALUES(?1,?2,?3,?4,?5)", params![
+                                id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?,serde_json::to_string(files)?]).context("DATABASE_ERROR")?;
+                            Ok(())
+                        })?;
+                        task.files = serde_json::from_value(result["files"].clone()).context("INVALID_ENGINE_RESULT")?;
+                        if let Some(video) = task.video.as_mut() { video["images"] = result["files"].clone(); }
+                        task.completed_items = Some(task.files.len() as u64);
+                        task.total_items = task.completed_items;
+                        file
+                    } else {
                     let extension = result["container"].as_str().context("INVALID_ENGINE_RESULT")?;
                     if !matches!(extension, "mp4" | "webm") { bail!("INVALID_MEDIA_CONTENT"); }
                     let target = directory.join(format!("{}_{}_{}.{}",identity.platform,identity.video_id,id,extension));
-                    let file = finalize_to(&identity, &result, stage.path(), &target, |source,size| {
-                        inner.db.execute("INSERT INTO commit_intents VALUES(?1,?2,?3,?4)", params![
+                    let file = finalize_to(&identity, &result, &media, &target, |source,size| {
+                        inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,?4)", params![
                             id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?]).context("DATABASE_ERROR")?;
                         Ok(())
                     })?;
                     if result["cover_filename"].is_string() {
-                        match crate::files::finalize_cover(&result, stage.path(), &file.path) {
+                        match crate::files::finalize_cover(&result, &media, &file.path) {
                             Ok(path) => task.cover_path = Some(path),
                             Err(_) => task.cover_error = Some("COVER_UNAVAILABLE".into()),
                         }
                     } else {
                         task.cover_error = Some("COVER_UNAVAILABLE".into());
                     }
+                    file
+                    };
                     task.path = Some(file.path);
                     task.bytes = file.bytes;
                     task.total_bytes = Some(file.bytes);
@@ -737,6 +940,7 @@ impl Core {
                 return Ok(());
             }
             if matches!(task.status, Status::Ready | Status::Queued) {
+                close_preview(&mut inner, id)?;
                 task.status = Status::Canceled;
                 task.revision += 1;
                 publish(&mut inner, task, &*self.emit)?;
@@ -849,6 +1053,68 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert!(restarted.list()[0].file_missing);
     }
+    #[tokio::test]
+    async fn album_preview_commit_restart_and_owned_file_deletion() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = app
+            .resolve_with_resolver("album".into(), "dtk".into())
+            .unwrap();
+        let ready = wait(&app, &task.id, Status::Ready).await;
+        assert_eq!(
+            ready.video.as_ref().unwrap()["images"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(app
+            .image(&task.id, 0)
+            .unwrap()
+            .starts_with(&[0xff, 0xd8, 0xff]));
+        assert!(app.image(&task.id, 64).is_err());
+        app.download(&task.id, false).unwrap();
+        let completed = wait(&app, &task.id, Status::Completed).await;
+        assert_eq!(completed.files.len(), 2);
+        assert_eq!(completed.completed_items, Some(2));
+        let path = completed.path.clone().unwrap();
+        assert_eq!(
+            validate_album(&path, &completed.files).unwrap(),
+            completed.bytes
+        );
+        app.shutdown().await;
+        drop(app);
+        let restored = core(root.path());
+        assert_eq!(restored.list()[0].status, Status::Completed);
+        assert!(!restored.list()[0].file_missing);
+        assert!(restored.image(&task.id, 1).unwrap().starts_with(b"RIFF"));
+        // Simulate a crash after the directory move, before publishing completed.
+        let mut interrupted = completed.clone();
+        interrupted.status = Status::Downloading;
+        interrupted.files.clear();
+        interrupted.bytes = 0;
+        interrupted.path = None;
+        {
+            let inner = restored.inner.lock().unwrap();
+            persist(&inner.db, &interrupted).unwrap();
+        }
+        drop(restored);
+        let restored = core(root.path());
+        let recovered = restored.list().remove(0);
+        assert_eq!(recovered.status, Status::Completed);
+        assert_eq!(recovered.files.len(), 2);
+        assert_eq!(recovered.bytes, completed.bytes);
+        assert_eq!(recovered.completed_items, Some(2));
+        assert!(restored.image(&task.id, 1).unwrap().starts_with(b"RIFF"));
+        std::fs::write(path.join("user-note.txt"), "preserve").unwrap();
+        restored.delete_local_file(&task.id).unwrap();
+        assert_eq!(
+            std::fs::read(path.join("user-note.txt")).unwrap(),
+            b"preserve"
+        );
+        assert!(restored.list()[0].file_missing);
+        assert_eq!(restored.list()[0].status, Status::Completed);
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_allows_immediate_reopen_after_completion() {
         let root = tempfile::tempdir().unwrap();
@@ -946,6 +1212,9 @@ mod tests {
             download_requested: false,
             cover_path: None,
             cover_error: None,
+            files: Vec::new(),
+            completed_items: None,
+            total_items: None,
         };
         {
             let inner = app.inner.lock().unwrap();
@@ -953,7 +1222,7 @@ mod tests {
             inner
                 .db
                 .execute(
-                    "INSERT INTO commit_intents VALUES(?1,?2,?3,8)",
+                    "INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,8)",
                     params![task.id, source.to_string_lossy(), target.to_string_lossy()],
                 )
                 .unwrap();
@@ -983,6 +1252,8 @@ mod tests {
             platform: "douyin".into(),
             video_id: "123".into(),
             canonical_url: String::new(),
+            kind: "video".into(),
+            resolver: "yt-dlp".into(),
         };
         let result = json!({"platform":"douyin","video_id":"123","container":"mp4","filename":"video.mp4","bytes":12});
         assert!(finalize_to(

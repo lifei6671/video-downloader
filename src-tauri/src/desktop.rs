@@ -41,6 +41,10 @@ fn get_task_cover(core: State<AppCore>, task_id: String) -> Result<Vec<u8>, Stri
     core.cover(&task_id).map_err(error)
 }
 #[tauri::command]
+fn get_task_image(core: State<AppCore>, task_id: String, index: usize) -> Result<Vec<u8>, String> {
+    core.image(&task_id, index).map_err(error)
+}
+#[tauri::command]
 async fn save_profile(core: State<'_, AppCore>, update: ProfileUpdate) -> Result<Settings, String> {
     core.save_profile(update).map_err(error)
 }
@@ -49,8 +53,13 @@ async fn set_max_downloads(core: State<'_, AppCore>, value: u8) -> Result<Settin
     core.set_max_downloads(value).map_err(error)
 }
 #[tauri::command]
-async fn resolve_video(core: State<'_, AppCore>, input: String) -> Result<Task, String> {
-    core.resolve(input).map_err(error)
+async fn resolve_video(
+    core: State<'_, AppCore>,
+    input: String,
+    resolver: Option<String>,
+) -> Result<Task, String> {
+    core.resolve_with_resolver(input, resolver.unwrap_or_else(|| "auto".into()))
+        .map_err(error)
 }
 #[tauri::command]
 async fn start_download(
@@ -104,7 +113,7 @@ fn reveal_download(
         .into_iter()
         .find(|t| t.id == task_id && t.status == Status::Completed)
         .ok_or("TASK_NOT_FOUND")?;
-    let path = task.path.filter(|p| p.is_file()).ok_or("FILE_MISSING")?;
+    let path = task.path.filter(|p| p.exists()).ok_or("FILE_MISSING")?;
     app.opener()
         .reveal_item_in_dir(path)
         .map_err(|_| "IO_ERROR".into())
@@ -146,6 +155,11 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
+            // Preserve the existing database when adopting the new bundle identifier.
+            let legacy = data.with_file_name("com.yingqu.desktop");
+            if !data.exists() && legacy.join("yingqu.sqlite").is_file() {
+                std::fs::rename(&legacy, &data)?;
+            }
             std::fs::create_dir_all(&data)?;
             let downloads = app.path().download_dir()?.join("Yingqu");
             #[cfg(debug_assertions)]
@@ -211,6 +225,7 @@ fn main() {
             get_settings,
             get_profile_cookie,
             get_task_cover,
+            get_task_image,
             save_profile,
             set_max_downloads,
             resolve_video,

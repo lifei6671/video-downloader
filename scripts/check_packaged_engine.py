@@ -17,6 +17,6 @@ with tempfile.TemporaryDirectory() as cwd:
 if result.returncode != 3:
     raise RuntimeError(f'Engine did not exit on stdin EOF: {result.returncode}: {result.stderr}')
 ready = json.loads(result.stdout.strip())
-if ready.get('type') != 'ready' or ready.get('protocol_version') != 2:
+if ready.get('type') != 'ready' or ready.get('protocol_version') != 3:
     raise RuntimeError(f'Invalid engine handshake: {ready}')
 print(f"Packaged engine ready: {ready['engine_version']}, yt-dlp {ready['yt_dlp_version']}")

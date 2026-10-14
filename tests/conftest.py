@@ -23,7 +23,8 @@ def media_proxy():
                 self.send_header('Location','http://127.0.0.1/secret')
                 self.end_headers()
                 return
-            body = b'<html>error</html>' if mode == 'html' else BODY
+            body = (b'RIFF' + b'\x10\x00\x00\x00WEBPfixture' if mode == 'image' else
+                    b'<html>error</html>' if mode == 'html' else BODY)
             self.send_response(200)
             self.send_header('Content-Type','video/mp4')
             if mode != 'unknown':

@@ -1,0 +1,370 @@
+"""Query parameter construction for the Douyin web P0 endpoints.
+
+The parameter names and default values are the distilled form of V4's
+``crawlers/douyin/web/models.py`` and ``app/api/endpoints/douyin_web.py``
+on branch ``main`` (commit ``8c98fb7``). That knowledge is not documented anywhere by the platform, which is why
+the salvage doc lists those two files as read-only references worth mining.
+
+Two deliberate differences from V4:
+
+* **Nothing is read from a config file.** V4's ``BaseRequestModel`` called
+  ``TokenManager.gen_real_msToken()`` at class-definition time, which made
+  importing the model perform a network request against a cookie taken from
+  ``config.yaml``. Here ``msToken``, ``a_bogus`` and ``X-Bogus`` are appended by
+  the signing layer, which owns the identity they belong to.
+* **Fingerprint values are injected.** ``screen_width``, ``browser_version`` and
+  friends are echoed back to the platform and must agree with the TLS emulation
+  and User-Agent of the identity making the call, so they arrive as a
+  :class:`~dtk.platforms.base.ClientProfile`.
+
+Values are returned un-encoded. The transport layer percent-encodes exactly
+once, because the signature is computed over the encoded query string.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Final
+
+from dtk.platforms.base import ClientProfile, ProfileSource, browser_version
+
+#: Douyin's web client identifies itself as a Chinese-locale desktop browser.
+#: A profile whose language does not match the rest of the fingerprint is itself
+#: a signal, so this default is a coherent whole rather than a set of knobs.
+DEFAULT_PROFILE: Final = ClientProfile(
+    browser_name="Chrome",
+    browser_version="130.0.0.0",
+    browser_platform="Win32",
+    browser_language="zh-CN",
+    engine_name="Blink",
+    engine_version="130.0.0.0",
+    os_name="Windows",
+    os_version="10",
+    screen_width=1920,
+    screen_height=1080,
+    cpu_core_num=12,
+    device_memory=8,
+    language="zh-CN",
+    timezone="Asia/Shanghai",
+    region="CN",
+)
+
+#: How Douyin's own page names an engine, given the browser it decided on. Its
+#: detector (``chunk-43693``) reports ``Chrome`` for anything carrying
+#: ``Chrome/`` - Edge and the Chromium-based Chinese browsers included - so the
+#: engine table only needs the three real engines.
+_ENGINES: Final[dict[str, str]] = {"Chrome": "Blink", "Firefox": "Gecko", "Safari": "WebKit"}
+
+#: The browser names Douyin's detector can produce, in the order it tries them.
+#: Only the desktop ones are reachable from an identity this project mints; the
+#: rest of its table (``qqbrowser``, ``weixin``, ``TTWebView``, ``xiaomi``) is
+#: for in-app webviews.
+_BROWSERS: Final[tuple[str, ...]] = ("Chrome", "Firefox", "Safari")
+
+
+def profile_for(source: ProfileSource) -> ClientProfile:
+    """The query values that agree with one identity's User-Agent.
+
+    Every field here is echoed straight back to Douyin beside the User-Agent
+    that carries the same facts, so a profile that disagrees with it is a free
+    signal: a request claiming Chrome 130 in the query while its own header says
+    Chrome 146 could not have come from a browser. That was the state of this
+    module until now - the profile was a constant, and only the constant.
+
+    Read out of the User-Agent rather than invented, using the platform's own
+    vocabulary: :func:`dtk.platforms.base.operating_system` follows the OS table
+    from Douyin's ``chunk-43693`` bundle, and the browser version is the same
+    substring its detector takes. Anything the User-Agent does not state keeps
+    :data:`DEFAULT_PROFILE`'s value.
+    """
+    profile = DEFAULT_PROFILE.with_fingerprint(source)
+    # Douyin has no separate bare-subtag field: `browser_language` is the only
+    # language it asks for, and `language` rides along unread.
+    profile = replace(profile, language=profile.browser_language)
+    for name in _BROWSERS:
+        version = browser_version(source.user_agent, name)
+        if version is None:
+            continue
+        return replace(
+            profile,
+            browser_name=name,
+            browser_version=version,
+            engine_name=_ENGINES[name],
+            # Chromium reports its Blink version as its own; the browser
+            # fixture captured from a live page carries 130.0.0.0 in both.
+            engine_version=version,
+        )
+    return profile
+
+
+#: Web client build identifiers. Douyin rejects requests whose ``version_code``
+#: is far behind the live web build, so these need refreshing when the platform
+#: ships a major web release; that is a browser task, not a code change.
+AID: Final = "6383"
+CHANNEL: Final = "channel_pc_web"
+VERSION_CODE: Final = "290100"
+VERSION_NAME: Final = "29.1.0"
+UPDATE_VERSION_CODE: Final = "170400"
+
+#: Default page size. Douyin silently caps larger values.
+DEFAULT_PAGE_SIZE: Final = 20
+
+
+def base_params(profile: ClientProfile = DEFAULT_PROFILE) -> dict[str, str]:
+    """The parameters every Douyin web API call carries.
+
+    Ported from V4's ``BaseRequestModel``, minus ``msToken`` which the signing
+    layer supplies.
+    """
+    return {
+        "device_platform": "webapp",
+        "aid": AID,
+        "channel": CHANNEL,
+        "pc_client_type": "1",
+        "version_code": VERSION_CODE,
+        "version_name": VERSION_NAME,
+        "cookie_enabled": "true",
+        "screen_width": str(profile.screen_width),
+        "screen_height": str(profile.screen_height),
+        "browser_language": profile.browser_language,
+        "browser_platform": profile.browser_platform,
+        "browser_name": profile.browser_name,
+        "browser_version": profile.browser_version,
+        "browser_online": "true",
+        "engine_name": profile.engine_name,
+        "engine_version": profile.engine_version,
+        "os_name": profile.os_name,
+        "os_version": profile.os_version,
+        "cpu_core_num": str(profile.cpu_core_num),
+        "device_memory": str(profile.device_memory),
+        "platform": "PC",
+        "downlink": "10",
+        "effective_type": "4g",
+        "round_trip_time": "0",
+        "update_version_code": UPDATE_VERSION_CODE,
+    }
+
+
+def session_check_params(*, profile: ClientProfile = DEFAULT_PROFILE) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/query/user/``.
+
+    The base set and nothing else. The question this endpoint answers - whose
+    session is this - is asked entirely by the cookies and the signature, so
+    there is nothing to name in the query string.
+    """
+    return base_params(profile)
+
+
+def content_detail_params(
+    *, aweme_id: str, profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/aweme/detail/``."""
+    return {**base_params(profile), "aweme_id": str(aweme_id)}
+
+
+def author_profile_params(
+    *, sec_user_id: str, profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/user/profile/other/``.
+
+    ``sec_user_id`` and not ``uid``: the numeric uid rotates, the sec id does
+    not. See the Author contract in ``docs/design/11-data-contracts.md``.
+    """
+    return {
+        **base_params(profile),
+        "sec_user_id": str(sec_user_id),
+        "publish_video_strategy_type": "2",
+        "personal_center_strategy": "1",
+    }
+
+
+def author_posts_params(
+    *,
+    sec_user_id: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/aweme/post/``.
+
+    ``cursor`` is the opaque cursor handed back by the previous page. For Douyin
+    it decodes to ``max_cursor``, a millisecond publish timestamp; ``"0"`` asks
+    for the first page. Callers never need to know that.
+    """
+    return {
+        **base_params(profile),
+        "sec_user_id": str(sec_user_id),
+        "max_cursor": _cursor(cursor),
+        "count": str(count),
+        "publish_video_strategy_type": "2",
+        "from_user_page": "1",
+        "locate_query": "false",
+        "need_time_list": "1",
+        "show_live_replay_strategy": "1",
+        "time_list_query": "0",
+        "pc_libra_divert": profile.os_name,
+        "whale_cut_token": "",
+    }
+
+
+def author_likes_params(
+    *,
+    sec_user_id: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/aweme/favorite/``.
+
+    Only returns anything when the author has chosen to make their likes
+    public, which most accounts have not. An empty page is the normal answer
+    for a private list, not an error.
+    """
+    return {
+        **base_params(profile),
+        "sec_user_id": str(sec_user_id),
+        "max_cursor": _cursor(cursor),
+        "count": str(count),
+        "publish_video_strategy_type": "2",
+    }
+
+
+def author_collections_params(
+    *,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/collects/list/``.
+
+    Takes no user id, and the absence is the endpoint's entire semantics: it
+    answers about whoever the cookies belong to and there is no way to ask it
+    about anyone else. TikTok's equivalent takes a ``secUid`` and will answer
+    for a stranger's public folders; this one cannot be asked the question.
+
+    So a caller must pin an imported identity, and passing an author id is
+    rejected rather than ignored - see the Douyin entry in ``_ARGUMENTS``. A
+    silently dropped ``sec_user_id`` would return the operator's own folders
+    under someone else's name, which is the worst available answer.
+    """
+    return {
+        **base_params(profile),
+        "cursor": _cursor(cursor),
+        "count": str(count),
+    }
+
+
+def collection_posts_params(
+    *,
+    collection_id: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/collects/video/list/``.
+
+    Douyin spells the folder id ``collects_id``, with the s - not ``collect_id``
+    and not TikTok's ``collectionId``. The canonical name stays
+    ``collection_id`` for both platforms; this is the only place the spelling
+    difference lives.
+
+    Unlike ``author_collections`` above, this one is keyed by the folder rather
+    than by the session, which is the same split TikTok has.
+    """
+    return {
+        **base_params(profile),
+        "collects_id": str(collection_id),
+        "cursor": _cursor(cursor),
+        "count": str(count),
+    }
+
+
+def mix_posts_params(
+    *,
+    mix_id: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/mix/aweme/``.
+
+    A mix is Douyin's series or playlist. ``mix_id`` comes from the ``mix_info``
+    block of any post that belongs to one.
+    """
+    return {
+        **base_params(profile),
+        "mix_id": str(mix_id),
+        "cursor": _cursor(cursor),
+        "count": str(count),
+    }
+
+
+def comments_params(
+    *,
+    aweme_id: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/comment/list/``.
+
+    Here the opaque cursor decodes to a plain offset, unlike the timestamp used
+    by the post list - which is exactly why the contract makes callers treat it
+    as opaque.
+    """
+    return {
+        **base_params(profile),
+        "aweme_id": str(aweme_id),
+        "cursor": _cursor(cursor),
+        "count": str(count),
+        "item_type": "0",
+        "insert_ids": "",
+        "whale_cut_token": "",
+        "cut_version": "1",
+        "rcFT": "",
+    }
+
+
+def comment_replies_params(
+    *,
+    item_id: str,
+    comment_id: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/comment/list/reply/``.
+
+    Note the name change: this endpoint calls the post ``item_id`` while the
+    comment list calls it ``aweme_id``. Same value, different spelling.
+    """
+    return {
+        **base_params(profile),
+        "item_id": str(item_id),
+        "comment_id": str(comment_id),
+        "cursor": _cursor(cursor),
+        "count": str(count),
+        "item_type": "0",
+    }
+
+
+def _cursor(cursor: str | None) -> str:
+    """Decode the opaque page cursor into Douyin's numeric cursor."""
+    if cursor is None:
+        return "0"
+    text = cursor.strip()
+    return text or "0"
+
+
+__all__ = [
+    "AID",
+    "DEFAULT_PAGE_SIZE",
+    "DEFAULT_PROFILE",
+    "author_posts_params",
+    "author_profile_params",
+    "base_params",
+    "comment_replies_params",
+    "comments_params",
+    "content_detail_params",
+    "profile_for",
+]

@@ -1,6 +1,6 @@
-# yt-dlp 来源与依赖
+# 解析引擎来源与依赖
 
-当前平台解析和媒体下载统一使用官方 Python 包 `yt-dlp==2026.8.19`；运行时版本 `2026.08.19`，协议 v2，引擎版本 `0.2.1`。
+当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.8.19` 的运行时版本为 `2026.08.19`；协议 v3，引擎版本 `0.3.0`。
 
 - 来源：https://github.com/yt-dlp/yt-dlp/tree/2026.08.19
 - PyPI：https://pypi.org/project/yt-dlp/2026.8.19/
@@ -11,13 +11,20 @@
 
 不修改已安装的 yt-dlp 包；经用户明确批准，在自有适配层覆盖 DouyinIE 的单一详情请求构造，补丁范围见下文。`python-engine/engine.py` 使用 `YoutubeDL` 嵌入接口；`network.py` 为本应用的双平台网络边界适配，固定依赖该版本的 `UrllibRH`、`HTTPHandler` 和请求 director。沿用上游 Cookie、HTTP 解码、重定向及 SOCKS 实现，只增加逐跳目标校验与直连 DNS 结果固定；升级须重测这些内部接入点。显式 HTTP 代理由适配层设置路由，避免环境 NO_PROXY 或系统 bypass 改走直连；SOCKS 保留上游实现。远端 DNS 代理的实际目的 IP 无法由本客户端验证。
 
-运行依赖仅为 yt-dlp，不启用 extras；没有 wreq、httpx、pydantic、structlog、reqwest、dtk 或 FastAPI/Redis 等服务端依赖。开发锁文件另有 pytest、PyInstaller 及其依赖，使用跨平台锁定及环境标记，含 macOS 构建依赖 macholib。Python 3.12 与 Windows x64 已有执行证据；2026-10-14 补充 macOS Apple Silicon 构建、离线启动及随包引擎的双平台真实下载，Intel 仍待验证，见 [macOS 验证记录](../docs/macos-validation.md)。
+运行锁文件新增 pydantic 2.14.1、structlog 26.1.0、httpx 0.28.1 与必要传递依赖，不启用 yt-dlp extras。httpx 是上游 token 模块的导入依赖，业务请求通过 GuardedRH；不调用其游客身份网络功能。structlog 自由文本在 bridge 中全部丢弃，避免 stdout 协议污染及凭据泄漏。没有 wreq、FastAPI、Redis、SQLAlchemy、上游 UI 或服务端。
 
-旧 dtk 源码、manifest、初始化补丁、旧许可证副本与专属签名/parser fixtures 已删除；没有保留旧引擎兼容或下载 fallback。仓库根 LICENSE 属于本项目，保持原样。少量旧忽略缓存的删除受自动审批限制；缓存不在依赖、源码、构建 pathex 或分发包中。
+PyInstaller 使用官方 yt-dlp hook，收集 DTK 的具体平台模块、完整 onedir 及实际运行依赖的许可证；DTK Apache LICENSE / NOTICE 一同分发。运行时不加载上游 RPC、签名 registry、身份池或后台服务。开发锁文件另有 pytest、PyInstaller，含 Windows/macOS 平台标记。旧 M1 引擎已退役，新切片不是恢复旧服务架构。
 
-官方 PyInstaller hook 收集打包所需模块；产品运行只注册两平台单视频提取器。发布时同时分发完整 onedir、Python/yt-dlp 许可证与实际第三方声明，不单独复制 exe。完整目录已纳入 Tauri 安装包；构建、安装和在线能力分别按对应平台证据验收。
+## DTK 固定切片与补丁
 
-测试、真实在线结果及未通过项见 [M1 验证记录](../docs/m1-validation.md)。
+- 来源：[Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/tree/4f0bed8483c35a980315d9c7b3a1d4a1119ad2b2)，版本 5.1.3，提交 `4f0bed8483c35a980315d9c7b3a1d4a1119ad2b2`。
+- [manifest](dtk/manifest.json) 保存 31 个 Python 文件及 LICENSE / NOTICE 的原始、安装后 SHA-256，补丁 SHA-256 和允许的运行依赖。
+- [desktop-imports.patch](dtk/patches/desktop-imports.patch) 仅隔离 signing 包初始化的 registry / RPC 聚合导入；签名算法、参数构造和 parser 保留上游原文。自有业务编排位于 `python-engine/dtk_adapter.py`。
+- `vendor/dtk/upstream/` 由 [同步脚本](../scripts/update_dtk_vendor.py) 生成，不手改。`_desktop_revision.py` 是脚本生成的版本文件。
+- 更新先校验已安装源文件，再从指定完整 commit 读取白名单、校验原始 hash、执行补丁 apply --check、审计导入与语法；全部通过才替换源码和 manifest。冲突、未审核依赖或本地修改不会被覆盖。
+- 更新命令、补丁升级及门禁见 [开发文档](../docs/development.md#解析模块同步与补丁升级)。CI 和 Release 构建均离线执行 `--check`，不在用户运行时拉取模块。
+
+正式图集 GUI、文件格式、重启及对应安装包验证见 [双引擎验收](../docs/dual-engine-validation.md)；初始独立试验与设计见 [双引擎方案](../docs/dtk-dual-engine-plan.md)。旧单引擎 Windows/macOS 证据不能替代此次双引擎对应平台验收。
 
 ## Douyin 详情请求补丁
 

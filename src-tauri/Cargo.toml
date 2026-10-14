@@ -20,6 +20,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io
 rusqlite = { version = "0.38", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
+sha2 = "0.10"
 keyring = { version = "3", features = ["windows-native", "apple-native"] }
 tauri = { version = "2", optional = true, features = ["tray-icon"] }
 tauri-plugin-dialog = { version = "2", optional = true }
@@ -34,3 +35,9 @@ required-features = ["desktop"]
 [[bin]]
 name = "m1-probe"
 path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }

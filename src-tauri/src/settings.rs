@@ -34,6 +34,8 @@ pub struct ProfileUpdate {
 }
 
 fn entry(reference: &str) -> Result<keyring::Entry> {
+    // This persistent credential namespace predates the bundle identifier change.
+    // Keep it stable so existing authenticated proxy secrets remain accessible.
     keyring::Entry::new("com.yingqu.desktop", reference).context("CREDENTIAL_ERROR")
 }
 

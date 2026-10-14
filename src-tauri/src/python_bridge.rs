@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.2.1";
+pub const ENGINE_VERSION: &str = "0.3.0";
 pub const YTDLP_VERSION: &str = "2026.08.19";
 
 async fn cancellation() -> Result<()> {
@@ -64,6 +64,7 @@ fn error_code(value: &Value) -> &'static str {
         Some("ENGINE_UNAVAILABLE") => "ENGINE_UNAVAILABLE",
         Some("TIMEOUT") => "TIMEOUT",
         Some("IO_ERROR") => "IO_ERROR",
+        Some("INVALID_MEDIA_CONTENT") => "INVALID_MEDIA_CONTENT",
         _ => "ENGINE_PROTOCOL_ERROR",
     }
 }
@@ -94,18 +95,22 @@ impl PythonBridge {
         params: Value,
         mut progress: impl FnMut(Value),
     ) -> Result<Value> {
+        let dtk: Value = serde_json::from_str(include_str!("../../vendor/dtk/manifest.json"))
+            .context("ENGINE_UNAVAILABLE")?;
         let ready = timeout(Duration::from_secs(15), read_message(&mut self.output))
             .await
             .context("TIMEOUT")??
             .context("ENGINE_PROTOCOL_ERROR")?;
-        if ready["protocol_version"] != 2
+        if ready["protocol_version"] != 3
             || ready["type"] != "ready"
             || ready["engine_version"] != ENGINE_VERSION
             || ready["yt_dlp_version"] != YTDLP_VERSION
+            || ready["dtk_version"] != dtk["upstream_version"]
+            || ready["dtk_commit"] != dtk["upstream_commit"]
         {
             bail!("ENGINE_PROTOCOL_ERROR");
         }
-        let mut bytes = serde_json::to_vec(&json!({"protocol_version":2,"id":id,
+        let mut bytes = serde_json::to_vec(&json!({"protocol_version":3,"id":id,
                                                    "method":method,"params":params}))?;
         bytes.push(b'\n');
         if bytes.len() as u64 > MAX_LINE {
@@ -125,7 +130,7 @@ impl PythonBridge {
                 .await
                 .context("TIMEOUT")??
                 .context("ENGINE_PROTOCOL_ERROR")?;
-            if value["id"] != id || value["protocol_version"] != 2 {
+            if value["id"] != id || value["protocol_version"] != 3 {
                 bail!("ENGINE_PROTOCOL_ERROR");
             }
             if value["type"] == "progress" && method == "download_video" {
@@ -152,8 +157,17 @@ impl PythonBridge {
                 downloaded = count;
                 known_total = total.or(known_total);
                 saw_progress = true;
+                let completed_items = value["completed_items"].as_u64();
+                let total_items = value["total_items"].as_u64();
+                if completed_items.is_some() != total_items.is_some()
+                    || total_items
+                        .is_some_and(|n| n == 0 || n > 64 || completed_items.unwrap_or(0) > n)
+                {
+                    bail!("ENGINE_PROTOCOL_ERROR");
+                }
                 progress(json!({"id":id,"event":"progress","bytes":count,
-                               "total_bytes":total,"speed_bps":speed}));
+                               "total_bytes":total,"speed_bps":speed,
+                               "completed_items":completed_items,"total_items":total_items}));
                 continue;
             }
             let failed = value["type"] == "error";

@@ -4,8 +4,36 @@ altgraph==0.17.5
     # via
     #   macholib
     #   pyinstaller
+annotated-types==0.8.0
+    # via
+    #   -r python-engine/requirements.txt
+    #   pydantic
+anyio==4.15.1
+    # via
+    #   -r python-engine/requirements.txt
+    #   httpx
+certifi==2026.7.22
+    # via
+    #   -r python-engine/requirements.txt
+    #   httpcore
+    #   httpx
 colorama==0.4.6 ; sys_platform == 'win32'
     # via pytest
+h11==0.16.0
+    # via
+    #   -r python-engine/requirements.txt
+    #   httpcore
+httpcore==1.0.9
+    # via
+    #   -r python-engine/requirements.txt
+    #   httpx
+httpx==0.28.1
+    # via -r python-engine/requirements.txt
+idna==3.20
+    # via
+    #   -r python-engine/requirements.txt
+    #   anyio
+    #   httpx
 iniconfig==2.3.1
     # via pytest
 macholib==1.16.4 ; sys_platform == 'darwin'
@@ -19,6 +47,12 @@ pefile==2024.8.26 ; sys_platform == 'win32'
     # via pyinstaller
 pluggy==1.6.0
     # via pytest
+pydantic==2.14.1
+    # via -r python-engine/requirements.txt
+pydantic-core==2.50.1
+    # via
+    #   -r python-engine/requirements.txt
+    #   pydantic
 pygments==2.21.0
     # via pytest
 pyinstaller==6.22.3
@@ -31,5 +65,18 @@ pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
     # via pyinstaller
 setuptools==84.0.0
     # via pyinstaller
+structlog==26.1.0
+    # via -r python-engine/requirements.txt
+typing-extensions==4.16.0
+    # via
+    #   -r python-engine/requirements.txt
+    #   anyio
+    #   pydantic
+    #   pydantic-core
+    #   typing-inspection
+typing-inspection==0.4.4
+    # via
+    #   -r python-engine/requirements.txt
+    #   pydantic
 yt-dlp==2026.8.19
     # via -r python-engine/requirements.txt

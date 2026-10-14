@@ -12,7 +12,9 @@ from network import DOMAINS, TargetError, validate_target
     ('分享 https://v.douyin.com/abc/ 复制打开', 'douyin'),
     ('https://vt.tiktok.com/abc/', 'tiktok'),
     ('https://www.tiktok.com/@author/video/123?tracking=foo', 'tiktok'),
-    ('https://www.douyin.com/video/123', 'douyin')])
+    ('https://www.douyin.com/video/123', 'douyin'),
+    ('https://www.douyin.com/note/123', 'douyin'),
+    ('https://www.tiktok.com/@author/photo/123', 'tiktok')])
 def test_single_input(text, platform):
     actual, url, short = engine.parse_input(text)
     assert actual == platform
@@ -131,10 +133,14 @@ def test_metadata_does_not_round_exact_size_or_dimensions():
     assert all(value[key] is None for key in ('width', 'height', 'filesize'))
 
 
-def test_pinned_version_and_no_old_modules():
+def test_pinned_versions_and_no_service_modules():
     import sys
     engine.check_version()
-    assert not any(name.startswith(('dtk','wreq','httpx','pydantic','structlog')) for name in sys.modules)
+    from pathlib import Path
+    manifest = json.loads((Path(__file__).resolve().parents[1] / 'vendor/dtk/manifest.json').read_text())
+    assert engine.dtk_adapter.VERSION == manifest['upstream_version']
+    assert engine.dtk_adapter.COMMIT == manifest['upstream_commit']
+    assert not any(name.startswith(('wreq', 'fastapi', 'sqlalchemy', 'redis', 'dtk.api', 'dtk.worker', 'dtk.identity', 'dtk.scheduler', 'dtk.signing.rpc')) for name in sys.modules)
 
 
 def test_cover_prefers_highest_resolution_and_downloads_to_stage(tmp_path):

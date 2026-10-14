@@ -15,7 +15,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-pytest 包含 Rust/Python 进程集成测试，必须先构建探针；测试使用隔离 HTTP fixture，不访问真实平台。运行依赖固定 yt-dlp 2026.8.19，协议 v2，具体版本见锁文件。
+pytest 包含 Rust/Python 进程集成测试，必须先构建探针；测试使用隔离 HTTP fixture，不访问真实平台。运行依赖固定 yt-dlp 2026.8.19 与 DTK 5.1.3 白名单切片，协议 v3，具体版本见锁文件。
 
 ## macOS 开发与打包
 
@@ -79,7 +79,7 @@ TikTok 便捷入口默认读取 `tests/TikTok.txt`、Edge 150 UA 和 SOCKS5 `127
 
 默认 UA 为 Edge 150；可在各 profile 中设置 `user_agent`。`proxy: null` 明确直连，不继承环境代理。没有 Cookie 时省略 `cookie_file`。相对路径按执行时工作目录解释；Cookie 文件是单行 `name=value; name=value`，仅在内存读取，经 stdin 传递，不进入命令参数或日志。`tests/douyin.txt`、`tests/TikTok.txt` 已忽略，其他私有文件放在 `.local/` 或仓库外，不得提交。
 
-探针串行处理输入，每次解析和下载分别启动一个 Python 操作进程。下载重新解析规范链接，核对作品身份后写入任务暂存目录；Rust 验证并提交 `平台_作品ID.mp4/webm`，已有同名文件不覆盖，重复验证使用新输出目录。仅支持直接 HTTP(S) 单文件视频，不支持图集、直播、分轨、HLS/DASH、转码或断点续传。
+探针串行处理输入，每次解析和下载分别启动一个 Python 操作进程。下载重新解析规范链接，核对作品身份后写入任务暂存目录；Rust 验证并提交 `平台_作品ID.mp4/webm`，已有同名文件不覆盖，重复验证使用新输出目录。支持直接 HTTP(S) 单文件视频及图集；图集保存为任务独占目录，按实际格式编号，不转码。直播、分轨、HLS/DASH、转码或断点续传不支持。
 
 `resolved` 表示解析成功，`progress` 表示字节进度，`completed` 表示该文件提交成功。任何输入失败时整体退出码为 1，其他成功文件保留；配置错误为 2。Ctrl+C 取消网络操作、回收进程并清理暂存。独立调用 bridge 时须持续保持 stdin 打开直到进程退出；EOF 会终止操作。M1 不负责异常崩溃后的暂存恢复，桌面任务恢复见 M2 验证记录。
 
@@ -107,7 +107,7 @@ npm run desktop
 
 在设置页分别保存两平台 Cookie、User-Agent 与 HTTP/SOCKS5 代理，再粘贴作品链接。Cookie 直接存本机应用数据目录的 SQLite，在设置页多行文本框回显；含密码的代理存系统凭据。下载目录默认为系统下载目录下的 Yingqu，可通过系统目录选择器修改。解析最多同时一个，下载默认同时 2 个、可在设置调整为 1–3 个，超出名额按提交顺序等待；提高上限立即补位，降低不打断已有下载。取消等待进程退出与暂存清理；重启保留记录，未完成任务标记中断，不自动恢复下载。
 
-并发队列、手动重试、移除历史及二次确认删除本地视频已实现。重试新建任务、重新解析并从头下载；解析失败且无作品信息时需重新粘贴链接。Debug 开发可执行文件依赖仓库内的打包引擎目录；Release 从应用资源目录加载完整引擎。Windows 干净环境与 macOS 验收在 M3 完成。[M2 单任务验证](m2-validation.md) · [并发与队列验证](m2-queue-validation.md) · [重试与历史管理验证](m2-history-validation.md)。
+并发队列、手动重试、移除历史及二次确认删除本地作品已实现。重试新建任务、重新解析并从头下载；解析失败且无作品信息时需重新粘贴链接。Debug 开发可执行文件依赖仓库内的打包引擎目录；Release 从应用资源目录加载完整引擎。Windows 干净环境与 macOS 验收在 M3 完成。[M2 单任务验证](m2-validation.md) · [并发与队列验证](m2-queue-validation.md) · [重试与历史管理验证](m2-history-validation.md)。
 
 新下载同时保存平台可用的最高分辨率封面，文件名为视频同名加 `.cover.jpg/png/webp`，已完成列表读取本地封面并支持重启。封面获取失败不把已成功视频误报为失败；旧历史不自动联网补封面。删除本地视频保留封面供历史展示，从列表移除不删除视频或封面文件。
 
@@ -141,3 +141,41 @@ git push origin v0.1.0
 ## 系统托盘与单实例
 
 关闭主窗口会隐藏到系统托盘，已开始的解析和下载继续运行。左键点击托盘图标或选择“显示窗口”可恢复主窗口；“退出映取”先停止队列、取消并等待引擎进程回收，再退出。重复启动应用会显示、还原并聚焦已有窗口，不再打开第二个应用实例。macOS 点击 Dock 图标也会恢复窗口；这里的单实例指桌面应用，WebView 和下载引擎仍可拥有自己的辅助进程。
+
+## 解析模块同步与补丁升级
+
+应用标识为 `me.disign.yingqu`。首次启动在新数据目录尚不存在时，将原 `com.yingqu.desktop` 数据目录迁移到新目录，保留 Cookie、设置、历史和提交意图；已有新目录时不合并或覆盖。系统代理密码沿用原 Keychain/Credential Manager 服务命名空间，保证原凭据引用继续可用。macOS 数据库为 `~/Library/Application Support/me.disign.yingqu/yingqu.sqlite`。
+
+固定版本离线校验及重建（PowerShell 使用 `.venv/Scripts/python.exe`）：
+
+```sh
+.venv/bin/python scripts/update_dtk_vendor.py --check
+.venv/bin/python scripts/update_dtk_vendor.py
+# 可改为读取已有上游 checkout 的 git blobs，不改变该 checkout：
+.venv/bin/python scripts/update_dtk_vendor.py --source /path/to/upstream
+```
+
+审核新的完整提交 SHA 后同步：
+
+```sh
+.venv/bin/python scripts/update_dtk_vendor.py --ref <完整40位SHA> --update
+```
+
+同步脚本只读取 manifest 的白名单，不自动增加服务文件。先检查当前 vendor 未被手改，再从原始 git 内容重建 staging、校验/应用独立补丁、审计导入和语法；失败保留已安装源码与 manifest。版本号、原始及安装后文件 hash、补丁 hash、生成 revision 一起更新。
+
+补丁冲突时先在临时上游副本检查包初始化变化，修改 `vendor/dtk/patches/desktop-imports.patch`；禁止修改 `upstream/` 已安装源码。签名和 parser 算法不改。审核补丁后使用相同 `--ref <SHA> --update` 重新生成，并检查 diff。若导入闭包增加，应明确审核 manifest 白名单、运行依赖及许可证；脚本不会自动引入未审核模块。依赖变化时生成两个跨平台锁文件并同步环境：
+
+```sh
+uv pip compile --universal python-engine/requirements.in -o python-engine/requirements.txt
+uv pip compile --universal python-engine/requirements-dev.in -o python-engine/requirements-dev.txt
+uv pip sync --python .venv/bin/python python-engine/requirements-dev.txt
+uv pip check --python .venv/bin/python
+.venv/bin/python scripts/update_dtk_vendor.py --check
+cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
+.venv/bin/python -m pytest -q
+cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings
+npm run build
+```
+
+握手核对 manifest 的 DTK commit/version。源码变更后必须重新生成 sidecar，再构建完整应用。离线升级回归包括新版本同步、补丁冲突、未知服务依赖、本地修改保护、原图优先及 404/410 降级、网络/身份错误不降级、多文件校验和恢复。离线通过后，用有效视频与图集分别执行双平台真实冒烟，并在 Windows、macOS arm64、macOS Intel 各自验收安装包；不得用手工 fixture 或旧引擎结果替代。此次结果见 [双引擎验收](dual-engine-validation.md)。

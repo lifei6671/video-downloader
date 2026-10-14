@@ -57,11 +57,13 @@ jobs:
           & "$pythonDir/python" -m pip install -r python-engine/requirements-dev.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$pythonDir/python" -m pip check
+      - name: Verify pinned parser slice
+        run: python scripts/update_dtk_vendor.py --check
       - name: Offline tests
         run: |
           cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q
       - name: Rust lint

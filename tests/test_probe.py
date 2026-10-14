@@ -10,6 +10,7 @@ from conftest import BODY
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / 'src-tauri/target/debug' / ('m1-probe.exe' if os.name == 'nt' else 'm1-probe')
 FIXTURE = ROOT / 'tests/support_engine.py'
+DTK = json.loads((ROOT / 'vendor/dtk/manifest.json').read_text())
 
 
 def config(tmp_path, proxy):
@@ -25,13 +26,13 @@ def test_actual_downloader_to_rust_finalize(mode, tmp_path, media_proxy):
         input=json.dumps(config(tmp_path,proxy)).encode(),capture_output=True,env=env,timeout=15)
     result = run()
     assert result.returncode == 0, (result.stdout,result.stderr)
-    assert b'completed' in result.stdout and b'must-not-leak' not in result.stdout + result.stderr
+    assert b'"event":"completed"' in result.stdout and b'must-not-leak' not in result.stdout + result.stderr
     assert (tmp_path/'tiktok_123.mp4').read_bytes() == BODY
     assert not any('Cookie' in headers for _,headers in requests)
     assert list(tmp_path.iterdir()) == [tmp_path/'tiktok_123.mp4']
     second = run()
     assert second.returncode == 1
-    assert b'completed' not in second.stdout
+    assert b'"event":"completed"' not in second.stdout
     assert (tmp_path/'tiktok_123.mp4').read_bytes() == BODY
 
 
@@ -42,7 +43,7 @@ def test_rejects_bad_media_and_cleans_staging(mode,tmp_path,media_proxy):
         input=json.dumps(config(tmp_path,proxy)).encode(),capture_output=True,
         env={**os.environ,'FIXTURE_MODE':mode},timeout=15)
     assert result.returncode == 1
-    assert b'completed' not in result.stdout
+    assert b'"event":"completed"' not in result.stdout
     assert list(tmp_path.iterdir()) == []
     if mode == 'redirect':
         assert len(requests) == 1  # malicious redirect never reaches the proxy
@@ -53,24 +54,24 @@ def test_bridge_stops_bad_engine(mode,tmp_path):
     script=tmp_path/'fake.py'
     script.write_text('''import json,sys
 mode=sys.argv[1]
-print(json.dumps({'type':'ready','protocol_version':1 if mode=='wrong_version' else 2,
- 'engine_version':'bad' if mode=='bad_ready' else '0.2.1','yt_dlp_version':'2026.08.19'}),flush=True)
+print(json.dumps({'type':'ready','protocol_version':1 if mode=='wrong_version' else 3,
+ 'engine_version':'bad' if mode=='bad_ready' else '0.3.0','yt_dlp_version':'2026.08.19','dtk_version':sys.argv[2],'dtk_commit':sys.argv[3]}),flush=True)
 request=json.loads(sys.stdin.readline())
 if mode=='eof': sys.exit(0)
 if mode=='secret_error':
- print(json.dumps({'protocol_version':2,'id':request['id'],'type':'error','error':{'code':'session=private','message':'secret'}}),flush=True)
+ print(json.dumps({'protocol_version':3,'id':request['id'],'type':'error','error':{'code':'session=private','message':'secret'}}),flush=True)
  sys.exit(1)
-msg={'protocol_version':2,'id':'wrong' if mode=='wrong_id' else request['id'],'type':'resolved','result':{'platform':'tiktok','video_id':'123','canonical_url':'https://www.tiktok.com/@u/video/123'}}
+msg={'protocol_version':3,'id':'wrong' if mode=='wrong_id' else request['id'],'type':'resolved','result':{'platform':'tiktok','video_id':'123','canonical_url':'https://www.tiktok.com/@u/video/123'}}
 print(json.dumps(msg),flush=True)
 if mode=='duplicate': print(json.dumps(msg),flush=True)
 if mode=='nonzero': sys.exit(2)
 if mode=='wrong_id': sys.stdin.read()
 ''')
-    result=subprocess.run([str(PROBE),sys.executable,str(script),mode],
+    result=subprocess.run([str(PROBE),sys.executable,str(script),mode,DTK['upstream_version'],DTK['upstream_commit']],
         input=json.dumps(config(tmp_path,None)).encode(),capture_output=True,timeout=20)
     assert result.returncode == 1
     assert b'ENGINE_PROTOCOL_ERROR' in result.stdout
-    assert b'completed' not in result.stdout
+    assert b'"event":"completed"' not in result.stdout
     assert b'private' not in result.stdout + result.stderr
 
 
@@ -80,7 +81,7 @@ def test_eof_cancels_blocked_network(tmp_path,media_proxy):
     process=subprocess.Popen([sys.executable,str(FIXTURE)],stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={**os.environ,'FIXTURE_MODE':'stall'})
     assert json.loads(process.stdout.readline())['type']=='ready'
-    request={'protocol_version':2,'id':'test','method':'download_video','params':{
+    request={'protocol_version':3,'id':'test','method':'download_video','params':{
         'input':'https://www.tiktok.com/@u/video/123','profiles':{'tiktok':{'proxy':proxy}},
         'expected':{'platform':'tiktok','video_id':'123'},'staging_dir':str(stage)}}
     process.stdin.write((json.dumps(request)+'\n').encode()); process.stdin.flush()
@@ -102,7 +103,7 @@ def test_startup_timeout_kills_engine(tmp_path):
         input=json.dumps(config(tmp_path,None)).encode(),capture_output=True,timeout=20)
     assert result.returncode == 1
     assert b'TIMEOUT' in result.stdout
-    assert b'completed' not in result.stdout
+    assert b'"event":"completed"' not in result.stdout
 
 
 def test_parent_exit_ends_sidecar(tmp_path,media_proxy):
@@ -158,7 +159,7 @@ def test_cancel_probe_reaps_child_and_cleans_stage(tmp_path,media_proxy):
         assert process.wait(timeout=5) == 1
         output=process.stdout.read()
         assert b'CANCELED' in output
-        assert b'completed' not in output
+        assert b'"event":"completed"' not in output
         assert list(tmp_path.iterdir()) == []
     finally:
         if process.poll() is None: process.kill(); process.wait()

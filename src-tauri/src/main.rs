@@ -52,7 +52,9 @@ async fn run(program: &str, args: &[String], config: Probe) -> Result<()> {
                 &id,
                 "download_video",
                 json!({"input":video.canonical_url,"profiles":config.profiles,
-                       "expected":{"platform":video.platform,"video_id":video.video_id},
+                       "resolver":video.resolver,
+                       "expected":{"platform":video.platform,"video_id":video.video_id,"kind":video.kind,
+                          "image_count":resolved["result"]["images"].as_array().map(Vec::len)},
                        "staging_dir":staging.path()}),
                 |event| println!("{event}"),
             )

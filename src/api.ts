@@ -1,16 +1,19 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 export type Status = 'parsing' | 'ready' | 'queued' | 'downloading' | 'completed' | 'failed' | 'canceled';
-export interface Video { platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null }
-export interface Task { id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null }
+export type Resolver = 'auto' | 'yt-dlp' | 'dtk';
+export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string }
+export interface Video { platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
+export interface Task { id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null }
 export interface Profile { platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
 export interface Settings { download_directory: string; max_downloads: number; profiles: Profile[] }
 export const api = {
   cookie: (platform: string) => invoke<string>('get_profile_cookie', { platform }),
+  image: (taskId: string, index: number) => invoke<number[]>('get_task_image', { taskId, index }),
   cover: (taskId: string) => invoke<number[]>('get_task_cover', { taskId }),
   tasks: () => invoke<Task[]>('list_tasks'),
   settings: () => invoke<Settings>('get_settings'),
-  resolve: (input: string) => invoke<Task>('resolve_video', { input }),
+  resolve: (input: string, resolver: Resolver = 'auto') => invoke<Task>('resolve_video', { input, resolver }),
   download: (taskId: string, confirmDuplicate = false) => invoke<void>('start_download', { taskId, confirmDuplicate }),
   cancel: (taskId: string) => invoke<void>('cancel_task', { taskId }),
   retry: (taskId: string) => invoke<Task>('retry_task', { taskId }),
@@ -39,7 +42,7 @@ export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlyS
 const errors: Record<string, string> = {
   INVALID_INPUT: '请粘贴抖音或 TikTok 的视频分享链接',
   UNSUPPORTED_PLATFORM: '请粘贴抖音或 TikTok 的视频分享链接',
-  UNSUPPORTED_CONTENT: '暂不支持此作品类型，请使用单条视频链接',
+  UNSUPPORTED_CONTENT: '此作品或所选引擎不支持解析，图集请使用自动或 DTK',
   CONFIG_INVALID: '配置格式有误，请检查 Cookie、代理或 User-Agent',
   NETWORK_ERROR: '网络连接失败，请检查网络或代理设置',
   ACCESS_DENIED: '平台拒绝访问，请检查 Cookie 或稍后重试',
@@ -54,13 +57,13 @@ const errors: Record<string, string> = {
   DATABASE_ERROR: '无法保存任务记录，请检查磁盘空间并重启应用',
   INTERRUPTED: '上次任务已中断，请重新解析并从头下载',
   IO_ERROR: '文件操作失败，请检查目录权限、文件占用和磁盘空间',
-  INCOMPLETE_MEDIA: '视频文件不完整，请重新解析并下载',
-  INVALID_MEDIA_CONTENT: '下载内容不是有效的视频文件',
+  INCOMPLETE_MEDIA: '作品文件不完整，请重新解析并下载',
+  INVALID_MEDIA_CONTENT: '下载内容不是有效的媒体文件',
   INVALID_ENGINE_RESULT: '下载结果校验失败',
   TASK_BUSY: '任务仍在执行或清理，请稍后再试',
   REPARSE_REQUIRED: '请重新粘贴链接解析',
   INVALID_STATE: '当前任务状态不支持此操作',
-  ALREADY_DOWNLOADED: '该视频已有成功下载记录，请确认是否重新下载',
+  ALREADY_DOWNLOADED: '该作品已有成功下载记录，请确认是否重新下载',
   FILE_MISSING: '文件已移动或删除',
 };
 export const errorText = (error: unknown) => errors[String(error)] ?? '操作失败，请重试';
