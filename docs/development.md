@@ -163,6 +163,8 @@ git push origin v0.1.0
 
 同步脚本只读取 manifest 的白名单，不自动增加服务文件。先检查当前 vendor 未被手改，再从原始 git 内容重建 staging、校验/应用独立补丁、审计导入和语法；失败保留已安装源码与 manifest。版本号、原始及安装后文件 hash、补丁 hash、生成 revision 一起更新。
 
+`vendor/dtk/` 的源码及补丁通过 `.gitattributes` 固定为 LF，避免 Windows checkout 的 CRLF 转换改变校验字节；检查器使用 UTF-8 和正斜杠清单路径。已有工作区若仍为 CRLF，应先确认没有本地修改，再重新检出该目录，不要重算 manifest 哈希来接受换行差异。
+
 补丁冲突时先在临时上游副本检查包初始化变化，修改 `vendor/dtk/patches/desktop-imports.patch`；禁止修改 `upstream/` 已安装源码。签名和 parser 算法不改。审核补丁后使用相同 `--ref <SHA> --update` 重新生成，并检查 diff。若导入闭包增加，应明确审核 manifest 白名单、运行依赖及许可证；脚本不会自动引入未审核模块。依赖变化时生成两个跨平台锁文件并同步环境：
 
 ```sh

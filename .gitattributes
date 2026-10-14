@@ -1,0 +1,2 @@
+# DTK source and patches are verified by byte-level SHA-256 hashes.
+vendor/dtk/** text eol=lf

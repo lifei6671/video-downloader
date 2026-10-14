@@ -33,7 +33,7 @@ def git(path, *args):
 def audit(directory, manifest):
     allowed = set(manifest['runtime_imports']) | sys.stdlib_module_names | {'dtk', '__future__'}
     for file in directory.rglob('*.py'):
-        tree = ast.parse(file.read_text())
+        tree = ast.parse(file.read_text(encoding='utf-8'))
         for node in ast.walk(tree):
             names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
                      else [node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
@@ -60,9 +60,9 @@ def check(manifest, check_patches=True):
     revision = SOURCE / 'src/dtk/_desktop_revision.py'
     expected.add('src/dtk/_desktop_revision.py')
     text = f'COMMIT = {manifest["upstream_commit"]!r}\nVERSION = {manifest["upstream_version"]!r}\n'
-    if not revision.is_file() or revision.read_text() != text:
+    if not revision.is_file() or revision.read_text(encoding='utf-8') != text:
         raise ValueError('Vendor revision differs from manifest')
-    actual = {str(p.relative_to(SOURCE)) for p in SOURCE.rglob('*')
+    actual = {p.relative_to(SOURCE).as_posix() for p in SOURCE.rglob('*')
               if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc'}
     if actual != expected:
         raise ValueError('Unexpected vendor files')
@@ -73,7 +73,7 @@ def check(manifest, check_patches=True):
 
 
 def sync(source, ref, update):
-    manifest = json.loads(MANIFEST.read_text())
+    manifest = json.loads(MANIFEST.read_text(encoding='utf-8'))
     ref = ref or manifest['upstream_commit']
     if not re.fullmatch(r'[0-9a-f]{40}', ref):
         raise ValueError('Use a complete commit SHA')
@@ -110,7 +110,7 @@ def sync(source, ref, update):
             item['sha256'] = patch_hash
             git(staging, 'apply', '--check', str(patch))
             git(staging, 'apply', str(patch))
-        init = (staging / 'src/dtk/__init__.py').read_text()
+        init = (staging / 'src/dtk/__init__.py').read_text(encoding='utf-8')
         version = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', init)
         if not version:
             raise ValueError('Upstream version not found')
@@ -119,7 +119,7 @@ def sync(source, ref, update):
         for item in manifest['files']:
             item['installed_sha256'] = digest((staging / item['path']).read_bytes())
         (staging / 'src/dtk/_desktop_revision.py').write_text(
-            f'COMMIT = {ref!r}\nVERSION = {version[1]!r}\n')
+            f'COMMIT = {ref!r}\nVERSION = {version[1]!r}\n', encoding='utf-8', newline='\n')
         audit(staging, manifest)
         # Work on a sibling directory so replacement stays on the same volume.
         with tempfile.TemporaryDirectory(prefix='.dtk-staging-', dir=VENDOR) as install:
@@ -131,7 +131,7 @@ def sync(source, ref, update):
             try:
                 candidate.rename(SOURCE)
                 new_manifest = Path(install) / 'manifest.json'
-                new_manifest.write_text(json.dumps(manifest, indent=2) + '\n')
+                new_manifest.write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8', newline='\n')
                 new_manifest.replace(MANIFEST)
             except Exception:
                 if SOURCE.exists():
@@ -150,7 +150,7 @@ if __name__ == '__main__':
     parser.add_argument('--update', action='store_true')
     args = parser.parse_args()
     if args.check:
-        check(json.loads(MANIFEST.read_text()))
+        check(json.loads(MANIFEST.read_text(encoding='utf-8')))
     else:
         sync(args.source, args.ref, args.update)
     print('DTK source, import boundary and patches: PASS')
