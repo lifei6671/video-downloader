@@ -18,3 +18,4 @@
 用户已批准进入 M2，已完成单任务闭环、并发等待队列及重试/历史管理；全新无 Python Windows 验收移至 M3、仍待验证。启动和构建见[开发文档](development.md)。
 
 - [视频规格选择与抖音 4K 验收](video-format-validation.md)
+- [TikTok 视频规格选择在线验收](tiktok-video-format-validation.md)

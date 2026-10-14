@@ -50,3 +50,7 @@
 日志 `.local/video-format-python-tests.log`、`.local/video-format-rust-tests.log`、`.local/video-format-clippy.log`、`.local/video-format-macos-build.log`。本轮未重新进行 TikTok 或 DTK 的在线视频下载，相关离线下载/网络回归通过，不冒充双引擎双平台在线验收。
 
 1440 × 900 真实窗口中的规格卡片、滚动选择、预览、完成及重启 PASS。原生拖拽未能改变窗口尺寸，1280 × 800 / 1024 × 680 本轮未取得有效窗口证据，记 UNAVAILABLE；键盘选择本轮 NOT_RUN。一次后续窗口读取失败，重置 CUA 绑定后恢复并完成历史页及重启验证。Windows / macOS Intel 本轮 NOT_RUN。
+
+## TikTok 追加在线验收
+
+2026-10-14 后续使用 `https://vt.tiktok.com/ZSgJMkMPn/` 完成 1080p 和 720p H.265 的真实下载、文件尺寸/字节核验、选择与完成记录重启恢复，均 PASS；具体规格、任务和边界见 [TikTok 视频规格在线验收](tiktok-video-format-validation.md)。这是后续独立证据，不改写本轮尚未运行 TikTok 的记录。
