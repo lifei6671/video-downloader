@@ -75,8 +75,8 @@ def test_format_contract():
     audio = dict(protocol='https',ext='mp4',vcodec='none',acodec='aac')
     video = dict(protocol='https',ext='mp4',vcodec='h264',acodec='none')
     combined = dict(protocol='https',ext='mp4',vcodec='h264',acodec='aac')
-    assert list(engine.select_format({'formats':[combined, video, audio]})) == [combined]
-    assert list(engine.select_format({'formats':[video]})) == [video]
+    assert list(engine.select_format({'formats':[combined, video, audio]})) == [{**combined, '_yingqu_format_id': engine.public_formats({'formats':[combined]})[0]['format_id']}]
+    assert list(engine.select_format({'formats':[video]})) == [{**video, '_yingqu_format_id': engine.public_formats({'formats':[video]})[0]['format_id']}]
     for formats in [[audio,video], [{**combined,'protocol':'m3u8_native'}],
                     [{**combined,'has_drm':True}], [audio]]:
         with pytest.raises(engine.EngineError,match='UNSUPPORTED_CONTENT'):
@@ -179,3 +179,25 @@ def test_cover_prefers_original_when_upstream_omits_dimensions():
         {'id': 'origin_cover', 'url': 'https://p.byteimg.com/original'},
         {'id': 'cover', 'url': 'https://p.byteimg.com/preview'},
     ]}) == 'https://p.byteimg.com/original'
+
+
+@pytest.mark.parametrize('url,resolver,kind,actual', [
+    ('https://www.douyin.com/video/123','auto','video','yt-dlp'),
+    ('https://www.douyin.com/note/601','auto','image_album','dtk'),
+    ('https://www.tiktok.com/@user/photo/602','auto','image_album','dtk'),
+    ('https://www.tiktok.com/@user/video/603','dtk','video','dtk'),
+])
+def test_identification_does_not_fetch_details_or_media(monkeypatch,url,resolver,kind,actual):
+    import engine
+    def forbidden(*args, **kwargs):
+        raise AssertionError('identification must not request details/media')
+    monkeypatch.setattr(engine.YoutubeDL,'extract_info',forbidden)
+    monkeypatch.setattr(engine.YoutubeDL,'urlopen',forbidden)
+    monkeypatch.setattr(engine.dtk_adapter,'extract',forbidden)
+    events=[]
+    engine.operate('identify_input',{'input':url,'resolver':resolver},
+        lambda event_type,**fields:events.append((event_type,fields)))
+    assert len(events)==1 and events[0][0]=='identified'
+    result=events[0][1]['result']
+    assert result['kind']==kind and result['resolver']==actual
+    assert result['video_id']==url.rsplit('/',1)[1]

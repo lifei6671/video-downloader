@@ -97,12 +97,18 @@ def test_dtk_video_uses_same_guarded_single_file_downloader(monkeypatch, tmp_pat
     from conftest import BODY
     proxy, _, _, _ = media_proxy
     stream = SimpleNamespace(url='http://v.fixture.douyinvod.com/good.mp4', watermark=False,
-                             width=1280, height=720, size_bytes=len(BODY))
+                             width=1280, height=720, size_bytes=len(BODY), bitrate=None)
     item = SimpleNamespace(platform='douyin', content_id='123', kind='video',
         web_url='https://www.douyin.com/video/123', title='fixture', duration_ms=1000, music=None,
         author=SimpleNamespace(unique_id='fixture',nickname='fixture'),
         media=SimpleNamespace(video=stream,streams=[stream],covers=[]))
     monkeypatch.setattr(dtk_adapter,'extract',lambda *args:item)
+    from yt_dlp import YoutubeDL
+    original_process = YoutubeDL.process_info
+    def process(self, info):
+        assert info['http_headers']['Referer'] == 'https://www.douyin.com/'
+        return original_process(self, info)
+    monkeypatch.setattr(YoutubeDL, 'process_info', process)
     events=[]
     engine.operate('download_video',dict(input=item.web_url,resolver='dtk',
         profiles={'douyin':{'proxy':proxy}},expected={'platform':'douyin','video_id':'123','kind':'video'},

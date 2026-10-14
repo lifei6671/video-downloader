@@ -55,7 +55,7 @@ def test_bridge_stops_bad_engine(mode,tmp_path):
     script.write_text('''import json,sys
 mode=sys.argv[1]
 print(json.dumps({'type':'ready','protocol_version':1 if mode=='wrong_version' else 3,
- 'engine_version':'bad' if mode=='bad_ready' else '0.3.0','yt_dlp_version':'2026.08.19','dtk_version':sys.argv[2],'dtk_commit':sys.argv[3]}),flush=True)
+ 'engine_version':'bad' if mode=='bad_ready' else '0.5.0','yt_dlp_version':'2026.08.19','dtk_version':sys.argv[2],'dtk_commit':sys.argv[3]}),flush=True)
 request=json.loads(sys.stdin.readline())
 if mode=='eof': sys.exit(0)
 if mode=='secret_error':

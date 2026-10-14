@@ -105,7 +105,7 @@ npm run desktop
 
 前端检查：`npm run build`。完整桌面编译：`npm run desktop:build`（不生成安装器）。Rust 桌面门禁：`cargo test --manifest-path src-tauri/Cargo.toml`、`cargo clippy --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings`。
 
-在设置页分别保存两平台 Cookie、User-Agent 与 HTTP/SOCKS5 代理，再粘贴作品链接。Cookie 直接存本机应用数据目录的 SQLite，在设置页多行文本框回显；含密码的代理存系统凭据。下载目录默认为系统下载目录下的 Yingqu，可通过系统目录选择器修改。解析最多同时一个，下载默认同时 2 个、可在设置调整为 1–3 个，超出名额按提交顺序等待；提高上限立即补位，降低不打断已有下载。取消等待进程退出与暂存清理；重启保留记录，未完成任务标记中断，不自动恢复下载。
+在设置页分别保存两平台 Cookie、User-Agent 与 HTTP/SOCKS5 代理，再粘贴作品链接。Cookie 直接存本机应用数据目录的 SQLite，在设置页多行文本框回显；含密码的代理存系统凭据。下载目录默认为系统下载目录下的 Yingqu，可通过系统目录选择器修改。解析最多同时一个，下载默认同时 2 个、可在设置调整为 1–3 个，超出名额按提交顺序等待；提高上限立即补位，降低不打断已有下载。取消等待进程退出与暂存清理；重启保留记录及已解析预览，解析中/排队/下载中标记中断，不自动恢复下载。可复用缓存和封面/图集字节保存在 SQLite，命中时不请求详情，下载时仍重新解析；见 [解析缓存](parse-cache-validation.md)。
 
 并发队列、手动重试、移除历史及二次确认删除本地作品已实现。重试新建任务、重新解析并从头下载；解析失败且无作品信息时需重新粘贴链接。Debug 开发可执行文件依赖仓库内的打包引擎目录；Release 从应用资源目录加载完整引擎。Windows 干净环境与 macOS 验收在 M3 完成。[M2 单任务验证](m2-validation.md) · [并发与队列验证](m2-queue-validation.md) · [重试与历史管理验证](m2-history-validation.md)。
 

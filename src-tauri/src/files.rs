@@ -194,7 +194,7 @@ pub struct AlbumFile {
     pub quality_source: String,
 }
 
-fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn image_extension(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         Some("jpeg")
     } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {

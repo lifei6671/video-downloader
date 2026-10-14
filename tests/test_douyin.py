@@ -27,8 +27,9 @@ def test_signature_matches_browser_serialization(name, monkeypatch):
     original = {'aweme_id': '123'}
     assert extractor._download_json(DETAIL, '123', query=original)['aweme_detail']['aweme_id'] == '123'
     assert captured['query'] == {
+        'aid': '6383', 'channel': 'channel_pc_web', 'detail_list': '1',
         'aweme_id': '123', 'uifid': 'fixture~*+ /',
-        'x-secsdk-web-signature': 'a949734dd5a7b81cfe506822d8063af7',
+        'x-secsdk-web-signature': 'bdbb9b87ca47022ef8f60d2812f50ad8',
     }
     assert original == {'aweme_id': '123'}
 
@@ -95,3 +96,14 @@ def test_douyin_cover_domain_is_platform_scoped():
                           ('https://fakedouyinpic.com/image', 'douyin')]:
         with pytest.raises(TargetError):
             validate_target(url, platform)
+
+
+def test_each_play_address_dimensions_override_upload_and_unparsed_4k(monkeypatch):
+    monkeypatch.setattr(UpstreamDouyinIE, '_parse_aweme_video_app', lambda *a: {
+        'formats': [{'url': 'https://v.douyinvod.com/4k', 'width': None, 'height': None},
+                    {'url': 'https://v.douyinvod.com/720', 'width': 2160, 'height': 3840}]})
+    value = DouyinIE()._parse_aweme_video_app({'video': {
+        'width': 2160, 'height': 3840,
+        'play_addr': {'url_list': ['https://v.douyinvod.com/720'], 'width': 720, 'height': 1280},
+        'bit_rate': [{'play_addr': {'url_list': ['https://v.douyinvod.com/4k'], 'width': 2160, 'height': 3840}}]}})
+    assert [(f['width'], f['height']) for f in value['formats']] == [(2160, 3840), (720, 1280)]

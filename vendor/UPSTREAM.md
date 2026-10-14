@@ -1,6 +1,6 @@
 # 解析引擎来源与依赖
 
-当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.8.19` 的运行时版本为 `2026.08.19`；协议 v3，引擎版本 `0.3.0`。
+当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.8.19` 的运行时版本为 `2026.08.19`；协议 v3，引擎版本 `0.5.0`。
 
 - 来源：https://github.com/yt-dlp/yt-dlp/tree/2026.08.19
 - PyPI：https://pypi.org/project/yt-dlp/2026.8.19/
@@ -40,3 +40,14 @@ PyInstaller 使用官方 yt-dlp hook，收集 DTK 的具体平台模块、完整
 ## M2 桌面界面
 
 生产界面使用 shadcn/ui 官方 radix-nova 注册表生成的组件，来源 https://ui.shadcn.com/r/styles/radix-nova/ ，CLI 4.21.0；组件保存在 `src/components/ui/`，MIT 许可副本见 `shadcn-LICENSE`（来自安装包 LICENSE.md）。仅 Progress 透传 value 到 Radix Root，以提供真实 ARIA 进度。页面仅组合这些组件与业务数据，不另建基础控件。React、Radix、Tailwind、Lucide 和 Tauri 的实际版本/完整性哈希由 package-lock.json 与 Cargo.lock 固定；没有运行时 CDN。
+
+
+## 视频规格与抖音高清补充（2026-10-14）
+
+用户批准在预览选择真实下载规格。`python-engine/video_formats.py` 只列单文件 MP4/WebM，移除 CDN 镜像重复项、水印、DRM 和不可播放 bytevc2；默认按实际像素数、帧率、码率排序，稳定规格 ID 不包含 URL 或签名。下载重新提取并严格匹配规格，缺失时 `FORMAT_UNAVAILABLE`，不自动降级或转码。
+
+`python-engine/douyin.py` 的详情请求补充 `aid=6383`、`channel=channel_pc_web`、`detail_list=1`，仍使用此前签名公式及 GuardedRH。来源核对：[DownVid 抖音解析器](https://github.com/yxxbc/downvid/blob/main/electron/parsers/douyin.ts)。不引入其浏览器、UI 或网络实现。实际作品 `7696335899718697330` 原查询仅返回 720p；完整查询返回含 6290708 字节 4K 的播放规格。
+
+yt-dlp 2026.08.19 的 URL-key parser 对该作品 `bytevc1_4k` 未填尺寸；自有 Douyin 子类在复用上游解析后，将同一 URL 对应 `play_addr` 的 width/height 填回各格式，不使用父级上传尺寸猜测。上游升级时检查完整请求参数、4K 格式尺寸和排序；上游能够正确完成这些行为后移除此补充，保留回归测试。签名算法没有改变。
+
+4K 媒体请求显式使用平台根 Referer `https://www.douyin.com/`；本机同一规格 CDN 请求缺少该头时返回 403，带根 Referer 时返回 206。该头只用于抖音下载，TikTok 和 Cookie 域隔离保持不变。

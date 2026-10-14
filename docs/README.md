@@ -2,6 +2,7 @@
 
 - [开发、验证与发布](development.md)：源码运行、测试、引擎打包、CI 与标签发布。
 - [macOS 验证记录](macos-validation.md)：Apple Silicon 安装包、双平台 GUI 下载及正常重启恢复，以及 Intel / 旧系统验收边界。
+- [解析缓存验收](parse-cache-validation.md)：SQLite 元数据/图片缓存、链接别名、重启预览及下载重新解析。
 - [双引擎与图集验收](dual-engine-validation.md)：正式 macOS GUI、文件校验、重启及平台验收边界。
 - [DTK 双解析引擎方案与试验](dtk-dual-engine-plan.md)：正式底层切片、导入补丁、图集任务契约和上游升级流程。
 
@@ -15,3 +16,5 @@
 - [独立 yt-dlp 试验记录](ytdlp-validation.md)：迁移前的 TikTok 下载证据。
 
 用户已批准进入 M2，已完成单任务闭环、并发等待队列及重试/历史管理；全新无 Python Windows 验收移至 M3、仍待验证。启动和构建见[开发文档](development.md)。
+
+- [视频规格选择与抖音 4K 验收](video-format-validation.md)

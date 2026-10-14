@@ -3,8 +3,9 @@ import { listen } from '@tauri-apps/api/event';
 export type Status = 'parsing' | 'ready' | 'queued' | 'downloading' | 'completed' | 'failed' | 'canceled';
 export type Resolver = 'auto' | 'yt-dlp' | 'dtk';
 export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string }
-export interface Video { platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
-export interface Task { id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null }
+export interface VideoFormat { format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
+export interface Video { formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
+export interface Task { id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
 export interface Profile { platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
 export interface Settings { download_directory: string; max_downloads: number; profiles: Profile[] }
 export const api = {
@@ -14,6 +15,7 @@ export const api = {
   tasks: () => invoke<Task[]>('list_tasks'),
   settings: () => invoke<Settings>('get_settings'),
   resolve: (input: string, resolver: Resolver = 'auto') => invoke<Task>('resolve_video', { input, resolver }),
+  chooseFormat: (taskId: string, formatId: string) => invoke<Task>('choose_video_format', { taskId, formatId }),
   download: (taskId: string, confirmDuplicate = false) => invoke<void>('start_download', { taskId, confirmDuplicate }),
   cancel: (taskId: string) => invoke<void>('cancel_task', { taskId }),
   retry: (taskId: string) => invoke<Task>('retry_task', { taskId }),
@@ -42,6 +44,7 @@ export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlyS
 const errors: Record<string, string> = {
   INVALID_INPUT: '请粘贴抖音或 TikTok 的视频分享链接',
   UNSUPPORTED_PLATFORM: '请粘贴抖音或 TikTok 的视频分享链接',
+  FORMAT_UNAVAILABLE: '所选视频规格已不可用，请重新解析后选择；未自动降级。',
   UNSUPPORTED_CONTENT: '此作品或所选引擎不支持解析，图集请使用自动或 DTK',
   CONFIG_INVALID: '配置格式有误，请检查 Cookie、代理或 User-Agent',
   NETWORK_ERROR: '网络连接失败，请检查网络或代理设置',

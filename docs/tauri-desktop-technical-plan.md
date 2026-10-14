@@ -97,14 +97,14 @@ flowchart TD
 - 预览阶段调用 `extract_info(..., download=False)`，只返回白名单展示字段、作品身份与规范链接；不返回原始 info dict、媒体 URL 或 headers。
 - 用户点击下载、取得槽位后，通过规范作品链接重新提取并下载。下载前校验平台与作品 ID 和预览一致；不复用预览时的过期媒体地址，也不增加本地媒体 URL TTL 缓存。
 - 仅选择符合第 1 节限制的格式，不使用会触发分轨合并的默认格式选择。提取器、格式选择与禁止后处理要在真实 yt-dlp 层验证，不能只断言配置字典。
-- 禁用下载续传、自动网络重试、playlist、额外字幕落盘、info JSON、缓存、插件及用户全局配置加载；保存一个视频文件及最高可用分辨率封面。Cookie 不导出临时 Netscape 文件。
+- 禁用下载续传、自动网络重试、playlist、额外字幕落盘、info JSON、yt-dlp 自身磁盘缓存、插件及用户全局配置加载；保存一个视频文件及最高可用分辨率封面。Cookie 不导出临时 Netscape 文件。
 - `progress_hooks` 只映射下载字节、已知总字节与速度。估计总大小不作为准确百分比的分母，缺失字段为 null。hook 的 `finished` 不等于业务完成。
 - 官方 logger 的自由文本默认不直接输出；错误映射稳定错误码，无法可靠区分原因时保留通用失败，不猜测 Cookie 失效或风控。
 - 不承诺 User-Agent 等于 TLS 浏览器指纹。废弃旧 wreq 的 `windows-chrome` 指纹预设和匹配规则；首版保存 UA，未验证的 impersonation 能力不进入配置契约。现有设计素材若出现指纹相关内容，实施时记录此技术边界，不改写素材掩盖差异。
 
 ## 5. 协议与进程生命周期
 
-当前为 **协议 v3**，引擎 0.3.0。Rust 与 sidecar 同步升级，不兼容旧 v1/v2，不增加旧协议 fallback。DTK 版本及 commit 以 vendor manifest 为准。
+当前为 **协议 v3**，引擎 0.5.0。Rust 与 sidecar 同步升级，不兼容旧 v1/v2，不增加旧协议 fallback。DTK 版本及 commit 以 vendor manifest 为准。
 
 ### 5.1 进程模型
 
@@ -119,6 +119,7 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 | 消息 | 字段与约定 |
 | --- | --- |
 | `ready` | `protocol_version=3`、`engine_version`、`yt_dlp_version`、`dtk_version`、`dtk_commit`；Rust 校验与分发版本一致 |
+| `identify_input` 请求/`identified` | 识别平台、作品 ID、规范链接、类型和实际 resolver；长链接纯本地识别，短链只经 GuardedRH 展开，不请求详情或媒体 |
 | `resolve_video` 请求 | `id`、单条 `input`、`resolver`（auto/yt-dlp/dtk）、可选 Rust 专属 `preview_dir`、两平台配置快照；凭据只经 stdin |
 | `download_video` 请求 | `id`、规范作品链接、预期 platform/video_id/kind/image_count、实际 resolver、原任务配置快照、Rust 创建的专属 staging 目录 |
 | `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、cover_url、duration_ms、width、height、filesize、filesize_approx、kind/resolver、images（尺寸/来源/本地相对预览名）、music（title/author）；可选字段可空 |
@@ -126,7 +127,7 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 | `download_finished` | 同一 `id`、平台/作品身份、staging 内相对文件名、实际字节数与容器；图集为 files 清单（每文件 bytes/hash/尺寸/来源），不含媒体 URL；仅表示引擎文件写入结束 |
 | `error` | 同一 `id`、稳定 code、脱敏 message、stage；可可靠获得时附 HTTP 状态 |
 
-请求和响应均包含 `protocol_version`。每个操作最多一个终端结果：解析以 `resolved` 结束、下载以 `download_finished` 结束，或以 `error` 结束。成功还必须伴随正常进程退出；EOF、超限、错 ID、错版本、重复终端消息、非零退出或缺失结果都明确失败。单条消息上限 1 MiB。
+请求和响应均包含 `protocol_version`。每个操作最多一个终端结果：身份识别以 `identified` 结束、解析以 `resolved` 结束、下载以 `download_finished` 结束，或以 `error` 结束。成功还必须伴随正常进程退出；EOF、超限、错 ID、错版本、重复终端消息、非零退出或缺失结果都明确失败。单条消息上限 1 MiB。
 
 `download_finished` 之后 Rust 校验路径确实位于所分配暂存目录，视频拒绝目录，图集核对专属 album 目录与全文件清单；两者均拒绝符号链接/重解析跳转及非预期文件，再执行第 7 节文件提交。这个消息不直接映射为 UI 的 completed。
 
@@ -182,7 +183,7 @@ FFmpeg 全量解码是验收手段，不作为产品运行依赖。首版重试�
 
 SQLite 位于应用数据目录，由 Rust 独占写入；Python 不访问。进度在内存维护并节流保存，状态转换持久化。source_url 为可重新提取的作品链接，任务表不保存完整分享文案、原始 info dict、Cookie、代理密码或签名媒体 URL。Cookie 单独保存在平台设置表。
 
-Cookie 按 2026-10-13 用户决定直接存 SQLite 的平台设置表，普通设置接口仅返回配置状态；设置编辑器通过专用命令读取已保存值。代理密码经系统安全存储保护，数据库只存引用；安全存储失败明确报错，不降级明文。关闭主窗口隐藏到托盘并继续当前任务；托盘“退出映取”和系统退出请求停止所有网络任务并等待引擎回收；重启将遗留 parsing/ready/queued/downloading 标为 failed/INTERRUPTED，不自动恢复下载。
+Cookie 按 2026-10-13 用户决定直接存 SQLite 的平台设置表，普通设置接口仅返回配置状态；设置编辑器通过专用命令读取已保存值。代理密码经系统安全存储保护，数据库只存引用；安全存储失败明确报错，不降级明文。关闭主窗口隐藏到托盘并继续当前任务；托盘“退出映取”和系统退出请求停止所有网络任务并等待引擎回收；重启保留有完整缓存的 ready 预览；遗留 parsing/queued/downloading 标为 failed/INTERRUPTED，不自动恢复下载。解析缓存仅保存元数据与预览字节，下载仍重新提取，具体见 [缓存契约](parse-cache-validation.md)。
 
 文件移动与数据库事务不原子：对已记录提交意图的任务，启动时核对最终文件存在且大小匹配、暂存文件已消失，证据完整才补记 completed。无法证明时保留中断，不误删最终视频。已完成文件被外部删除时保留历史记录并提示缺失。
 
@@ -323,3 +324,21 @@ Rust 使用每任务配置快照与独立取消/完成信号，下载槽位在�
 图集占一个现有下载槽位，按顺序下载；未知总量显示不确定进度，并展示实际字节和完成张数。全部文件通过类型、大小和 SHA-256 校验，在 commit_intents 保存完整清单后，以不覆盖的原子目录移动发布为 `平台_作品ID_任务ID/001.<实际格式>`，数据库提交后才标 completed。恢复提交意图必须验证全部文件及 hash；正常重启从保存清单读取本地图集，未完成任务仍按中断处理，不自动续传。预览使用 Rust 专属临时目录和字节读取命令，签名图片地址不进入数据库或前端。
 
 应用唯一标识改为 `me.disign.yingqu`。新目录不存在且旧数据库存在时迁移整个原数据目录，已有新目录不合并或覆盖。系统代理密码保留原凭据服务命名空间以维持既有引用。上游同步、补丁升级、生产切片、质量选择和具体命令见 [双引擎方案](dtk-dual-engine-plan.md)、[开发文档](development.md#解析模块同步与补丁升级)及 [UPSTREAM](../vendor/UPSTREAM.md)；在线 GUI、安装包和平台边界见 [双引擎验收](dual-engine-validation.md)。
+
+
+## 2026-10-14 可复用解析缓存
+
+新增 parse_cache、parse_cache_images、parse_cache_aliases，分别保存白名单元数据/封面 BLOB、图集预览 BLOB 和规范化的已验证链接别名。键为平台 + 作品 ID + 实际 resolver，记录引擎/yt-dlp/DTK commit revision；升级后旧 revision 不命中。旧记录只在首次建立缓存时迁移，优先已有本地素材的记录；缺少旧图集素材时首次重新解析补全，不冒充预览恢复。
+
+Rust 在成功解析后事务保存完整图片及元数据，再清理操作暂存，发布 ready。已知链接先查 SQLite，命中不启动 sidecar；未知链接且有缓存时调用 identify_input 取得身份，再查缓存。待下载预览正常退出和重启仍为 ready，首页恢复规范链接及预览；重新启动后的下载使用当前设置快照。下载不接受或复用缓存媒体 URL，仍由同一 resolver 重新解析并核对身份、类型和图集张数。缓存与历史记录独立，移除历史或删除下载文件不隐式删除缓存。验收与边界见 [解析缓存](parse-cache-validation.md)。
+
+
+## 视频规格选择（2026-10-14 用户批准）
+
+成功的视频解析返回 `formats` 白名单（稳定 format_id、container、codec、width/height、filesize/filesize_approx、fps、tbr）及 `selected_format_id`，不含 URL、请求头或签名。单文件 MP4/WebM 之外的分轨、分段、转码仍不启用。候选过滤水印、DRM 和 bytevc2，相同规格的 CDN 镜像合并，按真实像素、帧率、码率排序默认选择。
+
+React 使用现有 shadcn/ui ToggleGroup 选择规格，通过 `choose_video_format(task_id,format_id)` 更新 ready 任务。Rust 只接受该任务已解析候选中的 ID，更新预览的尺寸和大小并保存快照；排队/下载后不能改规格。缓存仍保存默认选择的完整候选，任务选择单独保留，恢复时重新应用该选择。重试也保留选择。
+
+取得槽位后的下载请求携带同一 resolver、规范身份与稳定 `format_id`；Python 重新提取并严格匹配，已失效则 `FORMAT_UNAVAILABLE`，不改选其他大小。下载终端回传所选 ID 和新提取尺寸；Rust 核验 ID 后提交，完成记录保存实际字节数。引擎 0.5.0 更新使旧缓存版本失效；旧成功记录与文件保留。
+
+抖音详情补充完整 Web 参数，并按每个播放地址填入真实尺寸，解决旧请求仅取 720p 和上游 `4k` URL-key 缺尺寸问题。具体来源及移除条件见 [上游记录](../vendor/UPSTREAM.md)，验收见 [视频规格](video-format-validation.md)。

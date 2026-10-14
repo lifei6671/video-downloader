@@ -7,11 +7,19 @@ import time
 from pathlib import Path
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.3.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.5.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.readline())
 params = request["params"]
 def emit(event_type, **data):
     print(json.dumps(dict(protocol_version=3, id=request["id"], type=event_type, **data)), flush=True)
+if request["method"] == "identify_input":
+    from urllib.parse import urlsplit
+    path=urlsplit(params["input"]).path
+    album="/note/" in path
+    video_id=path.rstrip("/").split("/")[-1]
+    if path.startswith("/share"): video_id="601" if "album" in path else "123"
+    emit("identified",result=dict(platform="douyin",video_id=video_id,canonical_url=f"https://www.douyin.com/{'note' if album or video_id=='601' else 'video'}/{video_id}",kind="image_album" if album or video_id=='601' else "video",resolver="dtk" if album or video_id=='601' or params.get("resolver")=="dtk" else "yt-dlp"))
+    sys.exit(0)
 if request["method"] == "resolve_video":
     if params["input"] == "invalid":
         emit("error", error={"code": "INVALID_INPUT"})
@@ -29,9 +37,16 @@ if request["method"] == "resolve_video":
         video_id = params["input"].split(":", 1)[1] if params["input"].startswith("hold:") else "999" if params["input"] == "slow" else "123"
         if params["input"].startswith("https://www.douyin.com/video/"):
             video_id = params["input"].rsplit("/", 1)[1]
+        cover={}
+        if params.get("preview_dir"):
+            image=b"\x89PNG\r\n\x1a\nfixture"
+            (Path(params["preview_dir"])/"cover").write_bytes(image)
+            cover=dict(cover_filename="cover",cover_bytes=len(image))
         emit("resolved", result=dict(platform="douyin", video_id=video_id,
             canonical_url="https://www.douyin.com/video/" + video_id,
-            title="离线生命周期验证", author="fixture", duration_ms=1000))
+            title="离线生命周期验证", author="fixture", duration_ms=1000, resolver=params.get("resolver") if params.get("resolver") in ("dtk","yt-dlp") else "yt-dlp",kind="video", width=1080, height=1920, selected_format_id="1"*24,
+            formats=[dict(format_id="1"*24,container="mp4",width=1080,height=1920,filesize=40),
+                     dict(format_id="2"*24,container="mp4",width=720,height=1280,filesize=20)], **cover))
 else:
     stage = Path(params["staging_dir"])
     video_id = params["expected"]["video_id"]
@@ -74,4 +89,5 @@ else:
             (stage / "cover").write_bytes(image)
             cover = dict(cover_filename="cover", cover_bytes=len(image))
         emit("download_finished", platform="douyin", video_id=video_id,
-            filename="video.mp4", container="mp4", bytes=len(body), **cover)
+            filename="video.mp4", container="mp4", bytes=len(body), format_id=params.get("format_id"),
+            width=720 if params.get("format_id")=="2"*24 else 1080,height=1280 if params.get("format_id")=="2"*24 else 1920, **cover)

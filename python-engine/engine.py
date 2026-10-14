@@ -18,9 +18,10 @@ from douyin import DouyinIE
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/dtk/upstream/src'))
 import dtk_adapter
+from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.3.0'
+ENGINE_VERSION = '0.5.0'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.08.19'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -125,24 +126,6 @@ def add_cookies(jar, cookies, platform):
                              True, '/', True, True, None, True, None, None, {}))
 
 
-def select_format(context):
-    # yt-dlp supplies formats sorted worst -> best. No segmented or external downloader.
-    for fmt in reversed(context['formats']):
-        if (fmt.get('protocol') in ('http', 'https') and fmt.get('ext') in ('mp4', 'webm')
-                and fmt.get('vcodec') != 'none' and fmt.get('acodec') != 'none'
-                and not fmt.get('has_drm')):
-            yield fmt
-            return
-    # A truly silent video may have no audio format at all. Do not discard a separate audio track.
-    if not any(f.get('vcodec') == 'none' and f.get('acodec') != 'none' for f in context['formats']):
-        for fmt in reversed(context['formats']):
-            if (fmt.get('protocol') in ('http', 'https') and fmt.get('ext') in ('mp4', 'webm')
-                    and fmt.get('vcodec') != 'none' and not fmt.get('has_drm')):
-                yield fmt
-                return
-    raise EngineError('UNSUPPORTED_CONTENT', 'format')
-
-
 def cover_url(info):
     # yt-dlp sorts thumbnails from least to most preferred; use dimensions when available.
     candidates = [t for t in info.get('thumbnails', []) if isinstance(t, dict)
@@ -197,20 +180,37 @@ def metadata(info, platform):
         selected[field] = max(1, round(value)) if valid else None
     return dict(platform=platform, video_id=video_id, canonical_url=canonical,
                 title=info.get('title'), author=info.get('uploader'), cover_url=cover,
-                duration_ms=duration_ms, resolver='yt-dlp', kind='video', **selected)
+                duration_ms=duration_ms, resolver='yt-dlp', kind='video',
+                formats=public_formats(info), selected_format_id=info.get('_yingqu_format_id'), **selected)
+
+
+def input_identity(platform, url, resolver, source_url):
+    if resolver not in ('auto', 'yt-dlp', 'dtk'):
+        raise EngineError('CONFIG_INVALID', 'resolver')
+    album = '/note/' in url or '/photo/' in url
+    actual = 'dtk' if resolver == 'dtk' or (resolver == 'auto' and album) else 'yt-dlp'
+    if actual == 'yt-dlp' and album:
+        raise EngineError('UNSUPPORTED_CONTENT', 'resolver')
+    return dict(platform=platform, video_id=url.rstrip('/').split('/')[-1], canonical_url=url,
+                kind='image_album' if album else 'video', resolver=actual, source_url=source_url)
 
 
 def operate(method, params, emit):
     if not isinstance(params, dict):
         raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
     platform, url, short = parse_input(params.get('input'))
+    source_url = url
+    resolver = params.get('resolver', 'auto')
+    identity = None if short else input_identity(platform, url, resolver, source_url)
+    if method == 'identify_input' and identity:
+        emit('identified', result=identity)
+        return
     profiles = params.get('profiles', {})
     if not isinstance(profiles, dict):
         raise EngineError('CONFIG_INVALID', 'config')
     ua, cookies, proxy = profile_config(profiles.get(platform, {}))
     downloading = method == 'download_video'
     expected = params.get('expected')
-    resolver = params.get('resolver', 'auto')
     if resolver not in ('auto', 'yt-dlp', 'dtk'):
         raise EngineError('CONFIG_INVALID', 'resolver')
     stage = None
@@ -249,7 +249,7 @@ def operate(method, params, emit):
     options = dict(proxy=proxy or '', http_headers={'User-Agent': ua},
         logger=logger, quiet=True, noprogress=True, cachedir=False, noplaylist=True,
         allowed_extractors=['Douyin$'] if platform == 'douyin' else ['TikTok$', r'vm\.tiktok$'],
-        format=select_format, match_filter=match_filter, progress_hooks=[progress] if downloading else [],
+        format=lambda context: select_format(context, params.get('format_id') if downloading else None), match_filter=match_filter, progress_hooks=[progress] if downloading else [],
         outtmpl=str(stage / 'video.%(ext)s') if stage else 'unused.%(ext)s',
         overwrites=False, continuedl=False, socket_timeout=30, retries=0,
         extractor_retries=0, fragment_retries=0, file_access_retries=0,
@@ -267,16 +267,18 @@ def operate(method, params, emit):
                     resolved_platform, url, still_short = parse_input(response.url)
                 if resolved_platform != platform or still_short:
                     raise EngineError('UNSUPPORTED_CONTENT', 'short_link')
-            album_url = '/note/' in url or '/photo/' in url
-            actual_resolver = 'dtk' if resolver == 'dtk' or (resolver == 'auto' and album_url) else 'yt-dlp'
-            if actual_resolver == 'yt-dlp' and album_url:
-                raise EngineError('UNSUPPORTED_CONTENT', 'resolver')
+            identity = identity or input_identity(platform, url, resolver, source_url)
+            actual_resolver = identity['resolver']
+            if method == 'identify_input':
+                emit('identified', result=identity)
+                return
             content = None
             if actual_resolver == 'dtk':
                 video_id = url.rstrip('/').split('/')[-1]
                 content = dtk_adapter.extract(ydl, platform, video_id, ua, cookies, proxy)
                 if str(content.kind) == 'image_album':
                     result = dtk_adapter.metadata(content)
+                    result['source_url'] = source_url
                     if downloading:
                         if (result['video_id'] != expected['video_id']
                                 or expected.get('kind', 'video') != 'image_album'
@@ -297,21 +299,28 @@ def operate(method, params, emit):
                 raise EngineError('UPSTREAM_CHANGED', 'detail')
             result = metadata(info, platform)
             result['resolver'] = actual_resolver
+            result['source_url'] = source_url
             if content and content.music:
                 result['music'] = dict(title=content.music.title, author=content.music.author)
             if not downloading:
+                if preview:
+                    result.update(download_cover(ydl, info, preview))
                 emit('resolved', result=result)
                 return
             if result['video_id'] != expected['video_id'] or expected.get('kind', 'video') != 'video':
                 raise EngineError('UPSTREAM_CHANGED', 'identity')
             # The validated single-file format and identity remain in this process;
             # start media I/O only after validation, never forward a URL to Rust.
+            if platform == 'douyin':
+                # Web 4K CDN variants require the platform root Referer.
+                info.setdefault('http_headers', {})['Referer'] = 'https://www.douyin.com/'
             ydl.process_info(info)
             file = Path(ydl.prepare_filename(info))
             if file.parent != stage or file.is_symlink() or not file.is_file() or file.stat().st_size == 0:
                 raise EngineError('IO_ERROR', 'output')
             emit('download_finished', platform=platform, video_id=result['video_id'],
                  filename=file.name, bytes=file.stat().st_size, container=info['ext'],
+                 format_id=result['selected_format_id'], width=result['width'], height=result['height'],
                  **download_cover(ydl, info, stage))
     except DtkError as error:
         raise EngineError('UPSTREAM_CHANGED', 'dtk_signing') from None

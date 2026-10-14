@@ -62,6 +62,14 @@ async fn resolve_video(
         .map_err(error)
 }
 #[tauri::command]
+fn choose_video_format(
+    core: State<AppCore>,
+    task_id: String,
+    format_id: String,
+) -> Result<Task, String> {
+    core.choose_format(&task_id, &format_id).map_err(error)
+}
+#[tauri::command]
 async fn start_download(
     core: State<'_, AppCore>,
     task_id: String,
@@ -230,6 +238,7 @@ fn main() {
             set_max_downloads,
             resolve_video,
             start_download,
+            choose_video_format,
             cancel_task,
             retry_task,
             remove_history,

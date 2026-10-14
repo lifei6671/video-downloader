@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.3.0";
+pub const ENGINE_VERSION: &str = "0.5.0";
 pub const YTDLP_VERSION: &str = "2026.08.19";
 
 async fn cancellation() -> Result<()> {
@@ -173,10 +173,10 @@ impl PythonBridge {
             let failed = value["type"] == "error";
             if !failed
                 && value["type"]
-                    != if method == "resolve_video" {
-                        "resolved"
-                    } else {
-                        "download_finished"
+                    != match method {
+                        "identify_input" => "identified",
+                        "resolve_video" => "resolved",
+                        _ => "download_finished",
                     }
             {
                 bail!("ENGINE_PROTOCOL_ERROR");
@@ -233,7 +233,7 @@ impl PythonBridge {
         let mut bridge = Self::start(program, args)?;
         let result = tokio::select! {
             result = async {
-                if method == "resolve_video" {
+                if method != "download_video" {
                     timeout(Duration::from_secs(80), bridge.execute(id, method, params, progress))
                         .await.context("TIMEOUT")?
                 } else {

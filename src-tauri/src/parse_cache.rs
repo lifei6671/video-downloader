@@ -1,0 +1,352 @@
+use crate::files::{image_extension, Video};
+use anyhow::{bail, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value;
+
+pub struct Preview {
+    pub video: Value,
+    pub saved_at: u64,
+    pub has_cover: bool,
+}
+
+pub fn init(db: &Connection) -> Result<bool> {
+    let existed: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='parse_cache')",
+            [],
+            |r| r.get(0),
+        )
+        .context("DATABASE_ERROR")?;
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS parse_cache (
+           cache_key TEXT PRIMARY KEY, platform TEXT NOT NULL, video_id TEXT NOT NULL,
+           resolver TEXT NOT NULL, kind TEXT NOT NULL, metadata TEXT NOT NULL,
+           saved_at INTEGER NOT NULL CHECK(saved_at>=0), revision TEXT NOT NULL, cover BLOB);
+         CREATE TABLE IF NOT EXISTS parse_cache_images (
+           cache_key TEXT NOT NULL, image_index INTEGER NOT NULL CHECK(image_index BETWEEN 0 AND 63),
+           body BLOB NOT NULL CHECK(length(body) BETWEEN 1 AND 33554432),
+           PRIMARY KEY(cache_key,image_index));
+         CREATE TABLE IF NOT EXISTS parse_cache_aliases (
+           url TEXT PRIMARY KEY, platform TEXT NOT NULL, video_id TEXT NOT NULL);",
+    )
+    .context("DATABASE_ERROR")?;
+    Ok(!existed)
+}
+
+fn revision() -> String {
+    let dtk: Value = serde_json::from_str(include_str!("../../vendor/dtk/manifest.json"))
+        .expect("bundled manifest");
+    format!(
+        "{}:{}:{}",
+        crate::python_bridge::ENGINE_VERSION,
+        crate::python_bridge::YTDLP_VERSION,
+        dtk["upstream_commit"].as_str().expect("bundled commit")
+    )
+}
+
+fn key(video: &Value) -> Result<String> {
+    let identity: Video = serde_json::from_value(video.clone()).context("INVALID_ENGINE_RESULT")?;
+    identity.validate()?;
+    Ok(format!(
+        "{}_{}_{}",
+        identity.platform, identity.video_id, identity.resolver
+    ))
+}
+
+// Only extract/normalize a URL for looking up previously validated aliases.
+// Platform recognition and short-link expansion remain in the Python engine.
+pub fn share_url(input: &str) -> Option<String> {
+    let start = input
+        .match_indices("http://")
+        .chain(input.match_indices("https://"))
+        .map(|(start, _)| start)
+        .min()?;
+    let text = &input[start..];
+    let end = text
+        .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"'))
+        .unwrap_or(text.len());
+    if text[end..].contains("http://") || text[end..].contains("https://") {
+        return None;
+    }
+    let text = text[..end].trim_end_matches([
+        '.', ',', ';', '!', '?', '，', '。', '；', '！', '）', '》', ')',
+    ]);
+    let mut url = url::Url::parse(text).ok()?;
+    if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+        return None;
+    }
+    url.set_scheme("https").ok()?;
+    url.set_query(None);
+    url.set_fragment(None);
+    let path = url.path().trim_end_matches('/').to_owned();
+    url.set_path(&path);
+    Some(url.into())
+}
+
+pub fn get(db: &Connection, platform: &str, id: &str, resolver: &str) -> Result<Option<Preview>> {
+    let row = db.query_row(
+        "SELECT cache_key,metadata,saved_at,cover IS NOT NULL FROM parse_cache
+         WHERE platform=?1 AND video_id=?2 AND revision=?4 AND
+           (resolver=?3 OR (?3='auto' AND resolver=CASE WHEN kind='image_album' THEN 'dtk' ELSE 'yt-dlp' END))",
+        params![platform,id,resolver,revision()],
+        |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,bool>(3)?)),
+    ).optional().context("DATABASE_ERROR")?;
+    let Some((stored_key, metadata, saved_at, has_cover)) = row else {
+        return Ok(None);
+    };
+    let video: Value = serde_json::from_str(&metadata).context("DATABASE_ERROR")?;
+    if key(&video)? != stored_key {
+        bail!("DATABASE_ERROR");
+    }
+    if video["kind"] == "image_album" {
+        let count = video["images"].as_array().context("DATABASE_ERROR")?.len();
+        let available: i64 = db
+            .query_row(
+                "SELECT count(*) FROM parse_cache_images WHERE cache_key=?",
+                [&stored_key],
+                |r| r.get(0),
+            )
+            .context("DATABASE_ERROR")?;
+        if count == 0 || count > 64 || available != count as i64 {
+            return Ok(None);
+        }
+    }
+    Ok(Some(Preview {
+        video,
+        saved_at: u64::try_from(saved_at).context("DATABASE_ERROR")?,
+        has_cover,
+    }))
+}
+
+pub fn find(db: &Connection, input: &str, resolver: &str) -> Result<Option<Preview>> {
+    let Some(url) = share_url(input) else {
+        return Ok(None);
+    };
+    let identity = db
+        .query_row(
+            "SELECT platform,video_id FROM parse_cache_aliases WHERE url=?",
+            [url],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()
+        .context("DATABASE_ERROR")?;
+    match identity {
+        Some((platform, id)) => get(db, &platform, &id, resolver),
+        None => Ok(None),
+    }
+}
+
+pub fn remember(db: &Connection, input: &str, video: &Value) -> Result<()> {
+    if let Some(url) = share_url(input) {
+        db.execute(
+            "INSERT INTO parse_cache_aliases(url,platform,video_id) VALUES(?1,?2,?3)
+            ON CONFLICT(url) DO UPDATE SET platform=excluded.platform,video_id=excluded.video_id",
+            params![
+                url,
+                video["platform"]
+                    .as_str()
+                    .context("INVALID_ENGINE_RESULT")?,
+                video["video_id"]
+                    .as_str()
+                    .context("INVALID_ENGINE_RESULT")?
+            ],
+        )
+        .context("DATABASE_ERROR")?;
+    }
+    Ok(())
+}
+
+pub fn save(
+    db: &mut Connection,
+    video: &Value,
+    images: Vec<Vec<u8>>,
+    cover: Option<Vec<u8>>,
+    saved_at: u64,
+) -> Result<Preview> {
+    let identity: Video = serde_json::from_value(video.clone()).context("INVALID_ENGINE_RESULT")?;
+    let cache_key = key(video)?;
+    let mut metadata = video.clone();
+    metadata["kind"] = identity.kind.clone().into();
+    metadata["resolver"] = identity.resolver.clone().into();
+    metadata["cover_url"] = Value::Null;
+    if identity.kind == "image_album" {
+        let records = metadata["images"]
+            .as_array_mut()
+            .context("INVALID_ENGINE_RESULT")?;
+        if records.is_empty() || records.len() > 64 || records.len() != images.len() {
+            bail!("INCOMPLETE_MEDIA");
+        }
+        for (index, (record, body)) in records.iter_mut().zip(&images).enumerate() {
+            let ext = image_extension(body).context("INVALID_MEDIA_CONTENT")?;
+            record["preview_filename"] = format!("preview-{:03}.{ext}", index + 1).into();
+        }
+    }
+    let object = metadata.as_object_mut().context("INVALID_ENGINE_RESULT")?;
+    for field in ["cover_filename", "cover_bytes", "cover_error", "source_url"] {
+        object.remove(field);
+    }
+    let has_cover = cover.is_some();
+    let tx = db.transaction().context("DATABASE_ERROR")?;
+    tx.execute(
+        "INSERT INTO parse_cache(cache_key,platform,video_id,resolver,kind,metadata,saved_at,revision,cover)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(cache_key) DO UPDATE SET
+        metadata=excluded.metadata,kind=excluded.kind,saved_at=excluded.saved_at,revision=excluded.revision,cover=excluded.cover",
+        params![
+            cache_key,
+            identity.platform,
+            identity.video_id,
+            identity.resolver,
+            identity.kind,
+            metadata.to_string(),
+            i64::try_from(saved_at).context("DATABASE_ERROR")?,
+            revision(),
+            cover
+        ],
+    )
+    .context("DATABASE_ERROR")?;
+    tx.execute(
+        "DELETE FROM parse_cache_images WHERE cache_key=?",
+        [&cache_key],
+    )
+    .context("DATABASE_ERROR")?;
+    for (index, body) in images.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO parse_cache_images VALUES(?1,?2,?3)",
+            params![cache_key, index as i64, body],
+        )
+        .context("DATABASE_ERROR")?;
+    }
+    remember(
+        &tx,
+        video["canonical_url"]
+            .as_str()
+            .context("INVALID_ENGINE_RESULT")?,
+        video,
+    )?;
+    if let Some(url) = video["source_url"].as_str() {
+        remember(&tx, url, video)?;
+    }
+    tx.commit().context("DATABASE_ERROR")?;
+    Ok(Preview {
+        video: metadata,
+        saved_at,
+        has_cover,
+    })
+}
+
+pub fn image(db: &Connection, video: &Value, index: usize) -> Result<Vec<u8>> {
+    let body: Vec<u8> = db
+        .query_row(
+            "SELECT body FROM parse_cache_images WHERE cache_key=?1 AND image_index=?2",
+            params![key(video)?, i64::try_from(index).context("INVALID_INPUT")?],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("DATABASE_ERROR")?
+        .context("FILE_MISSING")?;
+    if body.len() > 32 * 1024 * 1024 || image_extension(&body).is_none() {
+        bail!("INVALID_MEDIA_CONTENT");
+    }
+    Ok(body)
+}
+
+pub fn cover(db: &Connection, video: &Value) -> Result<Vec<u8>> {
+    let body: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT cover FROM parse_cache WHERE cache_key=?",
+            [key(video)?],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("DATABASE_ERROR")?
+        .flatten();
+    let body = body.context("FILE_MISSING")?;
+    if body.len() > 10 * 1024 * 1024
+        || !matches!(image_extension(&body), Some("jpeg" | "png" | "webp"))
+    {
+        bail!("INVALID_MEDIA_CONTENT");
+    }
+    Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn aliases_assets_and_resolver_revision_are_isolated() {
+        let mut db = Connection::open_in_memory().unwrap();
+        assert!(init(&db).unwrap());
+        let video = json!({"platform":"douyin","video_id":"123","kind":"video","resolver":"yt-dlp",
+            "canonical_url":"https://www.douyin.com/video/123","title":"cached",
+            "cover_url":"https://example.invalid/cover?private_token=never_store"});
+        let cover_body = b"\x89PNG\r\n\x1a\nfixture".to_vec();
+        save(&mut db, &video, vec![], Some(cover_body.clone()), 100).unwrap();
+        remember(
+            &db,
+            "private share text https://v.douyin.com/share/?tracking=secret",
+            &video,
+        )
+        .unwrap();
+        let hit = find(&db, "new share text https://v.douyin.com/share/。", "auto")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.video["title"], "cached");
+        assert!(hit.video["cover_url"].is_null());
+        assert_eq!(cover(&db, &hit.video).unwrap(), cover_body);
+        assert!(find(
+            &db,
+            "https://www.douyin.com/video/123?tracking=https://example.invalid",
+            "auto"
+        )
+        .unwrap()
+        .is_some());
+        assert!(find(&db, "https://www.douyin.com/video/123", "dtk")
+            .unwrap()
+            .is_none());
+        let mut dtk = video.clone();
+        dtk["resolver"] = "dtk".into();
+        dtk["title"] = "other engine".into();
+        save(&mut db, &dtk, vec![], None, 101).unwrap();
+        assert_eq!(
+            find(&db, "https://www.douyin.com/video/123", "dtk")
+                .unwrap()
+                .unwrap()
+                .video["title"],
+            "other engine"
+        );
+        assert_eq!(
+            find(&db, "https://www.douyin.com/video/123", "auto")
+                .unwrap()
+                .unwrap()
+                .video["title"],
+            "cached"
+        );
+        assert!(find(
+            &db,
+            "https://www.douyin.com/video/123 https://v.douyin.com/share/",
+            "auto"
+        )
+        .unwrap()
+        .is_none());
+        db.execute("UPDATE parse_cache SET revision='old parser'", [])
+            .unwrap();
+        assert!(find(&db, "https://www.douyin.com/video/123", "auto")
+            .unwrap()
+            .is_none());
+        assert!(!init(&db).unwrap());
+        let stored: String = db
+            .query_row("SELECT metadata FROM parse_cache LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(!stored.contains("private_token"));
+        let urls: String = db
+            .query_row(
+                "SELECT group_concat(url) FROM parse_cache_aliases",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!urls.contains("share text") && !urls.contains("tracking"));
+    }
+}

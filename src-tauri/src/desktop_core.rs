@@ -1,5 +1,6 @@
 use crate::{
     files::{finalize_album, finalize_to, validate_album, AlbumFile, Video},
+    parse_cache,
     python_bridge::PythonBridge,
     settings::{self, Settings},
 };
@@ -58,6 +59,12 @@ pub struct Task {
     pub completed_items: Option<u64>,
     #[serde(default)]
     pub total_items: Option<u64>,
+    #[serde(default)]
+    pub cache_hit: bool,
+    #[serde(default)]
+    pub cached_at: Option<u64>,
+    #[serde(default)]
+    pub cover_cached: bool,
 }
 
 fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
@@ -83,8 +90,6 @@ struct Active {
     directory: PathBuf,
     cancel: watch::Sender<bool>,
     done: watch::Receiver<bool>,
-    preview: Option<tempfile::TempDir>,
-    preview_path: Option<PathBuf>,
 }
 struct Inner {
     db: Connection,
@@ -134,14 +139,18 @@ fn publish(inner: &mut Inner, task: Task, emit: &dyn Fn(TaskEvent)) -> Result<()
     Ok(())
 }
 
-fn close_preview(inner: &mut Inner, id: &str) -> Result<()> {
-    if let Some(preview) = inner.active.get_mut(id).and_then(|a| a.preview.take()) {
-        preview.close().context("IO_ERROR")?;
-        inner
-            .db
-            .execute("DELETE FROM task_staging WHERE task_id=?", [id])
-            .context("DATABASE_ERROR")?;
+fn apply_video_format(video: &mut Value, format_id: &str) -> Result<()> {
+    let format = video["formats"]
+        .as_array()
+        .context("FORMAT_UNAVAILABLE")?
+        .iter()
+        .find(|f| f["format_id"].as_str() == Some(format_id))
+        .cloned()
+        .context("FORMAT_UNAVAILABLE")?;
+    for field in ["width", "height", "filesize", "filesize_approx"] {
+        video[field] = format[field].clone();
     }
+    video["selected_format_id"] = format_id.into();
     Ok(())
 }
 
@@ -161,7 +170,7 @@ impl Core {
             .open(db_path.with_extension("lock"))
             .context("IO_ERROR")?;
         instance_lock.try_lock().context("APP_ALREADY_RUNNING")?;
-        let db = Connection::open(db_path).context("DATABASE_ERROR")?;
+        let mut db = Connection::open(db_path).context("DATABASE_ERROR")?;
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);
@@ -179,6 +188,7 @@ impl Core {
         if !has_manifest {
             db.execute("ALTER TABLE commit_intents ADD COLUMN manifest TEXT", [])?;
         }
+        let migrate_cache = parse_cache::init(&db)?;
         let settings = settings::load(&db, directory)?;
         let mut tasks = {
             let mut query =
@@ -191,7 +201,82 @@ impl Core {
                 .map(|s| serde_json::from_str::<Task>(s))
                 .collect::<serde_json::Result<Vec<_>>>()?
         };
+        // Seed reusable metadata/previews from existing records where assets exist.
+        let has_assets = |task: &&Task| {
+            !task.files.is_empty() || task.cover_path.as_ref().is_some_and(|path| path.is_file())
+        };
+        let legacy = tasks.iter().filter(|_| migrate_cache);
+        for task in legacy
+            .clone()
+            .filter(has_assets)
+            .chain(legacy.filter(|task| !has_assets(task)))
+        {
+            let Some(video) = task.video.as_ref() else {
+                continue;
+            };
+            let identity: Video =
+                serde_json::from_value(video.clone()).context("DATABASE_ERROR")?;
+            identity.validate()?;
+            if parse_cache::get(
+                &db,
+                &identity.platform,
+                &identity.video_id,
+                &identity.resolver,
+            )?
+            .is_some()
+            {
+                continue;
+            }
+            let images = if identity.kind == "image_album" {
+                let Some(path) = task.path.as_ref().filter(|_| !task.files.is_empty()) else {
+                    continue;
+                };
+                if validate_album(path, &task.files).is_err() {
+                    continue;
+                }
+                task.files
+                    .iter()
+                    .map(|f| crate::files::read_image(&path.join(&f.filename)))
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                Vec::new()
+            };
+            let cover = task
+                .cover_path
+                .as_ref()
+                .and_then(|p| crate::files::read_cover(p).ok());
+            parse_cache::save(&mut db, video, images, cover, task.created_at)?;
+        }
         for task in &mut tasks {
+            if task.status == Status::Ready {
+                if let Some(video) = task.video.as_ref() {
+                    let identity: Video =
+                        serde_json::from_value(video.clone()).context("DATABASE_ERROR")?;
+                    if let Some(mut cached) = parse_cache::get(
+                        &db,
+                        &identity.platform,
+                        &identity.video_id,
+                        &identity.resolver,
+                    )? {
+                        if let Some(format_id) = video["selected_format_id"].as_str() {
+                            if apply_video_format(&mut cached.video, format_id).is_err() {
+                                task.status = Status::Failed;
+                                task.error = Some("FORMAT_UNAVAILABLE".into());
+                                task.revision += 1;
+                                persist(&db, task)?;
+                                continue;
+                            }
+                        }
+                        task.video = Some(cached.video);
+                        task.cache_hit = true;
+                        task.cached_at = Some(cached.saved_at);
+                        task.cover_cached = cached.has_cover;
+                        task.revision += 1;
+                        persist(&db, task)?;
+                        continue;
+                    }
+                }
+            }
             // Older snapshots did not distinguish previews from submissions.
             task.download_requested |= task.queue_order.is_some()
                 || task.bytes > 0
@@ -356,6 +441,9 @@ impl Core {
             .iter()
             .find(|t| t.id == id)
             .context("TASK_NOT_FOUND")?;
+        if task.cover_path.is_none() && task.cover_cached {
+            return parse_cache::cover(&inner.db, task.video.as_ref().context("FILE_MISSING")?);
+        }
         crate::files::read_cover(task.cover_path.as_deref().context("FILE_MISSING")?)
     }
     pub fn save_profile(&self, update: settings::ProfileUpdate) -> Result<Settings> {
@@ -381,7 +469,7 @@ impl Core {
     }
 
     pub fn resolve(self: &Arc<Self>, input: String) -> Result<Task> {
-        self.resolve_task(input, false, "auto".into())
+        self.resolve_task(input, false, "auto".into(), None)
     }
 
     pub fn resolve_with_resolver(
@@ -392,7 +480,7 @@ impl Core {
         if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk") {
             bail!("CONFIG_INVALID");
         }
-        self.resolve_task(input, false, resolver)
+        self.resolve_task(input, false, resolver, None)
     }
 
     pub fn image(&self, id: &str, index: usize) -> Result<Vec<u8>> {
@@ -413,34 +501,18 @@ impl Core {
                     .context("FILE_MISSING")?
                     .join(&file.filename)
             } else {
-                let filename = task
-                    .video
-                    .as_ref()
-                    .and_then(|v| v["images"].get(index))
-                    .and_then(|v| v["preview_filename"].as_str())
-                    .context("FILE_MISSING")?;
-                let extension = filename
-                    .rsplit_once('.')
-                    .context("INVALID_ENGINE_RESULT")?
-                    .1;
-                if filename != format!("preview-{:03}.{extension}", index + 1)
-                    || !matches!(extension, "jpeg" | "png" | "webp" | "gif" | "heic" | "avif")
-                {
-                    bail!("INVALID_ENGINE_RESULT");
-                }
-                inner
-                    .active
-                    .get(id)
-                    .and_then(|a| a.preview_path.as_ref())
-                    .context("FILE_MISSING")?
-                    .join(filename)
+                return parse_cache::image(
+                    &inner.db,
+                    task.video.as_ref().context("FILE_MISSING")?,
+                    index,
+                );
             }
         };
         crate::files::read_image(&path)
     }
 
     pub fn retry(self: &Arc<Self>, id: &str) -> Result<Task> {
-        let (input, resolver) = {
+        let (input, resolver, format_id) = {
             let inner = self.inner.lock().unwrap();
             let task = inner
                 .tasks
@@ -454,9 +526,15 @@ impl Core {
                 serde_json::from_value(task.video.clone().context("REPARSE_REQUIRED")?)
                     .context("INVALID_ENGINE_RESULT")?;
             video.validate()?;
-            (video.canonical_url, video.resolver)
+            (
+                video.canonical_url,
+                video.resolver,
+                task.video.as_ref().unwrap()["selected_format_id"]
+                    .as_str()
+                    .map(str::to_owned),
+            )
         };
-        self.resolve_task(input, true, resolver)
+        self.resolve_task(input, true, resolver, format_id)
     }
 
     pub fn remove_history(&self, id: &str) -> Result<()> {
@@ -556,6 +634,7 @@ impl Core {
         input: String,
         download_after_resolve: bool,
         resolver: String,
+        requested_format: Option<String>,
     ) -> Result<Task> {
         if input.trim().is_empty() || input.len() > 8192 {
             bail!("INVALID_INPUT");
@@ -564,8 +643,12 @@ impl Core {
         if inner.closing || inner.tasks.iter().any(|t| t.status == Status::Parsing) {
             bail!("TASK_BUSY");
         }
+        let mut cached = parse_cache::find(&inner.db, &input, &resolver)?;
+        if let (Some(cached), Some(format_id)) = (&mut cached, &requested_format) {
+            apply_video_format(&mut cached.video, format_id)?;
+        }
         let profiles = settings::snapshot(&inner.settings)?;
-        let task = Task {
+        let mut task = Task {
             id: Uuid::new_v4().to_string(),
             revision: 1,
             status: Status::Parsing,
@@ -586,9 +669,12 @@ impl Core {
             files: Vec::new(),
             completed_items: None,
             total_items: None,
+            cache_hit: false,
+            cached_at: None,
+            cover_cached: false,
         };
         let (cancel, mut cancellation) = watch::channel(false);
-        let (done, done_rx) = watch::channel(false);
+        let (done, done_rx) = watch::channel(cached.is_some());
         publish(&mut inner, task.clone(), &*self.emit)?;
         let directory = inner.settings.download_directory.clone();
         inner.active.insert(
@@ -599,48 +685,107 @@ impl Core {
                 directory: directory.clone(),
                 cancel,
                 done: done_rx,
-                preview: None,
-                preview_path: None,
             },
         );
+        if let Some(cached) = cached {
+            task.video = Some(cached.video);
+            task.cache_hit = true;
+            task.cached_at = Some(cached.saved_at);
+            task.cover_cached = cached.has_cover;
+            task.status = Status::Ready;
+            task.revision += 1;
+            publish(&mut inner, task.clone(), &*self.emit)?;
+            drop(inner);
+            if download_after_resolve {
+                self.finish(&task.id, Ok(task.video.clone().unwrap()), false);
+            }
+            return Ok(task);
+        }
         let core = self.clone();
         let id = task.id.clone();
         inner.workers.retain(|worker| !worker.is_finished());
         let worker = tokio::spawn(async move {
             let result = async {
-                std::fs::create_dir_all(&directory).context("IO_ERROR")?;
-                let stage = tempfile::Builder::new().prefix(&format!("yingqu-{id}-")).tempdir_in(&directory).context("IO_ERROR")?;
-                core.inner.lock().unwrap().db.execute("INSERT INTO task_staging VALUES(?1,?2)",
-                    params![id, stage.path().to_string_lossy()]).context("DATABASE_ERROR")?;
-                let result = PythonBridge::operation_cancellable(
-                &core.program,
-                &core.args,
-                &id,
-                "resolve_video",
-                json!({"input":input,"profiles":profiles,"resolver":resolver,"preview_dir":stage.path()}),
-                |_| {},
-                async {
-                    let _ = cancellation.wait_for(|v| *v).await;
-                },
-            )
-            .await
-            .and_then(|result| {
-                let video: Video = serde_json::from_value(result["result"].clone())
-                    .context("INVALID_ENGINE_RESULT")?;
-                video.validate()?;
-                Ok(result["result"].clone())
-            });
-                if result.as_ref().is_ok_and(|v| v["kind"] == "image_album") {
-                    let mut inner = core.inner.lock().unwrap();
-                    let active = inner.active.get_mut(&id).context("INVALID_STATE")?;
-                    active.preview_path = Some(stage.path().to_owned());
-                    active.preview = Some(stage);
-                } else {
-                    stage.close().context("IO_ERROR")?;
-                    core.inner.lock().unwrap().db.execute("DELETE FROM task_staging WHERE task_id=?", [&id]).context("DATABASE_ERROR")?;
+                if parse_cache::share_url(&input).is_some() {
+                    let has_cache: bool = core.inner.lock().unwrap().db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM parse_cache)", [], |r| r.get(0),
+                    ).context("DATABASE_ERROR")?;
+                    if has_cache {
+                        let identified = PythonBridge::operation_cancellable(
+                            &core.program, &core.args, &id, "identify_input",
+                            json!({"input":input,"profiles":profiles,"resolver":resolver}),
+                            |_| {}, async { let _ = cancellation.wait_for(|v| *v).await; },
+                        ).await?;
+                        let identity: Video = serde_json::from_value(identified["result"].clone())
+                            .context("INVALID_ENGINE_RESULT")?;
+                        identity.validate()?;
+                        let mut inner = core.inner.lock().unwrap();
+                        if let Some(cached) = parse_cache::get(
+                            &inner.db, &identity.platform, &identity.video_id, &identity.resolver,
+                        )? {
+                            parse_cache::remember(&inner.db, &input, &cached.video)?;
+                            parse_cache::remember(&inner.db, &identity.canonical_url, &cached.video)?;
+                            let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
+                            task.cache_hit = true;
+                            task.cached_at = Some(cached.saved_at);
+                            task.cover_cached = cached.has_cover;
+                            return Ok(cached.video);
+                        }
+                    }
                 }
+                std::fs::create_dir_all(&directory).context("IO_ERROR")?;
+                let stage = tempfile::Builder::new().prefix(&format!("yingqu-{id}-"))
+                    .tempdir_in(&directory).context("IO_ERROR")?;
+                core.inner.lock().unwrap().db.execute(
+                    "INSERT INTO task_staging VALUES(?1,?2)",
+                    params![id, stage.path().to_string_lossy()],
+                ).context("DATABASE_ERROR")?;
+                let result = PythonBridge::operation_cancellable(
+                    &core.program, &core.args, &id, "resolve_video",
+                    json!({"input":input,"profiles":profiles,"resolver":resolver,"preview_dir":stage.path()}),
+                    |_| {}, async { let _ = cancellation.wait_for(|v| *v).await; },
+                ).await.and_then(|result| {
+                    let video: Video = serde_json::from_value(result["result"].clone())
+                        .context("INVALID_ENGINE_RESULT")?;
+                    video.validate()?;
+                    Ok(result["result"].clone())
+                });
+                let result = result.and_then(|video| {
+                    let images = if video["kind"] == "image_album" {
+                        video["images"].as_array().context("INVALID_ENGINE_RESULT")?
+                        .iter().enumerate().map(|(index, image)| {
+                            let name = image["preview_filename"].as_str().context("INVALID_ENGINE_RESULT")?;
+                            let extension = name.rsplit_once('.').context("INVALID_ENGINE_RESULT")?.1;
+                            if name != format!("preview-{:03}.{extension}", index + 1)
+                                || !matches!(extension, "jpeg"|"png"|"webp"|"gif"|"heic"|"avif") {
+                                bail!("INVALID_ENGINE_RESULT");
+                            }
+                            crate::files::read_image(&stage.path().join(name))
+                        }).collect::<Result<Vec<_>>>()?
+                    } else { Vec::new() };
+                    let cover = if video["cover_filename"] == "cover" {
+                        Some(crate::files::read_cover(&stage.path().join("cover"))?)
+                    } else { None };
+                    let mut inner = core.inner.lock().unwrap();
+                    let cached = parse_cache::save(&mut inner.db, &video, images, cover, now())?;
+                    parse_cache::remember(&inner.db, &input, &cached.video)?;
+                    let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
+                    task.cached_at = Some(cached.saved_at);
+                    task.cover_cached = cached.has_cover;
+                    Ok(cached.video)
+                });
+                stage.close().context("IO_ERROR")?;
+                core.inner.lock().unwrap().db.execute(
+                    "DELETE FROM task_staging WHERE task_id=?", [&id],
+                ).context("DATABASE_ERROR")?;
                 result
             }.await;
+            let result = result.and_then(|mut video| {
+                if let Some(format_id) = requested_format {
+                    apply_video_format(&mut video, &format_id)?;
+                }
+                Ok(video)
+            });
             core.finish(&id, result, false);
             let _ = done.send(true);
         });
@@ -697,12 +842,6 @@ impl Core {
                     + 1,
             );
         }
-        if !matches!(task.status, Status::Ready | Status::Queued)
-            && close_preview(&mut inner, id).is_err()
-        {
-            task.status = Status::Failed;
-            task.error = Some("IO_ERROR".into());
-        }
         task.canceling = false;
         task.speed_bps = None;
         task.revision += 1;
@@ -741,6 +880,23 @@ impl Core {
         Ok(inner.settings.clone())
     }
 
+    pub fn choose_format(&self, id: &str, format_id: &str) -> Result<Task> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut task = inner
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .context("TASK_NOT_FOUND")?
+            .clone();
+        if inner.closing || task.status != Status::Ready {
+            bail!("INVALID_STATE");
+        }
+        apply_video_format(task.video.as_mut().context("INVALID_STATE")?, format_id)?;
+        task.revision += 1;
+        publish(&mut inner, task.clone(), &*self.emit)?;
+        Ok(task)
+    }
+
     pub fn download(self: &Arc<Self>, id: &str, confirm_duplicate: bool) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.closing {
@@ -757,6 +913,22 @@ impl Core {
         }
         if !confirm_duplicate && previously_downloaded(&inner.tasks, &task) {
             bail!("ALREADY_DOWNLOADED");
+        }
+        if !inner.active.contains_key(id) {
+            let profiles = settings::snapshot(&inner.settings)?;
+            let (cancel, _) = watch::channel(false);
+            let (_, done) = watch::channel(true);
+            let directory = inner.settings.download_directory.clone();
+            inner.active.insert(
+                id.to_owned(),
+                Active {
+                    download_after_resolve: false,
+                    profiles,
+                    directory,
+                    cancel,
+                    done,
+                },
+            );
         }
         task.status = Status::Queued;
         task.download_requested = true;
@@ -820,14 +992,13 @@ impl Core {
         let active = inner.active.get_mut(id).unwrap();
         active.cancel = cancel;
         active.done = done_rx;
-        let preview = active.preview.take();
         let core = self.clone();
         let id = id.to_owned();
         inner.workers.retain(|worker| !worker.is_finished());
         let worker = tokio::spawn(async move {
             let result = async {
                 std::fs::create_dir_all(&directory).context("IO_ERROR")?;
-                let stage = match preview { Some(stage) => stage, None => tempfile::Builder::new().prefix(&format!("yingqu-{id}-")).tempdir_in(&directory).context("IO_ERROR")? };
+                let stage = tempfile::Builder::new().prefix(&format!("yingqu-{id}-")).tempdir_in(&directory).context("IO_ERROR")?;
                 let media = stage.path().join("media");
                 std::fs::create_dir(&media).context("IO_ERROR")?;
                 core.inner.lock().unwrap().db.execute("INSERT OR REPLACE INTO task_staging VALUES(?1,?2)",
@@ -836,6 +1007,7 @@ impl Core {
                 let result = PythonBridge::operation_cancellable(&core.program, &core.args, &id, "download_video",
                     json!({"input":video["canonical_url"],"profiles":profiles,
                         "resolver":video["resolver"].as_str().unwrap_or("yt-dlp"),
+                        "format_id":video["selected_format_id"],
                         "expected":{"platform":video["platform"],"video_id":video["video_id"],"kind":video["kind"].as_str().unwrap_or("video"),
                             "image_count":video["images"].as_array().map(Vec::len)},"staging_dir":media}),
                     |event| {
@@ -857,6 +1029,9 @@ impl Core {
                     let mut inner = core.inner.lock().unwrap();
                     let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
                     if task.canceling { bail!("CANCELED"); }
+                    if video["selected_format_id"].is_string() && result["format_id"] != video["selected_format_id"] {
+                        bail!("INVALID_ENGINE_RESULT");
+                    }
                     let identity: Video = serde_json::from_value(video).context("INVALID_ENGINE_RESULT")?;
                     let file = if identity.kind == "image_album" {
                         let target = directory.join(format!("{}_{}_{}", identity.platform, identity.video_id, id));
@@ -889,6 +1064,15 @@ impl Core {
                     }
                     file
                     };
+                    if identity.kind == "video" {
+                        if let Some(video) = task.video.as_mut() {
+                            for field in ["width", "height"] {
+                                if result[field].is_number() { video[field] = result[field].clone(); }
+                            }
+                            video["filesize"] = file.bytes.into();
+                            video["filesize_approx"] = Value::Null;
+                        }
+                    }
                     task.path = Some(file.path);
                     task.bytes = file.bytes;
                     task.total_bytes = Some(file.bytes);
@@ -940,7 +1124,6 @@ impl Core {
                 return Ok(());
             }
             if matches!(task.status, Status::Ready | Status::Queued) {
-                close_preview(&mut inner, id)?;
                 task.status = Status::Canceled;
                 task.revision += 1;
                 publish(&mut inner, task, &*self.emit)?;
@@ -968,6 +1151,12 @@ impl Core {
             let active = inner
                 .active
                 .iter()
+                .filter(|(id, _)| {
+                    inner
+                        .tasks
+                        .iter()
+                        .any(|t| t.id == **id && t.status != Status::Ready)
+                })
                 .map(|(id, a)| (id.clone(), a.done.clone()))
                 .collect::<Vec<_>>();
             (active, std::mem::take(&mut inner.workers))
@@ -1032,6 +1221,55 @@ mod tests {
         .await
         .unwrap()
     }
+    #[tokio::test]
+    async fn selected_format_survives_restart_and_reaches_fresh_download() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = app.resolve("valid".into()).unwrap();
+        wait(&app, &task.id, Status::Ready).await;
+        assert!(app
+            .choose_format(&task.id, "https://attacker.invalid/video")
+            .is_err());
+        let chosen = app.choose_format(&task.id, &"2".repeat(24)).unwrap();
+        assert_eq!(chosen.video.as_ref().unwrap()["width"], 720);
+        assert_eq!(chosen.video.as_ref().unwrap()["filesize"], 20);
+        app.shutdown().await;
+        drop(app);
+        let restarted = core(root.path());
+        let restored = &restarted.list()[0];
+        assert_eq!(restored.status, Status::Ready);
+        assert_eq!(
+            restored.video.as_ref().unwrap()["selected_format_id"],
+            "2".repeat(24)
+        );
+        assert_eq!(restored.video.as_ref().unwrap()["width"], 720);
+        restarted.download(&task.id, false).unwrap();
+        assert!(restarted.choose_format(&task.id, &"1".repeat(24)).is_err());
+        let completed = wait(&restarted, &task.id, Status::Completed).await;
+        let video = completed.video.as_ref().unwrap();
+        assert_eq!(video["selected_format_id"], "2".repeat(24));
+        assert_eq!(video["width"], 720);
+        assert_eq!(video["height"], 1280);
+        assert_eq!(video["filesize"], completed.bytes);
+    }
+
+    #[tokio::test]
+    async fn retry_preserves_the_selected_format_instead_of_resetting_to_default() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = app.resolve("valid".into()).unwrap();
+        wait(&app, &task.id, Status::Ready).await;
+        app.choose_format(&task.id, &"2".repeat(24)).unwrap();
+        app.cancel(&task.id).await.unwrap();
+        let retried = app.retry(&task.id).unwrap();
+        let completed = wait(&app, &retried.id, Status::Completed).await;
+        assert_eq!(completed.video.as_ref().unwrap()["width"], 720);
+        assert_eq!(
+            completed.video.as_ref().unwrap()["selected_format_id"],
+            "2".repeat(24)
+        );
+    }
+
     #[tokio::test]
     async fn real_process_single_task_commit_and_restart() {
         let root = tempfile::tempdir().unwrap();
@@ -1115,6 +1353,118 @@ mod tests {
         assert!(restored.list()[0].file_missing);
         assert_eq!(restored.list()[0].status, Status::Completed);
     }
+
+    #[tokio::test]
+    async fn sqlite_previews_survive_restart_without_an_engine_but_download_requires_one() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let video = app.resolve("valid".into()).unwrap();
+        let video = wait(&app, &video.id, Status::Ready).await;
+        assert!(!video.cache_hit && video.cover_cached);
+        let album = app.resolve("album".into()).unwrap();
+        let album = wait(&app, &album.id, Status::Ready).await;
+        assert!(!album.cache_hit);
+        app.shutdown().await;
+        drop(app);
+        assert_eq!(
+            std::fs::read_dir(root.path().join("downloads"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let restarted = Core::open(
+            &root.path().join("tasks.sqlite"),
+            root.path().join("downloads"),
+            root.path().join("no-engine").to_string_lossy().into_owned(),
+            vec![],
+            |_| {},
+        )
+        .unwrap();
+        assert!(restarted
+            .list()
+            .iter()
+            .all(|t| t.status == Status::Ready && t.cache_hit));
+        assert!(restarted.cover(&video.id).unwrap().starts_with(b"\x89PNG"));
+        assert!(restarted.image(&album.id, 1).unwrap().starts_with(b"RIFF"));
+        let cached = restarted
+            .resolve("private copy https://www.douyin.com/note/601/?tracking=secret".into())
+            .unwrap();
+        assert_eq!(cached.status, Status::Ready);
+        assert!(cached.cache_hit);
+        assert!(restarted
+            .image(&cached.id, 0)
+            .unwrap()
+            .starts_with(&[0xff, 0xd8, 0xff]));
+        let other = restarted
+            .resolve_with_resolver("https://www.douyin.com/video/123".into(), "dtk".into())
+            .unwrap();
+        let failed = wait(&restarted, &other.id, Status::Failed).await;
+        assert_eq!(failed.error.as_deref(), Some("ENGINE_UNAVAILABLE"));
+        restarted.download(&cached.id, false).unwrap();
+        let failed = wait(&restarted, &cached.id, Status::Failed).await;
+        assert_eq!(failed.error.as_deref(), Some("ENGINE_UNAVAILABLE"));
+        assert!(failed.path.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_short_alias_reuses_identity_cache_and_persists_for_offline_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let album = app.resolve("album".into()).unwrap();
+        wait(&app, &album.id, Status::Ready).await;
+        let short = app
+            .resolve("https://v.douyin.com/share_album/".into())
+            .unwrap();
+        let ready = wait(&app, &short.id, Status::Ready).await;
+        assert!(ready.cache_hit);
+        assert_eq!(ready.video.as_ref().unwrap()["video_id"], "601");
+        app.shutdown().await;
+        drop(app);
+        let restarted = Core::open(
+            &root.path().join("tasks.sqlite"),
+            root.path().join("downloads"),
+            "missing-engine".into(),
+            vec![],
+            |_| {},
+        )
+        .unwrap();
+        let cached = restarted
+            .resolve("7.10 share https://v.douyin.com/share_album/ 复制".into())
+            .unwrap();
+        assert_eq!(cached.status, Status::Ready);
+        assert!(cached.cache_hit);
+    }
+
+    #[tokio::test]
+    async fn legacy_completed_album_seeds_sqlite_assets_for_an_existing_preview() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let album = app.resolve("album".into()).unwrap();
+        wait(&app, &album.id, Status::Ready).await;
+        app.download(&album.id, false).unwrap();
+        let completed = wait(&app, &album.id, Status::Completed).await;
+        let preview = app.resolve("album".into()).unwrap();
+        wait(&app, &preview.id, Status::Ready).await;
+        app.shutdown().await;
+        app.inner.lock().unwrap().db.execute_batch(
+            "DROP TABLE parse_cache_aliases;DROP TABLE parse_cache_images;DROP TABLE parse_cache;").unwrap();
+        drop(app);
+        let restored = Core::open(
+            &root.path().join("tasks.sqlite"),
+            root.path().join("downloads"),
+            "missing-engine".into(),
+            vec![],
+            |_| {},
+        )
+        .unwrap();
+        std::fs::remove_dir_all(completed.path.unwrap()).unwrap();
+        assert!(restored.image(&preview.id, 1).unwrap().starts_with(b"RIFF"));
+        let cached = restored
+            .resolve("https://www.douyin.com/note/601".into())
+            .unwrap();
+        assert!(cached.cache_hit);
+        assert_eq!(cached.status, Status::Ready);
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_allows_immediate_reopen_after_completion() {
         let root = tempfile::tempdir().unwrap();
@@ -1169,7 +1519,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn ready_restart_becomes_interrupted_and_input_is_not_stored() {
+    async fn ready_restart_restores_preview_and_input_is_not_stored() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         let task = app.resolve("private share text".into()).unwrap();
@@ -1180,7 +1530,8 @@ mod tests {
         worker.await.unwrap();
         drop(app);
         let restarted = core(root.path());
-        assert_eq!(restarted.list()[0].error.as_deref(), Some("INTERRUPTED"));
+        assert_eq!(restarted.list()[0].status, Status::Ready);
+        assert!(restarted.list()[0].cache_hit);
         let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
         let text: String = db
             .query_row("SELECT snapshot FROM download_tasks", [], |r| r.get(0))
@@ -1215,6 +1566,9 @@ mod tests {
             files: Vec::new(),
             completed_items: None,
             total_items: None,
+            cache_hit: false,
+            cached_at: None,
+            cover_cached: false,
         };
         {
             let inner = app.inner.lock().unwrap();

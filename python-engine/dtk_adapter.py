@@ -220,7 +220,8 @@ def video_info(content):
             continue
         formats.append(dict(format_id=f'dtk-{index}', url=stream.url, ext='mp4',
                             protocol=urlsplit(stream.url).scheme, vcodec=None, acodec=None,
-                            width=stream.width, height=stream.height, filesize=stream.size_bytes))
+                            width=stream.width, height=stream.height, filesize=stream.size_bytes,
+                            tbr=stream.bitrate / 1000 if stream.bitrate else None))
     if not formats:
         raise EngineError('UNSUPPORTED_CONTENT', 'format')
     return dict(id=content.content_id, webpage_url=content.web_url, title=content.title,
