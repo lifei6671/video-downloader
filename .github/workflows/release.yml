@@ -124,5 +124,13 @@ jobs:
             echo 'Release already exists; refusing to overwrite published assets.' >&2
             exit 1
           fi
+          # GitHub normalizes non-ASCII asset names; keep a readable ASCII prefix.
+          for i in "${!assets[@]}"; do
+            asset="${assets[$i]}"
+            filename="${asset##*/}"
+            renamed="${asset%/*}/Yingqu_${filename#*_}"
+            mv -- "$asset" "$renamed"
+            assets[$i]="$renamed"
+          done
           gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --draft --title "映取 $RELEASE_TAG" --generate-notes
           gh release edit "$RELEASE_TAG" --draft=false

@@ -134,6 +134,8 @@ git push origin v0.1.0
 
 三个构建全部成功后，使用仓库自带 `GITHUB_TOKEN` 创建草稿、上传 Windows NSIS `.exe` 和两种 macOS `.dmg`，随后公开 Release。构建失败不发布；已有同名 Release 不覆盖。若上传中断留下草稿，先检查并删除该草稿，再重跑失败的发布 job。Actions artifacts 保留 14 天。仓库/组织策略须允许该 workflow 的 `contents: write`，无需新增发布 Token。
 
+上传 Release 前将安装包文件名的中文前缀替换为 ASCII `Yingqu`，避免 GitHub 规范化附件名时丢失“映取”。例如 `Yingqu_0.1.2_x64-setup.exe`、`Yingqu_0.1.2_x64.dmg`、`Yingqu_0.1.2_aarch64.dmg`；版本号、架构、安装包内容和应用显示名称保持不变。
+
 当前未配置 Windows 代码签名；macOS 按用户决定采用 ad-hoc，不要求 Developer ID / 证书或公证。自动构建和离线启动检查不代表安装验收：全新无 Python Windows、Intel macOS 与旧系统仍待验证；Apple Silicon 本机安装启动及双平台 GUI 下载 / 重启证据见 [macOS 验证记录](macos-validation.md)。首次标签 CI 运行结果需单独确认。
 
 ## 持续集成
