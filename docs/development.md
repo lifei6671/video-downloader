@@ -46,6 +46,8 @@ open src-tauri/target/release/bundle/macos/映取.app
 
 应用位于 `src-tauri/target/release/bundle/macos/映取.app`，DMG 位于相邻的 `bundle/dmg/`。`-` 是本地 ad-hoc 签名；按 2026-10-14 用户决定，macOS 不要求 Developer ID、证书或公证，不将这些设置为本次验收阻塞项。本地签名检查不代表下载后的 Gatekeeper 场景已验证。
 
+当前 Tauri CLI 按 Cargo 的 `[[bin]]` 声明顺序签名，因此 `m1-probe` 必须排在主程序 `yingqu` 前，避免主程序签名检查同包中尚未签名的辅助程序。日常 CI 的两种 macOS 架构均生成 ad-hoc 签名的 `.app`，并执行 `codesign --verify --deep --strict`；Release 另生成 DMG。
+
 `tauri.macos.conf.json` 自动合并，声明最低 macOS 13.3，以匹配现有 Tailwind 4 的 Safari/WebKit 16.4 要求；13.3 实机兼容性仍待验证。依据：[Tailwind 浏览器要求](https://tailwindcss.com/docs/compatibility)、[WebKit 16.4](https://webkit.org/blog/13966/webkit-features-in-safari-16-4/)。Apple Silicon 本机证据及剩余验收见 [macOS 验证记录](macos-validation.md)。
 
 开发依赖锁文件包含平台标记：`macholib` 只在 macOS 安装，`pefile` / `pywin32-ctypes` 只在 Windows 安装。更新锁文件使用 `uv pip compile --universal python-engine/requirements-dev.in -o python-engine/requirements-dev.txt`，避免再次生成只适用当前主机的清单。

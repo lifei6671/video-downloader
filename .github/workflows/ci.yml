@@ -75,4 +75,13 @@ jobs:
           $engine = if ($IsWindows) { 'python-engine/dist/video-engine/video-engine.exe' } else { 'python-engine/dist/video-engine/video-engine' }
           python scripts/check_packaged_engine.py $engine
       - name: Build desktop
-        run: npm run desktop:build -- -- --locked
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: |
+          if ($IsMacOS) {
+            npm run tauri -- build --features desktop --config src-tauri/tauri.release.conf.json --bundles app -- --locked
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            codesign --verify --deep --strict 'src-tauri/target/release/bundle/macos/映取.app'
+          } else {
+            npm run desktop:build -- -- --locked
+          }

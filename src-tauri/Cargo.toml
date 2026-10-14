@@ -27,14 +27,16 @@ tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
 
+# Tauri signs binaries in declaration order. Sign the helper before the main
+# executable, whose signature also seals the enclosing macOS app bundle.
+[[bin]]
+name = "m1-probe"
+path = "src/main.rs"
+
 [[bin]]
 name = "yingqu"
 path = "src/desktop.rs"
 required-features = ["desktop"]
-
-[[bin]]
-name = "m1-probe"
-path = "src/main.rs"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
