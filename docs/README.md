@@ -1,6 +1,7 @@
 # 技术文档
 
 - [开发、验证与发布](development.md)：源码运行、测试、引擎打包、CI 与标签发布。
+- [macOS 验证记录](macos-validation.md)：Apple Silicon 安装包、双平台 GUI 下载及正常重启恢复，以及 Intel / 旧系统验收边界。
 
 - [技术方案](tauri-desktop-technical-plan.md)：yt-dlp 架构、协议、阶段与验收标准。
 - [设置与封面验收](m2-cover-settings-validation.md)：Cookie 多行回显、等高设置卡、并发下拉与本地封面。

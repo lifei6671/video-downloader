@@ -119,7 +119,7 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 | `ready` | `protocol_version=2`、`engine_version`、`yt_dlp_version`；Rust 校验与分发版本一致 |
 | `resolve_video` 请求 | `id`、单条 `input`、两平台配置快照；凭据只经 stdin |
 | `download_video` 请求 | `id`、规范作品链接、预期 platform/video_id、原任务配置快照、Rust 创建的专属 staging 目录 |
-| `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、cover_url、duration_ms；可选字段可空 |
+| `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、cover_url、duration_ms、width、height、filesize、filesize_approx；可选字段可空 |
 | `progress` | 同一 `id`、downloaded_bytes、total_bytes、speed_bps；不包含上游原始 dict |
 | `download_finished` | 同一 `id`、平台/作品身份、staging 内相对文件名、实际字节数与容器；仅表示引擎文件写入结束 |
 | `error` | 同一 `id`、稳定 code、脱敏 message、stage；可可靠获得时附 HTTP 状态 |
@@ -149,7 +149,7 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 
 事件 `task_updated` 返回完整展示快照：task_id、递增 revision、状态、预览、字节/速度、脱敏错误及完成路径。约 250 ms 合并进度，终态立即通知。前端先监听再读快照，按 revision 合并；重挂载重新查询。未完成最高显示 99%，文件与数据库提交后才显示 100%。
 
-Cookie 在设置页通过 get_profile_cookie 专用命令回显多行输入，支持显示/隐藏。空输入保存即清空；未完成读取时禁止保存。公开作品解析成功只证明该请求成功，不证明登录态有效。未知清晰度、大小与速度明确显示未知；失败原因持续可见。
+Cookie 在设置页通过 get_profile_cookie 专用命令回显多行输入，支持显示/隐藏。空输入保存即清空；未完成读取时禁止保存。公开作品解析成功只证明该请求成功，不证明登录态有效。预览清晰度显示所选下载格式的 width × height；大小优先使用实际完成字节、下载响应总大小、所选格式的 filesize，再使用标“约”的 filesize_approx，缺失时显示未知。预览估算不写入下载进度。未知清晰度、大小与速度明确显示未知；失败原因持续可见。
 
 ## 7. 状态、文件与持久化
 
@@ -239,7 +239,7 @@ Windows 验证 WebView2、无终端窗口、非管理员、中文/空格路径�
 
 ### M3：安装分发
 
-分别验证 Windows 11 x64、macOS Intel、macOS Apple Silicon 安装包，含进程回收、凭据、双平台真实下载、重启及签名。未运行的平台不得以其他平台成功替代。
+分别验证 Windows 11 x64、macOS Intel、macOS Apple Silicon 安装包，含进程回收、凭据、双平台真实下载、重启及签名。未运行的平台不得以其他平台成功替代。macOS 声明最低系统版本 13.3，匹配现有 Tailwind 4 的 WebKit 要求；Apple Silicon 本机构建、双平台 GUI 下载和正常重启恢复见 [macOS 验证记录](macos-validation.md)，不替代 Intel、旧系统及其他未执行场景。按 2026-10-14 用户决定，macOS 采用本地 ad-hoc，不要求 Developer ID、证书或公证。
 
 ### 最小验证矩阵
 

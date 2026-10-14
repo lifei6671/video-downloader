@@ -11,11 +11,11 @@
 
 不修改已安装的 yt-dlp 包；经用户明确批准，在自有适配层覆盖 DouyinIE 的单一详情请求构造，补丁范围见下文。`python-engine/engine.py` 使用 `YoutubeDL` 嵌入接口；`network.py` 为本应用的双平台网络边界适配，固定依赖该版本的 `UrllibRH`、`HTTPHandler` 和请求 director。沿用上游 Cookie、HTTP 解码、重定向及 SOCKS 实现，只增加逐跳目标校验与直连 DNS 结果固定；升级须重测这些内部接入点。显式 HTTP 代理由适配层设置路由，避免环境 NO_PROXY 或系统 bypass 改走直连；SOCKS 保留上游实现。远端 DNS 代理的实际目的 IP 无法由本客户端验证。
 
-运行依赖仅为 yt-dlp，不启用 extras；没有 wreq、httpx、pydantic、structlog、reqwest、dtk 或 FastAPI/Redis 等服务端依赖。开发锁文件另有 pytest、PyInstaller 及其依赖。Python 3.12 与 Windows x64 为当前已执行环境，macOS 尚未执行。
+运行依赖仅为 yt-dlp，不启用 extras；没有 wreq、httpx、pydantic、structlog、reqwest、dtk 或 FastAPI/Redis 等服务端依赖。开发锁文件另有 pytest、PyInstaller 及其依赖，使用跨平台锁定及环境标记，含 macOS 构建依赖 macholib。Python 3.12 与 Windows x64 已有执行证据；2026-10-14 补充 macOS Apple Silicon 构建、离线启动及随包引擎的双平台真实下载，Intel 仍待验证，见 [macOS 验证记录](../docs/macos-validation.md)。
 
 旧 dtk 源码、manifest、初始化补丁、旧许可证副本与专属签名/parser fixtures 已删除；没有保留旧引擎兼容或下载 fallback。仓库根 LICENSE 属于本项目，保持原样。少量旧忽略缓存的删除受自动审批限制；缓存不在依赖、源码、构建 pathex 或分发包中。
 
-官方 PyInstaller hook 收集打包所需模块；产品运行只注册两平台单视频提取器。发布时同时分发完整 onedir、Python/yt-dlp 许可证与实际第三方声明，不单独复制 exe。当前尚非完整 Tauri 安装包。
+官方 PyInstaller hook 收集打包所需模块；产品运行只注册两平台单视频提取器。发布时同时分发完整 onedir、Python/yt-dlp 许可证与实际第三方声明，不单独复制 exe。完整目录已纳入 Tauri 安装包；构建、安装和在线能力分别按对应平台证据验收。
 
 测试、真实在线结果及未通过项见 [M1 验证记录](../docs/m1-validation.md)。
 

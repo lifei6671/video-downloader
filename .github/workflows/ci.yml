@@ -55,6 +55,8 @@ jobs:
           $pythonDir = if ($IsWindows) { '.venv/Scripts' } else { '.venv/bin' }
           (Resolve-Path $pythonDir).Path >> $env:GITHUB_PATH
           & "$pythonDir/python" -m pip install -r python-engine/requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$pythonDir/python" -m pip check
       - name: Offline tests
         run: |
           cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe

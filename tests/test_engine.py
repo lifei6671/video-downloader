@@ -110,6 +110,27 @@ def test_metadata_rejects_playlist_and_identity():
             engine.metadata(info,'tiktok')
 
 
+def test_metadata_uses_selected_format_dimensions_and_size():
+    value = engine.metadata({'id': '123', 'webpage_url': 'https://www.tiktok.com/@u/video/123',
+        'width': 1280, 'height': 720, 'filesize': 44144781, 'filesize_approx': 44000000.4,
+        'formats': [{'width': 1920, 'height': 1080, 'filesize': 99999999}]}, 'tiktok')
+    assert {key: value[key] for key in ('width', 'height', 'filesize', 'filesize_approx')} == {
+        'width': 1280, 'height': 720, 'filesize': 44144781, 'filesize_approx': 44000000}
+
+
+@pytest.mark.parametrize('invalid', [None, True, False, 0, -1, '720', float('nan'), float('inf')])
+def test_metadata_keeps_unknown_format_fields_unknown(invalid):
+    value = engine.metadata({'id': '123', 'webpage_url': 'https://www.tiktok.com/@u/video/123',
+        **dict.fromkeys(('width', 'height', 'filesize', 'filesize_approx'), invalid)}, 'tiktok')
+    assert all(value[key] is None for key in ('width', 'height', 'filesize', 'filesize_approx'))
+
+
+def test_metadata_does_not_round_exact_size_or_dimensions():
+    value = engine.metadata({'id': '123', 'webpage_url': 'https://www.tiktok.com/@u/video/123',
+        'width': 720.5, 'height': 1280.5, 'filesize': 1000.5}, 'tiktok')
+    assert all(value[key] is None for key in ('width', 'height', 'filesize'))
+
+
 def test_pinned_version_and_no_old_modules():
     import sys
     engine.check_version()

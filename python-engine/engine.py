@@ -183,9 +183,15 @@ def metadata(info, platform):
     duration_ms = (round(duration * 1000) if isinstance(duration, (float, int))
                    and math.isfinite(duration) and duration >= 0 else None)
     cover = cover_url(info)
+    selected = {}
+    for field in ('width', 'height', 'filesize', 'filesize_approx'):
+        value = info.get(field)
+        valid = (type(value) in (int, float) and math.isfinite(value) and value > 0
+                 and (field == 'filesize_approx' or value == int(value)))
+        selected[field] = max(1, round(value)) if valid else None
     return dict(platform=platform, video_id=video_id, canonical_url=canonical,
                 title=info.get('title'), author=info.get('uploader'), cover_url=cover,
-                duration_ms=duration_ms)
+                duration_ms=duration_ms, **selected)
 
 
 def operate(method, params, emit):

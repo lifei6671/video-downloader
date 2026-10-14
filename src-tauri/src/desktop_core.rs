@@ -908,6 +908,10 @@ mod tests {
         let app = core(root.path());
         let task = app.resolve("private share text".into()).unwrap();
         wait(&app, &task.id, Status::Ready).await;
+        // Ready is published before the worker releases its Core reference.
+        // Preserve the Ready snapshot for recovery, but await actual process exit.
+        let worker = app.inner.lock().unwrap().workers.pop().unwrap();
+        worker.await.unwrap();
         drop(app);
         let restarted = core(root.path());
         assert_eq!(restarted.list()[0].error.as_deref(), Some("INTERRUPTED"));

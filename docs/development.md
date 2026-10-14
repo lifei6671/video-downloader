@@ -17,6 +17,39 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 pytest 包含 Rust/Python 进程集成测试，必须先构建探针；测试使用隔离 HTTP fixture，不访问真实平台。运行依赖固定 yt-dlp 2026.8.19，协议 v2，具体版本见锁文件。
 
+## macOS 开发与打包
+
+需要 Xcode Command Line Tools、Rust/Cargo、Node/npm 和 uv；Intel 与 Apple Silicon 必须分别在对应架构的 Mac 上构建 Python 引擎，不混用 Windows 产物或另一架构的 `.venv`。以下命令在仓库根目录的 zsh 执行：
+
+```sh
+uv venv --python 3.12 .venv
+uv pip sync --python .venv/bin/python python-engine/requirements-dev.txt
+uv pip check --python .venv/bin/python
+npm ci
+cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+.venv/bin/python -m pytest -q
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings
+.venv/bin/python -m PyInstaller --noconfirm --distpath python-engine/dist --workpath python-engine/build python-engine/pyinstaller.spec
+.venv/bin/python scripts/check_packaged_engine.py python-engine/dist/video-engine/video-engine
+npm run desktop
+```
+
+生成包含完整引擎的应用与磁盘映像：
+
+```sh
+APPLE_SIGNING_IDENTITY=- npm run tauri -- build --features desktop --config src-tauri/tauri.release.conf.json --bundles app,dmg -- --locked
+codesign --verify --deep --strict src-tauri/target/release/bundle/macos/映取.app
+.venv/bin/python scripts/check_packaged_engine.py src-tauri/target/release/bundle/macos/映取.app/Contents/Resources/video-engine/video-engine
+open src-tauri/target/release/bundle/macos/映取.app
+```
+
+应用位于 `src-tauri/target/release/bundle/macos/映取.app`，DMG 位于相邻的 `bundle/dmg/`。`-` 是本地 ad-hoc 签名；按 2026-10-14 用户决定，macOS 不要求 Developer ID、证书或公证，不将这些设置为本次验收阻塞项。本地签名检查不代表下载后的 Gatekeeper 场景已验证。
+
+`tauri.macos.conf.json` 自动合并，声明最低 macOS 13.3，以匹配现有 Tailwind 4 的 Safari/WebKit 16.4 要求；13.3 实机兼容性仍待验证。依据：[Tailwind 浏览器要求](https://tailwindcss.com/docs/compatibility)、[WebKit 16.4](https://webkit.org/blog/13966/webkit-features-in-safari-16-4/)。Apple Silicon 本机证据及剩余验收见 [macOS 验证记录](macos-validation.md)。
+
+开发依赖锁文件包含平台标记：`macholib` 只在 macOS 安装，`pefile` / `pywin32-ctypes` 只在 Windows 安装。更新锁文件使用 `uv pip compile --universal python-engine/requirements-dev.in -o python-engine/requirements-dev.txt`，避免再次生成只适用当前主机的清单。
+
 ## 真实下载验证
 
 TikTok 便捷入口默认读取 `tests/TikTok.txt`、Edge 150 UA 和 SOCKS5 `127.0.0.1:3067`：
@@ -99,7 +132,7 @@ git push origin v0.1.0
 
 三个构建全部成功后，使用仓库自带 `GITHUB_TOKEN` 创建草稿、上传 Windows NSIS `.exe` 和两种 macOS `.dmg`，随后公开 Release。构建失败不发布；已有同名 Release 不覆盖。若上传中断留下草稿，先检查并删除该草稿，再重跑失败的发布 job。Actions artifacts 保留 14 天。仓库/组织策略须允许该 workflow 的 `contents: write`，无需新增发布 Token。
 
-当前未配置 Windows 代码签名或 Apple Developer ID/公证；macOS 仅 ad-hoc 签名。自动构建和离线启动检查不代表安装验收：全新无 Python Windows、两种 macOS 安装/启动、双平台在线下载与签名公证仍待验证。首次标签 CI 运行结果需单独确认。
+当前未配置 Windows 代码签名；macOS 按用户决定采用 ad-hoc，不要求 Developer ID / 证书或公证。自动构建和离线启动检查不代表安装验收：全新无 Python Windows、Intel macOS 与旧系统仍待验证；Apple Silicon 本机安装启动及双平台 GUI 下载 / 重启证据见 [macOS 验证记录](macos-validation.md)。首次标签 CI 运行结果需单独确认。
 
 ## 持续集成
 

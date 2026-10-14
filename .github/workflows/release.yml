@@ -65,6 +65,8 @@ jobs:
           $pythonDir = if ($IsWindows) { '.venv/Scripts' } else { '.venv/bin' }
           (Resolve-Path $pythonDir).Path >> $env:GITHUB_PATH
           & "$pythonDir/python" -m pip install -r python-engine/requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$pythonDir/python" -m pip check
       - name: Offline tests
         run: |
           cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
@@ -80,7 +82,7 @@ jobs:
           python scripts/check_packaged_engine.py $engine
       - name: Build installer
         env:
-          # These initial releases are unsigned; signing/notarization is a separate setup.
+          # Windows is unsigned; macOS uses ad-hoc signing per the product decision.
           APPLE_SIGNING_IDENTITY: '-'
         run: npm run tauri -- build --features desktop --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundles }} -- --locked
       - name: Upload installer

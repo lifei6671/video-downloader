@@ -53,8 +53,8 @@
 项目目前处于早期迭代阶段：
 
 - **Windows：** 已完成开发环境下的双平台真实下载验证及安装包构建；全新、未安装 Python 的系统验收仍待完成。
-- **macOS：** 已配置 Intel 与 Apple Silicon 构建流程，安装和运行尚待实机验收。
-- **签名：** Windows 代码签名与 macOS Developer ID 签名、公证尚未配置。
+- **macOS：** 已完成 Apple Silicon 本机 `.app` / `.dmg` 构建、双平台 GUI 预览下载、本地封面、完成记录及正常重启恢复；声明最低系统版本 13.3，Intel、旧系统及其他验收场景仍待完成，见 [macOS 验证记录](docs/macos-validation.md)。
+- **签名：** Windows 代码签名尚未配置；macOS 采用本地 ad-hoc，按当前项目决定不要求 Developer ID、证书或公证。
 
 安装包按包含下载引擎的方式构建；具体平台是否可用，以对应 Release 的产物和验收说明为准。
 

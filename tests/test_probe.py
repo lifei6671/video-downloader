@@ -145,17 +145,16 @@ def test_parent_exit_ends_sidecar(tmp_path,media_proxy):
         if process.poll() is None: process.kill(); process.wait()
 
 
-@pytest.mark.skipif(os.name != 'nt', reason='Windows CTRL_BREAK event; POSIX separately unverified')
 def test_cancel_probe_reaps_child_and_cleans_stage(tmp_path,media_proxy):
     import signal
     proxy, _, started, _ = media_proxy
     process=subprocess.Popen([str(PROBE),sys.executable,str(FIXTURE)],stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={**os.environ,'FIXTURE_MODE':'stall'},
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
     process.stdin.write(json.dumps(config(tmp_path,proxy)).encode()); process.stdin.close()
     try:
         assert started.wait(5)
-        process.send_signal(signal.CTRL_BREAK_EVENT)
+        process.send_signal(signal.CTRL_BREAK_EVENT if os.name == 'nt' else signal.SIGINT)
         assert process.wait(timeout=5) == 1
         output=process.stdout.read()
         assert b'CANCELED' in output
