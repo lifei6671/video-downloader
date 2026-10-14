@@ -353,7 +353,11 @@ pub fn finalize_album(
         bail!("INCOMPLETE_MEDIA");
     }
     for file in &files {
-        fs::File::open(source.join(&file.filename))?.sync_all()?;
+        // Windows FlushFileBuffers requires a handle opened with write access.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(source.join(&file.filename))?
+            .sync_all()?;
     }
     before_move(&source, size, &files)?;
     move_album(&source, target)?;
