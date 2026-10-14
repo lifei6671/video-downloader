@@ -34,3 +34,5 @@ typing-inspection==0.4.4
     # via pydantic
 yt-dlp==2026.8.19
     # via -r python-engine/requirements.in
+yt-dlp-ejs==0.8.0
+    # via -r python-engine/requirements.in

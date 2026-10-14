@@ -12,7 +12,7 @@ if not python_license.is_file():
     python_license = Path(sysconfig.get_path('stdlib')) / 'LICENSE.txt'
 runtime_licenses = []
 for name in ('pydantic', 'pydantic-core', 'annotated-types', 'typing-inspection', 'typing-extensions',
-             'httpx', 'httpcore', 'anyio', 'certifi', 'idna', 'h11', 'structlog'):
+             'httpx', 'httpcore', 'anyio', 'certifi', 'idna', 'h11', 'structlog', 'yt-dlp-ejs'):
     package = distribution(name)
     for file in package.files or []:
         if 'license' in str(file).lower() or file.name.lower().startswith('notice'):

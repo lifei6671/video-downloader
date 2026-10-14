@@ -74,7 +74,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         Err(_) => bail!("DATABASE_ERROR"),
     };
     let mut profiles = Vec::new();
-    for platform in ["douyin", "tiktok"] {
+    for platform in ["douyin", "tiktok", "youtube"] {
         let row = db.query_row(
             "SELECT user_agent,proxy,cookie,credential_ref FROM platform_settings WHERE platform=?",
             [platform],
@@ -349,6 +349,33 @@ mod tests {
             snapshot(&restored).unwrap()["douyin"]["proxy"],
             "http://127.0.0.1:80/"
         );
+    }
+    #[test]
+    fn youtube_settings_persist_independently() {
+        let db = Connection::open_in_memory().unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        save_profile(
+            &db,
+            &mut settings,
+            ProfileUpdate {
+                platform: "youtube".into(),
+                user_agent: "fixture".into(),
+                cookie: Some("session=fixture".into()),
+                proxy: Some(String::new()),
+            },
+        )
+        .unwrap();
+        let restored = load(&db, PathBuf::new()).unwrap();
+        assert_eq!(restored.profiles.len(), 3);
+        assert_eq!(
+            super::cookie(&restored, "youtube").unwrap(),
+            "session=fixture"
+        );
+        assert_eq!(super::cookie(&restored, "douyin").unwrap(), "");
+        assert_eq!(super::cookie(&restored, "tiktok").unwrap(), "");
+        assert!(!serde_json::to_string(&restored)
+            .unwrap()
+            .contains("session=fixture"));
     }
     #[test]
     fn existing_settings_migrate_with_default_two_and_preserve_directory() {

@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.5.0";
+pub const ENGINE_VERSION: &str = "0.6.0";
 pub const YTDLP_VERSION: &str = "2026.08.19";
 
 async fn cancellation() -> Result<()> {
@@ -31,6 +31,49 @@ pub struct PythonBridge {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
+    #[cfg(windows)]
+    _job: std::os::windows::io::OwnedHandle,
+    #[cfg(unix)]
+    process_group: i32,
+}
+
+#[cfg(windows)]
+fn process_job(child: &Child) -> Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::JobObjects::*;
+    unsafe {
+        let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if handle.is_null() {
+            bail!("ENGINE_UNAVAILABLE");
+        }
+        let job = OwnedHandle::from_raw_handle(handle);
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const _,
+            std::mem::size_of_val(&limits) as u32,
+        ) == 0
+            || AssignProcessToJobObject(
+                job.as_raw_handle(),
+                child.raw_handle().context("ENGINE_UNAVAILABLE")?,
+            ) == 0
+        {
+            bail!("ENGINE_UNAVAILABLE");
+        }
+        Ok(job)
+    }
+}
+
+impl Drop for PythonBridge {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-self.process_group, libc::SIGKILL);
+        }
+        // Windows OwnedHandle closes the kill-on-close job, including FFmpeg/JS descendants.
+    }
 }
 
 async fn read_message(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Result<Option<Value>> {
@@ -65,6 +108,11 @@ fn error_code(value: &Value) -> &'static str {
         Some("TIMEOUT") => "TIMEOUT",
         Some("IO_ERROR") => "IO_ERROR",
         Some("INVALID_MEDIA_CONTENT") => "INVALID_MEDIA_CONTENT",
+        Some("FORMAT_UNAVAILABLE") => "FORMAT_UNAVAILABLE",
+        Some("FFMPEG_UNAVAILABLE") => "FFMPEG_UNAVAILABLE",
+        Some("JS_RUNTIME_UNAVAILABLE") => "JS_RUNTIME_UNAVAILABLE",
+        Some("BROWSER_COOKIES_UNAVAILABLE") => "BROWSER_COOKIES_UNAVAILABLE",
+        Some("MEDIA_MERGE_FAILED") => "MEDIA_MERGE_FAILED",
         _ => "ENGINE_PROTOCOL_ERROR",
     }
 }
@@ -80,11 +128,21 @@ impl PythonBridge {
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x08000000);
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command.spawn().context("ENGINE_UNAVAILABLE")?;
+        #[cfg(windows)]
+        let job = process_job(&child)?;
+        #[cfg(unix)]
+        let process_group = child.id().context("ENGINE_UNAVAILABLE")? as i32;
         Ok(Self {
             input: child.stdin.take().context("ENGINE_UNAVAILABLE")?,
             output: BufReader::new(child.stdout.take().context("ENGINE_UNAVAILABLE")?),
             child,
+            #[cfg(windows)]
+            _job: job,
+            #[cfg(unix)]
+            process_group,
         })
     }
 
@@ -125,15 +183,26 @@ impl PythonBridge {
         let mut downloaded = 0;
         let mut known_total = None;
         let mut saw_progress = false;
+        let youtube = params["expected"]["platform"] == "youtube";
+        let mut merging = false;
         loop {
-            let value = timeout(Duration::from_secs(65), read_message(&mut self.output))
-                .await
-                .context("TIMEOUT")??
-                .context("ENGINE_PROTOCOL_ERROR")?;
+            let value = timeout(
+                Duration::from_secs(if merging { 600 } else { 65 }),
+                read_message(&mut self.output),
+            )
+            .await
+            .context("TIMEOUT")??
+            .context("ENGINE_PROTOCOL_ERROR")?;
             if value["id"] != id || value["protocol_version"] != 3 {
                 bail!("ENGINE_PROTOCOL_ERROR");
             }
             if value["type"] == "progress" && method == "download_video" {
+                if !value["phase"].is_null() {
+                    if !youtube || value["phase"] != "merging" || merging {
+                        bail!("ENGINE_PROTOCOL_ERROR");
+                    }
+                    merging = true;
+                }
                 let count = value["downloaded_bytes"]
                     .as_u64()
                     .context("ENGINE_PROTOCOL_ERROR")?;
@@ -167,6 +236,7 @@ impl PythonBridge {
                 }
                 progress(json!({"id":id,"event":"progress","bytes":count,
                                "total_bytes":total,"speed_bps":speed,
+                               "phase":value["phase"],
                                "completed_items":completed_items,"total_items":total_items}));
                 continue;
             }
@@ -199,7 +269,18 @@ impl PythonBridge {
             }
             if method == "download_video" {
                 let size = value["bytes"].as_u64().context("ENGINE_PROTOCOL_ERROR")?;
-                if !saw_progress || downloaded != size || known_total.is_some_and(|n| n != size) {
+                let transferred = if youtube {
+                    value["transferred_bytes"]
+                        .as_u64()
+                        .context("ENGINE_PROTOCOL_ERROR")?
+                } else {
+                    size
+                };
+                if size == 0
+                    || !saw_progress
+                    || downloaded != transferred
+                    || known_total.is_some_and(|n| n != transferred)
+                {
                     bail!("INCOMPLETE_MEDIA");
                 }
             }

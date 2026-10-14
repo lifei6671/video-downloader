@@ -5,7 +5,7 @@ import re
 import sys
 from http.cookiejar import Cookie
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from yt_dlp import YoutubeDL
 from yt_dlp.globals import plugin_dirs
@@ -15,13 +15,15 @@ from yt_dlp.version import __version__
 
 from network import GuardedRH, TargetError
 from douyin import DouyinIE
+from browser_cookies import load_default_cookies
+from local_tools import installed_tool, javascript_runtime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/dtk/upstream/src'))
 import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.5.0'
+ENGINE_VERSION = '0.6.0'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.08.19'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -41,19 +43,19 @@ class SafeLogger:
     def __init__(self):
         self.code = 'UPSTREAM_CHANGED'
 
-    def debug(self, message):
+    def debug(self, message, **kwargs):
         pass
 
     info = debug
     warning = debug
 
-    def error(self, message):
+    def error(self, message, **kwargs):
         # Only stable, bounded codes leave this process. No upstream free text.
         lower = message.lower()
         if 'network_target_rejected' in lower:
             self.code = 'INVALID_INPUT'
         elif ('403' in lower or '401' in lower or 'fresh cookies' in lower
-              or 'login' in lower or 'uifid cookie is required' in lower):
+              or 'login' in lower or 'sign in' in lower or 'uifid cookie is required' in lower):
             self.code = 'ACCESS_DENIED'
         elif '404' in lower or 'not found' in lower:
             self.code = 'NOT_FOUND'
@@ -81,6 +83,13 @@ def parse_input(text):
                     else 'tiktok' if host in ('www.tiktok.com', 'tiktok.com', 'vt.tiktok.com', 'vm.tiktok.com')
                     else None)
         if not platform:
+            if host in ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'):
+                video_id = (parts.path.strip('/') if host == 'youtu.be' else
+                            parse_qs(parts.query).get('v', [''])[0] if parts.path == '/watch' else
+                            parts.path.rstrip('/').split('/')[-1] if re.fullmatch(r'/(?:shorts|embed)/[^/]+/?', parts.path) else '')
+                if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+                    raise EngineError('UNSUPPORTED_CONTENT', 'input')
+                return 'youtube', 'https://www.youtube.com/watch?v=' + video_id, False
             raise EngineError('UNSUPPORTED_PLATFORM', 'input')
         short = host in ('v.douyin.com', 'vt.tiktok.com', 'vm.tiktok.com')
         pattern = r'/[A-Za-z0-9_-]+/?' if short else (
@@ -162,11 +171,12 @@ def download_cover(ydl, info, stage):
 def metadata(info, platform):
     video_id = info.get('id')
     if (info.get('_type', 'video') != 'video' or info.get('is_live') or info.get('live_status') == 'is_live'
-            or not isinstance(video_id, str) or not re.fullmatch(r'\d{1,30}', video_id)):
+            or not isinstance(video_id, str) or not re.fullmatch(
+                r'[A-Za-z0-9_-]{11}' if platform == 'youtube' else r'\d{1,30}', video_id)):
         raise EngineError('UNSUPPORTED_CONTENT', 'detail')
     canonical = info.get('webpage_url')
     actual, canonical, short = parse_input(canonical)
-    if actual != platform or short or canonical.rstrip('/').split('/')[-1] != video_id:
+    if actual != platform or short or input_identity(platform, canonical, 'auto', canonical)['video_id'] != video_id:
         raise EngineError('UPSTREAM_CHANGED', 'detail')
     duration = info.get('duration')
     duration_ms = (round(duration * 1000) if isinstance(duration, (float, int))
@@ -181,7 +191,7 @@ def metadata(info, platform):
     return dict(platform=platform, video_id=video_id, canonical_url=canonical,
                 title=info.get('title'), author=info.get('uploader'), cover_url=cover,
                 duration_ms=duration_ms, resolver='yt-dlp', kind='video',
-                formats=public_formats(info), selected_format_id=info.get('_yingqu_format_id'), **selected)
+                formats=public_formats(info, platform == 'youtube'), selected_format_id=info.get('_yingqu_format_id'), **selected)
 
 
 def input_identity(platform, url, resolver, source_url):
@@ -189,9 +199,12 @@ def input_identity(platform, url, resolver, source_url):
         raise EngineError('CONFIG_INVALID', 'resolver')
     album = '/note/' in url or '/photo/' in url
     actual = 'dtk' if resolver == 'dtk' or (resolver == 'auto' and album) else 'yt-dlp'
+    if platform == 'youtube' and actual != 'yt-dlp':
+        raise EngineError('UNSUPPORTED_CONTENT', 'resolver')
     if actual == 'yt-dlp' and album:
         raise EngineError('UNSUPPORTED_CONTENT', 'resolver')
-    return dict(platform=platform, video_id=url.rstrip('/').split('/')[-1], canonical_url=url,
+    video_id = parse_qs(urlsplit(url).query)['v'][0] if platform == 'youtube' else url.rstrip('/').split('/')[-1]
+    return dict(platform=platform, video_id=video_id, canonical_url=url,
                 kind='image_album' if album else 'video', resolver=actual, source_url=source_url)
 
 
@@ -238,26 +251,52 @@ def operate(method, params, emit):
             raise EngineError('UPSTREAM_CHANGED', 'identity')
         return None
 
+    stream_bytes = {}
+    merging = False
+
     def progress(data):
         if data.get('status') in ('downloading', 'finished'):
             total = data.get('total_bytes')
             speed = data.get('speed')
-            emit('progress', downloaded_bytes=data.get('downloaded_bytes', 0),
+            count = data.get('downloaded_bytes', 0)
+            if platform == 'youtube':
+                stream_bytes[data.get('filename', '')] = count
+                count, total = sum(stream_bytes.values()), None
+            emit('progress', downloaded_bytes=count,
                  total_bytes=total, speed_bps=speed if speed and math.isfinite(speed) else None)
+
+    def postprocess(data):
+        nonlocal merging
+        if data.get('postprocessor') == 'Merger' and data.get('status') == 'started':
+            merging = True
+            emit('progress', downloaded_bytes=sum(stream_bytes.values()), total_bytes=None,
+                 speed_bps=None, phase='merging')
 
     logger = SafeLogger()
     options = dict(proxy=proxy or '', http_headers={'User-Agent': ua},
         logger=logger, quiet=True, noprogress=True, cachedir=False, noplaylist=True,
-        allowed_extractors=['Douyin$'] if platform == 'douyin' else ['TikTok$', r'vm\.tiktok$'],
-        format=lambda context: select_format(context, params.get('format_id') if downloading else None), match_filter=match_filter, progress_hooks=[progress] if downloading else [],
+        allowed_extractors=(['Douyin$'] if platform == 'douyin' else ['Youtube$'] if platform == 'youtube'
+                            else ['TikTok$', r'vm\.tiktok$']),
+        format=lambda context: select_format(context, params.get('format_id') if downloading else None, platform == 'youtube'), match_filter=match_filter, progress_hooks=[progress] if downloading else [],
+        postprocessor_hooks=[postprocess],
         outtmpl=str(stage / 'video.%(ext)s') if stage else 'unused.%(ext)s',
         overwrites=False, continuedl=False, socket_timeout=30, retries=0,
         extractor_retries=0, fragment_retries=0, file_access_retries=0,
         postprocessors=[], fixup='never', external_downloader=None,
         js_runtimes={}, remote_components=set())
+    if platform == 'youtube':
+        options['js_runtimes'] = javascript_runtime()
+        if not options['js_runtimes']:
+            raise EngineError('JS_RUNTIME_UNAVAILABLE', 'runtime')
+        options['ffmpeg_location'] = installed_tool('ffmpeg')
     try:
         with YoutubeDL(options) as ydl:
-            add_cookies(ydl.cookiejar, cookies, platform)
+            cookie_warning = None
+            if cookies:
+                add_cookies(ydl.cookiejar, cookies, platform)
+            else:
+                cookie_warning = load_default_cookies(ydl.cookiejar, platform, logger)
+                cookies = {c.name: c.value for c in ydl.cookiejar if not c.is_expired()}
             if platform == 'douyin':
                 ydl.add_info_extractor(DouyinIE())
             ydl._request_director = ydl.build_request_director(
@@ -279,6 +318,8 @@ def operate(method, params, emit):
                 if str(content.kind) == 'image_album':
                     result = dtk_adapter.metadata(content)
                     result['source_url'] = source_url
+                    if cookie_warning:
+                        result['cookie_warning'] = cookie_warning
                     if downloading:
                         if (result['video_id'] != expected['video_id']
                                 or expected.get('kind', 'video') != 'image_album'
@@ -300,6 +341,8 @@ def operate(method, params, emit):
             result = metadata(info, platform)
             result['resolver'] = actual_resolver
             result['source_url'] = source_url
+            if cookie_warning:
+                result['cookie_warning'] = cookie_warning
             if content and content.music:
                 result['music'] = dict(title=content.music.title, author=content.music.author)
             if not downloading:
@@ -314,6 +357,12 @@ def operate(method, params, emit):
             if platform == 'douyin':
                 # Web 4K CDN variants require the platform root Referer.
                 info.setdefault('http_headers', {})['Referer'] = 'https://www.douyin.com/'
+            if info.get('requested_formats') and not options.get('ffmpeg_location'):
+                raise EngineError('FFMPEG_UNAVAILABLE', 'merge')
+            if info.get('requested_formats'):
+                from yt_dlp.postprocessor.ffmpeg import FFmpegMergerPP
+                if not FFmpegMergerPP(ydl).available:
+                    raise EngineError('FFMPEG_UNAVAILABLE', 'merge')
             ydl.process_info(info)
             file = Path(ydl.prepare_filename(info))
             if file.parent != stage or file.is_symlink() or not file.is_file() or file.stat().st_size == 0:
@@ -321,11 +370,15 @@ def operate(method, params, emit):
             emit('download_finished', platform=platform, video_id=result['video_id'],
                  filename=file.name, bytes=file.stat().st_size, container=info['ext'],
                  format_id=result['selected_format_id'], width=result['width'], height=result['height'],
+                 **({'transferred_bytes': sum(stream_bytes.values())} if platform == 'youtube' else {}),
                  **download_cover(ydl, info, stage))
     except DtkError as error:
         raise EngineError('UPSTREAM_CHANGED', 'dtk_signing') from None
     except DownloadError:
-        raise EngineError(logger.code, 'yt_dlp') from None
+        code = 'MEDIA_MERGE_FAILED' if merging else logger.code
+        if code == 'ACCESS_DENIED' and cookie_warning:
+            code = 'BROWSER_COOKIES_UNAVAILABLE'
+        raise EngineError(code, 'yt_dlp') from None
     except TargetError:
         raise EngineError('INVALID_INPUT', 'network_target') from None
     except RequestError as error:

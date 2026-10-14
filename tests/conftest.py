@@ -7,8 +7,19 @@ import pytest
 BODY = b'\x00\x00\x00\x18ftypmp42' + b'payload' * 600
 
 
+@pytest.fixture(autouse=True)
+def no_real_browser_credentials(monkeypatch):
+    import engine
+    monkeypatch.setattr(engine, 'load_default_cookies', lambda *_: None)
+
+
 @pytest.fixture
-def media_proxy():
+def media_bodies():
+    return {}
+
+
+@pytest.fixture
+def media_proxy(media_bodies):
     requests = []
     started = threading.Event()
     released = threading.Event()
@@ -24,7 +35,7 @@ def media_proxy():
                 self.end_headers()
                 return
             body = (b'RIFF' + b'\x10\x00\x00\x00WEBPfixture' if mode == 'image' else
-                    b'<html>error</html>' if mode == 'html' else BODY)
+                    b'<html>error</html>' if mode == 'html' else media_bodies.get(mode, BODY))
             self.send_response(200)
             self.send_header('Content-Type','video/mp4')
             if mode != 'unknown':

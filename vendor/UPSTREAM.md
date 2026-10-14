@@ -1,6 +1,6 @@
 # 解析引擎来源与依赖
 
-当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.8.19` 的运行时版本为 `2026.08.19`；协议 v3，引擎版本 `0.5.0`。
+当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.8.19` 的运行时版本为 `2026.08.19`；协议 v3，引擎版本 `0.6.0`。
 
 - 来源：https://github.com/yt-dlp/yt-dlp/tree/2026.08.19
 - PyPI：https://pypi.org/project/yt-dlp/2026.8.19/
@@ -9,7 +9,9 @@
 - sdist SHA-256：`9e213e48cea35c66b378e4447903f118f6392a5fa380a2b6d7070ec86f4e0af1`
 - Unlicense 原文保留于 `yt-dlp-LICENSE`，从已安装的对应 wheel 许可证复制。
 
-不修改已安装的 yt-dlp 包；经用户明确批准，在自有适配层覆盖 DouyinIE 的单一详情请求构造，补丁范围见下文。`python-engine/engine.py` 使用 `YoutubeDL` 嵌入接口；`network.py` 为本应用的双平台网络边界适配，固定依赖该版本的 `UrllibRH`、`HTTPHandler` 和请求 director。沿用上游 Cookie、HTTP 解码、重定向及 SOCKS 实现，只增加逐跳目标校验与直连 DNS 结果固定；升级须重测这些内部接入点。显式 HTTP 代理由适配层设置路由，避免环境 NO_PROXY 或系统 bypass 改走直连；SOCKS 保留上游实现。远端 DNS 代理的实际目的 IP 无法由本客户端验证。
+不修改已安装的 yt-dlp 包；经用户明确批准，在自有适配层覆盖 DouyinIE 的单一详情请求构造，补丁范围见下文。`python-engine/engine.py` 使用 `YoutubeDL` 嵌入接口；`network.py` 为本应用的双平台网络边界适配，固定依赖该版本的 `UrllibRH`、`HTTPHandler` 和请求 director。沿用上游 Cookie、HTTP 解码、重定向及 SOCKS 实现，只增加逐跳目标校验与直连 DNS 结果固定；按 2026-10-14 用户 TUN 决策，不检查 DNS 返回 IP 的公网属性，私有/保留地址交由系统路由；升级须重测这些内部接入点。显式 HTTP 代理由适配层设置路由，避免环境 NO_PROXY 或系统 bypass 改走直连；SOCKS 保留上游实现。远端 DNS 代理的实际目的 IP 无法由本客户端验证。
+
+YouTube 额外锁定 `yt-dlp-ejs==0.8.0`（yt-dlp 此版本的匹配版本），许可证 `Unlicense AND MIT AND ISC` 随 onedir 收集；使用官方 hook 收集离线 solver JS，禁用 remote components，不运行时下载脚本。Node.js / Deno 与 FFmpeg 由本机提供，不随应用分发。参考 [yt-dlp EJS 官方说明](https://github.com/yt-dlp/yt-dlp/wiki/EJS)。默认浏览器 Cookie 思路参考 [downvid](https://github.com/yxxbc/downvid/tree/b1ef96800f1bb999bf63bee6b9a0ad98996494ea/electron/utils)，本项目自行实现系统默认浏览器识别，未复制其多浏览器重试或 Puppeteer 服务。
 
 运行锁文件新增 pydantic 2.14.1、structlog 26.1.0、httpx 0.28.1 与必要传递依赖，不启用 yt-dlp extras。httpx 是上游 token 模块的导入依赖，业务请求通过 GuardedRH；不调用其游客身份网络功能。structlog 自由文本在 bridge 中全部丢弃，避免 stdout 协议污染及凭据泄漏。没有 wreq、FastAPI、Redis、SQLAlchemy、上游 UI 或服务端。
 
@@ -34,7 +36,7 @@ PyInstaller 使用官方 yt-dlp hook，收集 DTK 的具体平台模块、完整
 - 公式来源：[Evil0ctal 原始研究提交说明](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/commit/d9f718800df20c0255979d93ebadb33dd3a3b757)。仅依据公布公式独立实现，没有复制 dtk 源文件、签名模块或恢复其依赖；使用 Python 标准库，不新增第三方包。
 - 读取授权 Cookie 的 UIFID（或 UIFID_TEMP）；不生成游客身份、不调用浏览器或远程签名服务。请求包括 aweme_id、uifid；timestamp 不发送，签名中的 timestamp 字段为空。
 - 签名为 `MD5(uifid + "_" + timestamp + "_" + salt + "_" + URLSearchParams(query))`；固定 salt 为该研究公布的 `A96D855A08C0A9707F8BEF0D9A527E4E`。编码按浏览器规则处理空格、星号、波浪号，测试向量由 Node URLSearchParams/crypto 独立生成。
-- 未持有 UIFID 时请求前报错；Cookie、签名 query 和媒体 URL 不记录日志、不持久化。域名 `365yg.com` 来自本次签名成功详情返回的抖音视频 CDN，只加入抖音清单；每跳目标及直连 DNS 检查仍生效。
+- 未持有 UIFID 时请求前报错；Cookie、签名 query 和媒体 URL 不记录日志、不持久化。域名 `365yg.com` 来自本次签名成功详情返回的抖音视频 CDN，只加入抖音清单；每跳域名/协议/端口校验仍生效，直连仅解析一次，不按 DNS 返回 IP 的公网属性拒绝 TUN 路由。
 - 上游加入可验证修复后优先移除此覆盖。固定版本升级或平台 salt/参数变化时，重新运行补丁测试、双平台实际下载、解码和打包验证；不自动切回旧引擎，不声称补丁永久有效。
 
 ## M2 桌面界面

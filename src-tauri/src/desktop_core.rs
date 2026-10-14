@@ -38,6 +38,8 @@ pub struct Task {
     pub bytes: u64,
     pub total_bytes: Option<u64>,
     pub speed_bps: Option<f64>,
+    #[serde(default)]
+    pub merging: bool,
     pub error: Option<String>,
     pub path: Option<PathBuf>,
     pub created_at: u64,
@@ -294,6 +296,7 @@ impl Core {
                 task.error = Some("INTERRUPTED".into());
                 task.canceling = false;
                 task.speed_bps = None;
+                task.merging = false;
                 task.revision += 1;
                 let intent = db.query_row(
                     "SELECT source,target,size,manifest FROM commit_intents WHERE task_id=?",
@@ -656,6 +659,7 @@ impl Core {
             bytes: 0,
             total_bytes: None,
             speed_bps: None,
+            merging: false,
             error: None,
             path: None,
             created_at: now(),
@@ -767,11 +771,14 @@ impl Core {
                         Some(crate::files::read_cover(&stage.path().join("cover"))?)
                     } else { None };
                     let mut inner = core.inner.lock().unwrap();
-                    let cached = parse_cache::save(&mut inner.db, &video, images, cover, now())?;
+                    let mut cached = parse_cache::save(&mut inner.db, &video, images, cover, now())?;
                     parse_cache::remember(&inner.db, &input, &cached.video)?;
                     let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
                     task.cached_at = Some(cached.saved_at);
                     task.cover_cached = cached.has_cover;
+                    if video["cookie_warning"] == "BROWSER_COOKIES_UNAVAILABLE" {
+                        cached.video["cookie_warning"] = video["cookie_warning"].clone();
+                    }
                     Ok(cached.video)
                 });
                 stage.close().context("IO_ERROR")?;
@@ -844,6 +851,7 @@ impl Core {
         }
         task.canceling = false;
         task.speed_bps = None;
+        task.merging = false;
         task.revision += 1;
         if publish(&mut inner, task.clone(), &*self.emit).is_err() {
             task.status = Status::Failed;
@@ -1011,7 +1019,7 @@ impl Core {
                         "expected":{"platform":video["platform"],"video_id":video["video_id"],"kind":video["kind"].as_str().unwrap_or("video"),
                             "image_count":video["images"].as_array().map(Vec::len)},"staging_dir":media}),
                     |event| {
-                        if last.elapsed() < Duration::from_millis(250) { return; }
+                        if last.elapsed() < Duration::from_millis(250) && event["phase"] != "merging" { return; }
                         last = Instant::now();
                         let mut inner = core.inner.lock().unwrap();
                         let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
@@ -1019,6 +1027,7 @@ impl Core {
                         task.bytes = event["bytes"].as_u64().unwrap_or(0);
                         task.total_bytes = event["total_bytes"].as_u64();
                         task.speed_bps = event["speed_bps"].as_f64();
+                        task.merging |= event["phase"] == "merging";
                         task.completed_items = event["completed_items"].as_u64();
                         task.total_items = event["total_items"].as_u64();
                         task.revision += 1;
@@ -1079,6 +1088,7 @@ impl Core {
                     task.completed_at = Some(now());
                     task.status = Status::Completed;
                     task.speed_bps = None;
+                task.merging = false;
                     task.revision += 1;
                     // Cancellation and file/DB commit share this lock.
                     publish(&mut inner, task, &*core.emit)?;
@@ -1220,6 +1230,25 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+    #[tokio::test]
+    async fn live_cookie_warning_reaches_ui_but_is_not_replayed_from_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = app.resolve("cookie-warning".into()).unwrap();
+        let ready = wait(&app, &task.id, Status::Ready).await;
+        assert_eq!(
+            ready.video.as_ref().unwrap()["cookie_warning"],
+            "BROWSER_COOKIES_UNAVAILABLE"
+        );
+        app.cancel(&task.id).await.unwrap();
+        let cached = app
+            .resolve("https://www.douyin.com/video/123".into())
+            .unwrap();
+        let cached = wait(&app, &cached.id, Status::Ready).await;
+        assert!(cached.cache_hit);
+        assert!(cached.video.as_ref().unwrap()["cookie_warning"].is_null());
+        app.shutdown().await;
     }
     #[tokio::test]
     async fn selected_format_survives_restart_and_reaches_fresh_download() {
@@ -1553,6 +1582,7 @@ mod tests {
             bytes: 0,
             total_bytes: None,
             speed_bps: None,
+            merging: false,
             error: None,
             path: None,
             created_at: now(),

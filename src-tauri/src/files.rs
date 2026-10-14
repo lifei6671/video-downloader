@@ -31,10 +31,20 @@ impl Video {
         if !matches!(self.kind.as_str(), "video" | "image_album")
             || !matches!(self.resolver.as_str(), "yt-dlp" | "dtk")
             || (self.kind == "image_album" && self.resolver != "dtk")
-            || !matches!(self.platform.as_str(), "douyin" | "tiktok")
-            || self.video_id.is_empty()
-            || self.video_id.len() > 30
-            || !self.video_id.bytes().all(|c| c.is_ascii_digit())
+            || if self.platform == "youtube" {
+                self.resolver != "yt-dlp"
+                    || self.kind != "video"
+                    || self.video_id.len() != 11
+                    || !self
+                        .video_id
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+            } else {
+                !matches!(self.platform.as_str(), "douyin" | "tiktok")
+                    || self.video_id.is_empty()
+                    || self.video_id.len() > 30
+                    || !self.video_id.bytes().all(|c| c.is_ascii_digit())
+            }
         {
             bail!("INVALID_ENGINE_RESULT");
         }

@@ -76,7 +76,17 @@ pub fn share_url(input: &str) -> Option<String> {
         return None;
     }
     url.set_scheme("https").ok()?;
+    let video_id = if url.path() == "/watch" {
+        url.query_pairs()
+            .find(|(key, _)| key == "v")
+            .map(|(_, value)| value.into_owned())
+    } else {
+        None
+    };
     url.set_query(None);
+    if let Some(id) = video_id {
+        url.query_pairs_mut().append_pair("v", &id);
+    }
     url.set_fragment(None);
     let path = url.path().trim_end_matches('/').to_owned();
     url.set_path(&path);
@@ -182,7 +192,13 @@ pub fn save(
         }
     }
     let object = metadata.as_object_mut().context("INVALID_ENGINE_RESULT")?;
-    for field in ["cover_filename", "cover_bytes", "cover_error", "source_url"] {
+    for field in [
+        "cover_filename",
+        "cover_bytes",
+        "cover_error",
+        "source_url",
+        "cookie_warning",
+    ] {
         object.remove(field);
     }
     let has_cover = cover.is_some();
@@ -348,5 +364,21 @@ mod tests {
             )
             .unwrap();
         assert!(!urls.contains("share text") && !urls.contains("tracking"));
+    }
+    #[test]
+    fn youtube_watch_aliases_keep_distinct_video_ids() {
+        let first = share_url("https://www.youtube.com/watch?v=BaW_jenozKc&list=ignored").unwrap();
+        let second = share_url("https://www.youtube.com/watch?v=YE7VzlLtp-4&tracking=x").unwrap();
+        assert_eq!(first, "https://www.youtube.com/watch?v=BaW_jenozKc");
+        assert_ne!(first, second);
+        let mut db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let video = serde_json::json!({"platform":"youtube","video_id":"BaW_jenozKc",
+            "canonical_url":first,"kind":"video","resolver":"yt-dlp",
+            "cookie_warning":"BROWSER_COOKIES_UNAVAILABLE"});
+        let stored = save(&mut db, &video, vec![], None, 1).unwrap();
+        assert!(stored.video["cookie_warning"].is_null());
+        assert!(find(&db, &first, "auto").unwrap().is_some());
+        assert!(find(&db, &second, "auto").unwrap().is_none());
     }
 }

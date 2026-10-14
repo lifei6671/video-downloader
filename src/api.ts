@@ -3,9 +3,9 @@ import { listen } from '@tauri-apps/api/event';
 export type Status = 'parsing' | 'ready' | 'queued' | 'downloading' | 'completed' | 'failed' | 'canceled';
 export type Resolver = 'auto' | 'yt-dlp' | 'dtk';
 export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string }
-export interface VideoFormat { format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
-export interface Video { formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
-export interface Task { id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
+export interface VideoFormat { requires_merge?: boolean; format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
+export interface Video { cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
+export interface Task { merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
 export interface Profile { platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
 export interface Settings { download_directory: string; max_downloads: number; profiles: Profile[] }
 export const api = {
@@ -42,8 +42,12 @@ export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlyS
   return [...map.values()].sort((a, b) => b.created_at - a.created_at);
 }
 const errors: Record<string, string> = {
-  INVALID_INPUT: '请粘贴抖音或 TikTok 的视频分享链接',
-  UNSUPPORTED_PLATFORM: '请粘贴抖音或 TikTok 的视频分享链接',
+  INVALID_INPUT: '请粘贴抖音、TikTok 或 YouTube 的视频分享链接',
+  UNSUPPORTED_PLATFORM: '请粘贴抖音、TikTok 或 YouTube 的视频分享链接',
+  FFMPEG_UNAVAILABLE: '此高清规格需要合并音视频。请安装 FFmpeg；若使用自定义目录，请加入系统 PATH 后重试。',
+  JS_RUNTIME_UNAVAILABLE: 'YouTube 解析需要本机 Node.js 22+ 或 Deno 2.3+。请安装并加入 PATH，重启应用后重试。',
+  BROWSER_COOKIES_UNAVAILABLE: '未从系统默认浏览器读取到此平台的可用 Cookie。请确认已登录；若浏览器被占用或加密不支持，可关闭后重试，或在设置中粘贴 Cookie。',
+  MEDIA_MERGE_FAILED: 'FFmpeg 合并音视频失败，请检查本机 FFmpeg 和磁盘空间后重试。',
   FORMAT_UNAVAILABLE: '所选视频规格已不可用，请重新解析后选择；未自动降级。',
   UNSUPPORTED_CONTENT: '此作品或所选引擎不支持解析，图集请使用自动或 DTK',
   CONFIG_INVALID: '配置格式有误，请检查 Cookie、代理或 User-Agent',

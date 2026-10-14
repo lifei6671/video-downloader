@@ -2,7 +2,6 @@
 import functools
 import base64
 import http.client
-import ipaddress
 import socket
 import urllib.request
 from urllib.parse import unquote, urlsplit
@@ -15,6 +14,8 @@ from yt_dlp.utils.networking import select_proxy
 # Platform web/API and video CDN suffixes used by the two pinned extractors.
 # This is application policy, not a generated dtk asset or a general-site downloader.
 DOMAINS = {
+    'youtube': ('youtube.com', 'youtu.be', 'youtube-nocookie.com', 'googlevideo.com',
+                'ytimg.com', 'youtubei.googleapis.com'),
     'douyin': ('douyin.com', 'iesdouyin.com', 'amemv.com', 'douyinvod.com',
                'bytecdn.cn', 'byteimg.com', 'douyinstatic.com', 'zjcdn.com', '365yg.com', 'douyinpic.com'),
     'tiktok': ('tiktok.com', 'tiktokv.com', 'tiktokcdn.com', 'tiktokcdn-us.com',
@@ -39,12 +40,12 @@ def validate_target(url, platform):
         raise TargetError('NETWORK_TARGET_REJECTED') from None
 
 
-def public_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
-    """Resolve once, validate every address, then connect to those exact sockaddr values."""
+def direct_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    """Resolve once and use OS routing, including private addresses returned by TUN DNS."""
     host, port = address
     addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
-        raise TargetError('NETWORK_TARGET_REJECTED')
+    if not addresses:
+        raise OSError('getaddrinfo returned no addresses')
     last_error = None
     for family, kind, proto, _, sockaddr in addresses:
         connection = socket.socket(family, kind, proto)
@@ -85,7 +86,7 @@ class GuardedHTTPHandler(HTTPHandler):
     def connection(self, base, *args, **kwargs):
         connection = _create_http_connection(base, self._source_address, *args, **kwargs)
         if self.direct:
-            connection._create_connection = public_connection
+            connection._create_connection = direct_connection
         return connection
 
     def http_open(self, request):
@@ -123,7 +124,7 @@ class GuardedRH(UrllibRH):
 
     def _create_instance(self, proxies, cookiejar, legacy_ssl_support=None):
         # Keep yt-dlp's HTTP decoding, SOCKS, cookie and redirect implementation.
-        # Only add a per-hop guard and pin direct sockets to validated DNS results.
+        # Guard each URL hop and connect directly to the OS resolver's addresses.
         opener = urllib.request.OpenerDirector()
         for handler in (
             TargetGuard(self.platform), ExplicitProxyHandler(proxies),
