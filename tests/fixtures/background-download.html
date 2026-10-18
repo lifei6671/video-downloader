@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+// Explicit browser-only mock of IPC. No download, login or platform request occurs.
+import {api} from '/src/api';
+const scenario = new URLSearchParams(location.search).get('scenario') || 'telegram';
+const platform = ['douyin','tiktok','youtube'].includes(scenario) ? scenario : scenario === 'album' ? 'douyin' : 'telegram';
+const video = {platform, video_id:'100_9', canonical_url:platform === 'telegram' ? 'https://t.me/c/100/9' : platform === 'youtube' ? 'https://www.youtube.com/watch?v=test1234567' : platform === 'tiktok' ? 'https://www.tiktok.com/@test/video/123' : 'https://www.douyin.com/video/123', title:'原作品', resolver:scenario === 'album' ? 'dtk' : platform === 'telegram' ? 'tdl' : 'yt-dlp', kind:scenario === 'album' ? 'image_album' : 'video', filesize:65536, selected_format_id:scenario === 'album' ? null : 'original', formats:scenario === 'album' ? [] : [{format_id:'original',container:'mp4',filesize:65536}], images:scenario === 'album' ? [{quality_source:'original',width:1,height:1}] : undefined};
+const original = {id:'original',revision:1,status:'ready',video,bytes:0,total_bytes:null,speed_bps:null,error:null,path:null,created_at:10,completed_at:null,canceling:false,file_missing:false,queue_order:null,download_requested:false,cover_path:null,cover_error:null,files:[],completed_items:null,total_items:null,cache_hit:false,cached_at:null,cover_cached:false};
+const completed = {...structuredClone(original),id:'previous',revision:2,status:'completed',path:'C:\\TestVideos\\previous.mp4',download_requested:true,completed_at:9};
+let tasks = [structuredClone(original), ...(scenario === 'duplicate' ? [completed] : []), ...(scenario === 'multiple' ? [{...structuredClone(original),id:'older-preview',created_at:1,video:{...video,title:'更早的未提交预览'}}] : []), ...(scenario === 'queued' ? [{...structuredClone(original),id:'running',status:'downloading',download_requested:true,video:{...video,title:'其他正在下载的作品'}}] : [])];
+let listener = () => {}; let removedListener = () => {}; let next = 0; const pendingUpdates = [], pendingSnapshots = [];
+const control = {loaded:false,calls:[],holdEvents:scenario === 'delayed',holdRefresh:scenario === 'delayed',race:scenario === 'race',release:()=>{},snapshot:()=>structuredClone(tasks),flush:()=>{control.holdEvents=false;control.holdRefresh=false;for(const task of pendingUpdates.splice(0))listener(task);for(const [resolve,snapshot] of pendingSnapshots.splice(0))resolve(snapshot)},complete:id=>{const task=tasks.find(t=>t.id===id);Object.assign(task,{revision:task.revision+1,status:'completed',bytes:65536,path:'C:\\TestVideos\\'+id+'.mp4',completed_at:20});listener(structuredClone(task))},stale:()=>listener(structuredClone(original))};
+window.backgroundTest = control;
+if (scenario.startsWith('clear')) {
+  const row = (id,status,title) => ({...structuredClone(original),id,status,download_requested:true,
+    video:{...video,video_id:'100_'+id,title},path:status==='completed'?'C:\\TestVideos\\'+id+'.mp4':null});
+  tasks.push(row('live','downloading','进行中的作品'),row('queue','queued','等待中的作品'),row('parse','parsing','解析中的下载'));
+  if (scenario !== 'clear-empty') tasks.push(row('done','completed','已完成作品'),row('failed','failed','失败作品'),row('cancel','canceled','取消作品'));
+  const stale = structuredClone(tasks.filter(task => ['completed','failed','canceled'].includes(task.status)));
+  control.replay = () => stale.forEach(task=>listener(task));
+}
+control.completeCached = id => {
+  const task = tasks.find(task => task.id === id);
+  task.cover_cached = true;
+  control.complete(id);
+};
+if (scenario === 'cached-cover') {
+  Object.assign(tasks[0], {status:'completed',download_requested:true,cover_cached:true,
+    path:'C:\\TestVideos\\original.mp4',bytes:65536,completed_at:20});
+}
+if (scenario.startsWith('actions')) {
+  const row = (id,status,title,kind='video',missing=false) => ({...structuredClone(original),id,status,
+    download_requested:true,file_missing:missing,video:{...video,video_id:'100_'+id,title,kind},
+    path:status==='completed'?'C:\\TestVideos\\'+id+(kind==='video'?'.mp4':''):null});
+  tasks = [row('done','completed','可播放视频'),row('album','completed','已完成图集','image_album'),
+    row('missing','completed','文件缺失视频','video',true),row('live','downloading','下载中视频'),
+    row('failed','failed','失败视频'),row('cancel','canceled','取消视频')];
+}
+control.fail = id => {
+  const task = tasks.find(task => task.id === id);
+  Object.assign(task, {revision:task.revision + 1,status:'failed',error:'NETWORK_ERROR'});
+  listener(structuredClone(task));
+};
+api.subscribe = async (callback,removed=()=>{}) => {listener=callback;removedListener=removed;return ()=>{if(listener===callback){listener=()=>{};removedListener=()=>{}}}};
+api.tasks = async () => {control.loaded=true;const snapshot=structuredClone(tasks);if(control.holdRefresh && control.calls.some(c=>c.type==='download'))return new Promise(resolve=>pendingSnapshots.push([resolve,snapshot]));if(scenario==='refresh-error' && control.calls.some(c=>c.type==='download'))throw 'NETWORK_ERROR';return snapshot};
+api.settings = async () => ({download_directory:'C:\\TestVideos',max_downloads:1,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'test-only',proxy:null,cookie_configured:false})),tdl:{enabled:true,path:null}});
+api.checkTdl = async () => ({path:'C:\\TestTools\\tdl.exe',version:'0.20.4'});
+api.resolve = async input => {control.calls.push({type:'resolve',input});const task={...structuredClone(original),id:'next-'+(++next),created_at:10+next,video:{...structuredClone(video),video_id:['duplicate','race'].includes(scenario)?video.video_id:'100_'+(9+next),canonical_url:input,title:'新作品 '+next}};tasks.unshift(task);return structuredClone(task)};
+api.cancel = async id => {control.calls.push({type:'cancel',id});const task=tasks.find(t=>t.id===id);Object.assign(task,{status:'canceled',revision:task.revision+1});listener(structuredClone(task))};
+api.clearHistory = async () => {
+  control.calls.push({type:'clear-history'});
+  if(scenario==='clear-pending')await new Promise(resolve=>control.release=resolve);
+  if(scenario==='clear-failure')throw 'DATABASE_ERROR';
+  const ids=tasks.filter(task=>task.download_requested && ['completed','failed','canceled'].includes(task.status)).map(task=>task.id);
+  tasks=tasks.filter(task=>!ids.includes(task.id));
+  return ids;
+};
+api.deleteFile = async id => {control.calls.push({type:'delete-file',id});throw 'UNEXPECTED_FILE_DELETION'};
+api.reveal = async id => {control.calls.push({type:'reveal',id})};
+api.play = async id => {control.calls.push({type:'play',id});if(scenario==='actions-error')throw 'PLAYBACK_OPEN_FAILED'};
+api.remove = async id => {control.calls.push({type:'remove',id});tasks=tasks.filter(task=>task.id!==id);removedListener(id)};
+api.download = async (id,confirm=false) => {
+  control.calls.push({type:'download',id,confirm,format:tasks.find(t=>t.id===id).video.selected_format_id});
+  if(scenario==='pending')await new Promise(resolve=>control.release=resolve);
+  if(scenario==='failure')throw 'NETWORK_ERROR';
+  if(control.race && !confirm){control.race=false;tasks.push(structuredClone(completed));throw 'ALREADY_DOWNLOADED'}
+  const task=tasks.find(t=>t.id===id);Object.assign(task,{status:scenario==='queued'?'queued':'downloading',revision:task.revision+1,download_requested:true,queue_order:scenario==='queued'?1:null});
+  if(control.holdEvents)pendingUpdates.push(structuredClone(task));else listener(structuredClone(task));
+};
+api.image = async () => Array.from(Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ0kAAAAASUVORK5CYII='),c=>c.charCodeAt(0)));
+api.cover = async () => api.image();
+await import('/src/main');
+</script></body></html>

@@ -1,7 +1,7 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 export type Status = 'parsing' | 'ready' | 'queued' | 'downloading' | 'completed' | 'failed' | 'canceled';
-export type Resolver = 'auto' | 'yt-dlp' | 'dtk';
+export type Resolver = 'auto' | 'yt-dlp' | 'dtk' | 'tdl';
 export type ProjectPage = 'source' | 'issues' | 'releases' | 'license' | 'credits' | 'credit-ytdlp' | 'credit-dtk' | 'credit-tauri' | 'credit-react' | 'credit-shadcn' | 'credit-lucide';
 export interface UpdateCheck { current_version: string; latest_version: string; release_tag: string; has_update: boolean; release_notes: string; published_at: string | null; installer: { name: string; size: number } | null }
 export interface UpdateDownload { id: string; revision: number; release: UpdateCheck; phase: 'preparing' | 'downloading' | 'verifying' | 'canceling' | 'completed' | 'canceled' | 'failed'; downloaded_bytes: number; total_bytes: number | null; filename: string | null; error: string | null }
@@ -11,12 +11,23 @@ export interface RuntimeProgress { tool: RuntimeTool['id']; phase: 'downloading'
 export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string }
 export interface VideoFormat { requires_merge?: boolean; format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
 export interface Video { cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
-export interface Task { merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
+export interface Task { eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
 export interface Profile { platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
-export interface Settings { download_directory: string; max_downloads: number; profiles: Profile[] }
+export interface TdlSettings { enabled: boolean; path: string | null; session_directory?: string | null }
+export interface TdlStatus { path: string; version: string }
+export interface TdlLoginStatus { id: string; phase: 'starting' | 'qr' | 'password' | 'verifying'; qr: boolean[][] | null }
+export interface Settings { download_directory: string; max_downloads: number; profiles: Profile[]; tdl: TdlSettings }
 export const api = {
+  saveTdlSettings: (config: TdlSettings) => invoke<Settings>('save_tdl_settings', { config }),
+  selectTdlExecutable: () => invoke<string | null>('select_tdl_executable'),
+  checkTdl: (path: string | null) => invoke<TdlStatus>('check_tdl', { path }),
+  loginTdl: (path: string | null) => invoke<Settings>('login_tdl', { path }),
+  cancelTdlLogin: () => invoke<void>('cancel_tdl_login'),
+  tdlLoginStatus: () => invoke<TdlLoginStatus | null>('tdl_login_status'),
+  submitTdlPassword: (loginId: string, password: string) => invoke<void>('submit_tdl_password', { loginId, password }),
   readClipboardText: () => invoke<string>('read_clipboard_text'),
   openProjectPage: (page: ProjectPage, releaseTag?: string) => invoke<void>('open_project_page', { page, releaseTag }),
+  openReleaseNoteLink: (url: string) => invoke<void>('plugin:opener|open_url', { url }),
   checkForUpdates: () => invoke<UpdateCheck>('check_for_updates'),
   updateDownload: () => invoke<UpdateDownload | null>('get_update_download'),
   startUpdateDownload: (releaseTag: string) => invoke<UpdateDownload>('start_update_download', { releaseTag }),
@@ -41,10 +52,12 @@ export const api = {
   cancel: (taskId: string) => invoke<void>('cancel_task', { taskId }),
   retry: (taskId: string) => invoke<Task>('retry_task', { taskId }),
   remove: (taskId: string) => invoke<void>('remove_history', { taskId }),
+  clearHistory: () => invoke<string[]>('clear_download_history'),
   deleteFile: (taskId: string) => invoke<void>('delete_local_file', { taskId }),
   concurrency: (value: number) => invoke<Settings>('set_max_downloads', { value }),
   directory: () => invoke<Settings>('select_download_directory'),
   reveal: (taskId: string) => invoke<void>('reveal_download', { taskId }),
+  play: (taskId: string) => invoke<void>('play_download', { taskId }),
   save: (update: { platform: string; user_agent: string; cookie: string | null; proxy: string | null }) => invoke<Settings>('save_profile', { update }),
   subscribe: async (callback: (task: Task) => void, removed: (id: string) => void) => {
     const stopUpdates = await listen<Task>('task_updated', event => callback(event.payload));
@@ -122,5 +135,25 @@ const errors: Record<string, string> = {
   INVALID_STATE: '当前任务状态不支持此操作',
   ALREADY_DOWNLOADED: '该作品已有成功下载记录，请确认是否重新下载',
   FILE_MISSING: '文件已移动或删除',
+  PLAYBACK_OPEN_FAILED: '无法启动系统默认播放器，请检查视频文件关联或播放器安装',
+  TDL_UNAVAILABLE: '未找到可用 tdl，请自行安装或在运行依赖中设置可执行路径。',
+  TDL_UNSUPPORTED: 'tdl 无法正常返回版本信息，或当前操作所需命令不可用。请检查安装与命令能力。',
+  TDL_EXPERIMENTAL_DISABLED: 'Telegram 实验模式尚未启用，请先在系统设置 → 平台账号 → Telegram 中阅读风险说明并启用。',
+  TDL_SERVICE_FAILED: 'tdl 服务启动失败或意外退出。请在平台账号 → Telegram 中登录 tdl，并确认没有其他命令占用当前会话。',
+  TDL_BUSY: 'tdl 正在登录，或有 Telegram 任务使用会话。请先结束登录或取消相关任务后重试。',
+  TDL_LOGIN_FAILED: 'tdl 登录未成功，原有会话配置已保留。请检查 Telegram 网络连接后重新扫码。',
+  TDL_2FA_INVALID: '两步验证密码错误，请重新扫码并输入正确密码。原有登录已保留。',
+  TDL_PASSWORD_INVALID: '请输入有效的两步验证密码，不支持换行或控制字符。',
+  TDL_PTY_UNAVAILABLE: '无法创建 tdl 登录会话，请检查系统权限；Windows 需要支持 ConPTY 的系统版本。',
+  TDL_LOGIN_TIMEOUT: 'tdl 登录等待超过 5 分钟，进程已停止，原有会话配置已保留。',
+  TDL_CHECK_TIMEOUT: 'tdl 依赖检测超时，进程已回收。',
+  TDL_START_TIMEOUT: 'tdl 服务启动超时，请检查本机 tdl 的登录状态和 Telegram 网络连接。',
+  TDL_PORT_CONFLICT: 'tdl 临时端口发生冲突，本次操作已停止，请重试。',
+  TDL_STOP_FAILED: '无法确认 tdl 服务已回收，请关闭应用并检查本机进程。',
+  TDL_HTTP_ERROR: 'tdl HTTP 请求失败或媒体传输中断，本次下载未完成。',
+  TDL_INVALID_RESPONSE: 'tdl 服务返回的媒体路径或 HTTP 元数据不符合已验证协议。',
+  TDL_CHANNEL_ID_REQUIRED: '当前 tdl 服务尚未确认这个频道的数字 ID。请改用 https://t.me/c/数字频道ID/消息ID 链接，或等待当前 Telegram 下载结束后重试。',
+  TDL_IDENTITY_MISMATCH: 'tdl 返回的频道或消息身份不匹配，操作已拒绝。',
+  TDL_MEDIA_CHANGED: '原始文件大小、类型或文件名已变化，请重新解析后再下载。',
 };
 export const errorText = (error: unknown) => errors[String(error)] ?? '操作失败，请重试';

@@ -54,6 +54,16 @@ yt-dlp 2026.08.19 的 URL-key parser 对该作品 `bytevc1_4k` 未填尺寸；�
 
 4K 媒体请求显式使用平台根 Referer `https://www.douyin.com/`；本机同一规格 CDN 请求缺少该头时返回 403，带根 Referer 时返回 206。该头只用于抖音下载，TikTok 和 Cookie 域隔离保持不变。
 
+## Telegram tdl 外部工具（2026-10-18）
+
+按用户决定只调用用户自行安装的 [iyear/tdl v0.20.4](https://github.com/iyear/tdl/tree/9d7d49eef2bcb04da720c26e33598c49c68b9ddd)，commit `9d7d49eef2bcb04da720c26e33598c49c68b9ddd`，上游许可 AGPL-3.0。未 vendoring、复制其 Go 源码或随安装包分发 tdl；自有 Rust 适配器依据 `app/dl/serve.go`、`serve.go.tmpl`、`cmd/dl.go`、`cmd/version.go`、`cmd/root.go` 和 `core/util/tutil/tutil.go` 的 CLI/HTTP 契约实现。用户另行授权运行依赖登录，依据 `cmd/login.go`、`app/login/login.go`、`app/login/qr.go` 调用显式 QR 模式和独立存储；禁止默认 desktop 导入及覆盖既有命名空间。当前全接口监听、缺少令牌及请求白名单须作为已知实验风险持续呈现；升级和真实运行边界见 [集成说明](../docs/tdl-integration.md)。
+
+### tdl 界面内认证桥接（2026-10-18）
+
+仍执行用户安装的 tdl v0.20.4 `login --type qr`，不修改其 Go 代码。上游没有 JSON 认证接口；隐藏伪终端复用 `app/login/qr.go` 的二维码/2FA 流程，二维码像素还原依据 `skip2/go-qrcode` commit `da1b6568686e` 的 `ToSmallString(false)`，未复制其实现源码或引入 Telegram 认证库。
+
+新增 Rust 直接依赖：`portable-pty 0.9.0`（MIT）负责 Windows ConPTY / Unix PTY，`vt100 0.16.2`（MIT）处理终端重绘及屏幕状态，`zeroize 1.9.1`（Apache-2.0 OR MIT）清理 Rust 临时密码内存。完整版本/校验值见 Cargo.lock；新增及直接使用依赖的许可文本见 `vendor/tdl-ui-licenses.txt`，随安装包放入 `licenses/tdl-ui-licenses.txt`。不新增 shell 登录脚本，不转发终端原文、二维码 URL 或密码到日志/持久化。
+
 ## 运行依赖下载（2026-10-18）
 
 用户明确授权运行依赖页下载缺失工具，替代此前“只检测、不下载”的约束。仅作为应用专属外部工具，不更新内置解析引擎。

@@ -2,7 +2,8 @@
   "bundle": {
     "active": true,
     "resources": {
-      "../python-engine/dist/video-engine/": "video-engine/"
+      "../python-engine/dist/video-engine/": "video-engine/",
+      "../vendor/tdl-ui-licenses.txt": "licenses/tdl-ui-licenses.txt"
     }
   }
 }

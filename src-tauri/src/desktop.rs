@@ -37,6 +37,71 @@ fn get_settings(core: State<AppCore>) -> Settings {
     core.settings()
 }
 #[tauri::command]
+fn save_tdl_settings(
+    core: State<AppCore>,
+    config: yingqu_core::tdl_bridge::TdlSettings,
+) -> Result<Settings, String> {
+    core.save_tdl(config).map_err(error)
+}
+#[tauri::command]
+async fn select_tdl_executable(
+    app: tauri::AppHandle,
+    core: State<'_, AppCore>,
+) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let dialog = app.dialog().file().set_title("选择 tdl 可执行文件");
+    #[cfg(windows)]
+    let dialog = dialog.add_filter("可执行文件", &["exe"]);
+    let dialog = if let Some(parent) = core.settings().tdl.path.as_ref().and_then(|p| p.parent()) {
+        dialog.set_directory(parent)
+    } else {
+        dialog
+    };
+    dialog.pick_file(move |file| {
+        let _ = tx.send(file);
+    });
+    rx.await
+        .map_err(|_| "IO_ERROR")?
+        .map(|file| {
+            file.into_path()
+                .map(|p| p.to_string_lossy().into_owned())
+                .map_err(|_| "IO_ERROR".into())
+        })
+        .transpose()
+}
+#[tauri::command]
+async fn check_tdl(
+    path: Option<std::path::PathBuf>,
+) -> Result<yingqu_core::tdl_bridge::TdlStatus, String> {
+    yingqu_core::tdl_bridge::check(path.as_deref())
+        .await
+        .map_err(error)
+}
+#[tauri::command]
+async fn login_tdl(
+    core: State<'_, AppCore>,
+    path: Option<std::path::PathBuf>,
+) -> Result<Settings, String> {
+    core.login_tdl(path).await.map_err(error)
+}
+#[tauri::command]
+fn cancel_tdl_login(core: State<AppCore>) -> Result<(), String> {
+    core.cancel_tdl_login().map_err(error)
+}
+#[tauri::command]
+fn tdl_login_status(core: State<AppCore>) -> Option<yingqu_core::tdl_bridge::LoginStatus> {
+    core.tdl_login_status()
+}
+#[tauri::command]
+fn submit_tdl_password(
+    core: State<AppCore>,
+    login_id: String,
+    password: String,
+) -> Result<(), String> {
+    core.submit_tdl_password(&login_id, zeroize::Zeroizing::new(password))
+        .map_err(error)
+}
+#[tauri::command]
 fn read_clipboard_text(app: tauri::AppHandle) -> Result<String, String> {
     app.clipboard()
         .read_text()
@@ -97,6 +162,10 @@ fn remove_history(core: State<AppCore>, task_id: String) -> Result<(), String> {
     core.remove_history(&task_id).map_err(error)
 }
 #[tauri::command]
+fn clear_download_history(core: State<AppCore>) -> Result<Vec<String>, String> {
+    core.clear_history().map_err(error)
+}
+#[tauri::command]
 fn delete_local_file(core: State<AppCore>, task_id: String) -> Result<(), String> {
     core.delete_local_file(&task_id).map_err(error)
 }
@@ -135,6 +204,17 @@ fn reveal_download(
     app.opener()
         .reveal_item_in_dir(path)
         .map_err(|_| "IO_ERROR".into())
+}
+#[tauri::command]
+fn play_download(
+    app: tauri::AppHandle,
+    core: State<AppCore>,
+    task_id: String,
+) -> Result<(), String> {
+    let path = core.playback_path(&task_id).map_err(error)?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|_| "PLAYBACK_OPEN_FAILED".into())
 }
 #[tauri::command]
 fn open_project_page(
@@ -339,6 +419,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_tasks,
             get_settings,
+            save_tdl_settings,
+            select_tdl_executable,
+            login_tdl,
+            cancel_tdl_login,
+            tdl_login_status,
+            submit_tdl_password,
+            check_tdl,
             read_clipboard_text,
             get_profile_cookie,
             get_task_cover,
@@ -351,9 +438,11 @@ fn main() {
             cancel_task,
             retry_task,
             remove_history,
+            clear_download_history,
             delete_local_file,
             select_download_directory,
             reveal_download,
+            play_download,
             open_project_page,
             check_for_updates,
             get_update_download,

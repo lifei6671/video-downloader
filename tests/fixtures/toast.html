@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><main id="root"></main><script type="module">
+// Isolated component fixture: no IPC, credentials, platform or download access.
+import React from 'react';
+import {createRoot} from 'react-dom/client';
+import {toast} from 'sonner';
+import {Toaster} from '/src/components/ui/sonner';
+import {Button} from '/src/components/ui/button';
+import '/src/style.css';
+const types = ['default','success','error','warning','info','loading'];
+const labels = ['默认提示','下载成功','下载失败','需要处理','提示信息','正在处理'];
+createRoot(document.getElementById('root')).render(React.createElement(React.Fragment,null,
+  React.createElement('div',{style:{display:'flex',gap:8,padding:24}},types.map((type,index)=>React.createElement(Button,{key:type,onClick:()=>{
+    const options={id:'variant',duration:Infinity,description:'这是一条包含详细说明的通知，用于确认状态样式和关闭按钮布局。'};
+    (type==='default'?toast:toast[type])(labels[index],options);
+  }},type))),React.createElement(Toaster,{position:'top-center'})));
+</script></body></html>

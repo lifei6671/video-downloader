@@ -33,7 +33,10 @@ pub fn init(db: &Connection) -> Result<bool> {
     Ok(!existed)
 }
 
-fn revision() -> String {
+fn revision(resolver: &str) -> String {
+    if resolver == "tdl" {
+        return crate::tdl_bridge::PROTOCOL_REVISION.into();
+    }
     let dtk: Value = serde_json::from_str(include_str!("../../vendor/dtk/manifest.json"))
         .expect("bundled manifest");
     format!(
@@ -98,7 +101,7 @@ pub fn get(db: &Connection, platform: &str, id: &str, resolver: &str) -> Result<
         "SELECT cache_key,metadata,saved_at,cover IS NOT NULL FROM parse_cache
          WHERE platform=?1 AND video_id=?2 AND revision=?4 AND
            (resolver=?3 OR (?3='auto' AND resolver=CASE WHEN kind='image_album' THEN 'dtk' ELSE 'yt-dlp' END))",
-        params![platform,id,resolver,revision()],
+        params![platform,id,resolver,revision(resolver)],
         |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,bool>(3)?)),
     ).optional().context("DATABASE_ERROR")?;
     let Some((stored_key, metadata, saved_at, has_cover)) = row else {
@@ -146,6 +149,37 @@ pub fn find(db: &Connection, input: &str, resolver: &str) -> Result<Option<Previ
     }
 }
 
+// Re-resolve a known public alias in tdl when starting a download, so the live
+// service can bind that username to its freshly verified numeric channel ID.
+pub fn tdl_source(db: &Connection, video: &Value) -> Result<String> {
+    let canonical = video["canonical_url"]
+        .as_str()
+        .context("INVALID_ENGINE_RESULT")?;
+    let expected = crate::tdl_bridge::message_link(canonical)?;
+    let mut statement = db.prepare(
+        "SELECT url FROM parse_cache_aliases WHERE platform='telegram' AND video_id=? ORDER BY url"
+    ).context("DATABASE_ERROR")?;
+    let aliases = statement
+        .query_map(
+            [video["video_id"]
+                .as_str()
+                .context("INVALID_ENGINE_RESULT")?],
+            |r| r.get::<_, String>(0),
+        )
+        .context("DATABASE_ERROR")?;
+    for alias in aliases {
+        let alias = alias.context("DATABASE_ERROR")?;
+        if let Ok(link) = crate::tdl_bridge::message_link(&alias) {
+            if link.channel.is_none() && link.message == expected.message {
+                // Preserve the database key for precise invalidation (including
+                // telegram.me). The bridge normalizes its own CLI argument.
+                return Ok(alias);
+            }
+        }
+    }
+    Ok(canonical.to_owned())
+}
+
 pub fn remember(db: &Connection, input: &str, video: &Value) -> Result<()> {
     if let Some(url) = share_url(input) {
         db.execute(
@@ -163,6 +197,31 @@ pub fn remember(db: &Connection, input: &str, video: &Value) -> Result<()> {
         )
         .context("DATABASE_ERROR")?;
     }
+    Ok(())
+}
+
+// A fresh tdl HEAD can prove cached original-file metadata obsolete. Let retry resolve it again.
+pub fn invalidate_tdl(db: &mut Connection, video: &Value) -> Result<()> {
+    let cache_key = key(video)?;
+    if video["platform"] != "telegram" || video["resolver"] != "tdl" {
+        bail!("INVALID_ENGINE_RESULT");
+    }
+    let tx = db.transaction().context("DATABASE_ERROR")?;
+    tx.execute(
+        "DELETE FROM parse_cache_images WHERE cache_key=?",
+        [&cache_key],
+    )
+    .context("DATABASE_ERROR")?;
+    tx.execute("DELETE FROM parse_cache WHERE cache_key=?", [&cache_key])
+        .context("DATABASE_ERROR")?;
+    tx.execute(
+        "DELETE FROM parse_cache_aliases WHERE platform='telegram' AND video_id=?",
+        [video["video_id"]
+            .as_str()
+            .context("INVALID_ENGINE_RESULT")?],
+    )
+    .context("DATABASE_ERROR")?;
+    tx.commit().context("DATABASE_ERROR")?;
     Ok(())
 }
 
@@ -215,7 +274,7 @@ pub fn save(
             identity.kind,
             metadata.to_string(),
             i64::try_from(saved_at).context("DATABASE_ERROR")?,
-            revision(),
+            revision(&identity.resolver),
             cover
         ],
     )
@@ -266,6 +325,31 @@ pub fn image(db: &Connection, video: &Value, index: usize) -> Result<Vec<u8>> {
     Ok(body)
 }
 
+// Add a downloaded cover without replacing newer parsed metadata or restoring an
+// invalidated cache entry. A cache write failure never changes download success.
+pub fn save_cover(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {
+    if body.len() > 10 * 1024 * 1024
+        || !matches!(image_extension(body), Some("jpeg" | "png" | "webp"))
+    {
+        bail!("INVALID_MEDIA_CONTENT");
+    }
+    Ok(db.execute(
+        "UPDATE parse_cache SET cover=?1 WHERE cache_key=?2 AND revision=?3",
+        params![body, key(video)?, revision(video["resolver"].as_str().context("INVALID_ENGINE_RESULT")?)],
+    ).context("DATABASE_ERROR")? != 0)
+}
+
+// Task removal can release a shared Telegram cover while preserving reusable
+// metadata and aliases. The caller decides whether any other task still uses it.
+pub fn clear_cover(db: &Connection, video: &Value) -> Result<()> {
+    db.execute(
+        "UPDATE parse_cache SET cover=NULL WHERE cache_key=?",
+        [key(video)?],
+    )
+    .context("DATABASE_ERROR")?;
+    Ok(())
+}
+
 pub fn cover(db: &Connection, video: &Value) -> Result<Vec<u8>> {
     let body: Option<Vec<u8>> = db
         .query_row(
@@ -289,6 +373,30 @@ pub fn cover(db: &Connection, video: &Value) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn downloaded_cover_updates_existing_cache_without_overwriting_metadata_or_reviving_entries() {
+        let mut db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let video = json!({"platform":"telegram","video_id":"100_9","resolver":"tdl","kind":"video",
+            "canonical_url":"https://t.me/c/100/9","title":"current","selected_format_id":"original",
+            "formats":[{"format_id":"original","container":"mp4","filesize":4096}]});
+        let body = b"\x89PNG\r\n\x1a\nfixture";
+        assert!(!save_cover(&db, &video, body).unwrap());
+        save(&mut db, &video, vec![], None, 100).unwrap();
+        let mut stale = video.clone();
+        stale["title"] = "old".into();
+        assert!(save_cover(&db, &stale, body).unwrap());
+        let hit = find(&db, "https://t.me/c/100/9", "tdl").unwrap().unwrap();
+        assert_eq!(hit.video["title"], "current");
+        assert_eq!(hit.saved_at, 100);
+        assert!(hit.has_cover);
+        assert_eq!(cover(&db, &video).unwrap(), body);
+        assert!(save_cover(&db, &video, b"<html>error</html>").is_err());
+        db.execute("UPDATE parse_cache SET revision='obsolete',cover=NULL", []).unwrap();
+        assert!(!save_cover(&db, &video, body).unwrap());
+        assert!(cover(&db, &video).is_err());
+    }
 
     #[test]
     fn aliases_assets_and_resolver_revision_are_isolated() {

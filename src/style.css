@@ -89,6 +89,57 @@
 
 .cookie-masked { -webkit-text-security: disc; }
 
+.toaster[data-sonner-toaster] [data-sonner-toast][data-styled='true'] {
+  padding-inline-end: 44px;
+  font-family: inherit;
+}
+.toaster[data-sonner-toaster] [data-sonner-toast][data-styled='true'] [data-close-button] {
+  top: 8px;
+  right: 8px;
+  left: auto;
+  transform: none;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius);
+  color: inherit;
+  background: transparent;
+  border-color: transparent;
+}
+.toaster[data-sonner-toaster] [data-sonner-toast][data-styled='true'] [data-close-button]:hover {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  border-color: transparent;
+}
+.toaster[data-sonner-toaster] [data-sonner-toast][data-styled='true'] [data-close-button]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+.release-notes > :first-child { margin-top: 0; }
+.release-notes > :last-child { margin-bottom: 0; }
+.release-notes :where(p, ul, ol, blockquote, pre, table, hr) { margin-block: 0.75em; }
+.release-notes :where(h1, h2, h3, h4, h5, h6) { margin-block: 1em 0.5em; font-weight: 600; line-height: 1.4; }
+.release-notes h1 { font-size: 1.25em; }
+.release-notes h2 { font-size: 1.125em; }
+.release-notes :where(h3, h4, h5, h6) { font-size: 1em; }
+.release-notes :where(ul, ol) { padding-left: 1.5em; }
+.release-notes ul { list-style-type: disc; }
+.release-notes ol { list-style-type: decimal; }
+.release-notes li + li { margin-top: 0.35em; }
+.release-notes li > p { margin-block: 0.35em; }
+.release-notes strong { font-weight: 600; }
+.release-notes a { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
+.release-notes a:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.release-notes blockquote { border-left: 3px solid var(--border); padding-left: 0.75em; color: var(--muted-foreground); }
+.release-notes code { border-radius: var(--radius); background: var(--muted); padding: 0.1em 0.3em; font-size: 0.9em; }
+.release-notes pre { overflow-x: auto; border-radius: var(--radius); background: var(--muted); padding: 0.75em; }
+.release-notes pre code { padding: 0; background: transparent; }
+.release-notes table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.release-notes :where(th, td) { border: 1px solid var(--border); padding: 0.4em 0.65em; }
+.release-notes th { background: var(--muted); font-weight: 600; }
+.release-notes .task-list-item { list-style-type: none; }
+.release-notes input[type="checkbox"] { margin-right: 0.35em; accent-color: var(--primary); }
+
 .settings-navigation [data-slot="sidebar-menu-button"] {
   color: var(--sidebar-foreground);
   background: transparent;

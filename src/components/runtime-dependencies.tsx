@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { AlertCircle, Check, Download, FolderOpen, RefreshCw, Square } from 'lucide-react';
 import { api, errorText, type RuntimeProgress, type RuntimeStatus, type RuntimeTool } from '@/api';
 import { Button } from '@/components/ui/button';
@@ -51,7 +51,7 @@ export function useRuntimeDependencies() {
   return { status, checking, installing, progress, error, notice, canceling, busy, check, install, cancel };
 }
 
-export function RuntimeDependencies({ runtime }: { runtime: ReturnType<typeof useRuntimeDependencies> }) {
+export function RuntimeDependencies({ runtime, children }: { runtime: ReturnType<typeof useRuntimeDependencies>; children?: ReactNode }) {
   const { status, checking, installing, progress, error, notice, canceling, busy, check, install, cancel } = runtime;
   return <div className="flex min-w-0 flex-col gap-4" aria-busy={busy}>
     <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-muted-foreground">优先使用系统已有工具；仅在缺失或版本不满足时下载。</p><Button variant="outline" disabled={busy} onClick={() => void check()}>{checking ? <Spinner aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}{checking ? '正在检测…' : '重新检测'}</Button></div>
@@ -67,6 +67,7 @@ export function RuntimeDependencies({ runtime }: { runtime: ReturnType<typeof us
         </CardContent>{(!tool.available || working) && <CardFooter className="justify-end gap-2">{working ? <Button variant="outline" disabled={canceling} onClick={() => void cancel()}><Square aria-hidden="true" />{canceling ? '正在取消…' : '取消下载'}</Button> : <Button disabled={busy || !tool.can_install} onClick={() => void install(tool.id)}><Download aria-hidden="true" />下载缺失依赖</Button>}</CardFooter>}
       </Card>;
     })}
+    {children}
     {!status && !checking && !error && <p className="text-sm text-muted-foreground">检测后显示依赖版本与实际可执行路径。</p>}
     {status && <p className="flex items-start gap-2 break-all text-xs text-muted-foreground"><FolderOpen className="size-4 shrink-0" aria-hidden="true" />下载位置：{status.directory}<span className="shrink-0">{status.platform}</span></p>}
     <Alert role="note"><AlertCircle aria-hidden="true" /><AlertDescription>Python、yt-dlp、DTK 已随软件分发，通过软件更新升级。运行依赖下载使用系统网络及系统代理，不使用平台 Cookie 或平台代理配置。</AlertDescription></Alert>

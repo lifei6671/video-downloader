@@ -1,0 +1,18 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+// Real UI with isolated IPC mocks; never opens a native dialog or login session.
+import {api} from '/src/api';
+let settings={download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'test-only',proxy:null,cookie_configured:false})),tdl:{enabled:true,path:null,session_directory:'test-only-existing-session'}};
+const state={calls:[],selected:'C:\\Program Files\\Go\\bin\\tdl.exe',failPicker:false,failSave:false,failCheck:false,holdPicker:false,holdSave:false,holdCheck:false,release:()=>{},snapshot:()=>structuredClone(settings)};
+window.tdlPickerTest=state;
+api.settings=async()=>structuredClone(settings);
+api.tasks=async()=>[];
+api.subscribe=async()=>()=>{};
+api.cookie=async()=>'';
+api.tdlLoginStatus=async()=>null;
+api.checkRuntimeDependencies=async()=>({directory:'C:\\TestRuntime',platform:'win32-x64',tools:[{id:'ffmpeg',available:true,provider:'ffmpeg',version:'6.1.1',path:'C:\\ffmpeg.exe',source:'system',can_install:true},{id:'javascript',available:true,provider:'node',version:'22.14.0',path:'C:\\node.exe',source:'system',can_install:true}]});
+api.selectTdlExecutable=async()=>{state.calls.push({type:'choose'});if(state.holdPicker)await new Promise(resolve=>state.release=resolve);if(state.failPicker)throw 'IO_ERROR';return state.selected};
+api.saveTdlSettings=async config=>{state.calls.push({type:'save',config:structuredClone(config)});if(state.holdSave)await new Promise(resolve=>state.release=resolve);if(state.failSave)throw 'DATABASE_ERROR';settings.tdl={...config,session_directory:settings.tdl.session_directory};return structuredClone(settings)};
+api.checkTdl=async path=>{state.calls.push({type:'check',path,savedPath:settings.tdl.path});if(state.holdCheck)await new Promise(resolve=>state.release=resolve);if(state.failCheck)throw 'TDL_UNAVAILABLE';return {path:path||'C:\\Go\\bin\\tdl.exe',version:'9.1.0'}};
+await import('/src/main');
+</script></body></html>

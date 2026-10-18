@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.7.0";
+pub const ENGINE_VERSION: &str = "0.7.1";
 pub const YTDLP_VERSION: &str = "2026.08.19";
 
 async fn cancellation() -> Result<()> {
@@ -38,7 +38,14 @@ pub struct PythonBridge {
 }
 
 #[cfg(windows)]
-fn process_job(child: &Child) -> Result<std::os::windows::io::OwnedHandle> {
+pub(crate) fn process_job(child: &Child) -> Result<std::os::windows::io::OwnedHandle> {
+    process_job_handle(child.raw_handle().context("ENGINE_UNAVAILABLE")?)
+}
+
+#[cfg(windows)]
+pub(crate) fn process_job_handle(
+    process: std::os::windows::io::RawHandle,
+) -> Result<std::os::windows::io::OwnedHandle> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::System::JobObjects::*;
     unsafe {
@@ -55,10 +62,7 @@ fn process_job(child: &Child) -> Result<std::os::windows::io::OwnedHandle> {
             &limits as *const _ as *const _,
             std::mem::size_of_val(&limits) as u32,
         ) == 0
-            || AssignProcessToJobObject(
-                job.as_raw_handle(),
-                child.raw_handle().context("ENGINE_UNAVAILABLE")?,
-            ) == 0
+            || AssignProcessToJobObject(job.as_raw_handle(), process) == 0
         {
             bail!("ENGINE_UNAVAILABLE");
         }
@@ -277,6 +281,7 @@ impl PythonBridge {
                         "identify_input" => "identified",
                         "resolve_video" => "resolved",
                         "check_dependencies" | "install_dependency" => "dependencies",
+                        "extract_cover" => "cover_extracted",
                         _ => "download_finished",
                     }
             {
@@ -346,7 +351,7 @@ impl PythonBridge {
         let result = tokio::select! {
             result = async {
                 if method != "download_video" {
-                    timeout(Duration::from_secs(if method == "install_dependency" { 600 } else { 80 }), bridge.execute(id, method, params, progress))
+                    timeout(Duration::from_secs(match method { "install_dependency" => 600, "extract_cover" => 20, _ => 80 }), bridge.execute(id, method, params, progress))
                         .await.context("TIMEOUT")?
                 } else {
                     bridge.execute(id, method, params, progress).await

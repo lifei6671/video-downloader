@@ -18,6 +18,9 @@ serde_json = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "system-proxy"] }
 semver = "1"
 tempfile = "3"
+portable-pty = "0.9"
+vt100 = "0.16"
+zeroize = "1.9.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "io-std", "fs", "net", "time", "signal", "sync"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }

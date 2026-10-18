@@ -28,6 +28,15 @@ fn default_resolver() -> String {
 
 impl Video {
     pub fn validate(&self) -> Result<()> {
+        if self.platform == "telegram" {
+            if self.kind != "video"
+                || self.resolver != "tdl"
+                || !crate::tdl_bridge::validate_identity(&self.video_id, &self.canonical_url)
+            {
+                bail!("INVALID_ENGINE_RESULT");
+            }
+            return Ok(());
+        }
         if !matches!(self.kind.as_str(), "video" | "image_album")
             || !matches!(self.resolver.as_str(), "yt-dlp" | "dtk")
             || (self.kind == "image_album" && self.resolver != "dtk")
@@ -97,7 +106,9 @@ pub fn finalize_to(
     let container = result["container"]
         .as_str()
         .context("INVALID_ENGINE_RESULT")?;
-    if !matches!(container, "mp4" | "webm") {
+    if !matches!(container, "mp4" | "webm")
+        && !(video.platform == "telegram" && matches!(container, "mov" | "mkv"))
+    {
         bail!("INVALID_MEDIA_CONTENT");
     }
     let filename = format!("video.{container}");
@@ -128,11 +139,7 @@ pub fn finalize_to(
     let mut head = [0; 12];
     file.read_exact(&mut head)
         .context("INVALID_MEDIA_CONTENT")?;
-    let valid = match container {
-        "mp4" => &head[4..8] == b"ftyp",
-        "webm" => head.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]),
-        _ => false,
-    };
+    let valid = video_header_valid(container, &head);
     if !valid {
         bail!("INVALID_MEDIA_CONTENT");
     }
@@ -151,6 +158,39 @@ pub fn finalize_to(
     })
 }
 
+pub(crate) fn video_header_valid(container: &str, head: &[u8]) -> bool {
+    match container {
+        "mp4" => head.get(4..8) == Some(b"ftyp"),
+        "mov" => matches!(head.get(4..8), Some(b"ftyp" | b"moov" | b"mdat" | b"wide")),
+        "webm" | "mkv" => head.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]),
+        _ => false,
+    }
+}
+
+pub(crate) fn tdl_recovery_valid(path: &Path, size: u64) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != size {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return false;
+        }
+    }
+    let Some(container) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    let mut head = [0; 12];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut head))
+        .is_ok()
+        && video_header_valid(container, &head)
+}
+
 pub fn read_cover(path: &Path) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path).context("IO_ERROR")?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 10 * 1024 * 1024
@@ -167,15 +207,20 @@ pub fn read_cover(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub fn finalize_cover(result: &Value, staging: &Path, target: &Path) -> Result<PathBuf> {
+pub fn staged_cover(result: &Value, staging: &Path) -> Result<Vec<u8>> {
     if result["cover_filename"] != "cover" {
         bail!("INVALID_ENGINE_RESULT");
     }
-    let source = staging.join("cover");
-    let bytes = read_cover(&source)?;
+    let bytes = read_cover(&staging.join("cover"))?;
     if result["cover_bytes"].as_u64() != Some(bytes.len() as u64) {
         bail!("INCOMPLETE_MEDIA");
     }
+    Ok(bytes)
+}
+
+pub fn finalize_cover(result: &Value, staging: &Path, target: &Path) -> Result<PathBuf> {
+    let bytes = staged_cover(result, staging)?;
+    let source = staging.join("cover");
     let extension = if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         "jpg"
     } else if bytes.starts_with(b"\x89PNG") {

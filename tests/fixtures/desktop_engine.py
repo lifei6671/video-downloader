@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.7.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.7.1", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.readline())
 params = request["params"]
 def emit(event_type, **data):
@@ -23,6 +23,22 @@ if request['method'] in ('check_dependencies', 'install_dependency'):
             time.sleep(120)
         emit('dependency_progress', tool=params['tool'], phase='installing', downloaded_bytes=20, total_bytes=20)
     emit('dependencies', result=dict(platform='fixture', directory=params['runtime_directory'], tools=[]))
+    sys.exit(0)
+if request['method'] == 'extract_cover':
+    assert set(params) == {'runtime_directory', 'staging_dir', 'filename'}
+    stage = Path(params['staging_dir'])
+    assert (stage / params['filename']).is_file()
+    root = stage.parent.parent.parent
+    mode = (root / 'cover-mode').read_text() if (root / 'cover-mode').exists() else 'success'
+    (root / 'cover-started').write_text(str(os.getpid()))
+    if mode == 'block':
+        time.sleep(120)
+    if mode == 'failure':
+        emit('cover_extracted', cover_error='COVER_UNAVAILABLE')
+    else:
+        body = b'\x89PNG\r\n\x1a\nfixture'
+        (stage / 'cover').write_bytes(body)
+        emit('cover_extracted', cover_filename='cover', cover_bytes=len(body))
     sys.exit(0)
 if request["method"] == "identify_input":
     from urllib.parse import urlsplit

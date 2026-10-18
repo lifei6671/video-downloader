@@ -11,6 +11,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { Progress } from '@/components/ui/progress';
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { api, errorText, type ProjectPage, type UpdateCheck, type UpdateDownload } from '@/api';
+import { ReleaseNotes } from '@/components/release-notes';
 
 const brandIcon = new URL('../../src-tauri/icons/128x128.png', import.meta.url).href;
 const engineInfo = '引擎 0.7.0 · yt-dlp 2026.08.19 · DTK 5.1.3';
@@ -89,6 +90,11 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
     catch (error) { setOpenError(errorText(error)); }
     finally { setOpening(false); }
   }
+  async function openReleaseNoteLink(url: string) {
+    setOpenError('');
+    try { await api.openReleaseNoteLink(url); }
+    catch { setOpenError(errorText('OPEN_LINK_FAILED')); }
+  }
   async function startDownload() {
     if (!release || starting || downloading || opening || !downloadReady) return;
     setStarting(true); setOpenError('');
@@ -137,7 +143,7 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
         </DialogHeader>
         <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
           <h3 className="shrink-0 text-sm font-medium">更新说明</h3>
-          <div tabIndex={0} aria-label="更新说明内容" className="max-h-[25dvh] shrink-0 overflow-y-auto whitespace-pre-wrap break-words rounded-md border bg-muted/50 p-3 text-sm leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-ring">{release.release_notes.trim() || '此版本未提供更新说明。'}</div>
+          <ReleaseNotes content={release.release_notes} openLink={url => void openReleaseNoteLink(url)} />
           <p className="shrink-0 break-all text-xs text-muted-foreground">{release.installer ? `已匹配当前系统：${currentDownload?.filename ?? release.installer.name} · ${megabytes(currentDownload?.total_bytes ?? release.installer.size)}` : '此版本没有可验证的适用安装包，可前往发行页面手动下载。'}</p>
           {currentDownload && <div className="flex shrink-0 flex-col gap-2 rounded-md border p-3" aria-label="安装包下载状态">
             <p className="flex items-center gap-2 text-sm" role="status">{downloading ? <Spinner aria-hidden="true" /> : currentDownload.phase === 'completed' ? <Check aria-hidden="true" className="size-4" /> : null}{downloadPhases[currentDownload.phase]}</p>

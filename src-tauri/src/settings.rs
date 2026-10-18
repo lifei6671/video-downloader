@@ -22,6 +22,8 @@ pub struct Settings {
     pub download_directory: PathBuf,
     pub max_downloads: u8,
     pub profiles: Vec<Profile>,
+    #[serde(default)]
+    pub tdl: crate::tdl_bridge::TdlSettings,
 }
 
 #[derive(Deserialize)]
@@ -44,8 +46,19 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         "CREATE TABLE IF NOT EXISTS app_settings (id INTEGER PRIMARY KEY CHECK(id=1), directory TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS platform_settings (
            platform TEXT PRIMARY KEY, user_agent TEXT NOT NULL, proxy TEXT,
-           cookie TEXT NOT NULL, credential_ref TEXT);",
+           cookie TEXT NOT NULL, credential_ref TEXT);
+         CREATE TABLE IF NOT EXISTS tdl_settings (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL, path TEXT);",
     ).context("DATABASE_ERROR")?;
+    let has_session = db
+        .prepare("PRAGMA table_info(tdl_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "session_directory");
+    if !has_session {
+        db.execute_batch("ALTER TABLE tdl_settings ADD COLUMN session_directory TEXT")
+            .context("DATABASE_ERROR")?;
+    }
     let has_limit = db
         .prepare("PRAGMA table_info(app_settings)")?
         .query_map([], |r| r.get::<_, String>(1))?
@@ -99,10 +112,26 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
             Err(_) => bail!("DATABASE_ERROR"),
         });
     }
+    let tdl = match db.query_row(
+        "SELECT enabled,path,session_directory FROM tdl_settings WHERE id=1",
+        [],
+        |r| {
+            Ok(crate::tdl_bridge::TdlSettings {
+                enabled: r.get(0)?,
+                path: r.get::<_, Option<String>>(1)?.map(PathBuf::from),
+                session_directory: r.get::<_, Option<String>>(2)?.map(PathBuf::from),
+            })
+        },
+    ) {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => crate::tdl_bridge::TdlSettings::default(),
+        Err(_) => bail!("DATABASE_ERROR"),
+    };
     Ok(Settings {
         download_directory,
         max_downloads,
         profiles,
+        tdl,
     })
 }
 

@@ -3,6 +3,7 @@ use crate::{
     parse_cache,
     python_bridge::PythonBridge,
     settings::{self, Settings},
+    tdl_bridge::{self, TdlSettings},
 };
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
@@ -38,6 +39,8 @@ pub struct Task {
     pub bytes: u64,
     pub total_bytes: Option<u64>,
     pub speed_bps: Option<f64>,
+    #[serde(default)]
+    pub eta_seconds: Option<f64>,
     #[serde(default)]
     pub merging: bool,
     pub error: Option<String>,
@@ -87,6 +90,7 @@ pub enum TaskEvent {
 }
 
 struct Active {
+    tdl: Option<TdlSettings>,
     download_after_resolve: bool,
     profiles: Value,
     directory: PathBuf,
@@ -102,6 +106,8 @@ struct Inner {
     workers: Vec<tokio::task::JoinHandle<()>>,
     closing: bool,
     dependency_cancel: Option<watch::Sender<bool>>,
+    tdl_login_cancel: Option<watch::Sender<bool>>,
+    tdl_login_control: Option<tdl_bridge::LoginControl>,
 }
 pub struct Core {
     _instance_lock: std::fs::File,
@@ -109,6 +115,7 @@ pub struct Core {
     program: String,
     args: Vec<String>,
     runtime_directory: PathBuf,
+    tdl_session: tdl_bridge::Session,
     emit: Arc<dyn Fn(TaskEvent) + Send + Sync>,
 }
 
@@ -324,7 +331,17 @@ impl Core {
                                     })
                             } else {
                                 std::fs::symlink_metadata(&target).is_ok_and(|m| {
-                                    m.is_file() && !m.file_type().is_symlink() && m.len() == size
+                                    m.is_file()
+                                        && !m.file_type().is_symlink()
+                                        && m.len() == size
+                                        && (task
+                                            .video
+                                            .as_ref()
+                                            .is_none_or(|v| v["platform"] != "telegram")
+                                            || crate::files::tdl_recovery_valid(
+                                                Path::new(&target),
+                                                size,
+                                            ))
                                 })
                             }) =>
                     {
@@ -352,6 +369,18 @@ impl Core {
                     Err(_) => bail!("DATABASE_ERROR"),
                 }
                 persist(&db, task)?;
+            }
+            // Also restore the cache flag if a crash occurred between the video
+            // file commit / cover cache write and publishing the completed task.
+            if task.status == Status::Completed && task.cover_path.is_none() {
+                if let Some(video) = task.video.as_ref().filter(|v| v["platform"] == "telegram") {
+                    let cached = parse_cache::cover(&db, video).is_ok();
+                    if task.cover_cached != cached {
+                        task.cover_cached = cached;
+                        task.revision += 1;
+                        persist(&db, task)?;
+                    }
+                }
             }
         }
         // Clean only recorded task-owned directories; never sweep downloads.
@@ -397,10 +426,13 @@ impl Core {
                 workers: Vec::new(),
                 closing: false,
                 dependency_cancel: None,
+                tdl_login_cancel: None,
+                tdl_login_control: None,
             }),
             program,
             args,
             runtime_directory: db_path.parent().context("IO_ERROR")?.join("runtime"),
+            tdl_session: tdl_bridge::Session::default(),
             emit: Arc::new(emit),
         }))
     }
@@ -437,6 +469,110 @@ impl Core {
     }
     pub fn settings(&self) -> Settings {
         self.inner.lock().unwrap().settings.clone()
+    }
+    pub fn save_tdl(&self, mut config: TdlSettings) -> Result<Settings> {
+        if config
+            .path
+            .as_ref()
+            .is_some_and(|p| !p.is_absolute() || !p.is_file())
+        {
+            bail!("TDL_UNAVAILABLE");
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closing {
+            bail!("INVALID_STATE");
+        }
+        if inner.tdl_login_cancel.is_some() {
+            bail!("TDL_BUSY");
+        }
+        config.session_directory = inner.settings.tdl.session_directory.clone();
+        inner.db.execute("INSERT INTO tdl_settings(id,enabled,path) VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,path=excluded.path",
+            params![config.enabled, config.path.as_ref().map(|p| p.to_string_lossy().into_owned())]).context("DATABASE_ERROR")?;
+        inner.settings.tdl = config;
+        Ok(inner.settings.clone())
+    }
+    pub fn tdl_login_running(&self) -> bool {
+        self.inner.lock().unwrap().tdl_login_cancel.is_some()
+    }
+    pub fn tdl_login_status(&self) -> Option<tdl_bridge::LoginStatus> {
+        self.inner
+            .lock()
+            .unwrap()
+            .tdl_login_control
+            .as_ref()
+            .map(|control| control.state.borrow().clone())
+    }
+    pub fn submit_tdl_password(
+        &self,
+        login_id: &str,
+        password: zeroize::Zeroizing<String>,
+    ) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+        if inner.closing {
+            bail!("INVALID_STATE");
+        }
+        inner
+            .tdl_login_control
+            .as_ref()
+            .context("INVALID_STATE")?
+            .submit(login_id, password)
+    }
+    pub fn cancel_tdl_login(&self) -> Result<()> {
+        if let Some(cancel) = &self.inner.lock().unwrap().tdl_login_cancel {
+            let _ = cancel.send(true);
+        }
+        Ok(())
+    }
+    pub async fn login_tdl(self: &Arc<Self>, path: Option<PathBuf>) -> Result<Settings> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.closing {
+                bail!("INVALID_STATE");
+            }
+            if inner.tdl_login_cancel.is_some() || inner.active.values().any(|a| a.tdl.is_some()) {
+                bail!("TDL_BUSY");
+            }
+            let (cancel, receiver) = watch::channel(false);
+            inner.tdl_login_cancel = Some(cancel);
+            let (control, input) = tdl_bridge::LoginControl::new();
+            let state = control.state.clone();
+            inner.tdl_login_control = Some(control);
+            let core = self.clone();
+            let worker = tokio::spawn(async move {
+                let result = tdl_bridge::login(
+                    path.as_deref(),
+                    &core.runtime_directory.join("tdl-sessions"),
+                    receiver,
+                    state,
+                    input,
+                )
+                .await;
+                let mut inner = core.inner.lock().unwrap();
+                let result = result.and_then(|scratch| {
+                    if inner.closing || inner.tdl_login_cancel.as_ref().is_some_and(|c| *c.borrow()) {
+                        bail!("CANCELED");
+                    }
+                    let directory = scratch.path().join("data");
+                    let transaction = inner.db.transaction().context("DATABASE_ERROR")?;
+                    transaction.execute("INSERT INTO tdl_settings(id,enabled,path,session_directory) VALUES(1,0,?1,?2) ON CONFLICT(id) DO UPDATE SET path=excluded.path,session_directory=excluded.session_directory",
+                        params![path.as_ref().map(|p| p.to_string_lossy().into_owned()), directory.to_string_lossy()]).context("DATABASE_ERROR")?;
+                    // Metadata learned under another account must not serve as a new preview.
+                    transaction.execute_batch("DELETE FROM parse_cache_images WHERE cache_key IN (SELECT cache_key FROM parse_cache WHERE platform='telegram'); DELETE FROM parse_cache WHERE platform='telegram'; DELETE FROM parse_cache_aliases WHERE platform='telegram';").context("DATABASE_ERROR")?;
+                    transaction.commit().context("DATABASE_ERROR")?;
+                    inner.settings.tdl.path = path;
+                    inner.settings.tdl.session_directory = Some(directory);
+                    let _ = scratch.keep();
+                    Ok(inner.settings.clone())
+                });
+                inner.tdl_login_cancel = None;
+                inner.tdl_login_control = None;
+                let _ = send.send(result);
+            });
+            inner.workers.retain(|worker| !worker.is_finished());
+            inner.workers.push(worker);
+        }
+        receive.await.context("TDL_LOGIN_FAILED")?
     }
     pub fn cookie(&self, platform: &str) -> Result<String> {
         settings::cookie(&self.inner.lock().unwrap().settings, platform)
@@ -563,7 +699,7 @@ impl Core {
         input: String,
         resolver: String,
     ) -> Result<Task> {
-        if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk") {
+        if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk" | "tdl") {
             bail!("CONFIG_INVALID");
         }
         self.resolve_task(input, false, resolver, None)
@@ -638,17 +774,104 @@ impl Core {
         {
             bail!("TASK_BUSY");
         }
+        self.remove_history_records(&mut inner, vec![id.to_owned()])?;
+        Ok(())
+    }
+
+    pub fn clear_history(&self) -> Result<Vec<String>> {
+        let mut inner = self.inner.lock().unwrap();
+        let ids = inner
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.download_requested
+                    && matches!(
+                        task.status,
+                        Status::Completed | Status::Failed | Status::Canceled
+                    )
+                    && !inner.active.contains_key(&task.id)
+                    && !inner.downloads.contains(&task.id)
+            })
+            .map(|task| task.id.clone())
+            .collect();
+        self.remove_history_records(&mut inner, ids)
+    }
+
+    fn remove_history_records(&self, inner: &mut Inner, ids: Vec<String>) -> Result<Vec<String>> {
+        if ids.is_empty() {
+            return Ok(ids);
+        }
+        let removing: HashSet<_> = ids.iter().map(String::as_str).collect();
+        let retained: HashSet<_> = inner
+            .tasks
+            .iter()
+            .filter(|t| !removing.contains(t.id.as_str()))
+            .filter_map(|t| t.video.as_ref())
+            .map(|v| {
+                (
+                    v["platform"].as_str(),
+                    v["video_id"].as_str(),
+                    v["resolver"].as_str(),
+                )
+            })
+            .collect();
+        let mut released = HashSet::new();
+        let release_covers: Vec<_> = inner
+            .tasks
+            .iter()
+            .filter(|t| removing.contains(t.id.as_str()))
+            .filter_map(|t| t.video.as_ref())
+            .filter(|v| v["platform"] == "telegram")
+            .filter(|v| {
+                let identity = (
+                    v["platform"].as_str(),
+                    v["video_id"].as_str(),
+                    v["resolver"].as_str(),
+                );
+                !retained.contains(&identity) && released.insert(identity)
+            })
+            .cloned()
+            .collect();
         let tx = inner.db.transaction().context("DATABASE_ERROR")?;
-        tx.execute("DELETE FROM commit_intents WHERE task_id=?", [id])
-            .context("DATABASE_ERROR")?;
-        tx.execute("DELETE FROM download_tasks WHERE id=?", [id])
-            .context("DATABASE_ERROR")?;
+        for id in &ids {
+            tx.execute("DELETE FROM commit_intents WHERE task_id=?", [id])
+                .context("DATABASE_ERROR")?;
+            tx.execute("DELETE FROM download_tasks WHERE id=?", [id])
+                .context("DATABASE_ERROR")?;
+        }
+        for video in release_covers {
+            parse_cache::clear_cover(&tx, &video)?;
+        }
         tx.commit().context("DATABASE_ERROR")?;
         // Staging records, if cleanup previously failed, remain available for
         // startup cleanup. Removing history never touches a completed video.
-        inner.tasks.retain(|t| t.id != id);
-        (self.emit)(TaskEvent::Removed(id.to_owned()));
-        Ok(())
+        inner.tasks.retain(|t| !removing.contains(t.id.as_str()));
+        for id in &ids {
+            (self.emit)(TaskEvent::Removed(id.clone()));
+        }
+        Ok(ids)
+    }
+
+    pub fn playback_path(&self, id: &str) -> Result<PathBuf> {
+        let inner = self.inner.lock().unwrap();
+        let task = inner
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .context("TASK_NOT_FOUND")?;
+        let video = task.video.as_ref().context("INVALID_STATE")?;
+        if task.status != Status::Completed
+            || !task.files.is_empty()
+            || video["kind"].as_str().unwrap_or("video") != "video"
+        {
+            bail!("INVALID_STATE");
+        }
+        let path = task.path.as_ref().context("FILE_MISSING")?;
+        let metadata = std::fs::symlink_metadata(path).context("FILE_MISSING")?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!("FILE_MISSING");
+        }
+        Ok(path.clone())
     }
 
     pub fn delete_local_file(&self, id: &str) -> Result<()> {
@@ -725,6 +948,19 @@ impl Core {
         if input.trim().is_empty() || input.len() > 8192 {
             bail!("INVALID_INPUT");
         }
+        let telegram = tdl_bridge::is_telegram(&input);
+        let resolver = if telegram {
+            tdl_bridge::message_link(&input)?;
+            if !matches!(resolver.as_str(), "auto" | "tdl") {
+                bail!("UNSUPPORTED_CONTENT");
+            }
+            "tdl".to_owned()
+        } else {
+            if resolver == "tdl" {
+                bail!("INVALID_INPUT");
+            }
+            resolver
+        };
         let mut inner = self.inner.lock().unwrap();
         if inner.closing || inner.tasks.iter().any(|t| t.status == Status::Parsing) {
             bail!("TASK_BUSY");
@@ -733,7 +969,22 @@ impl Core {
         if let (Some(cached), Some(format_id)) = (&mut cached, &requested_format) {
             apply_video_format(&mut cached.video, format_id)?;
         }
-        let profiles = settings::snapshot(&inner.settings)?;
+        let tdl = if telegram {
+            if inner.tdl_login_cancel.is_some() {
+                bail!("TDL_BUSY");
+            }
+            if !inner.settings.tdl.enabled {
+                bail!("TDL_EXPERIMENTAL_DISABLED");
+            }
+            Some(inner.settings.tdl.clone())
+        } else {
+            None
+        };
+        let profiles = if telegram {
+            json!({})
+        } else {
+            settings::snapshot(&inner.settings)?
+        };
         let mut task = Task {
             id: Uuid::new_v4().to_string(),
             revision: 1,
@@ -742,6 +993,7 @@ impl Core {
             bytes: 0,
             total_bytes: None,
             speed_bps: None,
+            eta_seconds: None,
             merging: false,
             error: None,
             path: None,
@@ -767,6 +1019,7 @@ impl Core {
         inner.active.insert(
             task.id.clone(),
             Active {
+                tdl: tdl.clone(),
                 download_after_resolve,
                 profiles: profiles.clone(),
                 directory: directory.clone(),
@@ -793,6 +1046,17 @@ impl Core {
         inner.workers.retain(|worker| !worker.is_finished());
         let worker = tokio::spawn(async move {
             let result = async {
+                if let Some(config) = tdl {
+                    let video = core.tdl_session.operation(&config, &input, None, None, |_| {}, cancellation.clone()).await?;
+                    let identity: Video = serde_json::from_value(video.clone()).context("INVALID_ENGINE_RESULT")?;
+                    identity.validate()?;
+                    let mut inner = core.inner.lock().unwrap();
+                    let cached = parse_cache::save(&mut inner.db, &video, Vec::new(), None, now())?;
+                    parse_cache::remember(&inner.db, &input, &cached.video)?;
+                    let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
+                    task.cached_at = Some(cached.saved_at);
+                    return Ok(cached.video);
+                }
                 if parse_cache::share_url(&input).is_some() {
                     let has_cache: bool = core.inner.lock().unwrap().db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM parse_cache)", [], |r| r.get(0),
@@ -934,6 +1198,7 @@ impl Core {
         }
         task.canceling = false;
         task.speed_bps = None;
+        task.eta_seconds = None;
         task.merging = false;
         task.revision += 1;
         if publish(&mut inner, task.clone(), &*self.emit).is_err() {
@@ -945,9 +1210,7 @@ impl Core {
         if !matches!(task.status, Status::Ready | Status::Queued) {
             inner.active.remove(id);
         }
-        if task.status == Status::Queued {
-            self.dispatch(&mut inner);
-        }
+        self.dispatch(&mut inner);
     }
 
     pub fn set_max_downloads(self: &Arc<Self>, value: u8) -> Result<Settings> {
@@ -1002,17 +1265,42 @@ impl Core {
         if task.status != Status::Ready {
             bail!("INVALID_STATE");
         }
+        if task
+            .video
+            .as_ref()
+            .is_some_and(|v| v["platform"] == "telegram")
+            && !inner.settings.tdl.enabled
+        {
+            bail!("TDL_EXPERIMENTAL_DISABLED");
+        }
         if !confirm_duplicate && previously_downloaded(&inner.tasks, &task) {
             bail!("ALREADY_DOWNLOADED");
         }
         if !inner.active.contains_key(id) {
-            let profiles = settings::snapshot(&inner.settings)?;
+            let telegram = task
+                .video
+                .as_ref()
+                .is_some_and(|v| v["platform"] == "telegram");
+            let tdl = if telegram {
+                if inner.tdl_login_cancel.is_some() {
+                    bail!("TDL_BUSY");
+                }
+                Some(inner.settings.tdl.clone())
+            } else {
+                None
+            };
+            let profiles = if telegram {
+                json!({})
+            } else {
+                settings::snapshot(&inner.settings)?
+            };
             let (cancel, _) = watch::channel(false);
             let (_, done) = watch::channel(true);
             let directory = inner.settings.download_directory.clone();
             inner.active.insert(
                 id.to_owned(),
                 Active {
+                    tdl,
                     download_after_resolve: false,
                     profiles,
                     directory,
@@ -1072,8 +1360,14 @@ impl Core {
             .get(id)
             .expect("queued task has configuration snapshot");
         let profiles = active.profiles.clone();
+        let tdl = active.tdl.clone();
         let directory = active.directory.clone();
         let video = task.video.clone().context("INVALID_STATE")?;
+        let tdl_input = if tdl.is_some() {
+            Some(parse_cache::tdl_source(&inner.db, &video)?)
+        } else {
+            None
+        };
         let (cancel, mut cancellation) = watch::channel(false);
         let (done, done_rx) = watch::channel(false);
         task.status = Status::Downloading;
@@ -1095,13 +1389,7 @@ impl Core {
                 core.inner.lock().unwrap().db.execute("INSERT OR REPLACE INTO task_staging VALUES(?1,?2)",
                     params![id,stage.path().to_string_lossy()]).context("DATABASE_ERROR")?;
                 let mut last = Instant::now() - Duration::from_secs(1);
-                let result = PythonBridge::operation_cancellable(&core.program, &core.args, &id, "download_video",
-                    json!({"input":video["canonical_url"],"profiles":profiles,"runtime_directory":core.runtime_directory,
-                        "resolver":video["resolver"].as_str().unwrap_or("yt-dlp"),
-                        "format_id":video["selected_format_id"],
-                        "expected":{"platform":video["platform"],"video_id":video["video_id"],"kind":video["kind"].as_str().unwrap_or("video"),
-                            "image_count":video["images"].as_array().map(Vec::len)},"staging_dir":media}),
-                    |event| {
+                let progress = |event: Value| {
                         if last.elapsed() < Duration::from_millis(250) && event["phase"] != "merging" { return; }
                         last = Instant::now();
                         let mut inner = core.inner.lock().unwrap();
@@ -1110,13 +1398,56 @@ impl Core {
                         task.bytes = event["bytes"].as_u64().unwrap_or(0);
                         task.total_bytes = event["total_bytes"].as_u64();
                         task.speed_bps = event["speed_bps"].as_f64();
+                        task.eta_seconds = event["eta_seconds"].as_f64();
                         task.merging |= event["phase"] == "merging";
                         task.completed_items = event["completed_items"].as_u64();
                         task.total_items = event["total_items"].as_u64();
                         task.revision += 1;
                         (core.emit)(TaskEvent::Updated(Box::new(task.clone())));
-                    },
-                    async { let _ = cancellation.wait_for(|v| *v).await; }).await;
+                    };
+                let result = if let Some(config) = tdl {
+                    match core.tdl_session.operation(&config, tdl_input.as_deref().context("INVALID_ENGINE_RESULT")?, Some(&video), Some(&media), progress, cancellation.clone()).await {
+                        Ok(mut result) => {
+                            let mut cover_cancel = cancellation.clone();
+                            let cover = PythonBridge::operation_cancellable(
+                                &core.program, &core.args, &id, "extract_cover",
+                                json!({"runtime_directory":core.runtime_directory,
+                                    "staging_dir":media,"filename":result["filename"]}),
+                                |_| {}, async { let _ = cover_cancel.wait_for(|v| *v).await; },
+                            ).await;
+                            match cover {
+                                Err(error) if error.to_string() == "CANCELED" => Err(error),
+                                cover => {
+                                    if let Ok(cover) = cover {
+                                        result["cover_filename"] = cover["cover_filename"].clone();
+                                        result["cover_bytes"] = cover["cover_bytes"].clone();
+                                    }
+                                    Ok(result)
+                                }
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    PythonBridge::operation_cancellable(&core.program, &core.args, &id, "download_video",
+                    json!({"input":video["canonical_url"],"profiles":profiles,"runtime_directory":core.runtime_directory,
+                        "resolver":video["resolver"].as_str().unwrap_or("yt-dlp"),
+                        "format_id":video["selected_format_id"],
+                        "expected":{"platform":video["platform"],"video_id":video["video_id"],"kind":video["kind"].as_str().unwrap_or("video"),
+                            "image_count":video["images"].as_array().map(Vec::len)},"staging_dir":media}),
+                    progress, async { let _ = cancellation.wait_for(|v| *v).await; }).await
+                };
+                if result.as_ref().is_err_and(|error| error.root_cause().to_string() == tdl_bridge::ALIAS_IDENTITY_MISMATCH) {
+                    // A freshly resolved public bootstrap proved this exact alias
+                    // stale. Do not retry or remove a concurrently updated mapping.
+                    core.inner.lock().unwrap().db.execute(
+                        "DELETE FROM parse_cache_aliases WHERE url=?1 AND platform='telegram' AND video_id=?2",
+                        params![tdl_input.as_deref().context("INVALID_ENGINE_RESULT")?, video["video_id"].as_str().context("INVALID_ENGINE_RESULT")?],
+                    ).context("DATABASE_ERROR")?;
+                }
+                if result.as_ref().is_err_and(|error| error.to_string() == "TDL_MEDIA_CHANGED") {
+                    parse_cache::invalidate_tdl(&mut core.inner.lock().unwrap().db, &video)?;
+                }
                 let committed = result.and_then(|result| {
                     let mut inner = core.inner.lock().unwrap();
                     let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
@@ -1139,16 +1470,30 @@ impl Core {
                         file
                     } else {
                     let extension = result["container"].as_str().context("INVALID_ENGINE_RESULT")?;
-                    if !matches!(extension, "mp4" | "webm") { bail!("INVALID_MEDIA_CONTENT"); }
+                    if !matches!(extension, "mp4" | "webm") && !(identity.platform == "telegram" && matches!(extension, "mov" | "mkv")) { bail!("INVALID_MEDIA_CONTENT"); }
                     let target = directory.join(format!("{}_{}_{}.{}",identity.platform,identity.video_id,id,extension));
                     let file = finalize_to(&identity, &result, &media, &target, |source,size| {
                         inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,?4)", params![
                             id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?]).context("DATABASE_ERROR")?;
                         Ok(())
                     })?;
-                    if result["cover_filename"].is_string() {
+                    if identity.platform == "telegram" {
+                        let saved = crate::files::staged_cover(&result, &media).and_then(|body| {
+                            parse_cache::save_cover(&inner.db, task.video.as_ref().context("INVALID_ENGINE_RESULT")?, &body)
+                        }).unwrap_or(false);
+                        task.cover_path = None;
+                        if saved {
+                            task.cover_cached = true;
+                            task.cover_error = None;
+                        } else {
+                            task.cover_error = Some("COVER_UNAVAILABLE".into());
+                        }
+                    } else if result["cover_filename"].is_string() {
                         match crate::files::finalize_cover(&result, &media, &file.path) {
-                            Ok(path) => task.cover_path = Some(path),
+                            Ok(path) => {
+                                task.cover_path = Some(path);
+                                task.cover_error = None;
+                            }
                             Err(_) => task.cover_error = Some("COVER_UNAVAILABLE".into()),
                         }
                     } else {
@@ -1171,6 +1516,7 @@ impl Core {
                     task.completed_at = Some(now());
                     task.status = Status::Completed;
                     task.speed_bps = None;
+                    task.eta_seconds = None;
                 task.merging = false;
                     task.revision += 1;
                     // Cancellation and file/DB commit share this lock.
@@ -1244,6 +1590,9 @@ impl Core {
             if let Some(cancel) = &inner.dependency_cancel {
                 let _ = cancel.send(true);
             }
+            if let Some(cancel) = &inner.tdl_login_cancel {
+                let _ = cancel.send(true);
+            }
             let active = inner
                 .active
                 .iter()
@@ -1284,6 +1633,208 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn playback_uses_only_completed_video_records_and_preserves_files() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        assert_eq!(
+            app.playback_path("missing").unwrap_err().to_string(),
+            "TASK_NOT_FOUND"
+        );
+        let task = app.resolve("valid".into()).unwrap();
+        wait(&app, &task.id, Status::Ready).await;
+        assert_eq!(
+            app.playback_path(&task.id).unwrap_err().to_string(),
+            "INVALID_STATE"
+        );
+        app.download(&task.id, false).unwrap();
+        let done = wait(&app, &task.id, Status::Completed).await;
+        let path = done.path.unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(app.playback_path(&task.id).unwrap(), path);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let album = app.resolve("album".into()).unwrap();
+        wait(&app, &album.id, Status::Ready).await;
+        app.download(&album.id, false).unwrap();
+        wait(&app, &album.id, Status::Completed).await;
+        assert_eq!(
+            app.playback_path(&album.id).unwrap_err().to_string(),
+            "INVALID_STATE"
+        );
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(app.playback_path(&task.id).unwrap(), path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            app.playback_path(&task.id).unwrap_err().to_string(),
+            "FILE_MISSING"
+        );
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(
+            app.playback_path(&task.id).unwrap_err().to_string(),
+            "FILE_MISSING"
+        );
+        assert!(path.is_dir());
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bulk_history_clear_is_atomic_and_preserves_live_tasks_previews_and_files() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let sample = app.resolve("valid".into()).unwrap();
+        let sample = wait(&app, &sample.id, Status::Ready).await;
+        app.cancel(&sample.id).await.unwrap();
+        app.remove_history(&sample.id).unwrap();
+        let downloads = root.path().join("downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let video_path = downloads.join("saved.mp4");
+        let cover_path = downloads.join("saved.cover.jpg");
+        let album_path = downloads.join("album");
+        std::fs::create_dir(&album_path).unwrap();
+        std::fs::write(&video_path, b"original video").unwrap();
+        std::fs::write(&cover_path, b"original cover").unwrap();
+        std::fs::write(album_path.join("001.jpg"), b"original image").unwrap();
+        let telegram = json!({"platform":"telegram","video_id":"100_9","resolver":"tdl","kind":"video",
+            "canonical_url":"https://t.me/c/100/9","selected_format_id":"original",
+            "formats":[{"format_id":"original","container":"mp4","filesize":4096}]});
+        let mut retained_video = telegram.clone();
+        retained_video["video_id"] = "101_9".into();
+        retained_video["canonical_url"] = "https://t.me/c/101/9".into();
+        let cover = b"\x89PNG\r\n\x1a\nfixture".to_vec();
+        {
+            let mut inner = app.inner.lock().unwrap();
+            for (id, status, requested) in [
+                ("completed", Status::Completed, true),
+                ("failed", Status::Failed, true),
+                ("canceled", Status::Canceled, true),
+                ("tg-one", Status::Completed, true),
+                ("tg-two", Status::Completed, true),
+                ("tg-shared", Status::Completed, true),
+                ("running", Status::Downloading, true),
+                ("queued", Status::Queued, true),
+                ("parsing", Status::Parsing, true),
+                ("preview", Status::Ready, false),
+                ("canceled-preview", Status::Canceled, false),
+                ("finishing", Status::Completed, true),
+            ] {
+                let mut task = sample.clone();
+                task.id = id.into();
+                task.status = status;
+                task.download_requested = requested;
+                if id.starts_with("tg-") {
+                    task.video = Some(if id == "tg-shared" {
+                        retained_video.clone()
+                    } else {
+                        telegram.clone()
+                    });
+                    task.cover_cached = true;
+                }
+                if id == "preview" {
+                    task.video = Some(retained_video.clone());
+                    task.cover_cached = true;
+                }
+                if id == "completed" {
+                    task.path = Some(video_path.clone());
+                    task.cover_path = Some(cover_path.clone());
+                }
+                if id == "failed" {
+                    task.path = Some(album_path.clone());
+                }
+                persist(&inner.db, &task).unwrap();
+                inner.tasks.push(task);
+            }
+            parse_cache::save(&mut inner.db, &telegram, vec![], Some(cover.clone()), 100).unwrap();
+            parse_cache::save(
+                &mut inner.db,
+                &retained_video,
+                vec![],
+                Some(cover.clone()),
+                100,
+            )
+            .unwrap();
+            // A terminal snapshot can precede worker destruction; it remains ineligible.
+            inner.downloads.insert("finishing".into());
+            inner
+                .db
+                .execute_batch(
+                    "CREATE TRIGGER block_history_clear BEFORE DELETE ON download_tasks
+                WHEN OLD.id='failed' BEGIN SELECT RAISE(ABORT, 'test clear error'); END;",
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            app.clear_history().unwrap_err().to_string(),
+            "DATABASE_ERROR"
+        );
+        assert_eq!(app.list().len(), 12);
+        {
+            let inner = app.inner.lock().unwrap();
+            assert_eq!(
+                inner
+                    .db
+                    .query_row("SELECT count(*) FROM download_tasks", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                12
+            );
+            assert_eq!(parse_cache::cover(&inner.db, &telegram).unwrap(), cover);
+            inner
+                .db
+                .execute_batch("DROP TRIGGER block_history_clear")
+                .unwrap();
+        }
+        let removed: HashSet<_> = app.clear_history().unwrap().into_iter().collect();
+        assert_eq!(
+            removed,
+            [
+                "completed",
+                "failed",
+                "canceled",
+                "tg-one",
+                "tg-two",
+                "tg-shared"
+            ]
+            .map(String::from)
+            .into_iter()
+            .collect()
+        );
+        assert!(app.clear_history().unwrap().is_empty());
+        assert_eq!(app.list().len(), 6);
+        assert_eq!(std::fs::read(&video_path).unwrap(), b"original video");
+        assert_eq!(std::fs::read(&cover_path).unwrap(), b"original cover");
+        assert_eq!(
+            std::fs::read(album_path.join("001.jpg")).unwrap(),
+            b"original image"
+        );
+        {
+            let inner = app.inner.lock().unwrap();
+            assert_eq!(
+                inner
+                    .db
+                    .query_row("SELECT count(*) FROM download_tasks", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                6
+            );
+            assert!(parse_cache::cover(&inner.db, &telegram).is_err());
+            assert_eq!(
+                parse_cache::cover(&inner.db, &retained_video).unwrap(),
+                cover
+            );
+            assert!(parse_cache::find(&inner.db, "https://t.me/c/100/9", "tdl")
+                .unwrap()
+                .is_some());
+        }
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert!(app.list().iter().all(|t| !removed.contains(&t.id)));
+        assert!(app.cover("preview").is_ok());
+        app.shutdown().await;
+    }
+
     fn core(root: &Path) -> Arc<Core> {
         let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let python = project.join(if cfg!(windows) {
@@ -1763,6 +2314,7 @@ mod tests {
             bytes: 0,
             total_bytes: None,
             speed_bps: None,
+            eta_seconds: None,
             merging: false,
             error: None,
             path: None,

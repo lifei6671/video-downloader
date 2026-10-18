@@ -24,7 +24,7 @@ def test_bridge_merged_file_size_is_distinct_from_transferred_bytes(tmp_path, ba
     script.write_text('''import json,sys
 from pathlib import Path
 dtk=json.loads(Path(sys.argv[1]).read_text())
-print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.0',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
+print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.1',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
 r=json.loads(sys.stdin.readline())
 def emit(kind,**data): print(json.dumps(dict(type=kind,protocol_version=3,id=r['id'],**data)),flush=True)
 if r['method']=='resolve_video':
@@ -52,7 +52,7 @@ def test_protocol_error_reaps_engine_descendant(tmp_path):
     script.write_text('''import json,sys,subprocess
 from pathlib import Path
 dtk=json.loads(Path(sys.argv[1]).read_text())
-print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.0',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
+print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.1',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
 r=json.loads(sys.stdin.readline())
 child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 Path(sys.argv[2]).write_text(str(child.pid))
@@ -98,7 +98,7 @@ def test_cancel_waits_until_descendant_media_handle_is_released(tmp_path):
     script.write_text('''import json,sys,subprocess,time
 from pathlib import Path
 dtk=json.loads(Path(sys.argv[1]).read_text())
-print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.0',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
+print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.1',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
 r=json.loads(sys.stdin.readline())
 def emit(kind,**data): print(json.dumps(dict(type=kind,protocol_version=3,id=r['id'],**data)),flush=True)
 if r['method']=='resolve_video':
@@ -180,7 +180,7 @@ def test_bridge_stops_bad_engine(mode,tmp_path):
     script.write_text('''import json,sys
 mode=sys.argv[1]
 print(json.dumps({'type':'ready','protocol_version':1 if mode=='wrong_version' else 3,
- 'engine_version':'bad' if mode=='bad_ready' else '0.7.0','yt_dlp_version':'2026.08.19','dtk_version':sys.argv[2],'dtk_commit':sys.argv[3]}),flush=True)
+ 'engine_version':'bad' if mode=='bad_ready' else '0.7.1','yt_dlp_version':'2026.08.19','dtk_version':sys.argv[2],'dtk_commit':sys.argv[3]}),flush=True)
 request=json.loads(sys.stdin.readline())
 if mode=='eof': sys.exit(0)
 if mode=='secret_error':
