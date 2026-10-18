@@ -238,7 +238,7 @@ async fn login_cancel_and_shutdown_reap_process_and_remove_only_attempt_storage(
         let core = app.clone();
         let path = config.path.clone();
         let worker = tokio::spawn(async move { core.login_tdl(path).await });
-        let event = wait_login_event(root.path()).await;
+        let _event = wait_login_event(root.path()).await;
         assert!(app.tdl_login_running());
         assert_eq!(
             app.resolve("https://t.me/c/100/9".into())
@@ -286,8 +286,8 @@ async fn login_cancel_and_shutdown_reap_process_and_remove_only_attempt_storage(
         unsafe {
             use windows_sys::Win32::System::Threading::*;
             for pid in [
-                event["pid"].as_u64().unwrap(),
-                event["child_pid"].as_u64().unwrap(),
+                _event["pid"].as_u64().unwrap(),
+                _event["child_pid"].as_u64().unwrap(),
             ] {
                 let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
                 if !handle.is_null() {

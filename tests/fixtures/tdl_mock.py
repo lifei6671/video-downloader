@@ -3,6 +3,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import socketserver
 import sys
 import time
 from urllib.parse import urlparse
@@ -154,7 +155,13 @@ else:
                     pass
             self.close_connection = True
 
+    class LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+        def server_bind(self):
+            # HTTPServer's reverse DNS lookup can stall macOS CI for over 30 seconds.
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address
+
     time.sleep(options.get('startup_delay', 0))
-    server = http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    server = LoopbackHTTPServer(('127.0.0.1', port), Handler)
     event('serve', port=port, channel=channel, message=message)
     server.serve_forever()
