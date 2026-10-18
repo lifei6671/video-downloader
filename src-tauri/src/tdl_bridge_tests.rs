@@ -1372,7 +1372,7 @@ async fn core_can_parse_during_download_after_restart_and_cancel_one_shared_tran
 #[tokio::test]
 async fn core_reuses_another_channels_cached_username_without_replacing_running_service() {
     let (root, config) = fixture(json!({"channels":{"known_channel":200},"size":4096,
-        "files":{"/100/9":{"size":262144,"chunk":1024,"chunk_delay":0.02}}}));
+        "files":{"/100/9":{"size":65536,"release_file":"first-download.release"}}}));
     let open = || {
         Core::open(
             &root.path().join("tasks.sqlite"),
@@ -1418,6 +1418,7 @@ async fn core_reuses_another_channels_cached_username_without_replacing_running_
         app.list().iter().find(|t| t.id == first.id).unwrap().status,
         Status::Downloading
     );
+    std::fs::write(root.path().join("first-download.release"), b"release").unwrap();
     wait(&app, &first.id, Status::Completed).await;
     app.shutdown().await;
 }
@@ -1426,7 +1427,7 @@ async fn core_reuses_another_channels_cached_username_without_replacing_running_
 async fn deferred_channel_waits_for_telegram_but_allows_other_platform_and_keeps_fifo() {
     let (root, config) = fixture(
         json!({"channels":{"new_channel":200,"canceled_channel":300},"size":4096,
-        "files":{"/100/9":{"size":262144,"chunk":1024,"chunk_delay":0.02}}}),
+        "files":{"/100/9":{"size":65536,"release_file":"first-download.release"}}}),
     );
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let history = Arc::new(StdMutex::new(Vec::new()));
@@ -1514,6 +1515,7 @@ async fn deferred_channel_waits_for_telegram_but_allows_other_platform_and_keeps
             .filter(|e| e["kind"] == "serve")
             .count()
     );
+    std::fs::write(root.path().join("first-download.release"), b"release").unwrap();
     wait(&app, &first.id, Status::Completed).await;
     let completed = wait(&app, &deferred.id, Status::Completed).await;
     wait(&app, &later.id, Status::Completed).await;

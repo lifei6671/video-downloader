@@ -148,6 +148,14 @@ else:
                     content = body[:item.get('actual_size', len(body))]
                     chunk = item.get('chunk', 16384)
                     for offset in range(0, len(content), chunk):
+                        if offset and item.get('release_file'):
+                            # Keep one real HTTP body in flight until the test
+                            # has checked concurrent work; no runner-speed assumption.
+                            deadline = time.monotonic() + 30
+                            while not (root / item['release_file']).is_file():
+                                if time.monotonic() >= deadline:
+                                    return
+                                time.sleep(0.01)
                         self.wfile.write(content[offset:offset + chunk])
                         self.wfile.flush()
                         time.sleep(item.get('chunk_delay', 0))
