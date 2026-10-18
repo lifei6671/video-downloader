@@ -11,7 +11,7 @@ export interface RuntimeProgress { tool: RuntimeTool['id']; phase: 'downloading'
 export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string }
 export interface VideoFormat { requires_merge?: boolean; format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
 export interface Video { cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
-export interface Task { eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
+export interface Task { telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
 export interface Profile { platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
 export interface TdlSettings { enabled: boolean; path: string | null; session_directory?: string | null }
 export interface TdlStatus { path: string; version: string }
@@ -152,7 +152,7 @@ const errors: Record<string, string> = {
   TDL_STOP_FAILED: '无法确认 tdl 服务已回收，请关闭应用并检查本机进程。',
   TDL_HTTP_ERROR: 'tdl HTTP 请求失败或媒体传输中断，本次下载未完成。',
   TDL_INVALID_RESPONSE: 'tdl 服务返回的媒体路径或 HTTP 元数据不符合已验证协议。',
-  TDL_CHANNEL_ID_REQUIRED: '当前 tdl 服务尚未确认这个频道的数字 ID。请改用 https://t.me/c/数字频道ID/消息ID 链接，或等待当前 Telegram 下载结束后重试。',
+  TDL_CHANNEL_ID_REQUIRED: '当前 Telegram 服务正被其他任务占用，尚未确认这个频道的数字 ID。可加入待下载队列，服务空闲后自动解析并下载。',
   TDL_IDENTITY_MISMATCH: 'tdl 返回的频道或消息身份不匹配，操作已拒绝。',
   TDL_MEDIA_CHANGED: '原始文件大小、类型或文件名已变化，请重新解析后再下载。',
 };

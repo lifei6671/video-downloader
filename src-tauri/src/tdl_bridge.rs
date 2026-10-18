@@ -843,7 +843,7 @@ struct Running {
     _session: MutexGuard<'static, ()>,
 }
 
-fn public_peer(link: &MessageLink) -> Option<String> {
+pub(crate) fn public_peer(link: &MessageLink) -> Option<String> {
     (link.channel.is_none()).then(|| link.url.split('/').nth(3).unwrap().to_ascii_lowercase())
 }
 
@@ -853,6 +853,7 @@ impl Session {
         config: &TdlSettings,
         link: &MessageLink,
         known: Option<&MessageLink>,
+        cached_channel: Option<u64>,
         cancel: &mut watch::Receiver<bool>,
     ) -> Result<(Target, Option<Media>)> {
         let mut running = tokio::select! { biased;
@@ -879,7 +880,7 @@ impl Session {
             let channel = match known.and_then(|link| link.channel).or(link.channel) {
                 Some(channel) => channel,
                 None if public_peer(link) == current.public_peer => current.channel,
-                None => bail!("TDL_CHANNEL_ID_REQUIRED"),
+                None => cached_channel.context("TDL_CHANNEL_ID_REQUIRED")?,
             };
             let key = format!("{channel}{}", link.message);
             if current
@@ -959,6 +960,7 @@ impl Session {
         Ok((target, Some(media)))
     }
 
+    #[allow(clippy::too_many_arguments)] // Optional cache identity supplements the existing operation boundary.
     pub async fn operation(
         &self,
         config: &TdlSettings,
@@ -967,6 +969,7 @@ impl Session {
         directory: Option<&Path>,
         progress: impl FnMut(Value),
         mut cancel: watch::Receiver<bool>,
+        cached_channel: Option<u64>,
     ) -> Result<Value> {
         if !config.enabled {
             bail!("TDL_EXPERIMENTAL_DISABLED");
@@ -993,7 +996,7 @@ impl Session {
             })
             .transpose()?;
         let (target, initial) = self
-            .acquire(config, &link, known.as_ref(), &mut cancel)
+            .acquire(config, &link, known.as_ref(), cached_channel, &mut cancel)
             .await?;
         let bootstrap_public = initial.is_some() && link.channel.is_none();
         let result = tokio::select! { biased;

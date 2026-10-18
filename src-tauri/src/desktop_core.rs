@@ -70,6 +70,9 @@ pub struct Task {
     pub cached_at: Option<u64>,
     #[serde(default)]
     pub cover_cached: bool,
+    // Only a validated, normalized Telegram URL; never the pasted share text.
+    #[serde(default)]
+    pub telegram_link: Option<String>,
 }
 
 fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
@@ -737,6 +740,19 @@ impl Core {
     }
 
     pub fn retry(self: &Arc<Self>, id: &str) -> Result<Task> {
+        if self.list().iter().any(|task| {
+            task.id == id
+                && task.video.is_none()
+                && task.telegram_link.is_some()
+                && task.download_requested
+        }) {
+            self.download(id, false)?;
+            return self
+                .list()
+                .into_iter()
+                .find(|task| task.id == id)
+                .context("TASK_NOT_FOUND");
+        }
         let (input, resolver, format_id) = {
             let inner = self.inner.lock().unwrap();
             let task = inner
@@ -1034,6 +1050,11 @@ impl Core {
             cache_hit: false,
             cached_at: None,
             cover_cached: false,
+            telegram_link: if telegram {
+                Some(tdl_bridge::message_link(&input)?.url)
+            } else {
+                None
+            },
         };
         let (cancel, mut cancellation) = watch::channel(false);
         let (done, done_rx) = watch::channel(cached.is_some());
@@ -1091,15 +1112,7 @@ impl Core {
         let worker = tokio::spawn(async move {
             let result = async {
                 if let Some(config) = tdl {
-                    let video = core.tdl_session.operation(&config, &input, None, None, |_| {}, cancellation.clone()).await?;
-                    let identity: Video = serde_json::from_value(video.clone()).context("INVALID_ENGINE_RESULT")?;
-                    identity.validate()?;
-                    let mut inner = core.inner.lock().unwrap();
-                    let cached = parse_cache::save(&mut inner.db, &video, Vec::new(), None, now())?;
-                    parse_cache::remember(&inner.db, &input, &cached.video)?;
-                    let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
-                    task.cached_at = Some(cached.saved_at);
-                    return Ok(cached.video);
+                    return core.resolve_telegram(&config, &input, &id, cancellation.clone()).await;
                 }
                 if parse_cache::share_url(&input).is_some() {
                     let has_cache: bool = core.inner.lock().unwrap().db.query_row(
@@ -1230,15 +1243,17 @@ impl Core {
                 .is_some_and(|a| a.download_after_resolve)
         {
             task.status = Status::Queued;
-            task.queue_order = Some(
-                inner
-                    .tasks
-                    .iter()
-                    .filter_map(|t| t.queue_order)
-                    .max()
-                    .unwrap_or(0)
-                    + 1,
-            );
+            task.queue_order = task.queue_order.or_else(|| {
+                Some(
+                    inner
+                        .tasks
+                        .iter()
+                        .filter_map(|t| t.queue_order)
+                        .max()
+                        .unwrap_or(0)
+                        + 1,
+                )
+            });
         }
         task.canceling = false;
         task.speed_bps = None;
@@ -1306,13 +1321,19 @@ impl Core {
             .find(|t| t.id == id)
             .context("TASK_NOT_FOUND")?
             .clone();
-        if task.status != Status::Ready {
+        let deferred = task.video.is_none()
+            && task.telegram_link.is_some()
+            && matches!(task.status, Status::Failed | Status::Canceled)
+            && (task.error.as_deref() == Some("TDL_CHANNEL_ID_REQUIRED")
+                || task.download_requested);
+        if task.status != Status::Ready && !deferred {
             bail!("INVALID_STATE");
         }
-        if task
-            .video
-            .as_ref()
-            .is_some_and(|v| v["platform"] == "telegram")
+        if (deferred
+            || task
+                .video
+                .as_ref()
+                .is_some_and(|v| v["platform"] == "telegram"))
             && !inner.settings.tdl.enabled
         {
             bail!("TDL_EXPERIMENTAL_DISABLED");
@@ -1321,10 +1342,11 @@ impl Core {
             bail!("ALREADY_DOWNLOADED");
         }
         if !inner.active.contains_key(id) {
-            let telegram = task
-                .video
-                .as_ref()
-                .is_some_and(|v| v["platform"] == "telegram");
+            let telegram = deferred
+                || task
+                    .video
+                    .as_ref()
+                    .is_some_and(|v| v["platform"] == "telegram");
             let tdl = if telegram {
                 if inner.tdl_login_cancel.is_some() {
                     bail!("TDL_BUSY");
@@ -1345,7 +1367,7 @@ impl Core {
                 id.to_owned(),
                 Active {
                     tdl,
-                    download_after_resolve: false,
+                    download_after_resolve: deferred,
                     profiles,
                     directory,
                     cancel,
@@ -1354,6 +1376,7 @@ impl Core {
             );
         }
         task.status = Status::Queued;
+        task.error = None;
         task.download_requested = true;
         task.queue_order = Some(
             inner
@@ -1374,16 +1397,55 @@ impl Core {
     // submissions, settings changes, cancellation, and process completion.
     fn dispatch(self: &Arc<Self>, inner: &mut Inner) {
         while !inner.closing && inner.downloads.len() < usize::from(inner.settings.max_downloads) {
+            let waiting_channel = inner
+                .tasks
+                .iter()
+                .filter(|t| {
+                    matches!(t.status, Status::Queued | Status::Parsing)
+                        && t.download_requested
+                        && t.video.is_none()
+                        && t.telegram_link.is_some()
+                })
+                .filter_map(|t| t.queue_order)
+                .min();
+            let telegram_busy = inner.active.iter().any(|(id, active)| {
+                active.tdl.is_some()
+                    && (inner.downloads.contains(id)
+                        || inner
+                            .tasks
+                            .iter()
+                            .any(|t| t.id == *id && t.status == Status::Parsing))
+            });
             let Some(id) = inner
                 .tasks
                 .iter()
                 .filter(|t| t.status == Status::Queued)
+                .filter(|t| {
+                    if t.video.is_none() {
+                        !telegram_busy
+                            && !inner
+                                .tasks
+                                .iter()
+                                .any(|other| other.status == Status::Parsing)
+                    } else {
+                        // Later Telegram downloads must not keep an unknown channel
+                        // waiting forever. Other platforms may use free slots.
+                        !inner.active.get(&t.id).is_some_and(|a| a.tdl.is_some())
+                            || waiting_channel.is_none_or(|order| t.queue_order < Some(order))
+                    }
+                })
                 .min_by_key(|t| t.queue_order)
                 .map(|t| t.id.clone())
             else {
                 break;
             };
-            if self.start_download(inner, &id).is_err() {
+            let deferred = inner.tasks.iter().any(|t| t.id == id && t.video.is_none());
+            let started = if deferred {
+                self.start_deferred(inner, &id)
+            } else {
+                self.start_download(inner, &id)
+            };
+            if started.is_err() {
                 let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
                 task.status = Status::Failed;
                 task.error = Some("DATABASE_ERROR".into());
@@ -1395,6 +1457,62 @@ impl Core {
                 inner.active.remove(&id);
             }
         }
+    }
+
+    async fn resolve_telegram(
+        self: &Arc<Self>,
+        config: &TdlSettings,
+        input: &str,
+        id: &str,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<Value> {
+        let channel = parse_cache::tdl_channel(&self.inner.lock().unwrap().db, input)?;
+        let video = self
+            .tdl_session
+            .operation(config, input, None, None, |_| {}, cancel, channel)
+            .await?;
+        let identity: Video =
+            serde_json::from_value(video.clone()).context("INVALID_ENGINE_RESULT")?;
+        identity.validate()?;
+        let mut inner = self.inner.lock().unwrap();
+        let cached = parse_cache::save(&mut inner.db, &video, Vec::new(), None, now())?;
+        parse_cache::remember(&inner.db, input, &cached.video)?;
+        let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
+        task.cached_at = Some(cached.saved_at);
+        Ok(cached.video)
+    }
+
+    fn start_deferred(self: &Arc<Self>, inner: &mut Inner, id: &str) -> Result<()> {
+        let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
+        let input = task.telegram_link.clone().context("INVALID_STATE")?;
+        let config = inner
+            .active
+            .get(id)
+            .unwrap()
+            .tdl
+            .clone()
+            .context("INVALID_STATE")?;
+        let (cancel, cancellation) = watch::channel(false);
+        let (done, done_rx) = watch::channel(false);
+        task.status = Status::Parsing;
+        task.revision += 1;
+        publish(inner, task, &*self.emit)?;
+        inner.downloads.insert(id.to_owned());
+        let active = inner.active.get_mut(id).unwrap();
+        active.cancel = cancel;
+        active.done = done_rx;
+        let core = self.clone();
+        let id = id.to_owned();
+        inner.workers.retain(|worker| !worker.is_finished());
+        inner.workers.push(tokio::spawn(async move {
+            let result = core
+                .resolve_telegram(&config, &input, &id, cancellation)
+                .await;
+            core.inner.lock().unwrap().downloads.remove(&id);
+            core.finish(&id, result, false);
+            let _ = done.send(true);
+        }));
+        Ok(())
     }
 
     fn start_download(self: &Arc<Self>, inner: &mut Inner, id: &str) -> Result<()> {
@@ -1450,7 +1568,7 @@ impl Core {
                         (core.emit)(TaskEvent::Updated(Box::new(task.clone())));
                     };
                 let result = if let Some(config) = tdl {
-                    match core.tdl_session.operation(&config, tdl_input.as_deref().context("INVALID_ENGINE_RESULT")?, Some(&video), Some(&media), progress, cancellation.clone()).await {
+                    match core.tdl_session.operation(&config, tdl_input.as_deref().context("INVALID_ENGINE_RESULT")?, Some(&video), Some(&media), progress, cancellation.clone(), None).await {
                         Ok(mut result) => {
                             let mut cover_cancel = cancellation.clone();
                             let cover = PythonBridge::operation_cancellable(
@@ -1484,10 +1602,8 @@ impl Core {
                 if result.as_ref().is_err_and(|error| error.root_cause().to_string() == tdl_bridge::ALIAS_IDENTITY_MISMATCH) {
                     // A freshly resolved public bootstrap proved this exact alias
                     // stale. Do not retry or remove a concurrently updated mapping.
-                    core.inner.lock().unwrap().db.execute(
-                        "DELETE FROM parse_cache_aliases WHERE url=?1 AND platform='telegram' AND video_id=?2",
-                        params![tdl_input.as_deref().context("INVALID_ENGINE_RESULT")?, video["video_id"].as_str().context("INVALID_ENGINE_RESULT")?],
-                    ).context("DATABASE_ERROR")?;
+                    parse_cache::forget_tdl_channel(&core.inner.lock().unwrap().db,
+                        tdl_input.as_deref().context("INVALID_ENGINE_RESULT")?, &video)?;
                 }
                 if result.as_ref().is_err_and(|error| error.to_string() == "TDL_MEDIA_CHANGED") {
                     parse_cache::invalidate_tdl(&mut core.inner.lock().unwrap().db, &video)?;
@@ -1594,7 +1710,7 @@ impl Core {
         Ok(())
     }
 
-    pub async fn cancel(&self, id: &str) -> Result<()> {
+    pub async fn cancel(self: &Arc<Self>, id: &str) -> Result<()> {
         let mut done = {
             let mut inner = self.inner.lock().unwrap();
             let mut task = inner
@@ -1614,6 +1730,7 @@ impl Core {
                 task.revision += 1;
                 publish(&mut inner, task, &*self.emit)?;
                 inner.active.remove(id);
+                self.dispatch(&mut inner);
                 return Ok(());
             }
             task.canceling = true;
@@ -2380,6 +2497,7 @@ mod tests {
             cache_hit: false,
             cached_at: None,
             cover_cached: false,
+            telegram_link: None,
         };
         {
             let inner = app.inner.lock().unwrap();

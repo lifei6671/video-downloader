@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+// Browser-only IPC fixture: never starts tdl, reads credentials, or downloads.
+import {api} from '/src/api';
+const base={revision:1,bytes:0,total_bytes:null,speed_bps:null,error:null,path:null,created_at:10,completed_at:null,canceling:false,file_missing:false,queue_order:null,download_requested:false,cover_path:null,cover_error:null,files:[],completed_items:null,total_items:null,cache_hit:false,cached_at:null,cover_cached:false,telegram_link:null};
+const video={platform:'telegram',video_id:'100_9',canonical_url:'https://t.me/c/100/9',title:'原有下载继续进行',resolver:'tdl',kind:'video',filesize:65536,selected_format_id:'original',formats:[{format_id:'original',container:'mp4',filesize:65536}]};
+let tasks=[{...base,id:'running',status:'downloading',download_requested:true,video}];
+let listener=()=>{};let next=0;
+const snapshot=()=>structuredClone(tasks);
+const publish=task=>{task.revision++;listener(structuredClone(task))};
+window.deferredTest={loaded:false,calls:[],snapshot,
+  fail:id=>{const task=tasks.find(t=>t.id===id);task.status='failed';task.error='TDL_HTTP_ERROR';publish(task)},
+  advance:id=>{const original=tasks.find(t=>t.id==='running');original.status='completed';original.path='C:\\TestVideos\\first.mp4';publish(original);const task=tasks.find(t=>t.id===id);task.status='parsing';publish(task)},
+  ready:id=>{const task=tasks.find(t=>t.id===id);task.video={...video,title:'新频道作品',video_id:'200_9',canonical_url:'https://t.me/c/200/9'};task.status='downloading';publish(task)}};
+api.subscribe=async update=>{listener=update;window.deferredTest.loaded=true;return()=>{}};
+api.tasks=async()=>snapshot();
+api.settings=async()=>({download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'test-only',proxy:null,cookie_configured:false})),tdl:{enabled:true,path:null}});
+api.checkTdl=async()=>({path:'C:\\TestTools\\tdl.exe',version:'0.20.4'});
+api.cover=async()=>{throw 'FILE_MISSING'};
+api.resolve=async input=>{window.deferredTest.calls.push({type:'resolve',input});const task={...base,id:'pending-'+(++next),status:'failed',video:null,telegram_link:input,error:'TDL_CHANNEL_ID_REQUIRED',created_at:10+next};tasks.unshift(task);return structuredClone(task)};
+api.download=async id=>{window.deferredTest.calls.push({type:'queue',id});const task=tasks.find(t=>t.id===id);task.status='queued';task.download_requested=true;task.error=null;task.queue_order=next;publish(task)};
+api.cancel=async id=>{window.deferredTest.calls.push({type:'cancel',id});const task=tasks.find(t=>t.id===id);task.status='canceled';task.error=null;publish(task)};
+api.retry=async id=>{window.deferredTest.calls.push({type:'retry',id});await api.download(id);return structuredClone(tasks.find(t=>t.id===id))};
+await import('/src/main');
+</script></body></html>

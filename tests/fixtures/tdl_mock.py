@@ -95,7 +95,7 @@ else:
     url = sys.argv[sys.argv.index('-u') + 1]
     event('session', storage=sys.argv[sys.argv.index('--storage') + 1] if '--storage' in sys.argv else None, namespace=sys.argv[sys.argv.index('--ns') + 1] if '--ns' in sys.argv else None)
     parts = urlparse(url).path.strip('/').split('/')
-    channel = parts[1] if parts[0] == 'c' else str(options.get('channel', 100))
+    channel = parts[1] if parts[0] == 'c' else str(options.get('channels', {}).get(parts[0].lower(), options.get('channel', 100)))
     message = parts[-1]
 
     class Handler(http.server.BaseHTTPRequestHandler):

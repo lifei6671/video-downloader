@@ -35,7 +35,7 @@ async fn operation(
     cancel: watch::Receiver<bool>,
 ) -> Result<Value> {
     Session::default()
-        .operation(config, input, expected, directory, progress, cancel)
+        .operation(config, input, expected, directory, progress, cancel, None)
         .await
 }
 async fn resolve(config: &TdlSettings, input: &str) -> Value {
@@ -550,6 +550,7 @@ async fn shared_service_parses_other_messages_and_channels_during_a_download() {
                 Some(&path),
                 |_| {},
                 cancel,
+                None,
             )
             .await
     });
@@ -561,7 +562,7 @@ async fn shared_service_parses_other_messages_and_channels_during_a_download() {
         let (_keep, cancel) = watch::channel(false);
         let parsed = timeout(
             Duration::from_millis(800),
-            session.operation(&config, link, None, None, |_| {}, cancel),
+            session.operation(&config, link, None, None, |_| {}, cancel, None),
         )
         .await
         .unwrap()
@@ -582,6 +583,7 @@ async fn shared_service_parses_other_messages_and_channels_during_a_download() {
             None,
             |_| {},
             cancel,
+            None,
         )
         .await
         .unwrap_err();
@@ -598,7 +600,8 @@ async fn shared_service_parses_other_messages_and_channels_during_a_download() {
                 None,
                 None,
                 |_| {},
-                cancel
+                cancel,
+                None
             )
             .await
             .unwrap_err()
@@ -652,6 +655,7 @@ async fn shared_request_cancellation_and_errors_do_not_stop_other_downloads() {
                 Some(&path),
                 |_| {},
                 cancel,
+                None,
             )
             .await
     });
@@ -668,6 +672,7 @@ async fn shared_request_cancellation_and_errors_do_not_stop_other_downloads() {
                 None,
                 |_| {},
                 parse_cancel,
+                None,
             )
             .await
     });
@@ -677,7 +682,15 @@ async fn shared_request_cancellation_and_errors_do_not_stop_other_downloads() {
     let (_keep, cancel) = watch::channel(false);
     assert_eq!(
         session
-            .operation(&config, "https://t.me/c/100/11", None, None, |_| {}, cancel)
+            .operation(
+                &config,
+                "https://t.me/c/100/11",
+                None,
+                None,
+                |_| {},
+                cancel,
+                None
+            )
             .await
             .unwrap_err()
             .to_string(),
@@ -716,6 +729,7 @@ async fn shared_service_rejects_upstream_concatenated_cache_key_identity_collisi
                 Some(&path),
                 |_| {},
                 cancel,
+                None,
             )
             .await
     });
@@ -723,7 +737,15 @@ async fn shared_service_rejects_upstream_concatenated_cache_key_identity_collisi
     let (_keep, cancel) = watch::channel(false);
     assert_eq!(
         session
-            .operation(&config, "https://t.me/c/1001/2", None, None, |_| {}, cancel)
+            .operation(
+                &config,
+                "https://t.me/c/1001/2",
+                None,
+                None,
+                |_| {},
+                cancel,
+                None
+            )
             .await
             .unwrap_err()
             .to_string(),
@@ -1345,6 +1367,341 @@ async fn core_can_parse_during_download_after_restart_and_cancel_one_shared_tran
             .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn core_reuses_another_channels_cached_username_without_replacing_running_service() {
+    let (root, config) = fixture(json!({"channels":{"known_channel":200},"size":4096,
+        "files":{"/100/9":{"size":262144,"chunk":1024,"chunk_delay":0.02}}}));
+    let open = || {
+        Core::open(
+            &root.path().join("tasks.sqlite"),
+            root.path().join("downloads"),
+            "unused".into(),
+            vec![],
+            |_| {},
+        )
+        .unwrap()
+    };
+    let app = open();
+    app.save_tdl(config).unwrap();
+    let known = app
+        .resolve("https://telegram.me/Known_Channel/9".into())
+        .unwrap();
+    wait(&app, &known.id, Status::Ready).await;
+    app.cancel(&known.id).await.unwrap();
+    app.remove_history(&known.id).unwrap(); // independent parse cache survives removal
+    app.shutdown().await;
+    drop(app);
+    let app = open();
+    let first = app.resolve("https://t.me/public_channel/9".into()).unwrap();
+    wait(&app, &first.id, Status::Ready).await;
+    app.download(&first.id, false).unwrap();
+    wait_request(root.path(), "GET", "/100/9").await;
+    let before = events(root.path())
+        .iter()
+        .filter(|e| e["kind"] == "serve")
+        .count();
+    let other = app.resolve("https://t.me/known_channel/10".into()).unwrap();
+    let parsed = wait(&app, &other.id, Status::Ready).await;
+    assert_eq!(parsed.video.unwrap()["video_id"], "200_10");
+    assert!(!parsed.cache_hit); // new message still gets its own real HEAD
+    wait_request(root.path(), "HEAD", "/200/10").await;
+    assert_eq!(
+        before,
+        events(root.path())
+            .iter()
+            .filter(|e| e["kind"] == "serve")
+            .count()
+    );
+    assert_eq!(
+        app.list().iter().find(|t| t.id == first.id).unwrap().status,
+        Status::Downloading
+    );
+    wait(&app, &first.id, Status::Completed).await;
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn deferred_channel_waits_for_telegram_but_allows_other_platform_and_keeps_fifo() {
+    let (root, config) = fixture(
+        json!({"channels":{"new_channel":200,"canceled_channel":300},"size":4096,
+        "files":{"/100/9":{"size":262144,"chunk":1024,"chunk_delay":0.02}}}),
+    );
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let history = Arc::new(StdMutex::new(Vec::new()));
+    let recorded = history.clone();
+    let app = Core::open(
+        &root.path().join("tasks.sqlite"),
+        root.path().join("downloads"),
+        project
+            .join(if cfg!(windows) {
+                ".venv/Scripts/python.exe"
+            } else {
+                ".venv/bin/python"
+            })
+            .to_string_lossy()
+            .into(),
+        vec![project
+            .join("tests/fixtures/desktop_engine.py")
+            .to_string_lossy()
+            .into()],
+        move |event| {
+            if let crate::desktop_core::TaskEvent::Updated(task) = event {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((task.id.clone(), task.status));
+            }
+        },
+    )
+    .unwrap();
+    app.save_tdl(config).unwrap();
+    let first = app.resolve("https://t.me/public_channel/9".into()).unwrap();
+    wait(&app, &first.id, Status::Ready).await;
+    app.download(&first.id, false).unwrap();
+    wait_request(root.path(), "GET", "/100/9").await;
+    let deferred = app
+        .resolve("分享文案 https://t.me/new_channel/9".into())
+        .unwrap();
+    wait(&app, &deferred.id, Status::Failed).await;
+    let before = events(root.path())
+        .iter()
+        .filter(|e| e["kind"] == "serve")
+        .count();
+    app.download(&deferred.id, false).unwrap();
+    let queued = app
+        .list()
+        .into_iter()
+        .find(|t| t.id == deferred.id)
+        .unwrap();
+    assert_eq!(queued.status, Status::Queued);
+    assert_eq!(
+        queued.telegram_link.as_deref(),
+        Some("https://t.me/new_channel/9")
+    );
+    assert!(queued.video.is_none() && queued.error.is_none());
+    assert!(app.download(&deferred.id, false).is_err());
+    let canceled = app
+        .resolve("https://t.me/canceled_channel/9".into())
+        .unwrap();
+    wait(&app, &canceled.id, Status::Failed).await;
+    app.download(&canceled.id, false).unwrap();
+    app.cancel(&canceled.id).await.unwrap();
+    let python = app
+        .resolve("https://www.douyin.com/video/123".into())
+        .unwrap();
+    wait(&app, &python.id, Status::Ready).await;
+    app.download(&python.id, false).unwrap();
+    wait(&app, &python.id, Status::Completed).await;
+    assert_eq!(
+        app.list().iter().find(|t| t.id == first.id).unwrap().status,
+        Status::Downloading
+    );
+    let later = app
+        .resolve("https://t.me/public_channel/10".into())
+        .unwrap();
+    wait(&app, &later.id, Status::Ready).await;
+    app.download(&later.id, false).unwrap();
+    assert_eq!(
+        app.list().iter().find(|t| t.id == later.id).unwrap().status,
+        Status::Queued
+    );
+    assert_eq!(
+        before,
+        events(root.path())
+            .iter()
+            .filter(|e| e["kind"] == "serve")
+            .count()
+    );
+    wait(&app, &first.id, Status::Completed).await;
+    let completed = wait(&app, &deferred.id, Status::Completed).await;
+    wait(&app, &later.id, Status::Completed).await;
+    assert_eq!(completed.created_at, deferred.created_at);
+    assert_eq!(completed.queue_order, queued.queue_order);
+    assert_eq!(completed.video.unwrap()["video_id"], "200_9");
+    {
+        let observed = history.lock().unwrap();
+        let ended = observed
+            .iter()
+            .position(|(id, status)| id == &first.id && *status == Status::Completed)
+            .unwrap();
+        let started = observed
+            .iter()
+            .rposition(|(id, status)| id == &deferred.id && *status == Status::Parsing)
+            .unwrap();
+        assert!(ended < started);
+    }
+    assert!(!events(root.path())
+        .iter()
+        .any(|e| e["kind"] == "serve" && e["channel"] == "300"));
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn deferred_parse_failure_retains_link_and_retry_keeps_identity() {
+    let (root, config) = fixture(json!({"channels":{"new_channel":200},"size":4096,
+        "files":{"/100/9":{"size":65536,"chunk":1024,"chunk_delay":0.02},"/200/9":{"head_status":403}}}));
+    let app = login_core(root.path());
+    app.save_tdl(config).unwrap();
+    let first = app.resolve("https://t.me/public_channel/9".into()).unwrap();
+    wait(&app, &first.id, Status::Ready).await;
+    app.download(&first.id, false).unwrap();
+    wait_request(root.path(), "GET", "/100/9").await;
+    let pending = app.resolve("https://t.me/new_channel/9".into()).unwrap();
+    wait(&app, &pending.id, Status::Failed).await;
+    app.download(&pending.id, false).unwrap();
+    wait(&app, &first.id, Status::Completed).await;
+    let failed = wait(&app, &pending.id, Status::Failed).await;
+    assert_eq!(failed.error.as_deref(), Some("TDL_HTTP_ERROR"));
+    assert!(failed.video.is_none() && failed.download_requested);
+    std::fs::write(
+        root.path().join("options.json"),
+        json!({"channels":{"new_channel":200},"size":4096}).to_string(),
+    )
+    .unwrap();
+    let retry = app.retry(&pending.id).unwrap();
+    assert_eq!(retry.id, pending.id);
+    assert_eq!(retry.created_at, pending.created_at);
+    wait(&app, &pending.id, Status::Completed).await;
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn deferred_queue_shutdown_and_restart_keep_link_without_automatic_resume() {
+    let (root, config) = fixture(json!({"channels":{"new_channel":200},"size":4096,
+        "files":{"/100/9":{"size":262144,"chunk":1024,"chunk_delay":0.02}}}));
+    let app = login_core(root.path());
+    app.save_tdl(config).unwrap();
+    let first = app.resolve("https://t.me/public_channel/9".into()).unwrap();
+    wait(&app, &first.id, Status::Ready).await;
+    app.download(&first.id, false).unwrap();
+    wait_request(root.path(), "GET", "/100/9").await;
+    let pending = app.resolve("https://t.me/new_channel/9".into()).unwrap();
+    wait(&app, &pending.id, Status::Failed).await;
+    app.download(&pending.id, false).unwrap();
+    let queued = app.list().into_iter().find(|t| t.id == pending.id).unwrap();
+    app.shutdown().await;
+    assert_eq!(
+        app.list()
+            .iter()
+            .find(|t| t.id == pending.id)
+            .unwrap()
+            .status,
+        Status::Canceled
+    );
+    drop(app);
+    // Simulate a crash snapshot from before shutdown, using only fixture data.
+    let db = rusqlite::Connection::open(root.path().join("login.sqlite")).unwrap();
+    db.execute(
+        "UPDATE download_tasks SET snapshot=? WHERE id=?",
+        rusqlite::params![serde_json::to_string(&queued).unwrap(), pending.id],
+    )
+    .unwrap();
+    drop(db);
+    let before = events(root.path())
+        .iter()
+        .filter(|e| e["kind"] == "serve")
+        .count();
+    let app = login_core(root.path());
+    let restored = app.list().into_iter().find(|t| t.id == pending.id).unwrap();
+    assert_eq!(restored.status, Status::Failed);
+    assert_eq!(restored.error.as_deref(), Some("INTERRUPTED"));
+    assert_eq!(restored.telegram_link, queued.telegram_link);
+    assert_eq!(
+        before,
+        events(root.path())
+            .iter()
+            .filter(|e| e["kind"] == "serve")
+            .count()
+    );
+    let retry = app.retry(&pending.id).unwrap();
+    assert_eq!(retry.id, pending.id);
+    assert_eq!(retry.created_at, pending.created_at);
+    wait(&app, &pending.id, Status::Completed).await;
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn deferred_duplicate_download_requires_confirmation() {
+    let (root, config) = fixture(json!({"channels":{"other":200},"size":4096,
+        "files":{"/100/9":{"size":65536,"chunk":1024,"chunk_delay":0.02}}}));
+    let app = login_core(root.path());
+    app.save_tdl(config).unwrap();
+    let original = app.resolve("https://t.me/c/200/9".into()).unwrap();
+    wait(&app, &original.id, Status::Ready).await;
+    app.download(&original.id, false).unwrap();
+    wait(&app, &original.id, Status::Completed).await;
+    let first = app.resolve("https://t.me/public_channel/9".into()).unwrap();
+    wait(&app, &first.id, Status::Ready).await;
+    app.download(&first.id, false).unwrap();
+    wait_request(root.path(), "GET", "/100/9").await;
+    let pending = app.resolve("https://t.me/other/9".into()).unwrap();
+    wait(&app, &pending.id, Status::Failed).await;
+    app.download(&pending.id, false).unwrap();
+    wait(&app, &first.id, Status::Completed).await;
+    wait(&app, &pending.id, Status::Ready).await;
+    assert_eq!(
+        app.download(&pending.id, false).unwrap_err().to_string(),
+        "ALREADY_DOWNLOADED"
+    );
+    app.cancel(&pending.id).await.unwrap();
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn deferred_resolution_cancellation_reaps_startup_and_allows_next_parse() {
+    let (root, config) = fixture(json!({"size":4096,
+        "files":{"/100/9":{"size":65536,"chunk":1024,"chunk_delay":0.02}}}));
+    let app = login_core(root.path());
+    app.save_tdl(config).unwrap();
+    let first = app.resolve("https://t.me/public_channel/9".into()).unwrap();
+    wait(&app, &first.id, Status::Ready).await;
+    app.download(&first.id, false).unwrap();
+    wait_request(root.path(), "GET", "/100/9").await;
+    let pending = app.resolve("https://t.me/new_channel/9".into()).unwrap();
+    wait(&app, &pending.id, Status::Failed).await;
+    std::fs::write(
+        root.path().join("options.json"),
+        json!({"channels":{"new_channel":200},"startup_delay":10,"size":4096}).to_string(),
+    )
+    .unwrap();
+    let before = events(root.path())
+        .iter()
+        .filter(|e| e["kind"] == "session")
+        .count();
+    app.download(&pending.id, false).unwrap();
+    wait(&app, &first.id, Status::Completed).await;
+    wait(&app, &pending.id, Status::Parsing).await;
+    timeout(Duration::from_secs(5), async {
+        while events(root.path())
+            .iter()
+            .filter(|e| e["kind"] == "session")
+            .count()
+            == before
+        {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    app.cancel(&pending.id).await.unwrap();
+    assert_eq!(
+        app.list()
+            .iter()
+            .find(|t| t.id == pending.id)
+            .unwrap()
+            .status,
+        Status::Canceled
+    );
+    std::fs::write(
+        root.path().join("options.json"),
+        json!({"size":4096}).to_string(),
+    )
+    .unwrap();
+    let next = app.resolve("https://t.me/c/100/10".into()).unwrap();
+    wait(&app, &next.id, Status::Ready).await;
+    app.shutdown().await;
 }
 
 #[tokio::test]
