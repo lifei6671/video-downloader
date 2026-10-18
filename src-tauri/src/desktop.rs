@@ -276,9 +276,32 @@ async fn open_update_installer(
     download_id: String,
 ) -> Result<(), String> {
     let path = downloads.installer_path(&download_id).await?;
+    #[cfg(windows)]
+    {
+        let _ = app;
+        launch_windows_installer(&path)
+            .map(|_| ())
+            .map_err(|_| "UPDATE_INSTALLER_OPEN_FAILED".into())
+    }
+    #[cfg(not(windows))]
     app.opener()
         .open_path(path.to_string_lossy(), None::<&str>)
         .map_err(|_| "UPDATE_INSTALLER_OPEN_FAILED".into())
+}
+
+#[cfg(windows)]
+fn launch_windows_installer(path: &std::path::Path) -> std::io::Result<std::process::Child> {
+    use std::{os::windows::process::CommandExt, process::Stdio};
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+
+    // The per-user NSIS installer is an executable, not a shell document. Avoid
+    // ShellExecuteEx/COM on the async worker and let the installer outlive the app.
+    std::process::Command::new(path)
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
 }
 #[tauri::command]
 async fn check_runtime_dependencies(core: State<'_, AppCore>) -> Result<RuntimeStatus, String> {
@@ -476,4 +499,51 @@ fn main() {
             tauri::RunEvent::Reopen { .. } => show_main_window(app),
             _ => {}
         });
+}
+
+#[cfg(all(test, windows))]
+mod update_installer_tests {
+    use super::launch_windows_installer;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn launches_executable_in_literal_unicode_path_without_blocking_or_exiting_host() {
+        let directory = tempfile::Builder::new()
+            .prefix("更新 安装包 & (test)-")
+            .tempdir()
+            .unwrap();
+        let path = directory.path().join("安装包 & (test).exe");
+        let system_root = std::env::var_os("SystemRoot").unwrap();
+        std::fs::copy(
+            std::path::Path::new(&system_root).join("System32/cmd.exe"),
+            &path,
+        )
+        .unwrap();
+
+        // With null stdin, this benign executable exits without user interaction.
+        // No shell should interpret the spaces or metacharacters in its path.
+        let mut child = launch_windows_installer(&path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "fixture failed: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("fixture did not exit after receiving EOF");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn missing_or_invalid_executables_report_launch_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("installer.exe");
+        assert!(launch_windows_installer(&path).is_err());
+        std::fs::write(&path, b"not a Windows executable").unwrap();
+        assert!(launch_windows_installer(&path).is_err());
+    }
 }
