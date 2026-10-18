@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.6.0";
+pub const ENGINE_VERSION: &str = "0.7.0";
 pub const YTDLP_VERSION: &str = "2026.08.19";
 
 async fn cancellation() -> Result<()> {
@@ -113,6 +113,12 @@ fn error_code(value: &Value) -> &'static str {
         Some("JS_RUNTIME_UNAVAILABLE") => "JS_RUNTIME_UNAVAILABLE",
         Some("BROWSER_COOKIES_UNAVAILABLE") => "BROWSER_COOKIES_UNAVAILABLE",
         Some("MEDIA_MERGE_FAILED") => "MEDIA_MERGE_FAILED",
+        Some("DEPENDENCY_UNSUPPORTED_SYSTEM") => "DEPENDENCY_UNSUPPORTED_SYSTEM",
+        Some("DEPENDENCY_NETWORK_ERROR") => "DEPENDENCY_NETWORK_ERROR",
+        Some("DEPENDENCY_TIMEOUT") => "DEPENDENCY_TIMEOUT",
+        Some("DEPENDENCY_CHECKSUM_MISMATCH") => "DEPENDENCY_CHECKSUM_MISMATCH",
+        Some("DEPENDENCY_INVALID_ARCHIVE") => "DEPENDENCY_INVALID_ARCHIVE",
+        Some("DEPENDENCY_VALIDATION_FAILED") => "DEPENDENCY_VALIDATION_FAILED",
         _ => "ENGINE_PROTOCOL_ERROR",
     }
 }
@@ -196,6 +202,30 @@ impl PythonBridge {
             if value["id"] != id || value["protocol_version"] != 3 {
                 bail!("ENGINE_PROTOCOL_ERROR");
             }
+            if value["type"] == "dependency_progress" && method == "install_dependency" {
+                let count = value["downloaded_bytes"]
+                    .as_u64()
+                    .context("ENGINE_PROTOCOL_ERROR")?;
+                let total = value["total_bytes"]
+                    .as_u64()
+                    .context("ENGINE_PROTOCOL_ERROR")?;
+                if value["tool"] != params["tool"]
+                    || count < downloaded
+                    || count > total
+                    || total == 0
+                    || !matches!(
+                        value["phase"].as_str(),
+                        Some("downloading" | "verifying" | "installing")
+                    )
+                {
+                    bail!("ENGINE_PROTOCOL_ERROR");
+                }
+                downloaded = count;
+                progress(
+                    json!({"tool":value["tool"], "phase":value["phase"], "downloaded_bytes":count, "total_bytes":total}),
+                );
+                continue;
+            }
             if value["type"] == "progress" && method == "download_video" {
                 if !value["phase"].is_null() {
                     if !youtube || value["phase"] != "merging" || merging {
@@ -246,6 +276,7 @@ impl PythonBridge {
                     != match method {
                         "identify_input" => "identified",
                         "resolve_video" => "resolved",
+                        "check_dependencies" | "install_dependency" => "dependencies",
                         _ => "download_finished",
                     }
             {
@@ -315,7 +346,7 @@ impl PythonBridge {
         let result = tokio::select! {
             result = async {
                 if method != "download_video" {
-                    timeout(Duration::from_secs(80), bridge.execute(id, method, params, progress))
+                    timeout(Duration::from_secs(if method == "install_dependency" { 600 } else { 80 }), bridge.execute(id, method, params, progress))
                         .await.context("TIMEOUT")?
                 } else {
                     bridge.execute(id, method, params, progress).await

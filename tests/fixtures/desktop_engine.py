@@ -7,11 +7,23 @@ import time
 from pathlib import Path
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.6.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.7.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.readline())
 params = request["params"]
 def emit(event_type, **data):
     print(json.dumps(dict(protocol_version=3, id=request["id"], type=event_type, **data)), flush=True)
+if request['method'] in ('check_dependencies', 'install_dependency'):
+    assert set(params).issubset({'runtime_directory', 'tool', 'staging_dir'})
+    assert Path(params['runtime_directory']).is_absolute()
+    if request['method'] == 'install_dependency':
+        assert Path(params['staging_dir']).parent == Path(params['runtime_directory'])
+        (Path(params['staging_dir']) / 'partial').write_bytes(b'partial download')
+        emit('dependency_progress', tool=params['tool'], phase='downloading', downloaded_bytes=10, total_bytes=20)
+        if params['tool'] == 'javascript':
+            time.sleep(120)
+        emit('dependency_progress', tool=params['tool'], phase='installing', downloaded_bytes=20, total_bytes=20)
+    emit('dependencies', result=dict(platform='fixture', directory=params['runtime_directory'], tools=[]))
+    sys.exit(0)
 if request["method"] == "identify_input":
     from urllib.parse import urlsplit
     path=urlsplit(params["input"]).path

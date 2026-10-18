@@ -185,3 +185,7 @@ npm run build
 ```
 
 握手核对 manifest 的 DTK commit/version。源码变更后必须重新生成 sidecar，再构建完整应用。离线升级回归包括新版本同步、补丁冲突、未知服务依赖、本地修改保护、原图优先及 404/410 降级、网络/身份错误不降级、多文件校验和恢复。离线通过后，用有效视频与图集分别执行双平台真实冒烟，并在 Windows、macOS arm64、macOS Intel 各自验收安装包；不得用手工 fixture 或旧引擎结果替代。此次结果见 [双引擎验收](dual-engine-validation.md)。
+
+## 运行依赖管理
+
+入口为系统设置 → 运行依赖。缺失时由用户点击下载 FFmpeg/FFprobe 或 Deno 到应用数据目录 runtime，已有系统工具优先。修改 Python 依赖模块后必须重建 PyInstaller 引擎；协议 v3、引擎 0.7.0。检查、下载、取消和平台验收见 [运行依赖说明](runtime-dependencies.md)。

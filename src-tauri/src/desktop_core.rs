@@ -101,12 +101,14 @@ struct Inner {
     downloads: HashSet<String>,
     workers: Vec<tokio::task::JoinHandle<()>>,
     closing: bool,
+    dependency_cancel: Option<watch::Sender<bool>>,
 }
 pub struct Core {
     _instance_lock: std::fs::File,
     inner: Mutex<Inner>,
     program: String,
     args: Vec<String>,
+    runtime_directory: PathBuf,
     emit: Arc<dyn Fn(TaskEvent) + Send + Sync>,
 }
 
@@ -394,9 +396,11 @@ impl Core {
                 downloads: HashSet::new(),
                 workers: Vec::new(),
                 closing: false,
+                dependency_cancel: None,
             }),
             program,
             args,
+            runtime_directory: db_path.parent().context("IO_ERROR")?.join("runtime"),
             emit: Arc::new(emit),
         }))
     }
@@ -436,6 +440,85 @@ impl Core {
     }
     pub fn cookie(&self, platform: &str) -> Result<String> {
         settings::cookie(&self.inner.lock().unwrap().settings, platform)
+    }
+
+    pub fn cancel_dependency(&self) -> Result<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .dependency_cancel
+            .as_ref()
+            .context("INVALID_STATE")?
+            .send(true)
+            .context("INVALID_STATE")
+    }
+
+    pub async fn dependencies(
+        self: &Arc<Self>,
+        tool: Option<String>,
+        progress: impl FnMut(Value) + Send + 'static,
+    ) -> Result<Value> {
+        if tool
+            .as_ref()
+            .is_some_and(|v| !matches!(v.as_str(), "ffmpeg" | "javascript"))
+        {
+            bail!("INVALID_INPUT");
+        }
+        let (cancel, mut cancellation) = watch::channel(false);
+        let (send, receive) = tokio::sync::oneshot::channel();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.closing {
+                bail!("INVALID_STATE");
+            }
+            if inner.dependency_cancel.is_some() {
+                bail!("DEPENDENCY_BUSY");
+            }
+            inner.dependency_cancel = Some(cancel);
+            let core = self.clone();
+            inner.workers.retain(|worker| !worker.is_finished());
+            inner.workers.push(tokio::spawn(async move {
+                let result = async {
+                    let mut params = json!({"runtime_directory":core.runtime_directory});
+                    let stage = if let Some(tool) = tool {
+                        std::fs::create_dir_all(&core.runtime_directory).context("IO_ERROR")?;
+                        let stage = tempfile::Builder::new()
+                            .prefix(".install-")
+                            .tempdir_in(&core.runtime_directory)
+                            .context("IO_ERROR")?;
+                        params["tool"] = tool.into();
+                        params["staging_dir"] = stage.path().to_string_lossy().into_owned().into();
+                        Some(stage)
+                    } else {
+                        None
+                    };
+                    let method = if stage.is_some() {
+                        "install_dependency"
+                    } else {
+                        "check_dependencies"
+                    };
+                    let result = PythonBridge::operation_cancellable(
+                        &core.program,
+                        &core.args,
+                        "runtime-dependencies",
+                        method,
+                        params,
+                        progress,
+                        async {
+                            let _ = cancellation.wait_for(|v| *v).await;
+                        },
+                    )
+                    .await;
+                    // The bridge reaps the whole process tree before staging is removed.
+                    drop(stage);
+                    result.map(|value| value["result"].clone())
+                }
+                .await;
+                core.inner.lock().unwrap().dependency_cancel = None;
+                let _ = send.send(result);
+            }));
+        }
+        receive.await.context("ENGINE_UNAVAILABLE")?
     }
     pub fn cover(&self, id: &str) -> Result<Vec<u8>> {
         let inner = self.inner.lock().unwrap();
@@ -717,7 +800,7 @@ impl Core {
                     if has_cache {
                         let identified = PythonBridge::operation_cancellable(
                             &core.program, &core.args, &id, "identify_input",
-                            json!({"input":input,"profiles":profiles,"resolver":resolver}),
+                            json!({"input":input,"profiles":profiles,"resolver":resolver,"runtime_directory":core.runtime_directory}),
                             |_| {}, async { let _ = cancellation.wait_for(|v| *v).await; },
                         ).await?;
                         let identity: Video = serde_json::from_value(identified["result"].clone())
@@ -746,7 +829,7 @@ impl Core {
                 ).context("DATABASE_ERROR")?;
                 let result = PythonBridge::operation_cancellable(
                     &core.program, &core.args, &id, "resolve_video",
-                    json!({"input":input,"profiles":profiles,"resolver":resolver,"preview_dir":stage.path()}),
+                    json!({"input":input,"profiles":profiles,"resolver":resolver,"preview_dir":stage.path(),"runtime_directory":core.runtime_directory}),
                     |_| {}, async { let _ = cancellation.wait_for(|v| *v).await; },
                 ).await.and_then(|result| {
                     let video: Video = serde_json::from_value(result["result"].clone())
@@ -1013,7 +1096,7 @@ impl Core {
                     params![id,stage.path().to_string_lossy()]).context("DATABASE_ERROR")?;
                 let mut last = Instant::now() - Duration::from_secs(1);
                 let result = PythonBridge::operation_cancellable(&core.program, &core.args, &id, "download_video",
-                    json!({"input":video["canonical_url"],"profiles":profiles,
+                    json!({"input":video["canonical_url"],"profiles":profiles,"runtime_directory":core.runtime_directory,
                         "resolver":video["resolver"].as_str().unwrap_or("yt-dlp"),
                         "format_id":video["selected_format_id"],
                         "expected":{"platform":video["platform"],"video_id":video["video_id"],"kind":video["kind"].as_str().unwrap_or("video"),
@@ -1158,6 +1241,9 @@ impl Core {
         let (active, workers) = {
             let mut inner = self.inner.lock().unwrap();
             inner.closing = true;
+            if let Some(cancel) = &inner.dependency_cancel {
+                let _ = cancel.send(true);
+            }
             let active = inner
                 .active
                 .iter()
@@ -1231,6 +1317,101 @@ mod tests {
         .await
         .unwrap()
     }
+    #[tokio::test]
+    async fn runtime_dependencies_check_install_and_cancel_share_worker_lifecycle() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let status = app.dependencies(None, |_| {}).await.unwrap();
+        assert_eq!(
+            status["directory"],
+            root.path().join("runtime").to_string_lossy().as_ref()
+        );
+        assert!(app
+            .dependencies(Some("arbitrary-url".into()), |_| {})
+            .await
+            .is_err());
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let observed = progress.clone();
+        app.dependencies(Some("ffmpeg".into()), move |value| {
+            observed.lock().unwrap().push(value)
+        })
+        .await
+        .unwrap();
+        assert_eq!(progress.lock().unwrap().len(), 2);
+        assert_eq!(
+            std::fs::read_dir(root.path().join("runtime"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let running = app.clone();
+        let mut send = Some(send);
+        let worker = tokio::spawn(async move {
+            running
+                .dependencies(Some("javascript".into()), move |_| {
+                    if let Some(send) = send.take() {
+                        let _ = send.send(());
+                    }
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), receive)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            app.dependencies(None, |_| {})
+                .await
+                .unwrap_err()
+                .to_string(),
+            "DEPENDENCY_BUSY"
+        );
+        app.cancel_dependency().unwrap();
+        assert_eq!(worker.await.unwrap().unwrap_err().to_string(), "CANCELED");
+        assert_eq!(
+            std::fs::read_dir(root.path().join("runtime"))
+                .unwrap()
+                .count(),
+            0
+        );
+        app.dependencies(None, |_| {}).await.unwrap();
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_and_reaps_dependency_download_before_releasing_core() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let running = app.clone();
+        let mut send = Some(send);
+        let worker = tokio::spawn(async move {
+            running
+                .dependencies(Some("javascript".into()), move |_| {
+                    if let Some(send) = send.take() {
+                        let _ = send.send(());
+                    }
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), receive)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), app.shutdown())
+            .await
+            .unwrap();
+        assert_eq!(worker.await.unwrap().unwrap_err().to_string(), "CANCELED");
+        assert_eq!(
+            std::fs::read_dir(root.path().join("runtime"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(app.dependencies(None, |_| {}).await.is_err());
+    }
+
     #[tokio::test]
     async fn live_cookie_warning_reaches_ui_but_is_not_replayed_from_cache() {
         let root = tempfile::tempdir().unwrap();

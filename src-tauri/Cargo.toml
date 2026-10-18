@@ -6,7 +6,7 @@ publish = false
 default-run = "yingqu"
 
 [features]
-desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-single-instance"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-clipboard-manager"]
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true , features = [] }
@@ -15,6 +15,8 @@ tauri-build = { version = "2", optional = true , features = [] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "system-proxy"] }
+semver = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "io-std", "fs", "net", "time", "signal", "sync"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
@@ -26,6 +28,7 @@ tauri = { version = "2", optional = true, features = ["tray-icon"] }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
+tauri-plugin-clipboard-manager = { version = "2", optional = true }
 
 # Tauri signs binaries in declaration order. Sign the helper before the main
 # executable, whose signature also seals the enclosing macOS app bundle.

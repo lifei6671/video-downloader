@@ -16,6 +16,7 @@
   --secondary-foreground: #334155;
   --muted: #EDF2F8;
   --muted-foreground: #64748B;
+  --surface-hover: #E8EEF6;
   --accent: #E8F0FF;
   --accent-foreground: #1D4ED8;
   --destructive: #C5304B;
@@ -87,3 +88,34 @@
 }
 
 .cookie-masked { -webkit-text-security: disc; }
+
+.settings-navigation [data-slot="sidebar-menu-button"] {
+  color: var(--sidebar-foreground);
+  background: transparent;
+  transition: background-color 150ms, border-color 150ms, color 150ms;
+}
+.settings-navigation [data-slot="sidebar-menu-button"]:not([data-active="true"]):hover {
+  color: var(--foreground);
+  background: var(--surface-hover);
+}
+.settings-navigation [data-slot="sidebar-menu-button"][data-active="true"] {
+  color: var(--primary);
+  background: var(--card);
+  border-color: var(--border);
+}
+.settings-navigation [data-slot="sidebar-menu-button"][data-active="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 14px;
+  bottom: 14px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--primary);
+}
+.settings-platforms [data-slot="tabs-trigger"][data-state="active"] {
+  color: var(--primary);
+}
+.settings-platforms [data-slot="tabs-trigger"]::after {
+  background: var(--primary);
+}

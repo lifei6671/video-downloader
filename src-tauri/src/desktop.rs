@@ -8,11 +8,15 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, State,
 };
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use yingqu_core::{
     desktop_core::{Core, Status, Task, TaskEvent},
+    runtime_dependencies::RuntimeStatus,
     settings::{ProfileUpdate, Settings},
+    update_download::{DownloadStatus, UpdateDownloads},
+    updates::{self, UpdateCheck},
 };
 
 type AppCore = Arc<Core>;
@@ -31,6 +35,12 @@ fn list_tasks(core: State<AppCore>) -> Vec<Task> {
 #[tauri::command]
 fn get_settings(core: State<AppCore>) -> Settings {
     core.settings()
+}
+#[tauri::command]
+fn read_clipboard_text(app: tauri::AppHandle) -> Result<String, String> {
+    app.clipboard()
+        .read_text()
+        .map_err(|_| "CLIPBOARD_READ_FAILED".into())
 }
 #[tauri::command]
 fn get_profile_cookie(core: State<AppCore>, platform: String) -> Result<String, String> {
@@ -126,6 +136,93 @@ fn reveal_download(
         .reveal_item_in_dir(path)
         .map_err(|_| "IO_ERROR".into())
 }
+#[tauri::command]
+fn open_project_page(
+    app: tauri::AppHandle,
+    page: String,
+    release_tag: Option<String>,
+) -> Result<(), String> {
+    let url = match page.as_str() {
+        "source" => "https://github.com/lifei6671/video-downloader",
+        "issues" => "https://github.com/lifei6671/video-downloader/issues",
+        "releases" => "https://github.com/lifei6671/video-downloader/releases",
+        "license" => "https://github.com/lifei6671/video-downloader/blob/master/LICENSE",
+        "credits" => "https://github.com/lifei6671/video-downloader/blob/master/vendor/UPSTREAM.md",
+        "credit-ytdlp" => "https://github.com/yt-dlp/yt-dlp",
+        "credit-dtk" => "https://github.com/Evil0ctal/Douyin_TikTok_Download_API",
+        "credit-tauri" => "https://github.com/tauri-apps/tauri",
+        "credit-react" => "https://github.com/react/react",
+        "credit-shadcn" => "https://github.com/shadcn-ui/ui",
+        "credit-lucide" => "https://github.com/lucide-icons/lucide",
+        _ => return Err("INVALID_INPUT".into()),
+    };
+    let url = match release_tag {
+        Some(tag) if page == "releases" => updates::release_url(&tag)?,
+        Some(_) => return Err("INVALID_INPUT".into()),
+        None => url.to_owned(),
+    };
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "OPEN_LINK_FAILED".into())
+}
+#[tauri::command]
+async fn check_for_updates(
+    downloads: State<'_, Arc<UpdateDownloads>>,
+) -> Result<UpdateCheck, String> {
+    downloads.check().await
+}
+#[tauri::command]
+fn get_update_download(downloads: State<Arc<UpdateDownloads>>) -> Option<DownloadStatus> {
+    downloads.status()
+}
+#[tauri::command]
+async fn start_update_download(
+    downloads: State<'_, Arc<UpdateDownloads>>,
+    release_tag: String,
+) -> Result<DownloadStatus, String> {
+    downloads.inner().start(&release_tag)
+}
+#[tauri::command]
+fn cancel_update_download(
+    downloads: State<Arc<UpdateDownloads>>,
+    download_id: String,
+) -> Result<DownloadStatus, String> {
+    downloads.cancel(&download_id)
+}
+#[tauri::command]
+async fn open_update_installer(
+    app: tauri::AppHandle,
+    downloads: State<'_, Arc<UpdateDownloads>>,
+    download_id: String,
+) -> Result<(), String> {
+    let path = downloads.installer_path(&download_id).await?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|_| "UPDATE_INSTALLER_OPEN_FAILED".into())
+}
+#[tauri::command]
+async fn check_runtime_dependencies(core: State<'_, AppCore>) -> Result<RuntimeStatus, String> {
+    let result = core.dependencies(None, |_| {}).await.map_err(error)?;
+    serde_json::from_value(result).map_err(|_| "ENGINE_PROTOCOL_ERROR".into())
+}
+#[tauri::command]
+async fn install_runtime_dependency(
+    core: State<'_, AppCore>,
+    tool: String,
+    on_progress: tauri::ipc::Channel<serde_json::Value>,
+) -> Result<RuntimeStatus, String> {
+    let result = core
+        .dependencies(Some(tool), move |value| {
+            let _ = on_progress.send(value);
+        })
+        .await
+        .map_err(error)?;
+    serde_json::from_value(result).map_err(|_| "ENGINE_PROTOCOL_ERROR".into())
+}
+#[tauri::command]
+fn cancel_runtime_dependency(core: State<AppCore>) -> Result<(), String> {
+    core.cancel_dependency().map_err(error)
+}
 fn show_main_window(app: &tauri::AppHandle) {
     if app.state::<AtomicBool>().load(Ordering::SeqCst) {
         return;
@@ -146,8 +243,10 @@ fn request_exit(app: &tauri::AppHandle) {
         return;
     }
     let core = app.state::<AppCore>().inner().clone();
+    let updates = app.state::<Arc<UpdateDownloads>>().inner().clone();
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
+        updates.shutdown().await;
         core.shutdown().await;
         handle.exit(0);
     });
@@ -160,6 +259,7 @@ fn main() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
@@ -169,6 +269,14 @@ fn main() {
                 std::fs::rename(&legacy, &data)?;
             }
             std::fs::create_dir_all(&data)?;
+            let update_handle = app.handle().clone();
+            app.manage(UpdateDownloads::new(
+                data.join("updates"),
+                app.package_info().version.to_string(),
+                move |status| {
+                    let _ = update_handle.emit("update_download", status);
+                },
+            ));
             let downloads = app.path().download_dir()?.join("Yingqu");
             #[cfg(debug_assertions)]
             let engine_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -231,6 +339,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_tasks,
             get_settings,
+            read_clipboard_text,
             get_profile_cookie,
             get_task_cover,
             get_task_image,
@@ -244,7 +353,16 @@ fn main() {
             remove_history,
             delete_local_file,
             select_download_directory,
-            reveal_download
+            reveal_download,
+            open_project_page,
+            check_for_updates,
+            get_update_download,
+            start_update_download,
+            cancel_update_download,
+            open_update_installer,
+            check_runtime_dependencies,
+            install_runtime_dependency,
+            cancel_runtime_dependency
         ])
         .build(tauri::generate_context!())
         .expect("无法启动映取")

@@ -24,7 +24,7 @@
 
 不做作者批量采集、评论、平台内容搜索、直播、身份池、自动游客身份、内置登录浏览器、云同步、开放 API 或 MCP。不提供暂停、断点续传、退出后后台下载、自动重试或转码。历史列表搜索不等于平台内容搜索。
 
-图集每张优先平台明确提供的原图，缺原图或原图 HTTP 404/410 时使用高清；其他网络、身份、风控错误不降级。保留原响应格式，不转码，实际来源逐张展示。抖音/TikTok 仍选择单文件直接 HTTP(S) 格式。YouTube 由 yt-dlp 解析单视频，支持兼容容器的分离音视频 HTTP(S) 规格，使用本机 FFmpeg stream copy 合并，不转码。仅分段流且无直接下载规格时返回 `UNSUPPORTED_CONTENT`。YouTube 使用本机 Node.js 22+ / Deno 2.3+ 及锁定的 yt-dlp-ejs；FFmpeg 与 JS runtime 不内置、不自动安装。手动 Cookie 优先；未填写时通过 yt-dlp 读取系统 HTTPS 默认浏览器并按平台过滤，不回写 SQLite。读取失败可匿名尝试公开作品并提示限制；不尝试其他浏览器。工具检测和验收见 [YouTube 说明](youtube-validation.md)。
+图集每张优先平台明确提供的原图，缺原图或原图 HTTP 404/410 时使用高清；其他网络、身份、风控错误不降级。保留原响应格式，不转码，实际来源逐张展示。抖音/TikTok 仍选择单文件直接 HTTP(S) 格式。YouTube 由 yt-dlp 解析单视频，支持兼容容器的分离音视频 HTTP(S) 规格，使用本机 FFmpeg stream copy 合并，不转码。仅分段流且无直接下载规格时返回 `UNSUPPORTED_CONTENT`。YouTube 使用本机 Node.js 22+ / Deno 2.3+ 及锁定的 yt-dlp-ejs；FFmpeg 与 JS runtime 不随安装包分发；用户可在系统设置的运行依赖中按需下载到应用专属目录。手动 Cookie 优先；未填写时通过 yt-dlp 读取系统 HTTPS 默认浏览器并按平台过滤，不回写 SQLite。读取失败可匿名尝试公开作品并提示限制；不尝试其他浏览器。工具检测和验收见 [YouTube 说明](youtube-validation.md)。
 
 ## 2. 当前证据与依赖取舍
 
@@ -135,11 +135,13 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 
 ## 6. UI 命令与状态同步
 
-流程：设置 → 粘贴单链接 → 解析预览 → 点击下载 → 排队/下载 → 文件与记录提交 → 已完成。沿用首页、下载任务、已完成和设置四个视图。
+流程：设置 → 粘贴单链接 → 解析预览 → 点击下载 → 排队/下载 → 文件与记录提交 → 已完成。使用首页、下载任务、设置和关于软件四个视图；下载任务统一展示已提交的任务与已完成记录，并支持按标题或作者搜索。
 
 | Tauri 命令 | 行为 |
 | --- | --- |
 | `resolve_video` | 输入分享文本及 resolver，创建 task_id，异步解析并发出快照 |
+| `open_project_page` | 接收 source / issues / releases / license / credits，以及 credit-ytdlp / credit-dtk / credit-tauri / credit-react / credit-shadcn / credit-lucide 固定标识，后六项打开对应组件 GitHub 仓库；仅 releases 可附 release_tag（经正式 SemVer 标签校验），打开本项目对应 Release 详情页；失败返回 OPEN_LINK_FAILED，不接受任意 URL |
+| `check_for_updates` | 无前端参数；Rust 以实际应用版本请求本项目 GitHub 最新正式 Release，返回 current_version、latest_version、release_tag、has_update、release_notes、published_at；15 秒总超时，网络、限流、无正式版及异常响应均明确失败，不伪报已是最新 |
 | `get_task_image` | 接收 task_id/index，从 Rust 所拥有预览或已完成清单读取图片字节 |
 | `start_download` | 仅接收 task_id，使用 Rust 保存的作品身份和任务配置排队 |
 | `cancel_task` | 取消等待或终止对应子进程，资源释放后进入终态 |
@@ -342,3 +344,21 @@ React 使用现有 shadcn/ui ToggleGroup 选择规格，通过 `choose_video_for
 取得槽位后的下载请求携带同一 resolver、规范身份与稳定 `format_id`；Python 重新提取并严格匹配，已失效则 `FORMAT_UNAVAILABLE`，不改选其他大小。下载终端回传所选 ID 和新提取尺寸；Rust 核验 ID 后提交，完成记录保存实际字节数。引擎 0.5.0 更新使旧缓存版本失效；旧成功记录与文件保留。
 
 抖音详情补充完整 Web 参数，并按每个播放地址填入真实尺寸，解决旧请求仅取 720p 和上游 `4k` URL-key 缺尺寸问题。具体来源及移除条件见 [上游记录](../vendor/UPSTREAM.md)，验收见 [视频规格](video-format-validation.md)。
+
+### 关于页手动检查更新
+
+Rust 使用 reqwest（系统 TLS 与系统代理支持）请求固定 GitHub 公共端点，不使用平台 Cookie、代理凭据或下载引擎，不请求镜像或重试。semver 比较正式版本，排除草稿与预发布；版本以 Tauri package_info 为准。检查过程仅在按钮内显示动画和进行中文案，不增加页面提示；无需更新使用顶部居中 Sonner Toast，检查失败在页面持续显示。前端发现更新后打开 shadcn/ui Dialog，以纯文本展示可滚动的更新说明，关闭后恢复检查按钮焦点。
+
+### 用户触发的更新安装包下载
+
+`updates.rs` 从同一 Release 的 assets 中按版本与系统架构精确选择 `Yingqu_{version}_x64-setup.exe`、`Yingqu_{version}_x64.dmg` 或 `Yingqu_{version}_aarch64.dmg`，只接收该仓库该 tag 的 HTTPS 下载地址、uploaded 状态、正数且不超过 1 GiB 的大小及完整 SHA-256。不支持的系统、缺包或缺少 digest 时不猜测替代包，保留具体发行页入口。
+
+`update_download.rs` 是更新下载状态权威，与媒体任务队列隔离。`start_update_download(release_tag)` 只接受实际检查到的新版本；下载前重新获取该 tag 的元数据。更新下载单槽位，采用应用 updates 目录下独占 `.part` 文件、流式保存和增量 SHA-256，验证大小与摘要、刷新文件后才以不覆盖方式提交。初始地址固定于本仓库，重定向仅允许 HTTPS 的 GitHub 与官方 Release CDN；连接超时 15 秒、读取等待 30 秒、整体上限 15 分钟，不增加重试或镜像。
+
+`get_update_download` 返回当前快照，`update_download` 事件携带单调 revision，前端忽略迟到旧事件或快照。取消命令按下载 ID 作用于当前操作，取消传播至 HTTP future，临时文件随操作回收；提交与取消在同一状态锁下决定终态。关停先禁止新请求，取消并等待更新下载回收，再完成应用既有退出流程。关闭弹窗或切换页面不取消下载，返回关于页可恢复状态；应用重启不恢复下载。
+
+`open_update_installer(download_id)` 不接受前端文件路径，仅打开本次运行已完成下载的后端文件，再次核验文件类型、大小与 SHA-256；前端显示实际打开失败并可重新下载。用户点击“打开安装包”后由系统打开，应用不自动安装、退出或重启。没有接入 Tauri Updater，不改变现有发布工作流、签名方式或媒体下载状态。
+
+### 设置二级分类
+
+系统设置采用左侧下载设置、平台账号、运行依赖菜单及右侧操作区。平台账号沿用既有字段和保存命令；运行依赖新增检查、下载、取消命令，具体见 [运行依赖](runtime-dependencies.md)。平台账号通过顶部 shadcn/ui Tabs 每次展示一个平台，Cookie、网络代理、User-Agent 在同一个表单内统一保存。TabsContent forceMount 保持三平台表单挂载，通过 inactive 状态隐藏非当前平台，避免草稿丢失或隐藏控件参与键盘导航。切换分类和平台均保留未保存输入。save_profile 每次传当前平台的完整 user_agent、已读取的 Cookie 和代理修改；未修改代理传 null，选择直连传空字符串；Cookie 未读取成功时传 null 保留原值，其编辑与清除禁用，其他配置仍可保存。保存提示绑定发起保存的平台，隐藏平台的输入不被提交或清空。下载目录和并发值仍使用原有即时保存命令。

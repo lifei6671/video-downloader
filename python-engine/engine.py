@@ -17,13 +17,14 @@ from network import GuardedRH, TargetError
 from douyin import DouyinIE
 from browser_cookies import load_default_cookies
 from local_tools import installed_tool, javascript_runtime
+import runtime_dependencies
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/dtk/upstream/src'))
 import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.6.0'
+ENGINE_VERSION = '0.7.0'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.08.19'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -211,6 +212,15 @@ def input_identity(platform, url, resolver, source_url):
 def operate(method, params, emit):
     if not isinstance(params, dict):
         raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
+    try:
+        runtime_dependencies.configure(params.get('runtime_directory'))
+        if method in ('check_dependencies', 'install_dependency'):
+            result = (runtime_dependencies.status() if method == 'check_dependencies' else
+                      runtime_dependencies.install(params.get('tool'), params.get('staging_dir'), emit))
+            emit('dependencies', result=result)
+            return
+    except runtime_dependencies.DependencyError as error:
+        raise EngineError(str(error), 'dependencies') from None
     platform, url, short = parse_input(params.get('input'))
     source_url = url
     resolver = params.get('resolver', 'auto')

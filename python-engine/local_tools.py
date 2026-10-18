@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 RUNTIME_MINIMUM = {'deno': (2, 3, 0), 'node': (22, 0, 0)}
+MANAGED_DIR = None
 
 
 def windows_path():
@@ -82,6 +83,9 @@ def installed_tool(name):
     found = shutil.which(name)
     filename = name + ('.exe' if sys.platform == 'win32' else '')
     paths = ([Path(found)] if found else []) + [root / filename for root in search_paths(name)]
+    if MANAGED_DIR and name in ('ffmpeg', 'ffprobe', 'deno'):
+        group = 'javascript' if name == 'deno' else 'ffmpeg'
+        paths.append(MANAGED_DIR / group / filename)
     seen = set()
     for path in paths:
         identity = os.path.normcase(str(path))
@@ -89,8 +93,8 @@ def installed_tool(name):
             continue
         seen.add(identity)
         # Skip stale links, wrong architecture, denied execution, and unrelated same-name files.
-        if name == 'ffmpeg':
-            if not re.match(r'ffmpeg version\s', tool_output(path, '-version')):
+        if name in ('ffmpeg', 'ffprobe'):
+            if not re.match(name + r' version\s', tool_output(path, '-version')):
                 continue
         elif name in RUNTIME_MINIMUM:
             version = re.search(r'(\d+)\.(\d+)\.(\d+)', tool_output(path, '--version'))

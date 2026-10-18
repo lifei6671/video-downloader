@@ -1,7 +1,13 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 export type Status = 'parsing' | 'ready' | 'queued' | 'downloading' | 'completed' | 'failed' | 'canceled';
 export type Resolver = 'auto' | 'yt-dlp' | 'dtk';
+export type ProjectPage = 'source' | 'issues' | 'releases' | 'license' | 'credits' | 'credit-ytdlp' | 'credit-dtk' | 'credit-tauri' | 'credit-react' | 'credit-shadcn' | 'credit-lucide';
+export interface UpdateCheck { current_version: string; latest_version: string; release_tag: string; has_update: boolean; release_notes: string; published_at: string | null; installer: { name: string; size: number } | null }
+export interface UpdateDownload { id: string; revision: number; release: UpdateCheck; phase: 'preparing' | 'downloading' | 'verifying' | 'canceling' | 'completed' | 'canceled' | 'failed'; downloaded_bytes: number; total_bytes: number | null; filename: string | null; error: string | null }
+export interface RuntimeTool { id: 'ffmpeg' | 'javascript'; available: boolean; provider: string | null; version: string | null; path: string | null; source: 'system' | 'managed' | null; can_install: boolean }
+export interface RuntimeStatus { platform: string; directory: string; tools: RuntimeTool[] }
+export interface RuntimeProgress { tool: RuntimeTool['id']; phase: 'downloading' | 'verifying' | 'installing'; downloaded_bytes: number; total_bytes: number }
 export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string }
 export interface VideoFormat { requires_merge?: boolean; format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
 export interface Video { cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
@@ -9,6 +15,21 @@ export interface Task { merging?: boolean; id: string; revision: number; status:
 export interface Profile { platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
 export interface Settings { download_directory: string; max_downloads: number; profiles: Profile[] }
 export const api = {
+  readClipboardText: () => invoke<string>('read_clipboard_text'),
+  openProjectPage: (page: ProjectPage, releaseTag?: string) => invoke<void>('open_project_page', { page, releaseTag }),
+  checkForUpdates: () => invoke<UpdateCheck>('check_for_updates'),
+  updateDownload: () => invoke<UpdateDownload | null>('get_update_download'),
+  startUpdateDownload: (releaseTag: string) => invoke<UpdateDownload>('start_update_download', { releaseTag }),
+  cancelUpdateDownload: (downloadId: string) => invoke<UpdateDownload>('cancel_update_download', { downloadId }),
+  openUpdateInstaller: (downloadId: string) => invoke<void>('open_update_installer', { downloadId }),
+  subscribeUpdateDownload: (callback: (status: UpdateDownload) => void) => listen<UpdateDownload>('update_download', event => callback(event.payload)),
+  checkRuntimeDependencies: () => invoke<RuntimeStatus>('check_runtime_dependencies'),
+  installRuntimeDependency: (tool: RuntimeTool['id'], progress: (value: RuntimeProgress) => void) => {
+    const onProgress = new Channel<RuntimeProgress>();
+    onProgress.onmessage = progress;
+    return invoke<RuntimeStatus>('install_runtime_dependency', { tool, onProgress });
+  },
+  cancelRuntimeDependency: () => invoke<void>('cancel_runtime_dependency'),
   cookie: (platform: string) => invoke<string>('get_profile_cookie', { platform }),
   image: (taskId: string, index: number) => invoke<number[]>('get_task_image', { taskId, index }),
   cover: (taskId: string) => invoke<number[]>('get_task_cover', { taskId }),
@@ -42,10 +63,39 @@ export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlyS
   return [...map.values()].sort((a, b) => b.created_at - a.created_at);
 }
 const errors: Record<string, string> = {
+  DEPENDENCY_BUSY: '依赖检测或下载正在进行，可取消后重新检测',
+  DEPENDENCY_UNSUPPORTED_SYSTEM: '当前系统或架构暂不支持自动下载，请自行安装后重新检测',
+  DEPENDENCY_NETWORK_ERROR: '依赖下载失败，请检查网络或系统代理后重试',
+  DEPENDENCY_TIMEOUT: '依赖下载或验证超时，请稍后重试',
+  DEPENDENCY_CHECKSUM_MISMATCH: '下载文件校验不一致，未安装，请重新下载',
+  DEPENDENCY_INVALID_ARCHIVE: '下载的压缩包无效，未安装，请重新下载',
+  DEPENDENCY_VALIDATION_FAILED: '依赖无法正常执行或版本不符，未确认安装成功',
+  CANCELED: '依赖操作已取消',
+  OPEN_LINK_FAILED: '无法打开系统浏览器，请稍后重试',
+  UPDATE_TIMEOUT: '检查更新超时，请检查网络后重试',
+  UPDATE_NETWORK_ERROR: '无法连接 GitHub，请检查网络或系统代理后重试',
+  UPDATE_RATE_LIMITED: 'GitHub 访问受限或请求过于频繁，请稍后重试',
+  UPDATE_NO_RELEASE: '未找到正式发行版本，请稍后再试',
+  UPDATE_SERVICE_ERROR: 'GitHub 更新服务暂时不可用，请稍后重试',
+  UPDATE_INVALID_RESPONSE: '更新信息格式异常，请稍后重试或查看发行版本',
+  UPDATE_INVALID_VERSION: '无法识别当前应用版本，请查看发行版本',
+  UPDATE_CHECK_REQUIRED: '请先检查更新，再下载安装包',
+  UPDATE_DOWNLOAD_BUSY: '已有更新正在下载，请查看进度或取消后重试',
+  UPDATE_DOWNLOAD_SHUTTING_DOWN: '软件正在退出，请重新启动后再下载更新',
+  UPDATE_UNSUPPORTED_SYSTEM: '当前系统或架构暂无自动下载包，请前往发行页面',
+  UPDATE_NO_INSTALLER: '此版本没有可验证的适用安装包，请前往发行页面',
+  UPDATE_DOWNLOAD_NOT_FOUND: '更新下载已不存在，请重新检查更新',
+  UPDATE_DOWNLOAD_FAILED: '安装包下载失败，请检查网络或系统代理后重试',
+  UPDATE_DOWNLOAD_TIMEOUT: '安装包下载超时，请稍后重试',
+  UPDATE_SIZE_MISMATCH: '安装包大小不完整，未保存，请重新下载',
+  UPDATE_CHECKSUM_MISMATCH: '安装包校验失败，请重新下载',
+  UPDATE_INSTALLER_NOT_READY: '安装包尚未准备好，请重新下载',
+  UPDATE_INSTALLER_MISSING: '安装包已移动或删除，请重新下载',
+  UPDATE_INSTALLER_OPEN_FAILED: '无法打开安装包，请稍后重试',
   INVALID_INPUT: '请粘贴抖音、TikTok 或 YouTube 的视频分享链接',
   UNSUPPORTED_PLATFORM: '请粘贴抖音、TikTok 或 YouTube 的视频分享链接',
-  FFMPEG_UNAVAILABLE: '此高清规格需要合并音视频。请安装 FFmpeg；若使用自定义目录，请加入系统 PATH 后重试。',
-  JS_RUNTIME_UNAVAILABLE: 'YouTube 解析需要本机 Node.js 22+ 或 Deno 2.3+。请安装并加入 PATH，重启应用后重试。',
+  FFMPEG_UNAVAILABLE: '此高清规格需要合并音视频，请在系统设置的运行依赖中检测并下载 FFmpeg。',
+  JS_RUNTIME_UNAVAILABLE: 'YouTube 解析需要 Node.js 22+ 或 Deno 2.3+，请在系统设置的运行依赖中检测并下载。',
   BROWSER_COOKIES_UNAVAILABLE: '未从系统默认浏览器读取到此平台的可用 Cookie。请确认已登录；若浏览器被占用或加密不支持，可关闭后重试，或在设置中粘贴 Cookie。',
   MEDIA_MERGE_FAILED: 'FFmpeg 合并音视频失败，请检查本机 FFmpeg 和磁盘空间后重试。',
   FORMAT_UNAVAILABLE: '所选视频规格已不可用，请重新解析后选择；未自动降级。',

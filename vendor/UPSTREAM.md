@@ -53,3 +53,11 @@ PyInstaller 使用官方 yt-dlp hook，收集 DTK 的具体平台模块、完整
 yt-dlp 2026.08.19 的 URL-key parser 对该作品 `bytevc1_4k` 未填尺寸；自有 Douyin 子类在复用上游解析后，将同一 URL 对应 `play_addr` 的 width/height 填回各格式，不使用父级上传尺寸猜测。上游升级时检查完整请求参数、4K 格式尺寸和排序；上游能够正确完成这些行为后移除此补充，保留回归测试。签名算法没有改变。
 
 4K 媒体请求显式使用平台根 Referer `https://www.douyin.com/`；本机同一规格 CDN 请求缺少该头时返回 403，带根 Referer 时返回 206。该头只用于抖音下载，TikTok 和 Cookie 域隔离保持不变。
+
+## 运行依赖下载（2026-10-18）
+
+用户明确授权运行依赖页下载缺失工具，替代此前“只检测、不下载”的约束。仅作为应用专属外部工具，不更新内置解析引擎。
+
+- FFmpeg/FFprobe：采用 [eugeneware/ffmpeg-static b6.1.1](https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1) 的 Windows x64 / macOS x64、arm64 gzip 静态构建。SHA-256、压缩大小直接核对该 Release 的公开资产元数据，与 Downvid 固定 manifest 对照一致；没有复用其源码。下载保留各平台 LICENSE、README（包含构建/源码说明），二者亦校验 SHA-256。许可依实际构建的 LGPL/GPL 声明，不将静态构建统一描述为 MIT。资产来源及校验值见 `python-engine/runtime_assets.py`。
+- Deno：采用官方 [denoland/deno v2.9.7](https://github.com/denoland/deno/releases/tag/v2.9.7)，按三目标下载 zip，仅提取 deno/deno.exe；固定 Release 资产 digest 和大小。安装时保留同 tag 的 LICENSE.md（MIT，原作者声明），同样固定 SHA-256；SOURCE.txt 记录下载 URL。
+- 下载源只有上述固定 GitHub Release/官方源码地址，无执行远程安装脚本、镜像降级或 PATH 改写。新增工具版本升级须重新核验产物哈希、许可、平台实际执行和本项目媒体接入，不能只更改版本文案。
