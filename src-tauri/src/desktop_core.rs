@@ -125,6 +125,31 @@ fn now() -> u64 {
         .expect("system clock before epoch")
         .as_secs()
 }
+fn cleanup_staging(db: &Connection, id: &str, path: &Path) -> Result<()> {
+    if path
+        .file_name()
+        .is_none_or(|n| !n.to_string_lossy().starts_with(&format!("yingqu-{id}-")))
+    {
+        bail!("INVALID_STAGING_PATH");
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if metadata.file_attributes() & 0x400 != 0 {
+                    bail!("INVALID_STAGING_PATH");
+                }
+            }
+            std::fs::remove_dir_all(path).context("IO_ERROR")?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => bail!("INVALID_STAGING_PATH"),
+    }
+    db.execute("DELETE FROM task_staging WHERE task_id=?", [id])
+        .context("DATABASE_ERROR")?;
+    Ok(())
+}
 fn persist(db: &Connection, task: &Task) -> Result<()> {
     let mut stored = task.clone();
     // Covers may carry short-lived query tokens. Keep them only in memory.
@@ -391,29 +416,7 @@ impl Core {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (id, path) in staging {
-            let path = PathBuf::from(path);
-            if path
-                .file_name()
-                .is_none_or(|n| !n.to_string_lossy().starts_with(&format!("yingqu-{id}-")))
-            {
-                bail!("INVALID_STAGING_PATH");
-            }
-            match std::fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                    #[cfg(windows)]
-                    {
-                        use std::os::windows::fs::MetadataExt;
-                        if metadata.file_attributes() & 0x400 != 0 {
-                            bail!("INVALID_STAGING_PATH");
-                        }
-                    }
-                    std::fs::remove_dir_all(&path).context("IO_ERROR")?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => bail!("INVALID_STAGING_PATH"),
-            }
-            db.execute("DELETE FROM task_staging WHERE task_id=?", [id])
-                .context("DATABASE_ERROR")?;
+            cleanup_staging(&db, &id, Path::new(&path))?;
         }
         Ok(Arc::new(Self {
             _instance_lock: instance_lock,
@@ -691,7 +694,7 @@ impl Core {
     }
 
     pub fn resolve(self: &Arc<Self>, input: String) -> Result<Task> {
-        self.resolve_task(input, false, "auto".into(), None)
+        self.resolve_task(input, None, "auto".into(), None)
     }
 
     pub fn resolve_with_resolver(
@@ -702,7 +705,7 @@ impl Core {
         if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk" | "tdl") {
             bail!("CONFIG_INVALID");
         }
-        self.resolve_task(input, false, resolver, None)
+        self.resolve_task(input, None, resolver, None)
     }
 
     pub fn image(&self, id: &str, index: usize) -> Result<Vec<u8>> {
@@ -756,7 +759,7 @@ impl Core {
                     .map(str::to_owned),
             )
         };
-        self.resolve_task(input, true, resolver, format_id)
+        self.resolve_task(input, Some(id), resolver, format_id)
     }
 
     pub fn remove_history(&self, id: &str) -> Result<()> {
@@ -941,7 +944,7 @@ impl Core {
     fn resolve_task(
         self: &Arc<Self>,
         input: String,
-        download_after_resolve: bool,
+        retry_id: Option<&str>,
         resolver: String,
         requested_format: Option<String>,
     ) -> Result<Task> {
@@ -965,6 +968,23 @@ impl Core {
         if inner.closing || inner.tasks.iter().any(|t| t.status == Status::Parsing) {
             bail!("TASK_BUSY");
         }
+        let previous = if let Some(id) = retry_id {
+            let task = inner
+                .tasks
+                .iter()
+                .find(|t| t.id == id)
+                .context("TASK_NOT_FOUND")?;
+            if !matches!(task.status, Status::Failed | Status::Canceled) {
+                bail!("INVALID_STATE");
+            }
+            if inner.active.contains_key(id) || inner.downloads.contains(id) {
+                bail!("TASK_BUSY");
+            }
+            Some(task.clone())
+        } else {
+            None
+        };
+        let download_after_resolve = previous.is_some();
         let mut cached = parse_cache::find(&inner.db, &input, &resolver)?;
         if let (Some(cached), Some(format_id)) = (&mut cached, &requested_format) {
             apply_video_format(&mut cached.video, format_id)?;
@@ -986,10 +1006,13 @@ impl Core {
             settings::snapshot(&inner.settings)?
         };
         let mut task = Task {
-            id: Uuid::new_v4().to_string(),
-            revision: 1,
+            id: previous
+                .as_ref()
+                .map(|t| t.id.clone())
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            revision: previous.as_ref().map_or(1, |t| t.revision + 1),
             status: Status::Parsing,
-            video: None,
+            video: previous.as_ref().and_then(|t| t.video.clone()),
             bytes: 0,
             total_bytes: None,
             speed_bps: None,
@@ -997,7 +1020,7 @@ impl Core {
             merging: false,
             error: None,
             path: None,
-            created_at: now(),
+            created_at: previous.as_ref().map_or_else(now, |t| t.created_at),
             completed_at: None,
             canceling: false,
             file_missing: false,
@@ -1014,7 +1037,28 @@ impl Core {
         };
         let (cancel, mut cancellation) = watch::channel(false);
         let (done, done_rx) = watch::channel(cached.is_some());
-        publish(&mut inner, task.clone(), &*self.emit)?;
+        if previous.is_some() {
+            let staging = inner.db.query_row(
+                "SELECT path FROM task_staging WHERE task_id=?",
+                [&task.id],
+                |r| r.get::<_, String>(0),
+            );
+            match staging {
+                Ok(path) => cleanup_staging(&inner.db, &task.id, Path::new(&path))?,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(_) => bail!("DATABASE_ERROR"),
+            }
+            // Old commit evidence must never complete a new attempt on restart.
+            let tx = inner.db.transaction().context("DATABASE_ERROR")?;
+            tx.execute("DELETE FROM commit_intents WHERE task_id=?", [&task.id])
+                .context("DATABASE_ERROR")?;
+            persist(&tx, &task)?;
+            tx.commit().context("DATABASE_ERROR")?;
+            *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
+            (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+        } else {
+            publish(&mut inner, task.clone(), &*self.emit)?;
+        }
         let directory = inner.settings.download_directory.clone();
         inner.active.insert(
             task.id.clone(),
@@ -1456,8 +1500,11 @@ impl Core {
                         bail!("INVALID_ENGINE_RESULT");
                     }
                     let identity: Video = serde_json::from_value(video).context("INVALID_ENGINE_RESULT")?;
+                    // A retry keeps the task ID but must not collide with files
+                    // committed by an earlier attempt whose database write failed.
+                    let attempt_id = Uuid::new_v4();
                     let file = if identity.kind == "image_album" {
-                        let target = directory.join(format!("{}_{}_{}", identity.platform, identity.video_id, id));
+                        let target = directory.join(format!("{}_{}_{}", identity.platform, identity.video_id, attempt_id));
                         let file = finalize_album(&identity, &result, &media, &target, |source,size,files| {
                             inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size,manifest) VALUES(?1,?2,?3,?4,?5)", params![
                                 id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?,serde_json::to_string(files)?]).context("DATABASE_ERROR")?;
@@ -1471,7 +1518,7 @@ impl Core {
                     } else {
                     let extension = result["container"].as_str().context("INVALID_ENGINE_RESULT")?;
                     if !matches!(extension, "mp4" | "webm") && !(identity.platform == "telegram" && matches!(extension, "mov" | "mkv")) { bail!("INVALID_MEDIA_CONTENT"); }
-                    let target = directory.join(format!("{}_{}_{}.{}",identity.platform,identity.video_id,id,extension));
+                    let target = directory.join(format!("{}_{}_{}.{}",identity.platform,identity.video_id,attempt_id,extension));
                     let file = finalize_to(&identity, &result, &media, &target, |source,size| {
                         inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,?4)", params![
                             id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?]).context("DATABASE_ERROR")?;
@@ -2023,6 +2070,7 @@ mod tests {
         app.choose_format(&task.id, &"2".repeat(24)).unwrap();
         app.cancel(&task.id).await.unwrap();
         let retried = app.retry(&task.id).unwrap();
+        assert_eq!(retried.id, task.id);
         let completed = wait(&app, &retried.id, Status::Completed).await;
         assert_eq!(completed.video.as_ref().unwrap()["width"], 720);
         assert_eq!(
@@ -2585,7 +2633,7 @@ mod tests {
         assert!(app.inner.lock().unwrap().active.is_empty());
     }
     #[tokio::test]
-    async fn retry_reparses_with_new_settings_and_preserves_old_record() {
+    async fn retry_reuses_record_with_new_settings_and_survives_restart() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         let old = enqueue(&app, "8301").await;
@@ -2593,6 +2641,7 @@ mod tests {
         assert!(app.remove_history(&old.id).is_err());
         assert!(app.delete_local_file(&old.id).is_err());
         app.cancel(&old.id).await.unwrap();
+        let canceled = app.list().into_iter().find(|t| t.id == old.id).unwrap();
         std::fs::remove_file(root.path().join("started-8301")).unwrap();
         app.save_profile(settings::ProfileUpdate {
             platform: "douyin".into(),
@@ -2602,7 +2651,12 @@ mod tests {
         })
         .unwrap();
         let retry = app.retry(&old.id).unwrap();
-        assert_ne!(retry.id, old.id);
+        assert_eq!(retry.id, old.id);
+        assert_eq!(retry.created_at, old.created_at);
+        assert!(retry.revision > canceled.revision);
+        assert_eq!(retry.bytes, 0);
+        assert!(retry.error.is_none());
+        assert_eq!(app.list().len(), 1);
         assert!(retry.download_requested);
         started(root.path(), "8301").await;
         let profile: Value = serde_json::from_str(
@@ -2612,12 +2666,208 @@ mod tests {
         assert_eq!(profile["douyin"]["user_agent"], "retry-agent");
         assert_eq!(
             app.list().iter().find(|t| t.id == old.id).unwrap().status,
-            Status::Canceled
+            Status::Downloading
         );
         release(root.path(), "8301");
-        wait(&app, &retry.id, Status::Completed).await;
+        let completed = wait(&app, &retry.id, Status::Completed).await;
         app.shutdown().await;
         assert!(app.retry(&retry.id).is_err());
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(app.list().len(), 1);
+        let restored = &app.list()[0];
+        assert_eq!(restored.id, old.id);
+        assert_eq!(restored.created_at, old.created_at);
+        assert_eq!(restored.status, Status::Completed);
+        assert_eq!(restored.path, completed.path);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_retry_reuses_progress_record_and_reparse_failure_keeps_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = enqueue(&app, "7301").await;
+        started(root.path(), "7301").await;
+        release(root.path(), "7301");
+        let failed = wait(&app, &task.id, Status::Failed).await;
+        assert_eq!(failed.bytes, 7);
+        assert_eq!(failed.error.as_deref(), Some("NETWORK_ERROR"));
+        // Wait for the completed attempt's cleanup, without shutting down the core.
+        let workers = std::mem::take(&mut app.inner.lock().unwrap().workers);
+        for worker in workers {
+            worker.await.unwrap();
+        }
+        {
+            let inner = app.inner.lock().unwrap();
+            inner
+                .db
+                .execute_batch(
+                    "DELETE FROM parse_cache;
+                CREATE TRIGGER reject_retry_preview BEFORE INSERT ON parse_cache
+                BEGIN SELECT RAISE(ABORT, 'test reparse failure'); END;",
+                )
+                .unwrap();
+        }
+        let retry = app.retry(&task.id).unwrap();
+        assert_eq!(retry.id, task.id);
+        assert_eq!(retry.bytes, 0);
+        assert!(retry.total_bytes.is_none());
+        assert!(retry.error.is_none());
+        assert!(retry.queue_order.is_none());
+        assert!(retry.completed_at.is_none());
+        assert!(retry.revision > failed.revision);
+        let failed_again = wait(&app, &task.id, Status::Failed).await;
+        assert_eq!(failed_again.error.as_deref(), Some("DATABASE_ERROR"));
+        assert_eq!(failed_again.video.as_ref().unwrap()["video_id"], "7301");
+        assert_eq!(app.list().len(), 1);
+        app.inner
+            .lock()
+            .unwrap()
+            .db
+            .execute_batch("DROP TRIGGER reject_retry_preview")
+            .unwrap();
+        let retry = app.retry(&task.id).unwrap();
+        assert_eq!(retry.id, task.id);
+        assert!(retry.revision > failed_again.revision);
+        let failed_again = wait(&app, &task.id, Status::Failed).await;
+        assert_eq!(failed_again.error.as_deref(), Some("NETWORK_ERROR"));
+        assert_eq!(app.list().len(), 1);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retry_is_atomic_cleans_old_attempt_and_never_overwrites_committed_files() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = app.resolve("valid".into()).unwrap();
+        wait(&app, &task.id, Status::Ready).await;
+        app.cancel(&task.id).await.unwrap();
+        let old = app.list()[0].clone();
+        let target = root
+            .path()
+            .join("downloads")
+            .join(format!("douyin_123_{}.mp4", task.id));
+        std::fs::write(&target, b"previous committed file").unwrap();
+        let staging = root
+            .path()
+            .join("downloads")
+            .join(format!("yingqu-{}-old", task.id));
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("video.mp4.part"), b"partial").unwrap();
+        {
+            let mut inner = app.inner.lock().unwrap();
+            inner.downloads.insert(task.id.clone());
+        }
+        assert_eq!(app.retry(&task.id).err().unwrap().to_string(), "TASK_BUSY");
+        {
+            let mut inner = app.inner.lock().unwrap();
+            inner.downloads.remove(&task.id);
+            inner
+                .db
+                .execute(
+                    "INSERT INTO task_staging VALUES(?1,?2)",
+                    params![task.id, staging.to_string_lossy()],
+                )
+                .unwrap();
+            inner
+                .db
+                .execute(
+                    "INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,23)",
+                    params![
+                        task.id,
+                        staging.join("video.mp4").to_string_lossy(),
+                        target.to_string_lossy()
+                    ],
+                )
+                .unwrap();
+            inner
+                .db
+                .execute_batch(
+                    "CREATE TRIGGER reject_retry_reset BEFORE UPDATE ON download_tasks
+                BEGIN SELECT RAISE(ABORT, 'test reset failure'); END;",
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            app.retry(&task.id).err().unwrap().to_string(),
+            "DATABASE_ERROR"
+        );
+        assert_eq!(app.list()[0].revision, old.revision);
+        assert_eq!(app.list()[0].status, Status::Canceled);
+        {
+            let inner = app.inner.lock().unwrap();
+            assert!(inner.active.is_empty());
+            let stored: String = inner
+                .db
+                .query_row(
+                    "SELECT snapshot FROM download_tasks WHERE id=?",
+                    [&task.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let stored: Task = serde_json::from_str(&stored).unwrap();
+            assert_eq!(stored.revision, old.revision);
+            assert_eq!(stored.status, Status::Canceled);
+            assert_eq!(
+                inner
+                    .db
+                    .query_row("SELECT count(*) FROM commit_intents", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            inner
+                .db
+                .execute_batch("DROP TRIGGER reject_retry_reset")
+                .unwrap();
+        }
+        let retry = app.retry(&task.id).unwrap();
+        assert_eq!(retry.id, task.id);
+        assert!(!staging.exists());
+        let completed = wait(&app, &task.id, Status::Completed).await;
+        assert_ne!(completed.path.as_ref().unwrap(), &target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"previous committed file");
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(app.list().len(), 1);
+        assert_eq!(app.list()[0].id, task.id);
+        assert_eq!(app.list()[0].path, completed.path);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retry_joins_fifo_tail_and_rejects_duplicate_submissions() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        app.set_max_downloads(1).unwrap();
+        let task = enqueue(&app, "8302").await;
+        started(root.path(), "8302").await;
+        app.cancel(&task.id).await.unwrap();
+        std::fs::remove_file(root.path().join("started-8302")).unwrap();
+        let blocker = enqueue(&app, "8401").await;
+        started(root.path(), "8401").await;
+        let queued = enqueue(&app, "8402").await;
+        let retry = app.retry(&task.id).unwrap();
+        assert_eq!(retry.id, task.id);
+        assert_eq!(app.list().len(), 3);
+        let retried = app.list().into_iter().find(|t| t.id == task.id).unwrap();
+        let ahead = app.list().into_iter().find(|t| t.id == queued.id).unwrap();
+        assert_eq!(retried.status, Status::Queued);
+        assert!(retried.queue_order > ahead.queue_order);
+        assert!(app.retry(&task.id).is_err());
+        release(root.path(), "8401");
+        wait(&app, &blocker.id, Status::Completed).await;
+        started(root.path(), "8402").await;
+        assert!(!root.path().join("started-8302").exists());
+        release(root.path(), "8402");
+        wait(&app, &queued.id, Status::Completed).await;
+        started(root.path(), "8302").await;
+        release(root.path(), "8302");
+        wait(&app, &task.id, Status::Completed).await;
+        assert_eq!(app.list().len(), 3);
+        app.shutdown().await;
     }
 
     #[tokio::test]
