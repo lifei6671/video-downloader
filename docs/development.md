@@ -123,16 +123,16 @@ Logo 区域和关于页版本号在 Vite 构建时注入，优先级为 `APP_VER
 
 ## GitHub Actions 标签发布
 
-[Release 工作流](../.github/workflows/release.yml) 监听 `v*` 标签推送，并严格校验正式版本 `vMAJOR.MINOR.PATCH`（例如 `v0.1.0`；暂不接受预发布或任意名称标签）。代码和工作流需要先提交到被打标签的 commit，然后推送标签：
+[Release 工作流](../.github/workflows/release.yml) 监听 `v*` 标签推送，并严格校验正式版本 `vMAJOR.MINOR.PATCH`（例如 `v1.3.0`；暂不接受预发布或任意名称标签）。每次发布在 `docs/releases/<tag>.md` 中编写面向用户的 Markdown 更新说明，与代码和工作流一起提交，再使用该文件创建附注标签并推送：
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag -a v1.3.0 --cleanup=verbatim -F docs/releases/v1.3.0.md
+git push --atomic origin master v1.3.0
 ```
 
 工作流分别在 Windows x64、macOS Intel、macOS Apple Silicon 原生 runner 上安装 Node 24、Python 3.12 和 Rust stable，执行锁文件安装、离线测试、PyInstaller onedir 打包、隔离 cwd/PATH 的引擎启动检查，以及 Tauri 前端/桌面安装器构建。安装包包含整个 `video-engine/` 目录；Release 使用应用资源路径，不依赖构建机源码位置。
 
-三个构建全部成功后，使用仓库自带 `GITHUB_TOKEN` 创建草稿、上传 Windows NSIS `.exe` 和两种 macOS `.dmg`，随后公开 Release。构建失败不发布；已有同名 Release 不覆盖。若上传中断留下草稿，先检查并删除该草稿，再重跑失败的发布 job。Actions artifacts 保留 14 天。仓库/组织策略须允许该 workflow 的 `contents: write`，无需新增发布 Token。
+三个构建全部成功后，使用仓库自带 `GITHUB_TOKEN` 创建草稿、上传 Windows NSIS `.exe` 和两种 macOS `.dmg`，随后公开 Release。创建时通过 `--notes-from-tag` 将附注标签中的 Markdown 原样作为 Release 正文，软件“检查更新”也会读取这份正文；不再自动生成仅含提交记录的说明。务必使用附注标签，轻量标签会退回到提交信息。构建失败不发布；已有同名 Release 不覆盖。若上传中断留下草稿，先检查并删除该草稿，再重跑失败的发布 job。Actions artifacts 保留 14 天。仓库/组织策略须允许该 workflow 的 `contents: write`，无需新增发布 Token。
 
 上传 Release 前将安装包文件名的中文前缀替换为 ASCII `Yingqu`，避免 GitHub 规范化附件名时丢失“映取”。例如 `Yingqu_0.1.2_x64-setup.exe`、`Yingqu_0.1.2_x64.dmg`、`Yingqu_0.1.2_aarch64.dmg`；版本号、架构、安装包内容和应用显示名称保持不变。
 

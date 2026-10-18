@@ -132,5 +132,5 @@ jobs:
             mv -- "$asset" "$renamed"
             assets[$i]="$renamed"
           done
-          gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --draft --title "映取 $RELEASE_TAG" --generate-notes
+          gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --draft --title "映取 $RELEASE_TAG" --notes-from-tag
           gh release edit "$RELEASE_TAG" --draft=false
