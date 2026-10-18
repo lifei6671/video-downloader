@@ -92,7 +92,7 @@
 .settings-navigation [data-slot="sidebar-menu-button"] {
   color: var(--sidebar-foreground);
   background: transparent;
-  transition: background-color 150ms, border-color 150ms, color 150ms;
+  transition: background-color 150ms, color 150ms;
 }
 .settings-navigation [data-slot="sidebar-menu-button"]:not([data-active="true"]):hover {
   color: var(--foreground);
@@ -100,18 +100,7 @@
 }
 .settings-navigation [data-slot="sidebar-menu-button"][data-active="true"] {
   color: var(--primary);
-  background: var(--card);
-  border-color: var(--border);
-}
-.settings-navigation [data-slot="sidebar-menu-button"][data-active="true"]::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 14px;
-  bottom: 14px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--primary);
+  background: var(--accent);
 }
 .settings-platforms [data-slot="tabs-trigger"][data-state="active"] {
   color: var(--primary);
