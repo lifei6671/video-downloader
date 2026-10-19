@@ -54,7 +54,9 @@ class SafeLogger:
     def error(self, message, **kwargs):
         # Only stable, bounded codes leave this process. No upstream free text.
         lower = message.lower()
-        if 'network_target_rejected' in lower:
+        if 'risk_control' in lower:
+            self.code = 'RISK_CONTROL'
+        elif 'network_target_rejected' in lower:
             self.code = 'INVALID_INPUT'
         elif ('403' in lower or '401' in lower or 'fresh cookies' in lower
               or 'login' in lower or 'sign in' in lower or 'uifid cookie is required' in lower):
@@ -393,11 +395,11 @@ def operate(method, params, emit):
         if code == 'ACCESS_DENIED' and cookie_warning:
             code = 'BROWSER_COOKIES_UNAVAILABLE'
         raise EngineError(code, 'yt_dlp') from None
-    except TargetError:
-        raise EngineError('INVALID_INPUT', 'network_target') from None
+    except TargetError as error:
+        raise EngineError(error.code, 'network_target') from None
     except RequestError as error:
         if isinstance(error.cause, TargetError):
-            raise EngineError('INVALID_INPUT', 'network_target') from None
+            raise EngineError(error.cause.code, 'network_target') from None
         code = ({401: 'ACCESS_DENIED', 403: 'ACCESS_DENIED', 404: 'NOT_FOUND', 429: 'RISK_CONTROL'}.get(error.status, 'NETWORK_ERROR')
                 if isinstance(error, HTTPError) else 'NETWORK_ERROR')
         raise EngineError(code, 'request') from None

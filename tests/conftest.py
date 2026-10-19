@@ -29,9 +29,10 @@ def media_proxy(media_bodies):
         def do_GET(self):
             requests.append((self.path, dict(self.headers)))
             mode = urlsplit(self.path).path.split('/')[-1].split('.')[0]
-            if mode == 'redirect':
+            if mode in ('redirect', 'youtube_challenge'):
                 self.send_response(302)
-                self.send_header('Location','http://127.0.0.1/secret')
+                self.send_header('Location', 'https://www.google.com/sorry/index?continue=private'
+                                 if mode == 'youtube_challenge' else 'http://127.0.0.1/secret')
                 self.end_headers()
                 return
             body = (b'RIFF' + b'\x10\x00\x00\x00WEBPfixture' if mode == 'image' else

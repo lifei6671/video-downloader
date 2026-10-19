@@ -16,12 +16,13 @@ from video_formats import public_formats, select_format
 URL = 'https://www.youtube.com/watch?v=BaW_jenozKc'
 
 
-def test_reported_youtube_link_is_supported_without_network_for_identity():
+@pytest.mark.parametrize('video_id', ['Ql7DR8YKwSg', 'y300HjYnHPw'])
+def test_reported_youtube_link_is_supported_without_network_for_identity(video_id):
     events = []
-    url = 'https://www.youtube.com/watch?v=Ql7DR8YKwSg'
+    url = 'https://www.youtube.com/watch?v=' + video_id
     engine.operate('identify_input', {'input': url}, lambda kind, **data: events.append(data))
     assert events[0]['result']['platform'] == 'youtube'
-    assert events[0]['result']['video_id'] == 'Ql7DR8YKwSg'
+    assert events[0]['result']['video_id'] == video_id
 
 
 @pytest.mark.parametrize('url', [URL + '&list=ignored&tracking=x',
@@ -82,6 +83,60 @@ def test_youtube_transport_remains_bounded():
     for domain in ('google.com', 'evilgooglevideo.com', 'googlevideo.com.evil.org', 'tiktokcdn.com'):
         with pytest.raises(TargetError):
             validate_target('https://' + domain + '/media', 'youtube')
+
+
+@pytest.mark.parametrize('path', ['/sorry/index', '/sorry/'])
+def test_youtube_challenge_is_rejected_as_risk_control(path):
+    with pytest.raises(TargetError, match='^RISK_CONTROL$') as caught:
+        validate_target('https://www.google.com' + path + '?continue=private', 'youtube')
+    assert caught.value.code == 'RISK_CONTROL'
+
+
+@pytest.mark.parametrize('url,platform', [
+    ('https://www.google.com/sorry/index', 'tiktok'),
+    ('https://www.google.com/search', 'youtube'),
+    ('https://www.google.com.evil.org/sorry/index', 'youtube'),
+    ('https://evilgoogle.com/sorry/index', 'youtube'),
+    ('https://u:p@www.google.com/sorry/index', 'youtube'),
+    ('https://www.google.com:444/sorry/index', 'youtube'),
+    ('http://www.google.com/sorry/index', 'youtube'),
+])
+def test_other_rejected_targets_keep_their_classification(url, platform):
+    with pytest.raises(TargetError, match='^NETWORK_TARGET_REJECTED$') as caught:
+        validate_target(url, platform)
+    assert caught.value.code == 'INVALID_INPUT'
+
+
+def test_challenge_redirect_reports_risk_control_without_following(monkeypatch, media_proxy):
+    proxy, requests, _, _ = media_proxy
+    monkeypatch.setattr(engine, 'javascript_runtime', lambda: {'node': {'path': 'fixture-node'}})
+    monkeypatch.setattr(engine, 'installed_tool', lambda _: None)
+    def extract(self, url, download):
+        self.urlopen('http://www.youtube.com/youtube_challenge')
+        pytest.fail('challenge must stop extraction')
+    monkeypatch.setattr(YoutubeDL, 'extract_info', extract)
+    with pytest.raises(engine.EngineError, match='^RISK_CONTROL$'):
+        engine.operate('resolve_video', {'input': URL, 'profiles': {'youtube': {'proxy': proxy}}},
+                       lambda *_a, **_k: pytest.fail('challenge cannot produce a successful result'))
+    assert len(requests) == 1
+    assert requests[0][0] == 'http://www.youtube.com/youtube_challenge'
+
+
+@pytest.mark.parametrize('route', ['wrapped', 'logged'])
+def test_challenge_classification_survives_upstream_errors(monkeypatch, route):
+    from yt_dlp.networking.exceptions import RequestError
+    monkeypatch.setattr(engine, 'javascript_runtime', lambda: {'node': {'path': 'fixture-node'}})
+    monkeypatch.setattr(engine, 'installed_tool', lambda _: None)
+    def extract(self, url, download):
+        try:
+            validate_target('https://www.google.com/sorry/index', 'youtube')
+        except TargetError as error:
+            if route == 'wrapped':
+                raise RequestError(cause=error)
+            self.report_error(str(error))
+    monkeypatch.setattr(YoutubeDL, 'extract_info', extract)
+    with pytest.raises(engine.EngineError, match='^RISK_CONTROL$'):
+        engine.operate('resolve_video', {'input': URL}, lambda *_a, **_k: None)
 
 
 def test_default_browser_cookies_are_filtered_and_never_saved(monkeypatch):

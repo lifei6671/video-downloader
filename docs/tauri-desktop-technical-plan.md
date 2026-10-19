@@ -133,6 +133,8 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 
 错误码：`INVALID_INPUT`、`UNSUPPORTED_PLATFORM`、`UNSUPPORTED_CONTENT`、`CONFIG_INVALID`、`ACCESS_DENIED`、`NOT_FOUND`、`RISK_CONTROL`、`NETWORK_ERROR`、`UPSTREAM_CHANGED`、`ENGINE_UNAVAILABLE`、`ENGINE_PROTOCOL_ERROR`、`TIMEOUT`、`IO_ERROR`、`INTERRUPTED`。只有可验证证据才细分登录、删除或风控；403 不自动解释为过期或 Cookie 无效。
 
+YouTube 请求被重定向至 `https://www.google.com/sorry/index` 或 `/sorry/` 人机验证页时，仍拒绝请求该地址，并返回 `RISK_CONTROL`，不误报为分享链接无效。此分类不扩大网络域名白名单，也不代表 Cookie 已失效。
+
 ## 6. UI 命令与状态同步
 
 流程：设置 → 粘贴单链接 → 解析预览 → 点击下载 → 排队/下载 → 文件与记录提交 → 已完成。使用首页、下载任务、设置和关于软件四个视图；下载任务统一展示已提交的任务与已完成记录，并支持按标题或作者搜索。

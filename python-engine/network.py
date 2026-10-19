@@ -25,7 +25,9 @@ DOMAINS = {
 
 
 class TargetError(ValueError):
-    pass
+    def __init__(self, message='NETWORK_TARGET_REJECTED', *, code='INVALID_INPUT'):
+        super().__init__(message)
+        self.code = code
 
 
 def validate_target(url, platform):
@@ -33,11 +35,19 @@ def validate_target(url, platform):
         parts = urlsplit(url)
         host = parts.hostname or ''
         if (parts.scheme not in ('http', 'https') or parts.username or parts.password
-                or parts.port not in (None, 80 if parts.scheme == 'http' else 443)
-                or not any(host == d or host.endswith('.' + d) for d in DOMAINS[platform])):
+                or parts.port not in (None, 80 if parts.scheme == 'http' else 443)):
             raise ValueError()
+        # Reject Google's YouTube challenge redirect without misreporting the input link.
+        # This classifies the failure; it does not allow requests to google.com.
+        if (platform == 'youtube' and parts.scheme == 'https' and host == 'www.google.com'
+                and parts.path in ('/sorry/index', '/sorry/')):
+            raise TargetError('RISK_CONTROL', code='RISK_CONTROL')
+        if not any(host == d or host.endswith('.' + d) for d in DOMAINS[platform]):
+            raise ValueError()
+    except TargetError:
+        raise
     except (ValueError, KeyError):
-        raise TargetError('NETWORK_TARGET_REJECTED') from None
+        raise TargetError() from None
 
 
 def direct_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
