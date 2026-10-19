@@ -325,7 +325,7 @@ impl UpdateDownloads {
             .await
             .map_err(|_| "UPDATE_INSTALLER_MISSING")?;
         let mut hash = Sha256::new();
-        let mut buffer = [0u8; 65536];
+        let mut buffer = vec![0u8; 65536];
         loop {
             let count = file.read(&mut buffer).await.map_err(|_| "IO_ERROR")?;
             if count == 0 {
@@ -497,6 +497,16 @@ mod tests {
             manager.installer_path(&id).await.unwrap_err(),
             "UPDATE_INSTALLER_MISSING"
         );
+    }
+
+    #[test]
+    fn installer_path_future_fits_desktop_command_stack() {
+        let (_dir, manager) = manager();
+        let future = manager.installer_path("test");
+        let bytes = std::mem::size_of_val(&future);
+        // Tauri moves this future through command wrappers on the Windows main
+        // thread's 1 MiB stack before spawning it; keep the read buffer off-stack.
+        assert!(bytes < 4096, "installer verification future is {bytes} bytes");
     }
 
     #[tokio::test]
