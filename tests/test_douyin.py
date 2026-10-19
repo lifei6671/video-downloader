@@ -1,4 +1,8 @@
 from http.cookies import SimpleCookie
+import copy
+import json
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from yt_dlp import YoutubeDL
@@ -7,6 +11,7 @@ from yt_dlp.utils import ExtractorError
 import engine
 import network
 from douyin import DouyinIE, UpstreamDouyinIE
+from video_formats import candidates, format_key, public_formats, select_format
 
 
 DETAIL = 'https://www.douyin.com/aweme/v1/web/aweme/detail/'
@@ -107,3 +112,120 @@ def test_each_play_address_dimensions_override_upload_and_unparsed_4k(monkeypatc
         'play_addr': {'url_list': ['https://v.douyinvod.com/720'], 'width': 720, 'height': 1280},
         'bit_rate': [{'play_addr': {'url_list': ['https://v.douyinvod.com/4k'], 'width': 2160, 'height': 3840}}]}})
     assert [(f['width'], f['height']) for f in value['formats']] == [(2160, 3840), (720, 1280)]
+
+
+@pytest.fixture
+def media_detail():
+    # Synthetic shape of the observed MP4/DASH response; no signed URLs or credentials.
+    base = 'https://v.fixture.douyinvod.com/'
+    muxed = dict(url_list=[base + 'muxed.mp4', base + 'mirror.mp4'],
+                 width=1920, height=1080, data_size=10000, url_key='v1_bytevc1_1080p_400000')
+    video = dict(url_list=[base + 'video.mp4'], width=1920, height=1080,
+                 data_size=8000, url_key='v1_bytevc1_1080p_320000')
+    return {'aweme_id': '123', 'desc': 'synthetic', 'video': {
+        'format': 'dash', 'width': 1920, 'height': 1080, 'duration': 196000,
+        'play_addr': muxed,
+        'play_addr_h264': {'url_list': [base + 'original.mp3']},
+        'play_addr_bytevc1': {'url_list': [base + 'audio.mp4']},
+        'bit_rate': [
+            {'format': 'mp4', 'play_addr': muxed, 'FPS': 24, 'is_h265': 1,
+             'video_extra': json.dumps({'format': 'mp4', 'audio_channels': '2.0',
+                                        'audio_sample_rate': '44100'})},
+            {'format': 'dash', 'play_addr': video, 'FPS': 24, 'is_h265': 1,
+             'video_extra': json.dumps({'format': 'dash', 'audio_file_id': 'audio-id'})}],
+        'bit_rate_audio': [{'audio_meta': {'file_id': 'audio-id', 'media_type': 'audio',
+                                           'url_list': [base + 'audio.mp4']}}]},
+        'music': {'play_url': {'url_list': [base + 'original.mp3']}}}
+
+
+
+def parse_media_detail(detail):
+    with YoutubeDL({'quiet': True, 'logger': engine.SafeLogger()}) as ydl:
+        info = DouyinIE(ydl)._parse_aweme_video_app(detail)
+    # YoutubeDL adds this after extraction, before calling the format selector.
+    for fmt in info['formats']:
+        fmt['protocol'] = urlsplit(fmt['url']).scheme
+    return info
+
+
+@pytest.mark.parametrize('numeric', [False, True])
+def test_real_upstream_parser_classifies_each_url_and_offers_only_muxed(media_detail, numeric):
+    if numeric:
+        media_detail['video']['bit_rate'][0]['video_extra'] = {
+            'format': 'mp4', 'audio_channels': 2, 'audio_sample_rate': 44100}
+    original = copy.deepcopy(media_detail)
+    info = parse_media_detail(media_detail)
+    formats = {f['url'].rsplit('/', 1)[-1]: f for f in info['formats']}
+    assert formats['muxed.mp4']['_yingqu_media_type'] == 'muxed'
+    assert formats['mirror.mp4']['_yingqu_media_type'] == 'muxed'
+    assert formats['video.mp4']['acodec'] == 'none'
+    for name in ('audio.mp4', 'original.mp3'):
+        assert formats[name]['vcodec'] == 'none'
+        assert formats[name]['width'] is None and formats[name]['height'] is None
+    assert len(public_formats(info)) == 1
+    assert list(select_format(info))[0]['_yingqu_media_type'] == 'muxed'
+    assert '_yingqu_media_type' not in json.dumps(public_formats(info))
+    assert media_detail == original
+
+
+@pytest.mark.parametrize('extra', [None, '', '{bad', [],
+    {'format': 'dash', 'audio_channels': 2, 'audio_sample_rate': 44100},
+    {'format': 'mp4', 'audio_channels': 0, 'audio_sample_rate': 44100},
+    {'format': 'mp4', 'audio_channels': True, 'audio_sample_rate': 44100},
+    {'format': 'mp4', 'audio_channels': 'bad', 'audio_sample_rate': '44100'},
+    {'format': 'mp4', 'audio_channels': 'NaN', 'audio_sample_rate': '44100'},
+    {'format': 'mp4', 'audio_channels': 2, 'audio_sample_rate': float('inf')}])
+def test_missing_or_conflicting_audio_evidence_never_defaults_to_muxed(media_detail, extra):
+    media_detail['video']['bit_rate'][0]['video_extra'] = extra
+    info = parse_media_detail(media_detail)
+    assert public_formats(info) == []
+    with pytest.raises(engine.EngineError, match='UNSUPPORTED_CONTENT'):
+        list(select_format(info))
+
+
+def test_conflicting_url_and_unmatched_address_remain_unknown(media_detail):
+    video = media_detail['video']
+    video['bit_rate'][1]['play_addr'] = video['play_addr']
+    video['play_addr_265'] = {'url_list': ['https://v.fixture.douyinvod.com/unmatched.mp4']}
+    # This address is included by the upstream parser.
+    video['download_addr'] = video['play_addr_265']
+    info = parse_media_detail(media_detail)
+    assert public_formats(info) == []
+    assert all(f['_yingqu_media_type'] != 'muxed' for f in info['formats'])
+
+
+def test_old_silent_selection_is_unavailable_without_downgrade(media_detail):
+    info = parse_media_detail(media_detail)
+    video = next(f for f in info['formats'] if f['_yingqu_media_type'] == 'video')
+    old_id = format_key({**video, 'acodec': 'aac'})
+    with pytest.raises(engine.EngineError, match='FORMAT_UNAVAILABLE'):
+        list(select_format(info, old_id))
+    info['formats'] = [video]
+    assert candidates(info) == []
+
+
+def test_resolve_and_download_reextract_use_same_muxed_candidates(media_detail, monkeypatch, tmp_path):
+    requests = []
+    def detail(self, url, video_id, *args, **kwargs):
+        requests.append(video_id)
+        return {'aweme_detail': copy.deepcopy(media_detail)}
+    monkeypatch.setattr(DouyinIE, '_download_json', detail)
+    monkeypatch.setattr(engine, 'download_cover', lambda *a: {})
+    def download(self, info):
+        assert info['_yingqu_media_type'] == 'muxed'
+        assert info['url'].rsplit('/', 1)[-1] in ('muxed.mp4', 'mirror.mp4')
+        Path(self.prepare_filename(info)).write_bytes(b'fixture media')
+    monkeypatch.setattr(YoutubeDL, 'process_info', download)
+    params = {'input': 'https://www.douyin.com/video/123', 'resolver': 'yt-dlp',
+              'profiles': {'douyin': {'cookie': 'UIFID=synthetic'}}}
+    events = []
+    engine.operate('resolve_video', params, lambda kind, **kw: events.append((kind, kw)))
+    result = events[-1][1]['result']
+    assert len(result['formats']) == 1
+    selected = result['selected_format_id']
+    events.clear()
+    engine.operate('download_video', {**params, 'expected': result, 'format_id': selected,
+                   'staging_dir': str(tmp_path)}, lambda kind, **kw: events.append((kind, kw)))
+    assert requests == ['123', '123']
+    assert events[-1][0] == 'download_finished'
+    assert events[-1][1]['format_id'] == selected

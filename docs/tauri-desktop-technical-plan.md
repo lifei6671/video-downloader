@@ -351,6 +351,8 @@ React 使用现有 shadcn/ui ToggleGroup 选择规格，通过 `choose_video_for
 
 抖音详情补充完整 Web 参数，并按每个播放地址填入真实尺寸，解决旧请求仅取 720p 和上游 `4k` URL-key 缺尺寸问题。具体来源及移除条件见 [上游记录](../vendor/UPSTREAM.md)，验收见 [视频规格](video-format-validation.md)。
 
+2026-10-19 用户批准：抖音 yt-dlp 路径按每个实际 URL 的 `bit_rate[].format`、`video_extra` 音轨信息、独立音轨与原声地址补充类型归一化，纠正上游对 DASH 默认标 AAC 的行为。候选只保留有明确音轨证据的 MP4 一体规格；分离视频、纯音频及未知/冲突类型不进入下载列表。顶层 `video.format` 不用于给所有地址统一分类；不新增抖音分轨合并或纯音频下载。原声/音乐元数据不代表视频文件内含音轨。引擎 0.7.2、协议仍为 v3，重建 sidecar 并通过现有 revision 淘汰旧缓存，保留已完成记录和文件。下载重新执行同一分类及严格规格匹配，旧无声规格 ID 返回 `FORMAT_UNAVAILABLE`。生产解析不额外读取媒体头，轨道抽查仅用于验收。
+
 ### Telegram tdl HTTP 实验模式
 
 Telegram 作为用户明确授权的独立原始视频实验模式，复用此方案的任务、SQLite、队列、暂存/提交机制；仅该平台通过 Rust HTTP 调用用户本机 tdl 服务，其余平台继续使用 Python 引擎。服务安全风险、能力边界和具体契约见 [tdl 集成说明](tdl-integration.md)。这不恢复原先退役的平台媒体 HTTP 链路。

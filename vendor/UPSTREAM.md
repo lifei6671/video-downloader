@@ -54,6 +54,10 @@ yt-dlp 2026.08.19 的 URL-key parser 对该作品 `bytevc1_4k` 未填尺寸；�
 
 4K 媒体请求显式使用平台根 Referer `https://www.douyin.com/`；本机同一规格 CDN 请求缺少该头时返回 403，带根 Referer 时返回 206。该头只用于抖音下载，TikTok 和 Cookie 域隔离保持不变。
 
+2026-10-19 用户批准补充抖音规格类型归一化。实测作品 `7664441562780702287` 的 `video.bit_rate` 同时包含 `format=mp4` 和 `format=dash`；yt-dlp 2026.08.19 的 `_parse_aweme_video_app.extract_addr` 默认填入 `acodec=aac`，没有处理分离音轨。自有 Douyin 子类继续调用上游 parser，再按具体 URL 关联每档 `video_extra`（JSON 字符串或对象）：MP4 与正数声道/采样率证据一致时标一体；DASH 的 `audio_file_id` 匹配 `bit_rate_audio[].audio_meta.file_id` 时纠正为无内嵌音轨；独立音轨及 `music.play_url` 标为音频；证据缺失、冲突均为未知。数字字符串按有限正数解析，布尔值不充当声道数。
+
+类型标记仅留在 Python 内部。现有选择器只向抖音 yt-dlp 的预览/下载提供已确认的一体规格，不新增音频下载、分轨合并、媒体探测请求或公开协议字段。引擎 0.7.2 使旧解析缓存失效，旧规格失效时明确失败，不自动降级。此补充来源为本机授权详情响应与 FFprobe 轨道核对，没有复用 DownVid 固定 `hasAudio=true` 的实现。升级 yt-dlp 时重新检查上述字段及真实轨道；上游正确识别且项目所需的一体证据完整时移除此归一化，保留回归测试。签名及 GuardedRH 均未改变。验收见 [视频规格](../docs/video-format-validation.md#抖音音视频类型修正2026-10-19)。
+
 ## Telegram tdl 外部工具（2026-10-18）
 
 按用户决定只调用用户自行安装的 [iyear/tdl v0.20.4](https://github.com/iyear/tdl/tree/9d7d49eef2bcb04da720c26e33598c49c68b9ddd)，commit `9d7d49eef2bcb04da720c26e33598c49c68b9ddd`，上游许可 AGPL-3.0。未 vendoring、复制其 Go 源码或随安装包分发 tdl；自有 Rust 适配器依据 `app/dl/serve.go`、`serve.go.tmpl`、`cmd/dl.go`、`cmd/version.go`、`cmd/root.go` 和 `core/util/tutil/tutil.go` 的 CLI/HTTP 契约实现。用户另行授权运行依赖登录，依据 `cmd/login.go`、`app/login/login.go`、`app/login/qr.go` 调用显式 QR 模式和独立存储；禁止默认 desktop 导入及覆盖既有命名空间。当前全接口监听、缺少令牌及请求白名单须作为已知实验风险持续呈现；升级和真实运行边界见 [集成说明](../docs/tdl-integration.md)。

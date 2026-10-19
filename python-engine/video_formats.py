@@ -44,6 +44,7 @@ def candidates(context, merge=False):
     for fmt in formats:
         protocols = str(fmt.get('protocol', '')).split('+')
         if (not all(p in ('http', 'https') for p in protocols) or (len(protocols) != 1 and not merge)
+                or ('_yingqu_media_type' in fmt and fmt['_yingqu_media_type'] != 'muxed')
                 or fmt.get('ext') not in ('mp4', 'webm')
                 or fmt.get('vcodec') in ('none', 'bytevc2') or fmt.get('has_drm')
                 or 'watermark' in str(fmt.get('format_note', '')).lower()
