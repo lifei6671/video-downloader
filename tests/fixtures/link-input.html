@@ -1,0 +1,15 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+// Isolated IPC and synthetic clipboard; never reads the user's clipboard or credentials.
+import {api} from '/src/api';
+const state={text:'',failRead:false,failWrite:false,resolved:[],delayRead:false,pendingRead:null};
+window.linkInputTest=state;
+Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{if(state.failWrite)throw Error('fixture');state.text=text}}});
+api.readClipboardText=async()=>{if(state.failRead)throw Error('fixture');if(state.delayRead)return new Promise(resolve=>state.pendingRead=resolve);return state.text};
+api.settings=async()=>({download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'fixture',proxy:null,cookie_configured:false})),tdl:{enabled:false,path:null}});
+api.tasks=async()=>[];
+api.subscribe=async()=>()=>{};
+api.tdlLoginStatus=async()=>null;
+api.resolve=async text=>{state.resolved.push(text);throw 'RISK_CONTROL'};
+await import('/src/main');
+</script></body></html>
