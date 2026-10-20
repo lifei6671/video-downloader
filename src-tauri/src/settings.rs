@@ -178,7 +178,10 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
     {
         bail!("CONFIG_INVALID");
     }
-    let cookie = update.cookie.unwrap_or_else(|| profile.cookie.clone());
+    let cookie = update
+        .cookie
+        .map(|cookie| cookie.trim().to_owned())
+        .unwrap_or_else(|| profile.cookie.clone());
     if cookie.len() > 60_000 || cookie.contains(['\r', '\n']) {
         bail!("CONFIG_INVALID");
     }
@@ -275,6 +278,84 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cookie_boundary_whitespace_is_trimmed_for_all_platforms() {
+        let db = Connection::open_in_memory().unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        for platform in ["douyin", "tiktok", "youtube"] {
+            for (input, expected) in [
+                (
+                    "\r\n \t session=fixture; preference=a b \r\n\t",
+                    "session=fixture; preference=a b",
+                ),
+                ("\r\n \t\r\n", ""),
+            ] {
+                save_profile(
+                    &db,
+                    &mut settings,
+                    ProfileUpdate {
+                        platform: platform.into(),
+                        user_agent: "test-agent".into(),
+                        cookie: Some(input.into()),
+                        proxy: None,
+                    },
+                )
+                .unwrap();
+                let restored = load(&db, PathBuf::new()).unwrap();
+                assert_eq!(super::cookie(&restored, platform).unwrap(), expected);
+                assert_eq!(snapshot(&restored).unwrap()[platform]["cookie"], expected);
+                assert_eq!(
+                    restored
+                        .profiles
+                        .iter()
+                        .find(|p| p.platform == platform)
+                        .unwrap()
+                        .cookie_configured,
+                    !expected.is_empty()
+                );
+            }
+        }
+    }
+    #[test]
+    fn cookie_internal_newlines_are_rejected_without_changing_saved_values() {
+        let db = Connection::open_in_memory().unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        for platform in ["douyin", "tiktok", "youtube"] {
+            save_profile(
+                &db,
+                &mut settings,
+                ProfileUpdate {
+                    platform: platform.into(),
+                    user_agent: "test-agent".into(),
+                    cookie: Some("session=fixture".into()),
+                    proxy: None,
+                },
+            )
+            .unwrap();
+            for input in ["session=one\r\nother=two", "session=one\n\nother=two"] {
+                assert!(save_profile(
+                    &db,
+                    &mut settings,
+                    ProfileUpdate {
+                        platform: platform.into(),
+                        user_agent: "test-agent".into(),
+                        cookie: Some(input.into()),
+                        proxy: None,
+                    },
+                )
+                .is_err());
+                let restored = load(&db, PathBuf::new()).unwrap();
+                assert_eq!(
+                    super::cookie(&restored, platform).unwrap(),
+                    "session=fixture"
+                );
+                assert_eq!(
+                    super::cookie(&settings, platform).unwrap(),
+                    "session=fixture"
+                );
+            }
+        }
+    }
     #[test]
     fn cookies_persist_in_sqlite_but_never_in_public_settings() {
         let db = Connection::open_in_memory().unwrap();

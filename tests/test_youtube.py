@@ -16,7 +16,7 @@ from video_formats import public_formats, select_format
 URL = 'https://www.youtube.com/watch?v=BaW_jenozKc'
 
 
-@pytest.mark.parametrize('video_id', ['Ql7DR8YKwSg', 'y300HjYnHPw'])
+@pytest.mark.parametrize('video_id', ['Ql7DR8YKwSg', 'y300HjYnHPw', 'a6cnYFcd7JQ'])
 def test_reported_youtube_link_is_supported_without_network_for_identity(video_id):
     events = []
     url = 'https://www.youtube.com/watch?v=' + video_id

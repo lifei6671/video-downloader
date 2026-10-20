@@ -3,8 +3,8 @@ async page => {
   const base = page.url().split('/').slice(0,3).join('/');
   const check = (value,message) => {if(!value)throw Error(message)};
   const results=[];
-  for (const restored of [false,true]) {
-    await page.goto(base+'/tests/fixtures/background-download.html?scenario='+(restored?'cached-cover':'telegram'));
+  for (const platform of ['douyin','tiktok','youtube','telegram']) for (const restored of [false,true]) {
+    await page.goto(base+'/tests/fixtures/background-download.html?scenario='+(restored?'cached-cover-'+platform:platform));
     await page.waitForFunction(()=>window.backgroundTest.loaded);
     if(!restored) {
       await page.getByRole('button',{name:'后台下载',exact:true}).click();
@@ -22,7 +22,7 @@ async page => {
       check(await cover.isVisible(),'cover missing at '+width);
       check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'viewport overflow');
     }
-    results.push(restored?'restored cached task shows cover without image path':'completion event displays cached cover without image path');
+    results.push(platform+': '+(restored?'restored cached task shows cover without image path':'completion event displays cached cover without image path'));
   }
   return {passed:results.length,cases:results};
 }

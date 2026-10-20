@@ -456,7 +456,7 @@ pub fn save_cover(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {
     ).context("DATABASE_ERROR")? != 0)
 }
 
-// Task removal can release a shared Telegram cover while preserving reusable
+// Task removal can release a shared video cover while preserving reusable
 // metadata and aliases. The caller decides whether any other task still uses it.
 pub fn clear_cover(db: &Connection, video: &Value) -> Result<()> {
     db.execute(

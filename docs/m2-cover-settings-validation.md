@@ -1,5 +1,9 @@
 # 设置与本地封面验收
 
+> 2026-10-20 存储更新：新下载视频封面统一只存 SQLite 缓存，不再生成同目录封面文件；删除最后引用时清空 BLOB，旧版文件保持原样。下文同名封面文件及当时在线结果是旧版历史证据，当前契约见 [开发说明](development.md)。
+
+当前存储回归：`cargo test --locked --manifest-path src-tauri/Cargo.toml cover -- --test-threads=1`（13 项）、`desktop_core::tests`（31 项）、`files::tests`（4 项）通过。覆盖三平台真实 sidecar 协议 fixture、封面字节入库、下载目录仅视频、重启/提交恢复、删除视频后保留、最后引用清理与事务回滚、缓存更新失败仍完成；图集回归保持。`tests/telegram-cover-cache.browser.js` 覆盖四平台完成事件及恢复记录的 8 组数据库封面展示，并检查三个设计视口。`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings` 通过。以上为隔离离线/浏览器 IPC 验证，不代表真实平台下载或原生 GUI 验收。
+
 日期：2026-10-13。以本轮用户要求覆盖此前 Cookie 不回显、封面不落盘约定。未改变视频引擎、签名补丁、队列与取消契约。
 
 ## 交付

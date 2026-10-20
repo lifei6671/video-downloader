@@ -4,7 +4,8 @@
 // Explicit browser-only mock of IPC. No download, login or platform request occurs.
 import {api} from '/src/api';
 const scenario = new URLSearchParams(location.search).get('scenario') || 'telegram';
-const platform = ['douyin','tiktok','youtube'].includes(scenario) ? scenario : scenario === 'album' ? 'douyin' : 'telegram';
+const sourcePlatform = scenario.replace('cached-cover-', '');
+const platform = ['douyin','tiktok','youtube'].includes(sourcePlatform) ? sourcePlatform : scenario === 'album' ? 'douyin' : 'telegram';
 const video = {platform, video_id:'100_9', canonical_url:platform === 'telegram' ? 'https://t.me/c/100/9' : platform === 'youtube' ? 'https://www.youtube.com/watch?v=test1234567' : platform === 'tiktok' ? 'https://www.tiktok.com/@test/video/123' : 'https://www.douyin.com/video/123', title:'原作品', resolver:scenario === 'album' ? 'dtk' : platform === 'telegram' ? 'tdl' : 'yt-dlp', kind:scenario === 'album' ? 'image_album' : 'video', filesize:65536, selected_format_id:scenario === 'album' ? null : 'original', formats:scenario === 'album' ? [] : [{format_id:'original',container:'mp4',filesize:65536}], images:scenario === 'album' ? [{quality_source:'original',width:1,height:1}] : undefined};
 const original = {id:'original',revision:1,status:'ready',video,bytes:0,total_bytes:null,speed_bps:null,error:null,path:null,created_at:10,completed_at:null,canceling:false,file_missing:false,queue_order:null,download_requested:false,cover_path:null,cover_error:null,files:[],completed_items:null,total_items:null,cache_hit:false,cached_at:null,cover_cached:false};
 const completed = {...structuredClone(original),id:'previous',revision:2,status:'completed',path:'C:\\TestVideos\\previous.mp4',download_requested:true,completed_at:9};
@@ -25,7 +26,7 @@ control.completeCached = id => {
   task.cover_cached = true;
   control.complete(id);
 };
-if (scenario === 'cached-cover') {
+if (scenario.startsWith('cached-cover')) {
   Object.assign(tasks[0], {status:'completed',download_requested:true,cover_cached:true,
     path:'C:\\TestVideos\\original.mp4',bytes:65536,completed_at:20});
 }

@@ -5,11 +5,14 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
 print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.7.2", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.readline())
 params = request["params"]
+source = urlsplit(params.get('input', ''))
+platform = 'youtube' if source.hostname == 'www.youtube.com' else 'tiktok' if source.hostname == 'www.tiktok.com' else 'douyin'
 def emit(event_type, **data):
     print(json.dumps(dict(protocol_version=3, id=request["id"], type=event_type, **data)), flush=True)
 if request['method'] in ('check_dependencies', 'install_dependency'):
@@ -41,12 +44,13 @@ if request['method'] == 'extract_cover':
         emit('cover_extracted', cover_filename='cover', cover_bytes=len(body))
     sys.exit(0)
 if request["method"] == "identify_input":
-    from urllib.parse import urlsplit
     path=urlsplit(params["input"]).path
     album="/note/" in path
     video_id=path.rstrip("/").split("/")[-1]
+    if platform == 'youtube': video_id=parse_qs(source.query)['v'][0]
     if path.startswith("/share"): video_id="601" if "album" in path else "123"
-    emit("identified",result=dict(platform="douyin",video_id=video_id,canonical_url=f"https://www.douyin.com/{'note' if album or video_id=='601' else 'video'}/{video_id}",kind="image_album" if album or video_id=='601' else "video",resolver="dtk" if album or video_id=='601' or params.get("resolver")=="dtk" else "yt-dlp"))
+    canonical = params['input'] if platform != 'douyin' else f"https://www.douyin.com/{'note' if album or video_id=='601' else 'video'}/{video_id}"
+    emit("identified",result=dict(platform=platform,video_id=video_id,canonical_url=canonical,kind="image_album" if album or video_id=='601' else "video",resolver="dtk" if album or video_id=='601' or params.get("resolver")=="dtk" else "yt-dlp"))
     sys.exit(0)
 if request["method"] == "resolve_video":
     if params["input"] == "invalid":
@@ -65,6 +69,8 @@ if request["method"] == "resolve_video":
         video_id = params["input"].split(":", 1)[1] if params["input"].startswith("hold:") else "999" if params["input"] == "slow" else "123"
         if params["input"].startswith("https://www.douyin.com/video/"):
             video_id = params["input"].rsplit("/", 1)[1]
+        elif platform == 'tiktok': video_id=source.path.rsplit('/',1)[1]
+        elif platform == 'youtube': video_id=parse_qs(source.query)['v'][0]
         cover={}
         if params.get("preview_dir"):
             image=b"\x89PNG\r\n\x1a\nfixture"
@@ -72,8 +78,8 @@ if request["method"] == "resolve_video":
             cover=dict(cover_filename="cover",cover_bytes=len(image))
         if params["input"] == "cookie-warning":
             cover['cookie_warning'] = 'BROWSER_COOKIES_UNAVAILABLE'
-        emit("resolved", result=dict(platform="douyin", video_id=video_id,
-            canonical_url="https://www.douyin.com/video/" + video_id,
+        emit("resolved", result=dict(platform=platform, video_id=video_id,
+            canonical_url=params['input'] if platform != 'douyin' else "https://www.douyin.com/video/" + video_id,
             title="离线生命周期验证", author="fixture", duration_ms=1000, resolver=params.get("resolver") if params.get("resolver") in ("dtk","yt-dlp") else "yt-dlp",kind="video", width=1080, height=1920, selected_format_id="1"*24,
             formats=[dict(format_id="1"*24,container="mp4",width=1080,height=1920,filesize=40),
                      dict(format_id="2"*24,container="mp4",width=720,height=1280,filesize=20)], **cover))
@@ -114,10 +120,11 @@ else:
         (stage / "video.mp4").write_bytes(body)
         emit("progress", downloaded_bytes=len(body), total_bytes=len(body), speed_bps=None)
         cover = {}
-        if video_id == "456":
-            image = b"\x89PNG\r\n\x1a\nfixture"
+        if video_id in ("456", "fixture0001"):
+            image = b"\x89PNG\r\n\x1a\ndownloaded-fixture"
             (stage / "cover").write_bytes(image)
             cover = dict(cover_filename="cover", cover_bytes=len(image))
-        emit("download_finished", platform="douyin", video_id=video_id,
+        emit("download_finished", platform=params['expected']['platform'], video_id=video_id,
             filename="video.mp4", container="mp4", bytes=len(body), format_id=params.get("format_id"),
+            **({'transferred_bytes':len(body)} if params['expected']['platform']=='youtube' else {}),
             width=720 if params.get("format_id")=="2"*24 else 1080,height=1280 if params.get("format_id")=="2"*24 else 1920, **cover)

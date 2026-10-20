@@ -45,3 +45,11 @@ FFmpeg 实际运行 `-version` 后才被采用；Node/Deno 同样逐候选验证
 解析任务错误、全局操作错误及 Cookie 警告统一为无边框、透明背景、icon + 12px 主题色文本，保留可访问的 alert 语义和持续可见的失败原因。Edge 隔离 IPC fixture 验证三个设计视口、键盘提交、每条提示一个图标、0px 边框及实际字体；不等于 Tauri 原生运行。
 
 已启动的 `yingqu.exe` 与其资源不会随源码更新；退出应用后，重新构建桌面发行产物才能应用本次 UI 和 TUN 修复。Python 引擎已在 `python-engine/dist/video-engine/` 从最新源码重建并通过无 Python PATH 启动检查。最终完整 Python 166 项通过，前端类型检查与构建通过；原生 Tauri GUI 更新仍需退出后重建，macOS 实机未运行。
+
+## 浏览器 Cookie 状态与代理输入修复（2026-10-20）
+
+- 默认浏览器复选框按已保存的手动 Cookie 是否为空恢复，保存成功后保持勾选；切换平台、离开设置或重新打开时沿用相同规则。取消勾选可编辑手动 Cookie，手动值留空仍表示使用默认浏览器，不增加另一份开关配置。读取失败时禁用 Cookie 编辑，保存其他设置仍传 `null` 以保留已有 Cookie。
+- 抖音、TikTok、YouTube 保存手动 Cookie 时统一去除首尾空白及空行，成功后编辑框回显清理后的值；全空白按空值处理，恢复默认浏览器模式。中间内容保持原样，中间存在换行仍拒绝保存，不自动拼接；后端保存入口同样执行首尾清理，`null` 仍保留原值。
+- 代理地址使用普通文本输入，提交前去除首尾空白；保留现有 URL 校验及系统凭据存储规则。系统 TUN 已接管网络时，应用的“直连”仍走系统路由。
+- 用户反馈链接 `https://www.youtube.com/watch?v=a6cnYFcd7JQ` 的身份识别及本机 Deno 检测通过；首轮匿名直连解析得到 `RISK_CONTROL / network_target`，即 Google 验证重定向被既有边界拦截。后续源码与已安装的 0.7.2 引擎均匿名解析成功，返回 18 个规格；此结果不保证平台持续放行，也不代表实际媒体下载通过。默认 Edge Cookie 提取在复制占用中的数据库时得到 `PermissionError`，未成功取得 YouTube Cookie。没有修改 TUN 或代理配置；界面提示补充浏览器验证与切换 TUN/代理出口的处理建议，保留网络白名单与错误分类，不绕过验证。
+- 回归入口：`tests/platform-settings.browser.js` + `tests/fixtures/platform-settings.html`，使用现有 Playwright CLI、Edge 和 `npm run dev`。仅使用虚构 Cookie 与隔离 IPC，覆盖三个设计视口、键盘切换、保存/刷新/平台切换、手动 Cookie、代理编辑及失败保留；不能代替原生 Tauri、真实浏览器解密或在线平台验收。

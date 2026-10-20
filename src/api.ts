@@ -116,7 +116,7 @@ const errors: Record<string, string> = {
   CONFIG_INVALID: '配置格式有误，请检查 Cookie、代理或 User-Agent',
   NETWORK_ERROR: '网络连接失败，请检查网络或代理设置',
   ACCESS_DENIED: '平台拒绝访问，请检查 Cookie 或稍后重试',
-  RISK_CONTROL: '平台暂时限制访问，请稍后重试',
+  RISK_CONTROL: '平台要求验证或暂时限制当前网络出口；请在浏览器打开链接完成验证，或切换 TUN/代理出口后重试。',
   NOT_FOUND: '当前视频无法访问',
   TIMEOUT: '请求超时，请检查网络后重新解析',
   ENGINE_UNAVAILABLE: '下载引擎不可用，请检查引擎是否已打包',

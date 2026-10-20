@@ -401,7 +401,11 @@ impl Core {
             // Also restore the cache flag if a crash occurred between the video
             // file commit / cover cache write and publishing the completed task.
             if task.status == Status::Completed && task.cover_path.is_none() {
-                if let Some(video) = task.video.as_ref().filter(|v| v["platform"] == "telegram") {
+                if let Some(video) = task
+                    .video
+                    .as_ref()
+                    .filter(|v| v["kind"].as_str().unwrap_or("video") == "video")
+                {
                     let cached = parse_cache::cover(&db, video).is_ok();
                     if task.cover_cached != cached {
                         task.cover_cached = cached;
@@ -840,7 +844,7 @@ impl Core {
             .iter()
             .filter(|t| removing.contains(t.id.as_str()))
             .filter_map(|t| t.video.as_ref())
-            .filter(|v| v["platform"] == "telegram")
+            .filter(|v| v["kind"].as_str().unwrap_or("video") == "video")
             .filter(|v| {
                 let identity = (
                     v["platform"].as_str(),
@@ -1640,25 +1644,13 @@ impl Core {
                             id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?]).context("DATABASE_ERROR")?;
                         Ok(())
                     })?;
-                    if identity.platform == "telegram" {
-                        let saved = crate::files::staged_cover(&result, &media).and_then(|body| {
-                            parse_cache::save_cover(&inner.db, task.video.as_ref().context("INVALID_ENGINE_RESULT")?, &body)
-                        }).unwrap_or(false);
-                        task.cover_path = None;
-                        if saved {
-                            task.cover_cached = true;
-                            task.cover_error = None;
-                        } else {
-                            task.cover_error = Some("COVER_UNAVAILABLE".into());
-                        }
-                    } else if result["cover_filename"].is_string() {
-                        match crate::files::finalize_cover(&result, &media, &file.path) {
-                            Ok(path) => {
-                                task.cover_path = Some(path);
-                                task.cover_error = None;
-                            }
-                            Err(_) => task.cover_error = Some("COVER_UNAVAILABLE".into()),
-                        }
+                    let saved = crate::files::staged_cover(&result, &media).and_then(|body| {
+                        parse_cache::save_cover(&inner.db, task.video.as_ref().context("INVALID_ENGINE_RESULT")?, &body)
+                    }).unwrap_or(false);
+                    task.cover_path = None;
+                    if saved {
+                        task.cover_cached = true;
+                        task.cover_error = None;
                     } else {
                         task.cover_error = Some("COVER_UNAVAILABLE".into());
                     }
@@ -3107,26 +3099,148 @@ mod tests {
                 .download_requested
         );
     }
+    const COVER_LINKS: [&str; 3] = [
+        "https://www.douyin.com/video/456",
+        "https://www.tiktok.com/@fixture/video/456",
+        "https://www.youtube.com/watch?v=fixture0001",
+    ];
     #[tokio::test]
-    async fn downloaded_cover_is_available_after_restart_and_video_deletion() {
-        let root = tempfile::tempdir().unwrap();
-        let app = core(root.path());
-        let task = app
-            .resolve("https://www.douyin.com/video/456".into())
+    async fn downloaded_video_covers_use_database_and_survive_restart_recovery_and_video_deletion()
+    {
+        for input in COVER_LINKS {
+            let root = tempfile::tempdir().unwrap();
+            let app = core(root.path());
+            let task = app.resolve(input.into()).unwrap();
+            wait(&app, &task.id, Status::Ready).await;
+            app.download(&task.id, false).unwrap();
+            let done = wait(&app, &task.id, Status::Completed).await;
+            assert!(done.cover_path.is_none() && done.cover_cached);
+            assert!(done.cover_error.is_none());
+            assert_eq!(
+                app.cover(&task.id).unwrap(),
+                b"\x89PNG\r\n\x1a\ndownloaded-fixture"
+            );
+            app.shutdown().await;
+            assert_eq!(
+                std::fs::read_dir(root.path().join("downloads"))
+                    .unwrap()
+                    .count(),
+                1
+            );
+            drop(app);
+            let app = core(root.path());
+            assert_eq!(
+                app.cover(&task.id).unwrap(),
+                b"\x89PNG\r\n\x1a\ndownloaded-fixture"
+            );
+            app.shutdown().await;
+            drop(app);
+            let mut interrupted = done.clone();
+            interrupted.status = Status::Downloading;
+            interrupted.cover_cached = false;
+            let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
+            db.execute(
+                "UPDATE download_tasks SET snapshot=? WHERE id=?",
+                params![serde_json::to_string(&interrupted).unwrap(), task.id],
+            )
             .unwrap();
-        wait(&app, &task.id, Status::Ready).await;
-        app.download(&task.id, false).unwrap();
-        let done = wait(&app, &task.id, Status::Completed).await;
-        assert!(done.cover_path.unwrap().is_file());
-        assert!(done.cover_error.is_none());
-        app.shutdown().await;
-        drop(app);
-        let app = core(root.path());
-        assert_eq!(app.cover(&task.id).unwrap(), b"\x89PNG\r\n\x1a\nfixture");
-        app.delete_local_file(&task.id).unwrap();
-        assert!(app.cover(&task.id).is_ok());
-        app.remove_history(&task.id).unwrap();
-        assert!(app.cover(&task.id).is_err());
+            let app = core(root.path());
+            let recovered = app.list().into_iter().find(|t| t.id == task.id).unwrap();
+            assert_eq!(recovered.status, Status::Completed);
+            assert!(recovered.cover_cached && recovered.cover_path.is_none());
+            assert!(app.cover(&task.id).is_ok());
+            app.delete_local_file(&task.id).unwrap();
+            assert!(app.cover(&task.id).is_ok());
+            app.remove_history(&task.id).unwrap();
+            assert!(app.cover(&task.id).is_err());
+            let video = done.video.unwrap();
+            assert!(parse_cache::cover(&db, &video).is_err());
+            assert!(parse_cache::get(
+                &db,
+                video["platform"].as_str().unwrap(),
+                video["video_id"].as_str().unwrap(),
+                video["resolver"].as_str().unwrap()
+            )
+            .unwrap()
+            .is_some());
+            app.shutdown().await;
+        }
+    }
+    #[tokio::test]
+    async fn shared_video_covers_are_released_atomically_only_after_last_reference() {
+        for input in COVER_LINKS {
+            let root = tempfile::tempdir().unwrap();
+            let app = core(root.path());
+            let first = app.resolve(input.into()).unwrap();
+            wait(&app, &first.id, Status::Ready).await;
+            app.download(&first.id, false).unwrap();
+            let done = wait(&app, &first.id, Status::Completed).await;
+            let preview = app.resolve(input.into()).unwrap();
+            wait(&app, &preview.id, Status::Ready).await;
+            app.remove_history(&first.id).unwrap();
+            assert!(app.cover(&preview.id).is_ok());
+            assert!(done.path.as_ref().unwrap().is_file());
+            app.cancel(&preview.id).await.unwrap();
+            let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
+            db.execute_batch(
+                "CREATE TRIGGER block_cover_cleanup BEFORE UPDATE OF cover ON parse_cache
+                WHEN NEW.cover IS NULL BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;",
+            )
+            .unwrap();
+            assert_eq!(
+                app.remove_history(&preview.id).unwrap_err().to_string(),
+                "DATABASE_ERROR"
+            );
+            assert!(app.list().iter().any(|t| t.id == preview.id));
+            assert!(app.cover(&preview.id).is_ok());
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM download_tasks WHERE id=?",
+                    [&preview.id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            db.execute_batch("DROP TRIGGER block_cover_cleanup")
+                .unwrap();
+            let legacy = root.path().join("downloads/legacy.cover.jpg");
+            std::fs::write(&legacy, b"legacy cover").unwrap();
+            app.remove_history(&preview.id).unwrap();
+            assert!(parse_cache::cover(&db, done.video.as_ref().unwrap()).is_err());
+            assert!(done.path.unwrap().is_file());
+            assert_eq!(std::fs::read(legacy).unwrap(), b"legacy cover");
+            app.shutdown().await;
+        }
+    }
+    #[tokio::test]
+    async fn video_cover_cache_failure_keeps_completed_video_and_existing_preview() {
+        for input in COVER_LINKS {
+            let root = tempfile::tempdir().unwrap();
+            let app = core(root.path());
+            let task = app.resolve(input.into()).unwrap();
+            wait(&app, &task.id, Status::Ready).await;
+            let before = app.cover(&task.id).unwrap();
+            let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
+            db.execute_batch(
+                "CREATE TRIGGER block_cover_save BEFORE UPDATE OF cover ON parse_cache
+                BEGIN SELECT RAISE(ABORT, 'fixture cache failure'); END;",
+            )
+            .unwrap();
+            app.download(&task.id, false).unwrap();
+            let done = wait(&app, &task.id, Status::Completed).await;
+            assert!(done.path.unwrap().is_file());
+            assert!(done.cover_path.is_none() && done.cover_cached);
+            assert_eq!(done.cover_error.as_deref(), Some("COVER_UNAVAILABLE"));
+            assert_eq!(app.cover(&task.id).unwrap(), before);
+            app.shutdown().await;
+            assert_eq!(
+                std::fs::read_dir(root.path().join("downloads"))
+                    .unwrap()
+                    .count(),
+                1
+            );
+        }
     }
     #[tokio::test]
     async fn duplicate_requires_confirmation_and_retry_cannot_bypass_it() {

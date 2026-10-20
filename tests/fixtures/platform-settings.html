@@ -1,0 +1,31 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+// Isolated IPC fixture: synthetic cookies only, no native credentials or network.
+import {api} from '/src/api';
+const initial={download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'test-only',proxy:null,cookie_configured:platform==='youtube'})),tdl:{enabled:false,path:null}};
+let settings=JSON.parse(sessionStorage.getItem('profile-settings')||'null')||initial;
+let cookies=JSON.parse(sessionStorage.getItem('profile-cookies')||'null')||{douyin:'',tiktok:'',youtube:'session=fixture'};
+const state={calls:[],failSave:false,failCookie:false,snapshot:()=>structuredClone({settings,cookies})};
+window.platformSettingsTest=state;
+api.settings=async()=>structuredClone(settings);
+api.tasks=async()=>[];
+api.subscribe=async()=>()=>{};
+api.cookie=async platform=>{if(state.failCookie)throw 'DATABASE_ERROR';return cookies[platform]};
+api.tdlLoginStatus=async()=>null;
+api.save=async config=>{
+  state.calls.push(structuredClone(config));
+  if(state.failSave)throw 'DATABASE_ERROR';
+  if(config.proxy && !/^(http|socks5):\/\/[^/]+:\d+\/?$/.test(config.proxy))throw 'CONFIG_INVALID';
+  if(config.cookie!==null && /[\r\n]/.test(config.cookie))throw 'CONFIG_INVALID';
+  const profile=settings.profiles.find(p=>p.platform===config.platform);
+  if(config.cookie!==null)cookies[config.platform]=config.cookie;
+  profile.cookie_configured=!!cookies[config.platform];
+  profile.user_agent=config.user_agent;
+  if(config.proxy!==null)profile.proxy=config.proxy||null;
+  sessionStorage.setItem('profile-settings',JSON.stringify(settings));
+  sessionStorage.setItem('profile-cookies',JSON.stringify(cookies));
+  return structuredClone(settings);
+};
+api.resolve=async()=>{throw 'RISK_CONTROL'};
+await import('/src/main');
+</script></body></html>

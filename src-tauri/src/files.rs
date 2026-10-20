@@ -218,27 +218,6 @@ pub fn staged_cover(result: &Value, staging: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub fn finalize_cover(result: &Value, staging: &Path, target: &Path) -> Result<PathBuf> {
-    let bytes = staged_cover(result, staging)?;
-    let source = staging.join("cover");
-    let extension = if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        "jpg"
-    } else if bytes.starts_with(b"\x89PNG") {
-        "png"
-    } else {
-        "webp"
-    };
-    let target = target.with_extension(format!("cover.{extension}"));
-    fs::OpenOptions::new()
-        .write(true)
-        .open(&source)?
-        .sync_all()?;
-    tempfile::TempPath::try_from_path(source)?
-        .persist_noclobber(&target)
-        .map_err(|_| anyhow::anyhow!("IO_ERROR"))?;
-    Ok(target.to_owned())
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AlbumFile {
     pub filename: String,
@@ -470,32 +449,26 @@ mod tests {
         assert!(!root.path().join("tiktok_123.mp4").exists());
     }
     #[test]
-    fn cover_commit_validates_content_path_size_and_never_overwrites() {
-        let root = tempfile::tempdir().unwrap();
-        let stage = tempfile::tempdir_in(root.path()).unwrap();
+    fn staged_cover_validates_content_path_size_without_moving_bytes() {
+        let stage = tempfile::tempdir().unwrap();
         let source = stage.path().join("cover");
-        let target = root.path().join("saved.cover");
         let body = b"\xff\xd8\xffimage";
         fs::write(&source, body).unwrap();
-        assert!(finalize_cover(
+        assert!(staged_cover(
             &json!({"cover_filename":"../cover","cover_bytes":body.len()}),
             stage.path(),
-            &target
         )
         .is_err());
-        assert!(finalize_cover(
+        assert!(staged_cover(
             &json!({"cover_filename":"cover","cover_bytes":100}),
             stage.path(),
-            &target
         )
         .is_err());
         let result = json!({"cover_filename":"cover","cover_bytes":body.len()});
-        let saved = finalize_cover(&result, stage.path(), &target).unwrap();
-        fs::write(&source, body).unwrap();
-        assert!(finalize_cover(&result, stage.path(), &target).is_err());
-        assert_eq!(fs::read(&saved).unwrap(), body);
+        assert_eq!(staged_cover(&result, stage.path()).unwrap(), body);
+        assert_eq!(fs::read(&source).unwrap(), body);
         fs::write(&source, b"<html>error</html>").unwrap();
-        assert!(read_cover(&source).is_err());
+        assert!(staged_cover(&result, stage.path()).is_err());
     }
     #[test]
     fn album_commit_never_overwrites_and_requires_complete_evidence() {
