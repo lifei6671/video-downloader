@@ -883,11 +883,11 @@ async fn extracted_telegram_cover_reuses_task_display_cache_and_restart() {
         services
     );
     app.delete_local_file(&task.id).unwrap();
-    assert!(app.cover(&task.id).is_ok());
-    assert!(app.cover(&cached.id).is_ok());
-    // An active preview keeps using the shared cover after its download record
-    // is removed. The last consumer's removal releases only the cover BLOB.
-    app.remove_history(&task.id).unwrap();
+    assert!(!video_path.exists());
+    assert!(app.list().iter().all(|t| t.id != task.id));
+    assert!(app.cover(&task.id).is_err());
+    // Deleting the video also removes its task. An active preview keeps the
+    // shared cover until the last consumer is removed.
     assert!(app.cover(&cached.id).is_ok());
     app.cancel(&cached.id).await.unwrap();
     app.remove_history(&cached.id).unwrap();
