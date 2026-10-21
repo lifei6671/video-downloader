@@ -8,8 +8,16 @@ import json
 from urllib.parse import urlencode
 
 from yt_dlp.extractor.tiktok import DouyinIE as UpstreamDouyinIE
-from yt_dlp.utils import ExtractorError, float_or_none
+from yt_dlp.utils import ExtractorError, float_or_none, url_or_none
+from yt_dlp.utils.traversal import traverse_obj
 from video_formats import positive
+
+
+def original_scale_cover(detail):
+    for url in traverse_obj(detail, ('video', 'cover_original_scale', 'url_list', ..., {url_or_none})):
+        if url.startswith('https://'):
+            return url
+    return None
 
 
 class DouyinIE(UpstreamDouyinIE):
@@ -32,9 +40,12 @@ class DouyinIE(UpstreamDouyinIE):
 
     def _parse_aweme_video_app(self, detail):
         info = super()._parse_aweme_video_app(detail)
+        video = detail.get('video') or {}
+        cover = original_scale_cover(detail)
+        if cover:
+            info['thumbnails'].append(dict(id='cover_original_scale', url=cover, preference=0))
         # The upstream URL-key parser misses e.g. bytevc1_4k. Use each actual
         # play address's dimensions, never the parent video's upload dimensions.
-        video = detail.get('video') or {}
         addresses = [video.get(k) for k in ('play_addr', 'play_addr_265', 'play_addr_h264', 'play_addr_bytevc1')]
         addresses += [gear.get('play_addr') for gear in video.get('bit_rate', []) if isinstance(gear, dict)]
         dimensions = {}

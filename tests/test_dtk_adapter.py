@@ -23,6 +23,29 @@ def test_original_priority_and_hd_when_missing():
     assert hd['url'].endswith('image.webp') and hd['quality_source'] == 'high_definition'
 
 
+@pytest.mark.parametrize('platform', ['douyin', 'tiktok'])
+@pytest.mark.parametrize('cover', [None, {'url_list': []},
+    {'url_list': ['http://p.douyinpic.com/insecure']},
+    {'url_list': [None, 'https://p.douyinpic.com/designed']}])
+def test_video_cover_priority_is_douyin_only_and_falls_back(platform, cover):
+    legacy = 'https://p.douyinpic.com/legacy'
+    stream = SimpleNamespace(url='https://v.fixture.douyinvod.com/video.mp4', watermark=False,
+                             width=1920, height=1080, size_bytes=10000, bitrate=None)
+    item = SimpleNamespace(platform=platform, content_id='123', kind='video',
+        raw={'video': {'cover_original_scale': cover}}, web_url='https://www.douyin.com/video/123',
+        title='fixture', duration_ms=1000, music=None,
+        author=SimpleNamespace(unique_id='fixture', nickname='fixture'),
+        media=SimpleNamespace(video=stream, streams=[], covers=[SimpleNamespace(url=legacy)]))
+    expected = ('https://p.douyinpic.com/designed' if platform == 'douyin' and cover and
+                'https://p.douyinpic.com/designed' in cover.get('url_list', []) else legacy)
+    assert dtk_adapter.metadata(item)['cover_url'] == expected
+    assert engine.cover_url(dtk_adapter.video_info(item)) == expected
+    item.media.covers = []
+    expected = expected if expected != legacy else None
+    assert dtk_adapter.metadata(item)['cover_url'] == expected
+    assert engine.cover_url(dtk_adapter.video_info(item)) == expected
+
+
 @pytest.mark.parametrize('original', [{'wrong': 'shape'}, {'url_list': []}, {'url_list': ['file:///private']}])
 def test_present_invalid_original_cannot_silently_downgrade(original):
     with pytest.raises(engine.EngineError, match='UPSTREAM_CHANGED'):
@@ -98,7 +121,7 @@ def test_dtk_video_uses_same_guarded_single_file_downloader(monkeypatch, tmp_pat
     proxy, _, _, _ = media_proxy
     stream = SimpleNamespace(url='http://v.fixture.douyinvod.com/good.mp4', watermark=False,
                              width=1280, height=720, size_bytes=len(BODY), bitrate=None)
-    item = SimpleNamespace(platform='douyin', content_id='123', kind='video',
+    item = SimpleNamespace(platform='douyin', content_id='123', kind='video', raw={},
         web_url='https://www.douyin.com/video/123', title='fixture', duration_ms=1000, music=None,
         author=SimpleNamespace(unique_id='fixture',nickname='fixture'),
         media=SimpleNamespace(video=stream,streams=[stream],covers=[]))

@@ -25,7 +25,7 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.7.2'
+ENGINE_VERSION = '0.7.3'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.08.19'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -140,11 +140,12 @@ def add_cookies(jar, cookies, platform):
 
 
 def cover_url(info):
-    # yt-dlp sorts thumbnails from least to most preferred; use dimensions when available.
+    # Prefer Douyin's designed cover, then the existing resolution/origin ordering.
     candidates = [t for t in info.get('thumbnails', []) if isinstance(t, dict)
                   and isinstance(t.get('url'), str) and urlsplit(t['url']).scheme == 'https']
     if candidates:
         return max(enumerate(candidates), key=lambda item: (
+            item[1].get('id') == 'cover_original_scale',
             (item[1].get('width') or 0) * (item[1].get('height') or 0),
             str(item[1].get('id', '')).startswith(('origin_cover', 'originCover')),
             item[1].get('preference') or 0, item[0]))[1]['url']

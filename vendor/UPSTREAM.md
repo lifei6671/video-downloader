@@ -58,6 +58,12 @@ yt-dlp 2026.08.19 的 URL-key parser 对该作品 `bytevc1_4k` 未填尺寸；�
 
 类型标记仅留在 Python 内部。现有选择器只向抖音 yt-dlp 的预览/下载提供已确认的一体规格，不新增音频下载、分轨合并、媒体探测请求或公开协议字段。引擎 0.7.2 使旧解析缓存失效，旧规格失效时明确失败，不自动降级。此补充来源为本机授权详情响应与 FFprobe 轨道核对，没有复用 DownVid 固定 `hasAudio=true` 的实现。升级 yt-dlp 时重新检查上述字段及真实轨道；上游正确识别且项目所需的一体证据完整时移除此归一化，保留回归测试。签名及 GuardedRH 均未改变。验收见 [视频规格](../docs/video-format-validation.md#抖音音视频类型修正2026-10-19)。
 
+## 抖音封面优先级补充（2026-10-21）
+
+按用户要求，抖音视频优先使用详情响应的 `video.cover_original_scale.url_list` 中的 HTTPS 地址，字段缺失或没有可用地址时沿用各引擎原有封面逻辑。yt-dlp 的自有 Douyin 子类补充该候选，选择器将其置于尺寸、`origin_cover` 和上游 preference 之前；DTK 自有适配层从已解析内容的 raw 详情读取同一字段，不修改 vendored parser。TikTok、YouTube 和图集保持原有行为。
+
+来源为作品 `7697086330987981242` 的本机授权详情响应：`origin_cover` 是橙字热榜画面，`cover_original_scale` 是白字设计封面，不能按字段名称将两者视为同一图片。引擎升为 0.7.3，使后续解析不再命中旧版本缓存；不主动替换历史任务封面。预览与下载复用同一选择结果及原有图片校验，封面下载失败不影响视频成功。升级上游时核对该字段是否已原生提取，保留优先级与缺失回退测试。
+
 ## Telegram tdl 外部工具（2026-10-18）
 
 按用户决定只调用用户自行安装的 [iyear/tdl v0.20.4](https://github.com/iyear/tdl/tree/9d7d49eef2bcb04da720c26e33598c49c68b9ddd)，commit `9d7d49eef2bcb04da720c26e33598c49c68b9ddd`，上游许可 AGPL-3.0。未 vendoring、复制其 Go 源码或随安装包分发 tdl；自有 Rust 适配器依据 `app/dl/serve.go`、`serve.go.tmpl`、`cmd/dl.go`、`cmd/version.go`、`cmd/root.go` 和 `core/util/tutil/tutil.go` 的 CLI/HTTP 契约实现。用户另行授权运行依赖登录，依据 `cmd/login.go`、`app/login/login.go`、`app/login/qr.go` 调用显式 QR 模式和独立存储；禁止默认 desktop 导入及覆盖既有命名空间。当前全接口监听、缺少令牌及请求白名单须作为已知实验风险持续呈现；升级和真实运行边界见 [集成说明](../docs/tdl-integration.md)。

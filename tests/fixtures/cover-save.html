@@ -1,0 +1,25 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+// Isolated IPC and image fixtures; never touches the real clipboard, dialogs or user files.
+import {api} from '/src/api';
+const image=Array.from(Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='),c=>c.charCodeAt(0)));
+const canvas=document.createElement('canvas');
+const encode=async(mime,width,height)=>{canvas.width=width;canvas.height=height;const context=canvas.getContext('2d');context.fillStyle='#ff0000';context.fillRect(0,0,width,height);return Array.from(new Uint8Array(await (await new Promise(resolve=>canvas.toBlob(resolve,mime))).arrayBuffer()))};
+const fit=new URLSearchParams(location.search).has('preview-fit');
+const jpeg=await encode('image/jpeg',fit?1600:640,fit?900:360),webp=await encode('image/webp',fit?720:360,fit?1280:640);
+const state={calls:[],result:true,error:false,pending:false,release:null,copies:[],copyError:false,copyPending:false,releaseCopy:null};
+window.coverSaveTest=state;
+const rows=['douyin','tiktok','youtube','telegram','legacy','missing','broken','album','broken-album'].map((id,index)=>({
+ id,revision:1,status:id==='telegram'?'queued':'completed',download_requested:true,video:{platform:['legacy','missing','broken','album','broken-album'].includes(id)?'douyin':id,video_id:'123',title:id+' cover'+(fit?' '+ '用于验证封面长标题不应撑宽预览浮层。'.repeat(12):''),kind:id.includes('album')?'image_album':'video',images:id.includes('album')?[{quality_source:'original',filename:'001.png'}]:undefined},
+ bytes:100,total_bytes:100,speed_bps:null,error:null,path:null,created_at:10-index,completed_at:20,canceling:false,file_missing:false,queue_order:null,cover_path:id==='legacy'?'C:\\fixture.cover.png':null,cover_error:null,files:[],cache_hit:false,cached_at:null,cover_cached:!['legacy','missing','album'].includes(id)
+}));
+api.tasks=async()=>structuredClone(rows);
+api.settings=async()=>({download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'fixture',proxy:null,cookie_configured:false})),tdl:{enabled:false,path:null}});
+api.subscribe=async()=>()=>{};
+api.tdlLoginStatus=async()=>null;
+api.cover=async id=>{if(id==='broken')throw 'FILE_MISSING';return id==='legacy'?jpeg:id==='youtube'?webp:image};
+api.image=async id=>{if(id==='broken-album')throw 'FILE_MISSING';return image};
+api.saveCover=async id=>{state.calls.push(id);if(state.pending)await new Promise(resolve=>state.release=resolve);if(state.error)throw 'IO_ERROR';return state.result};
+api.copyCover=async data=>{state.copies.push({width:data.width,height:data.height,rgba:Array.from(data.data)});if(state.copyPending)await new Promise(resolve=>state.releaseCopy=resolve);if(state.copyError)throw 'CLIPBOARD_WRITE_FAILED'};
+await import('/src/main');
+</script></body></html>

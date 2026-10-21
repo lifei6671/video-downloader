@@ -181,6 +181,24 @@ def test_cover_prefers_original_when_upstream_omits_dimensions():
     ]}) == 'https://p.byteimg.com/original'
 
 
+def test_original_scale_cover_beats_resolution_and_is_downloaded(tmp_path):
+    import io
+    url = 'https://p.douyinpic.com/designed'
+    body = b'\xff\xd8\xfffixture'
+    info = {'thumbnails': [
+        {'id': 'cover_original_scale', 'url': url, 'width': 360, 'height': 479},
+        {'id': 'origin_cover', 'url': 'https://p.douyinpic.com/origin',
+         'width': 1920, 'height': 1080, 'preference': 10},
+    ]}
+    class Ydl:
+        def urlopen(self, selected):
+            assert selected == url
+            return io.BytesIO(body)
+    assert engine.download_cover(Ydl(), info, tmp_path) == {
+        'cover_filename': 'cover', 'cover_bytes': len(body)}
+    assert (tmp_path / 'cover').read_bytes() == body
+
+
 @pytest.mark.parametrize('url,resolver,kind,actual', [
     ('https://www.douyin.com/video/123','auto','video','yt-dlp'),
     ('https://www.douyin.com/note/601','auto','image_album','dtk'),

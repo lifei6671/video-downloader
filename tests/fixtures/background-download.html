@@ -18,6 +18,13 @@ if (scenario.startsWith('clear')) {
     video:{...video,video_id:'100_'+id,title},path:status==='completed'?'C:\\TestVideos\\'+id+'.mp4':null});
   tasks.push(row('live','downloading','进行中的作品'),row('queue','queued','等待中的作品'),row('parse','parsing','解析中的下载'));
   if (scenario !== 'clear-empty') tasks.push(row('done','completed','已完成作品'),row('failed','failed','失败作品'),row('cancel','canceled','取消作品'));
+  if(scenario==='clear-platforms') {
+    for(const [id,platform] of [['dy','douyin'],['tt','tiktok'],['yt','youtube'],['tg','telegram']]) {
+      const task=row(id,'completed',platform+'-history');task.video.platform=platform;tasks.push(task);
+    }
+    const unresolved=row('tg-link','failed','link-only');unresolved.video=null;unresolved.telegram_link='https://t.me/c/100/99';tasks.push(unresolved);
+    const unknown=row('unknown','failed','unknown');unknown.video=null;tasks.push(unknown);
+  }
   const stale = structuredClone(tasks.filter(task => ['completed','failed','canceled'].includes(task.status)));
   control.replay = () => stale.forEach(task=>listener(task));
 }
@@ -37,6 +44,9 @@ if (scenario.startsWith('actions')) {
   tasks = [row('done','completed','可播放视频'),row('album','completed','已完成图集','image_album'),
     row('missing','completed','文件缺失视频','video',true),row('live','downloading','下载中视频'),
     row('failed','failed','失败视频'),row('cancel','canceled','取消视频')];
+  const stale = structuredClone(tasks);
+  control.replay = () => stale.forEach(task=>listener(task));
+  Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{control.calls.push({type:'copy',text})}}});
 }
 control.fail = id => {
   const task = tasks.find(task => task.id === id);
@@ -49,18 +59,32 @@ api.settings = async () => ({download_directory:'C:\\TestVideos',max_downloads:1
 api.checkTdl = async () => ({path:'C:\\TestTools\\tdl.exe',version:'0.20.4'});
 api.resolve = async input => {control.calls.push({type:'resolve',input});const task={...structuredClone(original),id:'next-'+(++next),created_at:10+next,video:{...structuredClone(video),video_id:['duplicate','race'].includes(scenario)?video.video_id:'100_'+(9+next),canonical_url:input,title:'新作品 '+next}};tasks.unshift(task);return structuredClone(task)};
 api.cancel = async id => {control.calls.push({type:'cancel',id});const task=tasks.find(t=>t.id===id);Object.assign(task,{status:'canceled',revision:task.revision+1});listener(structuredClone(task))};
-api.clearHistory = async () => {
-  control.calls.push({type:'clear-history'});
+api.clearHistory = async (platform=null) => {
+  control.calls.push({type:'clear-history',platform});
   if(scenario==='clear-pending')await new Promise(resolve=>control.release=resolve);
   if(scenario==='clear-failure')throw 'DATABASE_ERROR';
-  const ids=tasks.filter(task=>task.download_requested && ['completed','failed','canceled'].includes(task.status)).map(task=>task.id);
+  const ids=tasks.filter(task=>task.download_requested && (!platform || (task.video?.platform ?? (task.telegram_link?'telegram':undefined))===platform) && ['completed','failed','canceled'].includes(task.status)).map(task=>task.id);
   tasks=tasks.filter(task=>!ids.includes(task.id));
+  if(scenario!=='clear-no-event')ids.forEach(id=>removedListener(id));
   return ids;
 };
-api.deleteFile = async id => {control.calls.push({type:'delete-file',id});throw 'UNEXPECTED_FILE_DELETION'};
+api.deleteFile = async id => {
+  control.calls.push({type:'delete-file',id});
+  if(!scenario.startsWith('actions'))throw 'UNEXPECTED_FILE_DELETION';
+  if(scenario==='actions-delete-pending')await new Promise(resolve=>control.release=resolve);
+  if(scenario==='actions-delete-error')throw 'IO_ERROR';
+  tasks=tasks.filter(task=>task.id!==id);
+  if(scenario!=='actions-no-event')removedListener(id);
+};
 api.reveal = async id => {control.calls.push({type:'reveal',id})};
 api.play = async id => {control.calls.push({type:'play',id});if(scenario==='actions-error')throw 'PLAYBACK_OPEN_FAILED'};
-api.remove = async id => {control.calls.push({type:'remove',id});tasks=tasks.filter(task=>task.id!==id);removedListener(id)};
+api.remove = async id => {
+  control.calls.push({type:'remove',id});
+  if(scenario==='actions-remove-pending')await new Promise(resolve=>control.release=resolve);
+  if(scenario==='actions-remove-error')throw 'DATABASE_ERROR';
+  tasks=tasks.filter(task=>task.id!==id);
+  if(scenario!=='actions-no-event')removedListener(id);
+};
 api.download = async (id,confirm=false) => {
   control.calls.push({type:'download',id,confirm,format:tasks.find(t=>t.id===id).video.selected_format_id});
   if(scenario==='pending')await new Promise(resolve=>control.release=resolve);

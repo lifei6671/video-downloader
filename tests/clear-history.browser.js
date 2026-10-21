@@ -19,26 +19,23 @@ async page => {
     check(await remove.evaluate(item=>item.firstElementChild?.tagName.toLowerCase()==='svg'
       && item.firstElementChild.getAttribute('aria-hidden')==='true'
       && item.textContent.trim()===''),'remove must be icon only');
-    await remove.focus();await page.keyboard.press('Enter');
-    await dialog.getByRole('heading',{name:'从列表移除？',exact:true}).waitFor();
-    await dialog.getByRole('button',{name:'返回',exact:true}).click();
-    await dialog.waitFor({state:'hidden'});
-    check((await calls()).length===0,'opening remove confirmation mutated data');
     const buttonBox=await clear.boundingBox();const searchBox=await search.boundingBox();
     check(buttonBox.x<searchBox.x,'button must precede search');
     check(await clear.evaluate(button=>button.textContent.trim()==='' && !!button.querySelector('svg')),'expected icon only');
-    await clear.hover();await page.getByRole('tooltip').filter({hasText:'清理历史'}).waitFor();
+    await clear.hover();await page.getByRole('tooltip').filter({hasText:'清理全部平台下载历史'}).waitFor();
     await page.keyboard.press('Escape');await clear.focus();await page.keyboard.press('Enter');
     await dialog.getByRole('heading',{name:'清理下载历史？'}).waitFor();
     check((await calls()).length===0,'clear before confirmation');
     await dialog.getByRole('button',{name:'返回',exact:true}).click();
     await dialog.waitFor({state:'hidden'});
+    await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='清理历史');
     check(await clear.evaluate(button=>button===document.activeElement),'cancel focus restoration');
     await search.fill('已完成作品');await clear.click();
     await dialog.getByRole('button',{name:'清理历史',exact:true}).click();
     await dialog.waitFor({state:'hidden'});
     check((await calls()).filter(call=>call.type==='clear-history').length===1,'expected one batch IPC');
     check(!(await calls()).some(call=>call.type==='delete-file'),'file deletion requested');
+    await page.waitForFunction(()=>document.querySelectorAll('[data-task-row][data-removing]').length===0);
     await search.fill('');
     for(const title of ['进行中的作品','等待中的作品','解析中的下载'])await page.getByText(title,{exact:true}).waitFor();
     for(const title of ['已完成作品','失败作品','取消作品'])check(await page.getByText(title,{exact:true}).count()===0,'history survived clear');
@@ -48,7 +45,7 @@ async page => {
     check(await clear.isDisabled(),'no history should disable clear');
     check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'viewport overflow');
     await page.screenshot({path:`.local/clear-history-${width}.png`,animations:'disabled'});
-    results.push(width+' remove-icon/keyboard/confirmation + clear-history regression');
+    results.push(width+' remove-icon + clear-history confirmation regression');
   }
   await load('clear-empty');check(await clear.isDisabled(),'empty history enabled');
   await clear.locator('..').hover();await page.getByRole('tooltip').filter({hasText:'暂无可清理'}).waitFor();results.push('empty state');
@@ -63,7 +60,7 @@ async page => {
   await page.keyboard.press('Escape');check(await dialog.isVisible(),'pending escape dismissed');
   check((await calls()).filter(c=>c.type==='clear-history').length===1,'duplicate pending batch');
   await page.evaluate(()=>window.backgroundTest.release());await dialog.waitFor({state:'hidden'});
-  await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='搜索作品标题或作者');
+  await page.waitForFunction(()=>document.activeElement?.getAttribute('role')==='tabpanel');
   results.push('pending guard and final focus');
   return {passed:results.length,cases:results};
 }

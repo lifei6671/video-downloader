@@ -148,6 +148,24 @@ def parse_media_detail(detail):
     return info
 
 
+@pytest.mark.parametrize('cover', [None, {}, {'url_list': []},
+    {'url_list': [None, '', 'http://p.douyinpic.com/insecure']},
+    {'url_list': [None, 'https://p.douyinpic.com/designed']}])
+def test_original_scale_cover_priority_and_legacy_fallback(media_detail, cover):
+    video = media_detail['video']
+    video['cover'] = {'url_list': ['https://p.douyinpic.com/preview']}
+    video['origin_cover'] = {'url_list': ['https://p.douyinpic.com/origin']}
+    if cover is not None:
+        video['cover_original_scale'] = cover
+    original = copy.deepcopy(media_detail)
+    info = parse_media_detail(media_detail)
+    expected = ('https://p.douyinpic.com/designed' if cover and
+                'https://p.douyinpic.com/designed' in cover.get('url_list', [])
+                else 'https://p.douyinpic.com/origin')
+    assert engine.cover_url(info) == expected
+    assert media_detail == original
+
+
 @pytest.mark.parametrize('numeric', [False, True])
 def test_real_upstream_parser_classifies_each_url_and_offers_only_muxed(media_detail, numeric):
     if numeric:

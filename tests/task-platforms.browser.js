@@ -47,5 +47,38 @@ async page=>{
   await page.getByText('该平台暂无下载任务',{exact:true}).waitFor();
   await tabs().getByRole('tab',{name:'全部',exact:true}).click();check((await titles()).length===5,'all did not restore tasks');
   results.push('platform empty state and return to all');
+  for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
+    await page.setViewportSize({width,height});await load('?long=1');
+    const content=page.locator('[data-slot="page-content"]');
+    const heading=page.getByRole('heading',{name:'下载任务',exact:true});
+    const beforeTabs=await tabs().boundingBox();const beforeHeading=await heading.boundingBox();
+    const cards=panel().locator('[data-slot="card"]');
+    const firstHeight=(await cards.first().boundingBox()).height;
+    check(firstHeight>=70,'long-list cards collapsed');
+    check(await panel().evaluate(node=>node.scrollHeight>node.clientHeight+500),'task list does not scroll');
+    const box=await panel().boundingBox();
+    await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.wheel(0,600);
+    await page.waitForFunction(()=>document.querySelector('[role="tabpanel"]').scrollTop>200);
+    const afterTabs=await tabs().boundingBox();const afterHeading=await heading.boundingBox();
+    check(Math.abs(afterTabs.y-beforeTabs.y)<1 && Math.abs(afterHeading.y-beforeHeading.y)<1,'tab/header moved with list');
+    check(await content.evaluate(node=>node.scrollTop===0 && node.scrollHeight<=node.clientHeight+1),'outer content also scrolls');
+    check(await tabs().getByRole('tab',{name:'全部',exact:true}).evaluate(node=>{
+      const box=node.getBoundingClientRect();return node.contains(document.elementFromPoint(box.x+box.width/2,box.y+box.height/2));
+    }),'list painted over tabs');
+    await panel().focus();await page.keyboard.press('Control+End');
+    await page.waitForFunction(()=>{const n=document.querySelector('[role="tabpanel"]');return n.scrollHeight-n.clientHeight-n.scrollTop<2});
+    const last=await cards.last().boundingBox();const viewport=await panel().boundingBox();
+    check(last.y>=viewport.y && last.y+last.height<=viewport.y+viewport.height+1,'last task is unreachable');
+    check(Math.abs((await cards.first().boundingBox()).height-firstHeight)<1,'scroll changes card height');
+    check(Math.abs((await tabs().boundingBox()).y-beforeTabs.y)<1,'keyboard scroll moves tabs');
+    await page.screenshot({path:'.local/task-tabs-fixed-'+width+'.png',animations:'disabled'});
+    await tabs().getByRole('tab',{name:'抖音',exact:true}).click();
+    check((await titles()).length===51,'fixed tab cannot filter long list');
+    await tabs().getByRole('tab',{name:'TikTok',exact:true}).click();
+    check((await titles()).join(',')==='tiktok-wait','short filter after long list failed');
+    check(await panel().evaluate(node=>node.scrollTop===0),'short filter retained invalid scroll offset');
+    check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'fixed layout overflows viewport');
+    results.push(width+': long-list wheel/keyboard scroll keeps header and tabs fixed; filtering and last row accessible');
+  }
   return {passed:results.length,cases:results};
 }

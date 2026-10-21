@@ -5,6 +5,7 @@ import {api} from '/src/api';
 const row=(id,platform,status,extra={})=>({id,revision:1,status,video:platform?{platform,video_id:id,canonical_url:'https://example.invalid/'+id,title:id,author:platform+'-author',kind:'video',resolver:platform==='telegram'?'tdl':'yt-dlp'}:null,bytes:0,total_bytes:null,speed_bps:null,error:status==='failed'?'NETWORK_ERROR':null,path:null,created_at:10,completed_at:null,canceling:false,file_missing:false,queue_order:null,download_requested:true,cover_path:null,cover_error:null,files:[],completed_items:null,total_items:null,cache_hit:false,cached_at:null,cover_cached:false,...extra});
 let tasks=[row('douyin-live','douyin','downloading'),row('tiktok-wait','tiktok','queued',{queue_order:1}),row('youtube-done','youtube','completed',{path:'C:\\TestVideos\\youtube.mp4'}),row('youtube-failed','youtube','failed'),row('telegram-wait',null,'queued',{queue_order:2,telegram_link:'https://t.me/c/100/9'}),row('unknown-failed',null,'failed'),row('preview-only','douyin','ready',{download_requested:false})];
 if(new URLSearchParams(location.search).get('empty')==='telegram')tasks=tasks.filter(t=>!t.telegram_link);
+if(new URLSearchParams(location.search).has('long'))tasks.push(...Array.from({length:50},(_,i)=>row('douyin-scroll-'+i,'douyin',i%4===0?'failed':'downloading')));
 let listener=()=>{};
 window.taskPlatformsTest={calls:[],snapshot:()=>structuredClone(tasks),push:(id,platform)=>{const task=row(id,platform,'downloading');tasks.push(task);listener(structuredClone(task))}};
 api.tasks=async()=>structuredClone(tasks);

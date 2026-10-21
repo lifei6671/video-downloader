@@ -678,6 +678,31 @@ impl Core {
         }
         crate::files::read_cover(task.cover_path.as_deref().context("FILE_MISSING")?)
     }
+    pub fn export_cover(&self, id: &str) -> Result<(String, Vec<u8>)> {
+        let task = self
+            .list()
+            .into_iter()
+            .find(|t| t.id == id)
+            .context("TASK_NOT_FOUND")?;
+        let video = task.video.context("FILE_MISSING")?;
+        let body = if video["kind"] == "image_album" {
+            self.image(id, 0)?
+        } else {
+            self.cover(id)?
+        };
+        let extension = crate::files::image_extension(&body).context("INVALID_MEDIA_CONTENT")?;
+        let filename = format!(
+            "{}_{}.cover.{}",
+            video["platform"]
+                .as_str()
+                .context("INVALID_ENGINE_RESULT")?,
+            video["video_id"]
+                .as_str()
+                .context("INVALID_ENGINE_RESULT")?,
+            extension
+        );
+        Ok((filename, body))
+    }
     pub fn save_profile(&self, update: settings::ProfileUpdate) -> Result<Settings> {
         let mut inner = self.inner.lock().unwrap();
         let Inner { db, settings, .. } = &mut *inner;
@@ -801,13 +826,23 @@ impl Core {
         Ok(())
     }
 
-    pub fn clear_history(&self) -> Result<Vec<String>> {
+    pub fn clear_history(&self, platform: Option<&str>) -> Result<Vec<String>> {
+        if platform.is_some_and(|p| !matches!(p, "douyin" | "tiktok" | "youtube" | "telegram")) {
+            bail!("CONFIG_INVALID");
+        }
         let mut inner = self.inner.lock().unwrap();
         let ids = inner
             .tasks
             .iter()
             .filter(|task| {
                 task.download_requested
+                    && platform.is_none_or(|p| {
+                        task.video
+                            .as_ref()
+                            .and_then(|v| v["platform"].as_str())
+                            .or_else(|| task.telegram_link.as_ref().map(|_| "telegram"))
+                            == Some(p)
+                    })
                     && matches!(
                         task.status,
                         Status::Completed | Status::Failed | Status::Canceled
@@ -904,7 +939,7 @@ impl Core {
         }
         let task = inner
             .tasks
-            .iter_mut()
+            .iter()
             .find(|t| t.id == id)
             .context("TASK_NOT_FOUND")?;
         if task.status != Status::Completed {
@@ -952,12 +987,9 @@ impl Core {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => bail!("IO_ERROR"),
         }
-        // Missing-file state is derived from the stored path on every reload.
-        // No database write after deletion can turn a successful deletion into
-        // a misleading failure; the original history remains intact.
-        task.file_missing = true;
-        task.revision += 1;
-        (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+        // Remove the record only after file deletion succeeds. If the database
+        // fails, retain the task so deletion can be retried for the missing file.
+        self.remove_history_records(&mut inner, vec![id.to_owned()])?;
         Ok(())
     }
 
@@ -1790,6 +1822,52 @@ impl Core {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn cover_export_preserves_cached_legacy_and_album_bytes_and_real_format() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        assert_eq!(
+            app.export_cover("missing").unwrap_err().to_string(),
+            "TASK_NOT_FOUND"
+        );
+        let task = app.resolve("valid".into()).unwrap();
+        let ready = wait(&app, &task.id, Status::Ready).await;
+        let before = serde_json::to_value(&ready).unwrap();
+        let (name, bytes) = app.export_cover(&task.id).unwrap();
+        assert_eq!(name, "douyin_123.cover.png");
+        assert_eq!(bytes, app.cover(&task.id).unwrap());
+        assert_eq!(
+            serde_json::to_value(app.list().into_iter().find(|t| t.id == task.id).unwrap())
+                .unwrap(),
+            before
+        );
+        let path = root.path().join("legacy.cover.jpg");
+        for (body, extension) in [
+            (b"\xff\xd8\xfffixture".to_vec(), "jpeg"),
+            (b"RIFF\x10\0\0\0WEBPfixture".to_vec(), "webp"),
+        ] {
+            std::fs::write(&path, &body).unwrap();
+            {
+                let mut inner = app.inner.lock().unwrap();
+                let task = inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap();
+                task.cover_path = Some(path.clone());
+                task.cover_cached = false;
+            }
+            let (name, bytes) = app.export_cover(&task.id).unwrap();
+            assert_eq!(name, format!("douyin_123.cover.{extension}"));
+            assert_eq!(bytes, body);
+            assert_eq!(std::fs::read(&path).unwrap(), body);
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert!(app.export_cover(&task.id).is_err());
+        let album = app.resolve("album".into()).unwrap();
+        wait(&app, &album.id, Status::Ready).await;
+        let (name, bytes) = app.export_cover(&album.id).unwrap();
+        assert!(name.starts_with("douyin_601.cover."));
+        assert_eq!(bytes, app.image(&album.id, 0).unwrap());
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn playback_uses_only_completed_video_records_and_preserves_files() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
@@ -1921,7 +1999,7 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            app.clear_history().unwrap_err().to_string(),
+            app.clear_history(None).unwrap_err().to_string(),
             "DATABASE_ERROR"
         );
         assert_eq!(app.list().len(), 12);
@@ -1941,7 +2019,7 @@ mod tests {
                 .execute_batch("DROP TRIGGER block_history_clear")
                 .unwrap();
         }
-        let removed: HashSet<_> = app.clear_history().unwrap().into_iter().collect();
+        let removed: HashSet<_> = app.clear_history(None).unwrap().into_iter().collect();
         assert_eq!(
             removed,
             [
@@ -1956,7 +2034,7 @@ mod tests {
             .into_iter()
             .collect()
         );
-        assert!(app.clear_history().unwrap().is_empty());
+        assert!(app.clear_history(None).unwrap().is_empty());
         assert_eq!(app.list().len(), 6);
         assert_eq!(std::fs::read(&video_path).unwrap(), b"original video");
         assert_eq!(std::fs::read(&cover_path).unwrap(), b"original cover");
@@ -1989,6 +2067,100 @@ mod tests {
         assert!(app.list().iter().all(|t| !removed.contains(&t.id)));
         assert!(app.cover("preview").is_ok());
         app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn history_clear_scopes_platforms_and_preserves_other_tabs_and_live_tasks() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let sample = app.resolve("valid".into()).unwrap();
+        let sample = wait(&app, &sample.id, Status::Ready).await;
+        app.cancel(&sample.id).await.unwrap();
+        app.remove_history(&sample.id).unwrap();
+        {
+            let mut inner = app.inner.lock().unwrap();
+            for (id, platform, status, requested) in [
+                ("dy", Some("douyin"), Status::Completed, true),
+                ("tt", Some("tiktok"), Status::Failed, true),
+                ("yt", Some("youtube"), Status::Canceled, true),
+                ("tg", Some("telegram"), Status::Completed, true),
+                ("tg-link", None, Status::Failed, true),
+                ("unknown", None, Status::Failed, true),
+                ("live", Some("douyin"), Status::Downloading, true),
+                ("queue", Some("douyin"), Status::Queued, true),
+                ("preview", Some("douyin"), Status::Canceled, false),
+                ("busy", Some("douyin"), Status::Completed, true),
+            ] {
+                let mut task = sample.clone();
+                task.id = id.into();
+                task.status = status;
+                task.download_requested = requested;
+                task.video = platform.map(|platform| {
+                    let mut video = sample.video.clone().unwrap();
+                    video["platform"] = platform.into();
+                    video["canonical_url"] = match platform {
+                        "tiktok" => "https://www.tiktok.com/@fixture/video/123",
+                        "youtube" => "https://www.youtube.com/watch?v=fixture0001",
+                        "telegram" => "https://t.me/c/100/9",
+                        _ => "https://www.douyin.com/video/123",
+                    }
+                    .into();
+                    if platform == "youtube" {
+                        video["video_id"] = "fixture0001".into();
+                    }
+                    if platform == "telegram" {
+                        video["video_id"] = "100_9".into();
+                        video["resolver"] = "tdl".into();
+                        video["selected_format_id"] = "original".into();
+                        video["formats"] =
+                            json!([{"format_id":"original","container":"mp4","filesize":4096}]);
+                    }
+                    video
+                });
+                task.telegram_link = (id == "tg-link").then(|| "https://t.me/c/100/9".into());
+                persist(&inner.db, &task).unwrap();
+                inner.tasks.push(task);
+            }
+            inner.downloads.insert("busy".into());
+        }
+        assert_eq!(
+            app.clear_history(Some("invalid")).unwrap_err().to_string(),
+            "CONFIG_INVALID"
+        );
+        assert_eq!(app.list().len(), 10);
+        assert_eq!(app.clear_history(Some("douyin")).unwrap(), ["dy"]);
+        assert_eq!(app.clear_history(Some("tiktok")).unwrap(), ["tt"]);
+        assert_eq!(app.clear_history(Some("youtube")).unwrap(), ["yt"]);
+        let telegram: HashSet<_> = app
+            .clear_history(Some("telegram"))
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            telegram,
+            ["tg".to_owned(), "tg-link".to_owned()]
+                .into_iter()
+                .collect()
+        );
+        assert!(app.clear_history(Some("douyin")).unwrap().is_empty());
+        assert_eq!(app.clear_history(None).unwrap(), ["unknown"]);
+        let remaining: HashSet<_> = app.list().into_iter().map(|t| t.id).collect();
+        assert_eq!(
+            remaining,
+            ["live", "queue", "preview", "busy"]
+                .map(String::from)
+                .into_iter()
+                .collect()
+        );
+        let inner = app.inner.lock().unwrap();
+        assert_eq!(
+            inner
+                .db
+                .query_row("SELECT count(*) FROM download_tasks", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
     }
 
     fn core(root: &Path) -> Arc<Core> {
@@ -2268,8 +2440,12 @@ mod tests {
             std::fs::read(path.join("user-note.txt")).unwrap(),
             b"preserve"
         );
-        assert!(restored.list()[0].file_missing);
-        assert_eq!(restored.list()[0].status, Status::Completed);
+        for file in &completed.files {
+            assert!(!path.join(&file.filename).exists());
+        }
+        assert!(restored.list().is_empty());
+        drop(restored);
+        assert!(core(root.path()).list().is_empty());
     }
 
     #[tokio::test]
@@ -2981,7 +3157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_removal_preserves_file_and_deletion_preserves_history() {
+    async fn history_removal_preserves_file_and_deletion_removes_history() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         let first = app.resolve("valid".into()).unwrap();
@@ -3015,17 +3191,69 @@ mod tests {
         std::fs::create_dir(&second_path).unwrap();
         assert!(app.delete_local_file(&second.id).is_err());
         assert!(second_path.is_dir());
+        assert!(app.list().iter().any(|t| t.id == second.id));
         std::fs::remove_dir(&second_path).unwrap();
         std::fs::write(&second_path, b"video").unwrap();
-        app.delete_local_file(&second.id).unwrap();
+        app.inner.lock().unwrap().db.execute_batch("CREATE TRIGGER reject_deletion BEFORE DELETE ON download_tasks BEGIN SELECT RAISE(ABORT, 'test'); END;").unwrap();
+        assert_eq!(
+            app.delete_local_file(&second.id).unwrap_err().to_string(),
+            "DATABASE_ERROR"
+        );
+        assert!(!second_path.exists());
+        assert!(app
+            .list()
+            .iter()
+            .any(|t| t.id == second.id && t.file_missing));
+        {
+            let inner = app.inner.lock().unwrap();
+            assert_eq!(
+                inner
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM download_tasks WHERE id=?",
+                        [&second.id],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                inner
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM commit_intents WHERE task_id=?",
+                        [&second.id],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            inner
+                .db
+                .execute_batch("DROP TRIGGER reject_deletion")
+                .unwrap();
+        }
+        // Retrying deletion of an already missing file must still clear its record.
         app.delete_local_file(&second.id).unwrap();
         assert!(!second_path.exists());
         assert!(path.exists());
+        {
+            let inner = app.inner.lock().unwrap();
+            for table in ["download_tasks", "commit_intents"] {
+                assert_eq!(
+                    inner
+                        .db
+                        .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+        assert!(app.list().is_empty());
         drop(app);
         let app = core(root.path());
-        assert_eq!(app.list().len(), 1);
-        assert_eq!(app.list()[0].status, Status::Completed);
-        assert!(app.list()[0].file_missing);
+        assert!(app.list().is_empty());
     }
 
     #[tokio::test]
@@ -3105,8 +3333,7 @@ mod tests {
         "https://www.youtube.com/watch?v=fixture0001",
     ];
     #[tokio::test]
-    async fn downloaded_video_covers_use_database_and_survive_restart_recovery_and_video_deletion()
-    {
+    async fn downloaded_video_covers_survive_restart_recovery_and_are_released_with_deleted_task() {
         for input in COVER_LINKS {
             let root = tempfile::tempdir().unwrap();
             let app = core(root.path());
@@ -3150,8 +3377,7 @@ mod tests {
             assert!(recovered.cover_cached && recovered.cover_path.is_none());
             assert!(app.cover(&task.id).is_ok());
             app.delete_local_file(&task.id).unwrap();
-            assert!(app.cover(&task.id).is_ok());
-            app.remove_history(&task.id).unwrap();
+            assert!(app.list().is_empty());
             assert!(app.cover(&task.id).is_err());
             let video = done.video.unwrap();
             assert!(parse_cache::cover(&db, &video).is_err());
@@ -3177,9 +3403,10 @@ mod tests {
             let done = wait(&app, &first.id, Status::Completed).await;
             let preview = app.resolve(input.into()).unwrap();
             wait(&app, &preview.id, Status::Ready).await;
-            app.remove_history(&first.id).unwrap();
+            app.shutdown().await;
+            app.delete_local_file(&first.id).unwrap();
             assert!(app.cover(&preview.id).is_ok());
-            assert!(done.path.as_ref().unwrap().is_file());
+            assert!(!done.path.as_ref().unwrap().exists());
             app.cancel(&preview.id).await.unwrap();
             let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
             db.execute_batch(
@@ -3208,7 +3435,7 @@ mod tests {
             std::fs::write(&legacy, b"legacy cover").unwrap();
             app.remove_history(&preview.id).unwrap();
             assert!(parse_cache::cover(&db, done.video.as_ref().unwrap()).is_err());
-            assert!(done.path.unwrap().is_file());
+            assert!(!done.path.unwrap().exists());
             assert_eq!(std::fs::read(legacy).unwrap(), b"legacy cover");
             app.shutdown().await;
         }

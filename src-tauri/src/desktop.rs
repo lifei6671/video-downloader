@@ -107,6 +107,64 @@ fn read_clipboard_text(app: tauri::AppHandle) -> Result<String, String> {
         .read_text()
         .map_err(|_| "CLIPBOARD_READ_FAILED".into())
 }
+fn clipboard_image(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<tauri::image::Image<'static>, String> {
+    if width == 0
+        || height == 0
+        || (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            != Some(rgba.len())
+    {
+        return Err("INVALID_MEDIA_CONTENT".into());
+    }
+    Ok(tauri::image::Image::new_owned(rgba, width, height))
+}
+
+#[cfg(test)]
+mod clipboard_image_tests {
+    use super::clipboard_image;
+
+    #[test]
+    fn rgba_pixels_dimensions_and_transparency_are_preserved() {
+        let pixels = vec![255, 0, 0, 255, 0, 100, 200, 128];
+        let image = clipboard_image(pixels.clone(), 2, 1).unwrap();
+        assert_eq!(image.width(), 2);
+        assert_eq!(image.height(), 1);
+        assert_eq!(image.rgba(), pixels);
+    }
+
+    #[test]
+    fn invalid_dimensions_lengths_and_overflow_are_rejected() {
+        for (pixels, width, height) in [
+            (vec![], 0, 1),
+            (vec![], 1, 0),
+            (vec![0; 3], 1, 1),
+            (vec![0; 5], 1, 1),
+            (vec![], u32::MAX, u32::MAX),
+        ] {
+            assert_eq!(
+                clipboard_image(pixels, width, height).unwrap_err(),
+                "INVALID_MEDIA_CONTENT"
+            );
+        }
+    }
+}
+#[tauri::command]
+async fn copy_cover_image(
+    app: tauri::AppHandle,
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let image = clipboard_image(rgba, width, height)?;
+    app.clipboard()
+        .write_image(&image)
+        .map_err(|_| "CLIPBOARD_WRITE_FAILED".into())
+}
 #[tauri::command]
 fn get_profile_cookie(core: State<AppCore>, platform: String) -> Result<String, String> {
     core.cookie(&platform).map_err(error)
@@ -114,6 +172,31 @@ fn get_profile_cookie(core: State<AppCore>, platform: String) -> Result<String, 
 #[tauri::command]
 fn get_task_cover(core: State<AppCore>, task_id: String) -> Result<Vec<u8>, String> {
     core.cover(&task_id).map_err(error)
+}
+#[tauri::command]
+async fn save_task_cover(
+    app: tauri::AppHandle,
+    core: State<'_, AppCore>,
+    task_id: String,
+) -> Result<bool, String> {
+    let (filename, body) = core.export_cover(&task_id).map_err(error)?;
+    let extension = filename.rsplit('.').next().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("保存封面")
+        .set_directory(core.settings().download_directory)
+        .set_file_name(&filename)
+        .add_filter("封面图片", &[extension])
+        .save_file(move |file| {
+            let _ = tx.send(file);
+        });
+    let Some(file) = rx.await.map_err(|_| "IO_ERROR")? else {
+        return Ok(false);
+    };
+    let path = file.into_path().map_err(|_| "IO_ERROR")?;
+    std::fs::write(path, body).map_err(|_| "IO_ERROR")?;
+    Ok(true)
 }
 #[tauri::command]
 fn get_task_image(core: State<AppCore>, task_id: String, index: usize) -> Result<Vec<u8>, String> {
@@ -162,8 +245,11 @@ fn remove_history(core: State<AppCore>, task_id: String) -> Result<(), String> {
     core.remove_history(&task_id).map_err(error)
 }
 #[tauri::command]
-fn clear_download_history(core: State<AppCore>) -> Result<Vec<String>, String> {
-    core.clear_history().map_err(error)
+fn clear_download_history(
+    core: State<AppCore>,
+    platform: Option<String>,
+) -> Result<Vec<String>, String> {
+    core.clear_history(platform.as_deref()).map_err(error)
 }
 #[tauri::command]
 fn delete_local_file(core: State<AppCore>, task_id: String) -> Result<(), String> {
@@ -450,8 +536,10 @@ fn main() {
             submit_tdl_password,
             check_tdl,
             read_clipboard_text,
+            copy_cover_image,
             get_profile_cookie,
             get_task_cover,
+            save_task_cover,
             get_task_image,
             save_profile,
             set_max_downloads,

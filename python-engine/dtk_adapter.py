@@ -10,6 +10,7 @@ import structlog
 from yt_dlp.downloader.http import HttpFD
 from yt_dlp.networking import Request
 from yt_dlp.networking.exceptions import HTTPError
+from douyin import original_scale_cover
 
 
 def discard_log(_logger, _method, _event):
@@ -127,7 +128,8 @@ def metadata(content):
         stream = content.media.video
         result.update(width=stream.width, height=stream.height, filesize=stream.size_bytes,
                       filesize_approx=None,
-                      cover_url=content.media.covers[0].url if content.media.covers else None)
+                      cover_url=(original_scale_cover(content.raw) if str(content.platform) == 'douyin' else None)
+                      or (content.media.covers[0].url if content.media.covers else None))
     return result
 
 
@@ -227,5 +229,6 @@ def video_info(content):
     return dict(id=content.content_id, webpage_url=content.web_url, title=content.title,
                 uploader=content.author.unique_id or content.author.nickname,
                 duration=content.duration_ms / 1000 if content.duration_ms else None,
-                thumbnail=content.media.covers[0].url if content.media.covers else None,
+                thumbnail=(original_scale_cover(content.raw) if str(content.platform) == 'douyin' else None)
+                or (content.media.covers[0].url if content.media.covers else None),
                 extractor='dtk', extractor_key='DTK', formats=formats)
