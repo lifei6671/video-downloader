@@ -11,6 +11,8 @@ pub struct Profile {
     pub user_agent: String,
     pub proxy: Option<String>,
     pub cookie_configured: bool,
+    #[serde(default)]
+    pub http_chunk_size: Option<u64>,
     #[serde(skip_serializing)]
     pub credential_ref: Option<String>,
     #[serde(skip_serializing)]
@@ -33,6 +35,19 @@ pub struct ProfileUpdate {
     // None keeps saved data; empty string explicitly clears it.
     pub cookie: Option<String>,
     pub proxy: Option<String>,
+    // Missing keeps the setting; explicit null inherits; 0 disables chunking.
+    #[serde(default, deserialize_with = "deserialize_chunk_setting")]
+    pub http_chunk_size: Option<Option<u64>>,
+}
+
+fn deserialize_chunk_setting<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<u64>>, D::Error> {
+    Option::<u64>::deserialize(deserializer).map(Some)
+}
+
+fn valid_chunk_size(value: u64) -> bool {
+    value == 0 || (1_048_576..=1_073_741_824).contains(&value) && value.is_multiple_of(1_048_576)
 }
 
 fn entry(reference: &str) -> Result<keyring::Entry> {
@@ -49,6 +64,16 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
            cookie TEXT NOT NULL, credential_ref TEXT);
          CREATE TABLE IF NOT EXISTS tdl_settings (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL, path TEXT);",
     ).context("DATABASE_ERROR")?;
+    let has_chunk_size = db
+        .prepare("PRAGMA table_info(platform_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "http_chunk_size");
+    if !has_chunk_size {
+        db.execute_batch("ALTER TABLE platform_settings ADD COLUMN http_chunk_size INTEGER")
+            .context("DATABASE_ERROR")?;
+    }
     let has_session = db
         .prepare("PRAGMA table_info(tdl_settings)")?
         .query_map([], |r| r.get::<_, String>(1))?
@@ -89,7 +114,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
     let mut profiles = Vec::new();
     for platform in ["douyin", "tiktok", "youtube"] {
         let row = db.query_row(
-            "SELECT user_agent,proxy,cookie,credential_ref FROM platform_settings WHERE platform=?",
+            "SELECT user_agent,proxy,cookie,credential_ref,http_chunk_size FROM platform_settings WHERE platform=?",
             [platform],
             |r| {
                 Ok(Profile {
@@ -99,6 +124,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
                     cookie_configured: !r.get::<_, String>(2)?.is_empty(),
                     cookie: r.get(2)?,
                     credential_ref: r.get(3)?,
+                    http_chunk_size: r.get::<_, Option<u32>>(4)?.map(u64::from),
                 })
             },
         );
@@ -107,10 +133,13 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
             Err(rusqlite::Error::QueryReturnedNoRows) => Profile {
                 platform: platform.into(),
                 user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0".into(),
-                proxy: None, cookie_configured: false, cookie: String::new(), credential_ref: None,
+                proxy: None, cookie_configured: false, cookie: String::new(), credential_ref: None, http_chunk_size: None,
             },
             Err(_) => bail!("DATABASE_ERROR"),
         });
+    }
+    if profiles.iter().any(|p| p.http_chunk_size.is_some_and(|n| p.platform != "youtube" || !valid_chunk_size(n))) {
+        bail!("DATABASE_ERROR");
     }
     let tdl = match db.query_row(
         "SELECT enabled,path,session_directory FROM tdl_settings WHERE id=1",
@@ -146,22 +175,27 @@ pub fn cookie(settings: &Settings, platform: &str) -> Result<String> {
         .clone())
 }
 
+// Explicit settings-editor read; ordinary settings only contain the public address.
+pub fn proxy(settings: &Settings, platform: &str) -> Result<Option<String>> {
+    let profile = settings.profiles.iter().find(|p| p.platform == platform).context("CONFIG_INVALID")?;
+    match &profile.credential_ref {
+        Some(reference) => Ok(Some(
+            String::from_utf8(entry(reference)?.get_secret().context("CREDENTIAL_ERROR")?)
+                .context("CREDENTIAL_ERROR")?,
+        )),
+        None => Ok(profile.proxy.clone()),
+    }
+}
+
 pub fn snapshot(settings: &Settings) -> Result<Value> {
     let mut profiles = serde_json::Map::new();
     for profile in &settings.profiles {
-        let proxy = match &profile.credential_ref {
-            Some(reference) => Some(
-                String::from_utf8(entry(reference)?.get_secret().context("CREDENTIAL_ERROR")?)
-                    .context("CREDENTIAL_ERROR")?,
-            ),
-            None => profile.proxy.clone(),
-        };
-        profiles.insert(
-            profile.platform.clone(),
-            json!({
-                "user_agent": profile.user_agent, "proxy": proxy, "cookie": profile.cookie
-            }),
-        );
+        let proxy = proxy(settings, &profile.platform)?;
+        let mut value = json!({"user_agent": profile.user_agent, "proxy": proxy, "cookie": profile.cookie});
+        if profile.platform == "youtube" {
+            value["http_chunk_size"] = json!(profile.http_chunk_size);
+        }
+        profiles.insert(profile.platform.clone(), value);
     }
     Ok(Value::Object(profiles))
 }
@@ -172,6 +206,15 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
         .iter_mut()
         .find(|p| p.platform == update.platform)
         .context("CONFIG_INVALID")?;
+    let http_chunk_size = match update.http_chunk_size {
+        Some(value) => {
+            if update.platform != "youtube" || value.is_some_and(|n| !valid_chunk_size(n)) {
+                bail!("CONFIG_INVALID");
+            }
+            value
+        }
+        None => profile.http_chunk_size,
+    };
     if update.user_agent.is_empty()
         || update.user_agent.len() > 2048
         || update.user_agent.contains(['\r', '\n'])
@@ -241,15 +284,16 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
     // User decision: Cookies reside in SQLite. Only authenticated proxy URLs
     // use OS credential storage. Failed writes preserve the previous reference.
     let saved = db.execute(
-        "INSERT INTO platform_settings VALUES (?1,?2,?3,?4,?5)
+        "INSERT INTO platform_settings(platform,user_agent,proxy,cookie,credential_ref,http_chunk_size) VALUES (?1,?2,?3,?4,?5,?6)
          ON CONFLICT(platform) DO UPDATE SET user_agent=excluded.user_agent,proxy=excluded.proxy,
-         cookie=excluded.cookie,credential_ref=excluded.credential_ref",
+         cookie=excluded.cookie,credential_ref=excluded.credential_ref,http_chunk_size=excluded.http_chunk_size",
         rusqlite::params![
             update.platform,
             update.user_agent,
             public_proxy,
             cookie,
-            reference
+            reference,
+            http_chunk_size.map(|n| n as i64)
         ],
     );
     if saved.is_err() {
@@ -266,6 +310,7 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
         cookie_configured: !cookie.is_empty(),
         cookie,
         credential_ref: reference.clone(),
+        http_chunk_size,
     };
     if let Some(old) = old_reference.filter(|old| Some(old) != reference.as_ref()) {
         entry(&old)?
@@ -278,6 +323,91 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proxy_editor_reads_persisted_addresses_and_preserves_failure_semantics() {
+        let db = Connection::open_in_memory().unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        assert!(proxy(&settings, "youtube").unwrap().is_none());
+        assert_eq!(proxy(&settings, "invalid").unwrap_err().to_string(), "CONFIG_INVALID");
+        for value in ["http://127.0.0.1:80", "socks5://127.0.0.1:7890"] {
+            save_profile(&db, &mut settings, ProfileUpdate {
+                platform: "youtube".into(), user_agent: "fixture".into(), cookie: None,
+                proxy: Some(value.into()), http_chunk_size: None,
+            }).unwrap();
+            let restored = load(&db, PathBuf::new()).unwrap();
+            assert_eq!(proxy(&restored, "youtube").unwrap(), Some(format!("{value}/")));
+            assert_eq!(snapshot(&restored).unwrap()["youtube"]["proxy"], format!("{value}/"));
+            assert!(proxy(&restored, "tiktok").unwrap().is_none());
+        }
+        // A new, nonexistent reference never queries an existing user's credential.
+        let reference = Uuid::new_v4().to_string();
+        settings.profiles[2].credential_ref = Some(reference.clone());
+        assert_eq!(proxy(&settings, "youtube").unwrap_err().to_string(), "CREDENTIAL_ERROR");
+        assert!(!serde_json::to_string(&settings).unwrap().contains(&reference));
+    }
+
+    #[test]
+    fn youtube_chunk_modes_migrate_persist_and_snapshot_without_changing_credentials() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE platform_settings (platform TEXT PRIMARY KEY, user_agent TEXT NOT NULL,
+            proxy TEXT, cookie TEXT NOT NULL, credential_ref TEXT);
+            INSERT INTO platform_settings VALUES ('youtube','old-agent','http://127.0.0.1:7890/','session=fixture',NULL);")
+            .unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        assert!(snapshot(&settings).unwrap()["youtube"]["http_chunk_size"].is_null());
+        assert!(snapshot(&settings).unwrap()["tiktok"].get("http_chunk_size").is_none());
+        for value in [Some(10_485_760_u64), Some(0), Some(1_073_741_824), None] {
+            let update = serde_json::from_value(json!({"platform":"youtube", "user_agent":"old-agent",
+                "http_chunk_size":value})).unwrap();
+            save_profile(&db, &mut settings, update).unwrap();
+            let restored = load(&db, PathBuf::new()).unwrap();
+            assert_eq!(restored.profiles[2].http_chunk_size, value);
+            let captured = snapshot(&restored).unwrap();
+            assert_eq!(captured["youtube"]["http_chunk_size"], json!(value));
+            assert_eq!(captured["youtube"]["cookie"], "session=fixture");
+            assert_eq!(captured["youtube"]["proxy"], "http://127.0.0.1:7890/");
+            assert!(!serde_json::to_string(&restored).unwrap().contains("session=fixture"));
+            // Old callers that omit the new field must preserve the saved mode.
+            save_profile(&db, &mut settings, serde_json::from_value(json!({"platform":"youtube",
+                "user_agent":"old-agent"})).unwrap()).unwrap();
+            assert_eq!(load(&db, PathBuf::new()).unwrap().profiles[2].http_chunk_size, value);
+        }
+    }
+
+    #[test]
+    fn invalid_chunk_settings_cannot_change_saved_cookie_or_mode() {
+        let db = Connection::open_in_memory().unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        for (platform, value) in [("youtube", Some(1)), ("youtube", Some(1_048_577)),
+            ("youtube", Some(1_074_790_400)), ("youtube", Some(u64::MAX)),
+            ("douyin", None), ("tiktok", Some(0))] {
+            let error = save_profile(&db, &mut settings, ProfileUpdate {
+                platform: platform.into(), user_agent: "test".into(), cookie: Some("secret=changed".into()),
+                proxy: None, http_chunk_size: Some(value),
+            }).unwrap_err();
+            assert_eq!(error.to_string(), "CONFIG_INVALID");
+            assert_eq!(snapshot(&settings).unwrap()[platform]["cookie"], "");
+            assert!(load(&db, PathBuf::new()).unwrap().profiles[2].http_chunk_size.is_none());
+        }
+        for value in [json!(-1), json!(true), json!(1.5), json!("10485760")] {
+            assert!(serde_json::from_value::<ProfileUpdate>(json!({"platform":"youtube",
+                "user_agent":"test", "http_chunk_size":value})).is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_persisted_chunk_size_reports_database_error() {
+        let db = Connection::open_in_memory().unwrap();
+        load(&db, PathBuf::new()).unwrap();
+        for (platform, value) in [("youtube", -1_i64), ("youtube", 1),
+            ("youtube", i64::MAX), ("douyin", 0)] {
+            db.execute("DELETE FROM platform_settings", []).unwrap();
+            db.execute("INSERT INTO platform_settings (platform,user_agent,cookie,http_chunk_size) VALUES (?1,'test','',?2)",
+                rusqlite::params![platform, value]).unwrap();
+            assert_eq!(load(&db, PathBuf::new()).err().unwrap().to_string(), "DATABASE_ERROR");
+        }
+    }
+
     #[test]
     fn cookie_boundary_whitespace_is_trimmed_for_all_platforms() {
         let db = Connection::open_in_memory().unwrap();
@@ -294,6 +424,7 @@ mod tests {
                     &db,
                     &mut settings,
                     ProfileUpdate {
+                        http_chunk_size: None,
                         platform: platform.into(),
                         user_agent: "test-agent".into(),
                         cookie: Some(input.into()),
@@ -325,6 +456,7 @@ mod tests {
                 &db,
                 &mut settings,
                 ProfileUpdate {
+                    http_chunk_size: None,
                     platform: platform.into(),
                     user_agent: "test-agent".into(),
                     cookie: Some("session=fixture".into()),
@@ -337,6 +469,7 @@ mod tests {
                     &db,
                     &mut settings,
                     ProfileUpdate {
+                        http_chunk_size: None,
                         platform: platform.into(),
                         user_agent: "test-agent".into(),
                         cookie: Some(input.into()),
@@ -365,6 +498,7 @@ mod tests {
             &db,
             &mut settings,
             ProfileUpdate {
+                http_chunk_size: None,
                 platform: "douyin".into(),
                 user_agent: "test-agent".into(),
                 cookie: Some(cookie.clone()),
@@ -392,6 +526,7 @@ mod tests {
             &db,
             &mut settings,
             ProfileUpdate {
+                http_chunk_size: None,
                 platform: "douyin".into(),
                 user_agent: "next".into(),
                 cookie: None,
@@ -404,6 +539,7 @@ mod tests {
             &db,
             &mut settings,
             ProfileUpdate {
+                http_chunk_size: None,
                 platform: "douyin".into(),
                 user_agent: "next".into(),
                 cookie: Some(String::new()),
@@ -428,6 +564,7 @@ mod tests {
                 &db,
                 &mut settings,
                 ProfileUpdate {
+                    http_chunk_size: None,
                     platform: "douyin".into(),
                     user_agent: "agent".into(),
                     cookie: Some("session=x".into()),
@@ -447,6 +584,7 @@ mod tests {
             &db,
             &mut settings,
             ProfileUpdate {
+                http_chunk_size: None,
                 platform: "douyin".into(),
                 user_agent: "agent".into(),
                 cookie: None,
@@ -468,6 +606,7 @@ mod tests {
             &db,
             &mut settings,
             ProfileUpdate {
+                http_chunk_size: None,
                 platform: "youtube".into(),
                 user_agent: "fixture".into(),
                 cookie: Some("session=fixture".into()),

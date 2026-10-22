@@ -170,6 +170,10 @@ fn get_profile_cookie(core: State<AppCore>, platform: String) -> Result<String, 
     core.cookie(&platform).map_err(error)
 }
 #[tauri::command]
+fn get_profile_proxy(core: State<AppCore>, platform: String) -> Result<Option<String>, String> {
+    core.proxy(&platform).map_err(error)
+}
+#[tauri::command]
 fn get_task_cover(core: State<AppCore>, task_id: String) -> Result<Vec<u8>, String> {
     core.cover(&task_id).map_err(error)
 }
@@ -538,6 +542,7 @@ fn main() {
             read_clipboard_text,
             copy_cover_image,
             get_profile_cookie,
+            get_profile_proxy,
             get_task_cover,
             save_task_cover,
             get_task_image,

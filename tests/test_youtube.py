@@ -77,6 +77,96 @@ def test_hd_size_unknown_and_missing_audio_not_silent():
         next(select_format({'formats': [items[-1]]}, merge=True))
 
 
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('chunk', ['missing', None, 0, 3 * 1048576])
+def test_top_level_language_reaches_real_ytdlp_selector_and_public_choices(monkeypatch, tmp_path, reverse, chunk):
+    monkeypatch.setattr(engine, 'javascript_runtime', lambda: {'node': {'path': 'fixture-node'}})
+    items = [{**formats()[-1], 'language': None}, {**formats()[1], 'format_id': '140-ja', 'language': 'ja', 'abr': 100},
+             {**formats()[1], 'format_id': '140-en', 'language': 'en', 'abr': 200}]
+    for item in items:
+        item['downloader_options'] = {'http_chunk_size': 10 * 1048576}
+    def extract(self, url, download):
+        info = dict(id='BaW_jenozKc', webpage_url=URL, title='fixture', language='ja',
+            extractor='fixture', extractor_key='Fixture', formats=items[::-1] if reverse else items)
+        result = self.process_ie_result(info, download=False)
+        assert [f['format_id'] for f in result['requested_formats']] == ['137', '140-ja']
+        return result
+    monkeypatch.setattr(YoutubeDL, 'extract_info', extract)
+    events = []
+    engine.operate('resolve_video', {'input': URL}, lambda kind, **data: events.append(data))
+    public = events[-1]['result']
+    assert public['selected_format_id'] in {f['format_id'] for f in public['formats']}
+    from yt_dlp.postprocessor.ffmpeg import FFmpegMergerPP
+    monkeypatch.setattr(engine, 'installed_tool', lambda _: 'fixture-ffmpeg')
+    monkeypatch.setattr(FFmpegMergerPP, 'available', property(lambda _: True))
+    def download(self, info):
+        assert [f['format_id'] for f in info['requested_formats']] == ['137', '140-ja']
+        hook = self.params['progress_hooks'][0]
+        for fmt in info['requested_formats']:
+            assert fmt['downloader_options']['http_chunk_size'] == (10 * 1048576 if chunk in ('missing', None) else chunk)
+            hook(dict(status='finished', info_dict=fmt, downloaded_bytes=fmt['filesize'], total_bytes=fmt['filesize']))
+        (tmp_path / 'video.mp4').write_bytes(b'\x00\x00\x00\x18ftypmp42merged')
+    monkeypatch.setattr(YoutubeDL, 'process_info', download)
+    params = dict(input=URL, format_id=public['selected_format_id'], staging_dir=str(tmp_path),
+        expected={'platform': 'youtube', 'video_id': 'BaW_jenozKc'})
+    if chunk != 'missing':
+        params['profiles'] = {'youtube': {'http_chunk_size': chunk}}
+    engine.operate('download_video', params, lambda kind, **data: events.append(data))
+    assert events[-1]['format_id'] == public['selected_format_id']
+    items[:] = [fmt for fmt in items if fmt.get('language') != 'ja']
+    empty = tmp_path / 'missing-audio'
+    empty.mkdir()
+    with pytest.raises(engine.EngineError, match='FORMAT_UNAVAILABLE'):
+        engine.operate('download_video', {**params, 'staging_dir': str(empty)}, lambda *_a, **_k: None)
+    assert list(empty.iterdir()) == []
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('metadata', ['preference', 'language', 'default', 'missing'])
+def test_multilingual_audio_selection_is_deterministic(reverse, metadata):
+    video = formats()[-1]
+    audio = formats()[1]
+    japanese = {**audio, 'format_id': '140-ja', 'language': 'ja', 'abr': 100}
+    english = {**audio, 'format_id': '140-en', 'language': 'en', 'abr': 200}
+    context = {}
+    if metadata == 'preference':
+        japanese['language_preference'], english['language_preference'] = 10, 5
+    elif metadata == 'language':
+        context['language'] = 'ja'
+    elif metadata == 'default':
+        japanese['format_note'] = 'Japanese (default)'
+    items = [video, japanese, english]
+    context['formats'] = items[::-1] if reverse else items
+    selected = next(select_format(context, merge=True))
+    assert [f['format_id'] for f in selected['requested_formats']] == ['137', '140-en' if metadata == 'missing' else '140-ja']
+    key = selected['_yingqu_format_id']
+    # Same itag and codec with changed language is a different actual download.
+    changed = {**selected['requested_formats'][1], 'language': 'fr'}
+    with pytest.raises(engine.EngineError, match='FORMAT_UNAVAILABLE'):
+        next(select_format({'formats': [video, changed]}, key, merge=True))
+    with pytest.raises(engine.EngineError, match='FORMAT_UNAVAILABLE'):
+        next(select_format({'formats': [video]}, key, merge=True))
+
+
+@pytest.mark.parametrize('extra', [{'ext': 'webm', 'acodec': 'opus'}, {'acodec': 'opus'},
+    {'protocol': 'm3u8_native'}, {'has_drm': True}, {'format_note': 'watermarked'}])
+def test_incompatible_audio_is_never_reported_as_complete(extra):
+    with pytest.raises(engine.EngineError, match='UNSUPPORTED_CONTENT'):
+        next(select_format({'formats': [formats()[-1], {**formats()[1], **extra}]}, merge=True))
+
+
+def test_merged_identity_ignores_signatures_and_mirror_suffixes_and_preserves_mixed_size():
+    items = formats()[1:]
+    items[0]['filesize_approx'], items[0]['filesize'] = 30, None
+    first = public_formats({'formats': items}, True)[0]
+    assert first['filesize'] is None and first['filesize_approx'] == 130
+    for item in items:
+        item['url'] += '?signature=changed'
+        item['format_id'] += '-2'
+    second = public_formats({'formats': items}, True)[0]
+    assert first['format_id'] == second['format_id']
+
+
 def test_youtube_transport_remains_bounded():
     for domain in ('www.youtube.com', 'rr1.googlevideo.com', 'i.ytimg.com', 'youtubei.googleapis.com'):
         validate_target('https://' + domain + '/media', 'youtube')

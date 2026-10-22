@@ -41,7 +41,8 @@ async page => {
     await proxy().fill('  socks5://127.0.0.1:7890  ');
     check(await proxy().getAttribute('type')==='text','proxy address is masked');
     await save().click();await saved();
-    check((await snapshot()).settings.profiles.find(p=>p.platform==='youtube').proxy==='socks5://127.0.0.1:7890','proxy not trimmed/persisted');
+    check((await snapshot()).settings.profiles.find(p=>p.platform==='youtube').proxy==='socks5://127.0.0.1:7890/','proxy not trimmed/persisted');
+    check(await proxy().inputValue()==='socks5://127.0.0.1:7890','saved proxy address disappeared from editor');
     check(await browser().isChecked(),'proxy save changed browser mode');
     check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'horizontal overflow');
     await page.screenshot({path:'.local/platform-settings-'+width+'.png',animations:'disabled'});

@@ -1,0 +1,28 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+// Isolated UI fixture: synthetic data only; no native credentials or platform network.
+import {api} from '/src/api';
+const settings={download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'fixture-agent',proxy:platform==='youtube'?'http://127.0.0.1:7890/':null,cookie_configured:true,http_chunk_size:null})),tdl:{enabled:false,path:null}};
+api.settings=async()=>structuredClone(settings);
+let tasks=[];
+let listener=()=>{};
+const state={resolveSuccess:false,queue:()=>{tasks[0]={...tasks[0],status:'queued',revision:2,download_requested:true,queue_order:1};listener(structuredClone(tasks[0]))}};
+window.helperTextTest=state;
+api.tasks=async()=>structuredClone(tasks);
+api.subscribe=async callback=>{listener=callback;return()=>{if(listener===callback)listener=()=>{}}};
+api.cookie=async()=>'session=fixture';
+api.proxy=async platform=>settings.profiles.find(p=>p.platform===platform).proxy;
+api.tdlLoginStatus=async()=>null;
+api.cover=async()=>Array.from(new Uint8Array(await (await fetch('/src-tauri/icons/64x64.png')).arrayBuffer()));
+api.checkTdl=async()=>({path:'C:\\Fixture\\tdl.exe',version:'9.1.0'});
+api.checkRuntimeDependencies=async()=>({directory:'C:\\FixtureRuntime',platform:'win32-x64',tools:[{id:'ffmpeg',available:false,provider:'ffmpeg',version:null,path:null,source:null,can_install:true},{id:'javascript',available:true,provider:'node',version:'22.14.0',path:'C:\\Fixture\\node.exe',source:'system',can_install:true}]});
+api.resolve=async()=>{
+  if(!state.resolveSuccess)throw 'NETWORK_ERROR';
+  const task={id:'helper-preview',revision:1,status:'ready',video:{platform:'youtube',video_id:'BaW_jenozKc',canonical_url:'https://www.youtube.com/watch?v=BaW_jenozKc',title:'作品标题 fixture',author:'fixture-author',music:{title:'fixture-music'},kind:'video',resolver:'yt-dlp'},bytes:0,total_bytes:null,speed_bps:null,error:null,path:null,created_at:1,completed_at:null,canceling:false,file_missing:false,queue_order:null,download_requested:false,cover_path:null,cover_error:null,files:[],completed_items:null,total_items:null,cache_hit:false,cached_at:null,cover_cached:true};
+  tasks=[task];return structuredClone(task);
+};
+api.updateDownload=async()=>null;
+api.subscribeUpdateDownload=async()=>()=>{};
+api.checkForUpdates=async()=>({has_update:true,current_version:'1.7.1',latest_version:'9.9.9',release_tag:'v9.9.9',published_at:null,release_notes:'这是更新说明正文，保留正文的字号和颜色。',installer:null});
+await import('/src/main');
+</script></body></html>

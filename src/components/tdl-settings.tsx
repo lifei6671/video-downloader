@@ -139,10 +139,10 @@ export function TdlAccountCard({ settings, saved, busy, setBusy }: TdlCardProps)
   }
   const qr = loginStatus?.qr;
   const disabled = busy || loggingIn;
-  return <Card size="sm"><CardHeader><CardTitle className="flex items-center gap-2">Telegram<Badge variant="warning">实验模式</Badge></CardTitle><CardDescription>使用本机官方 tdl 扫码登录并完成两步验证。tdl 路径在“运行依赖”中配置。</CardDescription></CardHeader>
+  return <Card size="sm"><CardHeader><CardTitle className="flex items-center gap-2 font-semibold">Telegram<Badge variant="warning">实验模式</Badge></CardTitle><CardDescription>使用本机官方 tdl 扫码登录并完成两步验证。tdl 路径在“运行依赖”中配置。</CardDescription></CardHeader>
     <CardContent className="flex flex-col gap-4">
       <Alert role="note"><AlertCircle /><AlertDescription>tdl v0.20.4 的 HTTP 服务会监听所有网络接口，没有访问令牌，且可请求当前账号有权访问的其他消息。映取只请求本次的 127.0.0.1 端口和消息路径，但这不构成网络隔离。请仅在可信网络中启用，并使用系统防火墙限制访问；服务运行期间勿同时运行其他使用此 tdl 会话的命令。</AlertDescription></Alert>
-      <p className="text-sm text-muted-foreground">{settings.tdl.session_directory ? '已配置映取独立会话；实际权限以解析和下载结果为准。' : '当前使用 tdl 默认会话；点击登录将创建映取独立会话，不覆盖现有登录。'}</p>
+      <p className="text-xs text-muted-foreground">{settings.tdl.session_directory ? '已配置映取独立会话；实际权限以解析和下载结果为准。' : '当前使用 tdl 默认会话；点击登录将创建映取独立会话，不覆盖现有登录。'}</p>
       <Field orientation="horizontal"><Checkbox id="tdl-enabled" checked={enabled} disabled={disabled} onCheckedChange={value => { if (value === true) setConfirm(true); else setEnabled(false); }} /><FieldLabel htmlFor="tdl-enabled">启用 Telegram HTTP 实验模式</FieldLabel></Field>
       {loggingIn && <p role="status" className="text-sm text-muted-foreground">正在登录，请在登录弹窗内扫码或完成两步验证。最长等待 5 分钟。</p>}
       {error && <Alert role="alert" variant="destructive"><AlertCircle /><AlertDescription>{error}</AlertDescription></Alert>}

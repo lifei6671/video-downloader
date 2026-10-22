@@ -38,6 +38,8 @@ pub struct Task {
     pub video: Option<Value>,
     pub bytes: u64,
     pub total_bytes: Option<u64>,
+    #[serde(default)]
+    pub total_bytes_estimate: Option<u64>,
     pub speed_bps: Option<f64>,
     #[serde(default)]
     pub eta_seconds: Option<f64>,
@@ -75,14 +77,41 @@ pub struct Task {
     pub telegram_link: Option<String>,
 }
 
+fn file_missing(task: &Task) -> bool {
+    task.path.as_ref().is_none_or(|path| {
+        if task.files.is_empty() {
+            !path.is_file()
+        } else {
+            !std::fs::symlink_metadata(path)
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+                || task.files.iter().any(|file| {
+                    !std::fs::symlink_metadata(path.join(&file.filename)).is_ok_and(|m| {
+                        m.is_file() && !m.file_type().is_symlink() && m.len() == file.bytes
+                    })
+                })
+        }
+    })
+}
+
+fn same_download_variant(old: &Value, video: &Value) -> bool {
+    let old_kind = old["kind"].as_str().unwrap_or("video");
+    let kind = video["kind"].as_str().unwrap_or("video");
+    old["platform"] == video["platform"] && old["video_id"] == video["video_id"]
+        && old_kind == kind
+        && (kind == "image_album" || video["platform"] == "telegram"
+            // Legacy records without a format represent an unspecified variant.
+            || old["selected_format_id"].as_str().is_none()
+            || video["selected_format_id"].as_str().is_none()
+            || old["selected_format_id"] == video["selected_format_id"])
+}
+
 fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
     task.video.as_ref().is_some_and(|video| {
         tasks.iter().any(|old| {
             old.id != task.id
                 && old.status == Status::Completed
-                && old.video.as_ref().is_some_and(|v| {
-                    v["platform"] == video["platform"] && v["video_id"] == video["video_id"]
-                })
+                && !file_missing(old)
+                && old.video.as_ref().is_some_and(|v| same_download_variant(v, video))
         })
     })
 }
@@ -455,24 +484,7 @@ impl Core {
             .iter()
             .cloned()
             .map(|mut t| {
-                t.file_missing = t.status == Status::Completed
-                    && t.path.as_ref().is_none_or(|p| {
-                        if t.files.is_empty() {
-                            !p.is_file()
-                        } else {
-                            !std::fs::symlink_metadata(p)
-                                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
-                                || t.files.iter().any(|file| {
-                                    !std::fs::symlink_metadata(p.join(&file.filename)).is_ok_and(
-                                        |m| {
-                                            m.is_file()
-                                                && !m.file_type().is_symlink()
-                                                && m.len() == file.bytes
-                                        },
-                                    )
-                                })
-                        }
-                    });
+                t.file_missing = t.status == Status::Completed && file_missing(&t);
                 t
             })
             .collect()
@@ -586,6 +598,9 @@ impl Core {
     }
     pub fn cookie(&self, platform: &str) -> Result<String> {
         settings::cookie(&self.inner.lock().unwrap().settings, platform)
+    }
+    pub fn proxy(&self, platform: &str) -> Result<Option<String>> {
+        settings::proxy(&self.inner.lock().unwrap().settings, platform)
     }
 
     pub fn cancel_dependency(&self) -> Result<()> {
@@ -1067,6 +1082,7 @@ impl Core {
             video: previous.as_ref().and_then(|t| t.video.clone()),
             bytes: 0,
             total_bytes: None,
+            total_bytes_estimate: None,
             speed_bps: None,
             eta_seconds: None,
             merging: false,
@@ -1569,6 +1585,7 @@ impl Core {
         let (cancel, mut cancellation) = watch::channel(false);
         let (done, done_rx) = watch::channel(false);
         task.status = Status::Downloading;
+        task.total_bytes_estimate = None;
         task.revision += 1;
         publish(inner, task, &*self.emit)?;
         inner.downloads.insert(id.to_owned());
@@ -1595,6 +1612,7 @@ impl Core {
                         if task.canceling { return; }
                         task.bytes = event["bytes"].as_u64().unwrap_or(0);
                         task.total_bytes = event["total_bytes"].as_u64();
+                        task.total_bytes_estimate = event["total_bytes_estimate"].as_u64();
                         task.speed_bps = event["speed_bps"].as_f64();
                         task.eta_seconds = event["eta_seconds"].as_f64();
                         task.merging |= event["phase"] == "merging";
@@ -1700,6 +1718,7 @@ impl Core {
                     task.path = Some(file.path);
                     task.bytes = file.bytes;
                     task.total_bytes = Some(file.bytes);
+                    task.total_bytes_estimate = None;
                     task.completed_at = Some(now());
                     task.status = Status::Completed;
                     task.speed_bps = None;
@@ -2646,6 +2665,7 @@ mod tests {
             video: None,
             bytes: 0,
             total_bytes: None,
+            total_bytes_estimate: None,
             speed_bps: None,
             eta_seconds: None,
             merging: false,
@@ -2868,16 +2888,25 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         app.set_max_downloads(1).unwrap();
+        app.save_profile(settings::ProfileUpdate {
+            platform: "youtube".into(), user_agent: "youtube-fixture".into(),
+            cookie: None, proxy: None, http_chunk_size: Some(Some(10_485_760)),
+        }).unwrap();
         let a = enqueue(&app, "8201").await;
         let old = app.settings().profiles[0].user_agent.clone();
         let b = enqueue(&app, "8202").await;
         app.save_profile(settings::ProfileUpdate {
+            http_chunk_size: None,
             platform: "douyin".into(),
             user_agent: "new-agent".into(),
             cookie: None,
             proxy: None,
         })
         .unwrap();
+        app.save_profile(settings::ProfileUpdate {
+            platform: "youtube".into(), user_agent: "youtube-fixture".into(),
+            cookie: None, proxy: None, http_chunk_size: Some(Some(0)),
+        }).unwrap();
         app.cancel(&a.id).await.unwrap();
         started(root.path(), "8202").await;
         let captured: Value = serde_json::from_str(
@@ -2885,6 +2914,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(captured["douyin"]["user_agent"], old);
+        assert_eq!(captured["youtube"]["http_chunk_size"], 10_485_760);
+        assert_eq!(app.settings().profiles[2].http_chunk_size, Some(0));
         let c = enqueue(&app, "8203").await;
         let parsing = app.resolve("block".into()).unwrap();
         app.shutdown().await;
@@ -2930,6 +2961,7 @@ mod tests {
         let canceled = app.list().into_iter().find(|t| t.id == old.id).unwrap();
         std::fs::remove_file(root.path().join("started-8301")).unwrap();
         app.save_profile(settings::ProfileUpdate {
+            http_chunk_size: None,
             platform: "douyin".into(),
             user_agent: "retry-agent".into(),
             cookie: None,
@@ -3469,6 +3501,72 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn duplicate_variants_files_legacy_and_concurrent_submissions() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let first = app.resolve("valid".into()).unwrap();
+        wait(&app, &first.id, Status::Ready).await;
+        app.download(&first.id, false).unwrap();
+        let original = wait(&app, &first.id, Status::Completed).await;
+        let second = app.resolve("valid".into()).unwrap();
+        let ready = wait(&app, &second.id, Status::Ready).await;
+        assert!(previously_downloaded(&app.list(), &ready));
+        let different = app.choose_format(&second.id, &"2".repeat(24)).unwrap();
+        assert!(!previously_downloaded(&app.list(), &different));
+        let mut legacy = original.clone();
+        legacy.video.as_mut().unwrap()["selected_format_id"] = Value::Null;
+        assert!(previously_downloaded(&[legacy], &different));
+        for status in [Status::Failed, Status::Canceled, Status::Queued, Status::Downloading] {
+            let mut old = original.clone();
+            old.status = status;
+            assert!(!previously_downloaded(&[old], &ready));
+        }
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        let restored = app.list().into_iter().find(|t| t.id == second.id).unwrap();
+        assert!(!previously_downloaded(&app.list(), &restored));
+        let one = app.clone();
+        let two = app.clone();
+        let id_one = second.id.clone();
+        let id_two = second.id.clone();
+        let (one, two) = tokio::join!(
+            tokio::spawn(async move { one.download(&id_one, false) }),
+            tokio::spawn(async move { two.download(&id_two, false) })
+        );
+        assert_eq!(usize::from(one.unwrap().is_ok()) + usize::from(two.unwrap().is_ok()), 1);
+        wait(&app, &second.id, Status::Completed).await;
+        let third = app.resolve("valid".into()).unwrap();
+        wait(&app, &third.id, Status::Ready).await;
+        assert_eq!(app.download(&third.id, false).unwrap_err().to_string(), "ALREADY_DOWNLOADED");
+        std::fs::remove_file(original.path.unwrap()).unwrap();
+        // The other completed format must not block this exact, now-missing variant.
+        app.download(&third.id, false).unwrap();
+        wait(&app, &third.id, Status::Completed).await;
+        app.shutdown().await;
+    }
+
+    #[test]
+    fn album_telegram_and_legacy_variants_have_explicit_identity_rules() {
+        let video = json!({"platform":"douyin","video_id":"123","kind":"video","selected_format_id":"a"});
+        let mut other = video.clone();
+        other["selected_format_id"] = "b".into();
+        assert!(!same_download_variant(&video, &other));
+        other["kind"] = "image_album".into();
+        assert!(!same_download_variant(&video, &other));
+        let mut album = other.clone();
+        album["selected_format_id"] = Value::Null;
+        assert!(same_download_variant(&album, &other));
+        other["platform"] = "telegram".into();
+        other["kind"] = "video".into();
+        let mut original = other.clone();
+        original["selected_format_id"] = Value::Null;
+        assert!(same_download_variant(&original, &other));
+        original["video_id"] = "124".into();
+        assert!(!same_download_variant(&original, &other));
+    }
+
     #[tokio::test]
     async fn duplicate_requires_confirmation_and_retry_cannot_bypass_it() {
         let root = tempfile::tempdir().unwrap();

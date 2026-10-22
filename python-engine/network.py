@@ -2,6 +2,7 @@
 import functools
 import base64
 import http.client
+import re
 import socket
 import urllib.request
 from urllib.parse import unquote, urlsplit
@@ -10,6 +11,8 @@ from yt_dlp.networking._urllib import (
     HTTPHandler, ProxyHandler, RedirectHandler, UrllibRH, _create_http_connection,
 )
 from yt_dlp.utils.networking import select_proxy
+from yt_dlp.networking.common import Response
+from yt_dlp.networking.exceptions import TransportError, IncompleteRead
 
 # Platform web/API and video CDN suffixes used by the two pinned extractors.
 # This is application policy, not a generated dtk asset or a general-site downloader.
@@ -28,6 +31,33 @@ class TargetError(ValueError):
     def __init__(self, message='NETWORK_TARGET_REJECTED', *, code='INVALID_INPUT'):
         super().__init__(message)
         self.code = code
+
+
+class MediaRangeError(ValueError):
+    pass
+
+
+class LengthCheckedResponse(Response):
+    """Detect early EOF before HttpFD can treat a truncated chunk as NextFragment."""
+    def __init__(self, response):
+        super().__init__(response, response.url, response.headers, response.status,
+                         response.reason, response.extensions)
+        length = response.headers.get('Content-Length', '').strip()
+        self.expected = int(length) if length.isdecimal() and not response.headers.get('Content-Encoding') else None
+        if self.expected is None and response.status == 206 and not response.headers.get('Content-Encoding'):
+            received = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', response.headers.get('Content-Range', ''))
+            if received:
+                self.expected = int(received[2]) - int(received[1]) + 1
+        self.received = 0
+
+    def read(self, amt=None):
+        data = super().read(amt)
+        self.received += len(data)
+        if (amt != 0 and (not data or self.fp.closed) and self.expected is not None
+                and self.received < self.expected):
+            self.close()
+            raise IncompleteRead(self.received, self.expected - self.received)
+        return data
 
 
 def validate_target(url, platform):
@@ -87,6 +117,25 @@ class TargetGuard(urllib.request.BaseHandler):
 
     https_request = http_request
 
+    def http_response(self, request, response):
+        if response.status == 206:
+            requested = re.fullmatch(r'bytes=(\d+)-(\d*)', request.get_header('Range') or '')
+            received = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', response.headers.get('Content-Range', ''))
+            valid = False
+            if requested and received:
+                start, end, total = map(int, received.groups())
+                valid = (start == int(requested[1]) and start <= end < total
+                         and (not requested[2] or end == min(int(requested[2]), total - 1)))
+                length = response.headers.get('Content-Length')
+                if valid and length is not None:
+                    valid = bool(re.fullmatch(r'[0-9]+', length.strip())) and int(length) == end - start + 1
+            if not valid:
+                response.close()
+                raise TransportError(cause=MediaRangeError('INCOMPLETE_MEDIA'))
+        return response
+
+    https_response = http_response
+
 
 class GuardedHTTPHandler(HTTPHandler):
     def __init__(self, *, direct, **kwargs):
@@ -131,6 +180,10 @@ class GuardedRH(UrllibRH):
     def __init__(self, *, platform, **kwargs):
         super().__init__(**kwargs)
         self.platform = platform
+
+    def _send(self, request):
+        response = super()._send(request)
+        return LengthCheckedResponse(response) if request.method == 'GET' else response
 
     def _create_instance(self, proxies, cookiejar, legacy_ssl_support=None):
         # Keep yt-dlp's HTTP decoding, SOCKS, cookie and redirect implementation.

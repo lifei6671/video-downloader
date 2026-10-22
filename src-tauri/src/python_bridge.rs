@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.7.3";
+pub const ENGINE_VERSION: &str = "0.7.5";
 pub const YTDLP_VERSION: &str = "2026.08.19";
 
 async fn cancellation() -> Result<()> {
@@ -250,10 +250,18 @@ impl PythonBridge {
                     )
                 };
                 let speed = &value["speed_bps"];
+                let estimate = &value["total_bytes_estimate"];
+                let eta = &value["eta_seconds"];
                 if count < downloaded
+                    || count > 9_007_199_254_740_991
+                    || total.is_some_and(|n| n == 0 || n > 9_007_199_254_740_991)
                     || total.is_some_and(|n| n < count)
+                    || (!estimate.is_null() && (total.is_some()
+                        || !estimate.as_u64().is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)))
                     || (!speed.is_null()
-                        && !speed.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0))
+                        && !speed.as_f64().is_some_and(|n| n.is_finite() && (0.0..=1e12).contains(&n)))
+                    || (!eta.is_null()
+                        && !eta.as_f64().is_some_and(|n| n.is_finite() && (0.0..=604800.0).contains(&n)))
                 {
                     bail!("ENGINE_PROTOCOL_ERROR");
                 }
@@ -270,6 +278,7 @@ impl PythonBridge {
                 }
                 progress(json!({"id":id,"event":"progress","bytes":count,
                                "total_bytes":total,"speed_bps":speed,
+                               "total_bytes_estimate":estimate,"eta_seconds":eta,
                                "phase":value["phase"],
                                "completed_items":completed_items,"total_items":total_items}));
                 continue;

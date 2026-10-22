@@ -9,6 +9,7 @@ api.settings=async()=>structuredClone(settings);
 api.tasks=async()=>[];
 api.subscribe=async()=>()=>{};
 api.cookie=async()=>'';
+api.proxy=async()=>null;
 api.tdlLoginStatus=async()=>null;
 api.checkRuntimeDependencies=async()=>({directory:'C:\\TestRuntime',platform:'win32-x64',tools:[{id:'ffmpeg',available:true,provider:'ffmpeg',version:'6.1.1',path:'C:\\ffmpeg.exe',source:'system',can_install:true},{id:'javascript',available:true,provider:'node',version:'22.14.0',path:'C:\\node.exe',source:'system',can_install:true}]});
 api.selectTdlExecutable=async()=>{state.calls.push({type:'choose'});if(state.holdPicker)await new Promise(resolve=>state.release=resolve);if(state.failPicker)throw 'IO_ERROR';return state.selected};

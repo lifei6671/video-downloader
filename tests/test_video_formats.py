@@ -53,3 +53,31 @@ def test_watermarked_drm_and_unplayable_choices_are_not_offered():
 def test_unknown_size_remains_unknown_without_fabricated_estimates():
     value = public_formats({'formats': [fmt('720p-0', 720, 1280, None)]})[0]
     assert value['filesize'] is None and value['filesize_approx'] is None
+
+
+@pytest.mark.parametrize('fps,expected', [(23.976, 24), (29.969, 30), (29.97, 30), (59.94, 60), (27, 27)])
+def test_fps_display_normalization_keeps_persisted_identity(fps, expected):
+    value = fmt('same-0', 1920, 1080, None, fps=fps)
+    assert public_formats({'formats': [value]})[0]['fps'] == expected
+    # Display normalization must not silently rewrite the existing single-stream key.
+    import hashlib
+    identity = ['same', 'mp4', 1920, 1080, 'h265', 'aac', None, fps]
+    assert format_key(value) == hashlib.sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest()[:24]
+    assert format_key({**value, 'language': 'en'}) == format_key(value)
+
+
+def test_real_codec_bitrate_and_resolution_variants_are_retained():
+    base = fmt('base', 1920, 1080, 1000, fps=29.97)
+    variants = [{**base, 'vcodec': codec, 'tbr': rate}
+                for codec in ('avc1.640028', 'hvc1.1.6.L120', 'av01.0.08M.08') for rate in (1000, 2000)]
+    variants.append(fmt('4k', 3840, 2160, 4000))
+    public = public_formats({'formats': variants})
+    assert len(public) == 7 and public[0]['width'] == 3840
+    assert {f['codec'] for f in public} == {'h264', 'h265', 'av1'}
+
+
+@pytest.mark.parametrize('size,estimate,expected', [(100, 110, (100, None)), (None, 110, (None, 110)),
+    (None, None, (None, None)), (float('inf'), -1, (None, None)), (100.5, 120, (None, 120))])
+def test_sizes_remain_exact_estimated_or_unknown(size, estimate, expected):
+    public = public_formats({'formats': [fmt('size', 1280, 720, size, filesize_approx=estimate)]})[0]
+    assert (public['filesize'], public['filesize_approx']) == expected

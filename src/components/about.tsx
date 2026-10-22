@@ -14,7 +14,7 @@ import { api, errorText, type ProjectPage, type UpdateCheck, type UpdateDownload
 import { ReleaseNotes } from '@/components/release-notes';
 
 const brandIcon = new URL('../../src-tauri/icons/128x128.png', import.meta.url).href;
-const engineInfo = '引擎 0.7.0 · yt-dlp 2026.08.19 · DTK 5.1.3';
+const engineInfo = '引擎 0.7.5 · yt-dlp 2026.08.19 · DTK 5.1.3';
 export const aboutVersionInfo = `映取 v${__APP_VERSION__}\n${engineInfo}\nWindows / macOS`;
 const features = [
   { Icon: Link, title: '从分享链接开始', description: '粘贴抖音、TikTok 或 YouTube 链接，先看预览，再选择视频规格。' },

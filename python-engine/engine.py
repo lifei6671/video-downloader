@@ -1,7 +1,10 @@
 """Single-video yt-dlp adapter. No business state, credentials on disk, or raw logs."""
 import functools
+import http.client
 import math
+import os
 import re
+import socket
 import sys
 from http.cookiejar import Cookie
 from pathlib import Path
@@ -9,11 +12,11 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from yt_dlp import YoutubeDL
 from yt_dlp.globals import plugin_dirs
-from yt_dlp.utils import DownloadError
-from yt_dlp.networking.exceptions import RequestError, HTTPError
+from yt_dlp.utils import DownloadError, ContentTooShortError, PostProcessingError
+from yt_dlp.networking.exceptions import RequestError, HTTPError, IncompleteRead
 from yt_dlp.version import __version__
 
-from network import GuardedRH, TargetError
+from network import GuardedRH, TargetError, MediaRangeError
 from douyin import DouyinIE
 from browser_cookies import load_default_cookies
 from local_tools import installed_tool, javascript_runtime
@@ -25,7 +28,7 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.7.3'
+ENGINE_VERSION = '0.7.5'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.08.19'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -41,6 +44,57 @@ class EngineError(Exception):
         self.code, self.stage = code, stage
 
 
+def error_code(error=None, message=''):
+    pending, chain, seen = [error], [], set()
+    while pending:
+        item = pending.pop()
+        if not isinstance(item, BaseException) or id(item) in seen:
+            continue
+        seen.add(id(item))
+        chain.append(item)
+        pending.extend([getattr(item, 'cause', None), item.__cause__, item.__context__])
+        exc_info = getattr(item, 'exc_info', None)
+        if isinstance(exc_info, tuple) and len(exc_info) == 3:
+            pending.append(exc_info[1])
+    for item in chain:
+        if isinstance(item, (EngineError, TargetError)):
+            return item.code
+        if isinstance(item, MediaRangeError):
+            return 'INCOMPLETE_MEDIA'
+    for item in chain:
+        if isinstance(item, HTTPError):
+            return {401: 'ACCESS_DENIED', 403: 'ACCESS_DENIED', 404: 'NOT_FOUND',
+                    429: 'RISK_CONTROL'}.get(item.status, 'NETWORK_ERROR')
+        if isinstance(item, (IncompleteRead, http.client.IncompleteRead, ContentTooShortError)):
+            return 'INCOMPLETE_MEDIA'
+        if isinstance(item, (TimeoutError, socket.timeout)):
+            return 'TIMEOUT'
+        if isinstance(item, PostProcessingError):
+            return 'MEDIA_MERGE_FAILED'
+    if any(isinstance(item, RequestError) for item in chain):
+        return 'NETWORK_ERROR'
+    # yt-dlp sometimes discards the exception after exhausting its native retries.
+    # Require an HTTP label and bounded three-digit code, never arbitrary digits.
+    lower = (message or str(error or '')).lower()
+    status = re.search(r'\bhttp(?:\s+error|\s+status(?:\s+code)?)?[:\s]+(401|403|404|429|500|502|503|504)\b', lower)
+    if status:
+        return {401: 'ACCESS_DENIED', 403: 'ACCESS_DENIED', 404: 'NOT_FOUND',
+                429: 'RISK_CONTROL'}.get(int(status[1]), 'NETWORK_ERROR')
+    if re.search(r'\b\d+ bytes read, \d+ more expected\b', lower):
+        return 'INCOMPLETE_MEDIA'
+    for words, code in ((('risk_control',), 'RISK_CONTROL'),
+                        (('network_target_rejected',), 'INVALID_INPUT'),
+                        (('requested format is not available',), 'FORMAT_UNAVAILABLE'),
+                        (('fresh cookies', 'sign in', 'login required', 'uifid cookie is required'), 'ACCESS_DENIED'),
+                        (('not found',), 'NOT_FOUND'), (('timed out', 'timeout'), 'TIMEOUT'),
+                        (('incomplete', 'content too short'), 'INCOMPLETE_MEDIA'),
+                        (('unable to download', 'connection', 'name resolution'), 'NETWORK_ERROR'),
+                        (('no video formats',), 'UNSUPPORTED_CONTENT')):
+        if any(word in lower for word in words):
+            return code
+    return 'UPSTREAM_CHANGED'
+
+
 class SafeLogger:
     def __init__(self):
         self.code = 'UPSTREAM_CHANGED'
@@ -53,22 +107,85 @@ class SafeLogger:
 
     def error(self, message, **kwargs):
         # Only stable, bounded codes leave this process. No upstream free text.
-        lower = message.lower()
-        if 'risk_control' in lower:
-            self.code = 'RISK_CONTROL'
-        elif 'network_target_rejected' in lower:
-            self.code = 'INVALID_INPUT'
-        elif ('403' in lower or '401' in lower or 'fresh cookies' in lower
-              or 'login' in lower or 'sign in' in lower or 'uifid cookie is required' in lower):
-            self.code = 'ACCESS_DENIED'
-        elif '404' in lower or 'not found' in lower:
-            self.code = 'NOT_FOUND'
-        elif 'timed out' in lower:
-            self.code = 'TIMEOUT'
-        elif 'unable to download' in lower or 'connection' in lower or 'incomplete' in lower:
-            self.code = 'NETWORK_ERROR'
-        elif 'requested format is not available' in lower or 'no video formats' in lower:
-            self.code = 'UNSUPPORTED_CONTENT'
+        self.code = error_code(sys.exception(), message)
+
+
+def progress_number(value, maximum, *, integer=False, positive=False):
+    if (type(value) not in (int, float) or not math.isfinite(value)
+            or value < (1 if positive else 0) or value > maximum or (integer and value != int(value))):
+        return None
+    return int(value) if integer else value
+
+
+class DownloadProgress:
+    """Per-operation stream counters. Finished hooks describe streams, never the task."""
+    def __init__(self, emit):
+        self.emit, self.streams, self.merging = emit, {}, False
+
+    def prepare(self, info):
+        for fmt in info.get('requested_formats') or [info]:
+            self.streams[str(fmt.get('format_id') or '')] = dict(count=0,
+                total=progress_number(fmt.get('filesize'), 2**53 - 1, integer=True, positive=True),
+                estimate=progress_number(fmt.get('filesize_approx'), 2**53 - 1, integer=True, positive=True))
+
+    @property
+    def transferred(self):
+        return sum(s['count'] for s in self.streams.values())
+
+    def __call__(self, data):
+        if data.get('status') not in ('downloading', 'finished'):
+            return
+        key = str((data.get('info_dict') or {}).get('format_id') or '')
+        if key not in self.streams:
+            if len(self.streams) != 1:
+                raise EngineError('ENGINE_PROTOCOL_ERROR', 'progress_stream')
+            key = next(iter(self.streams))
+        stream = self.streams[key]
+        count = progress_number(data.get('downloaded_bytes'), 2**53 - 1, integer=True)
+        if count is None:
+            raise EngineError('ENGINE_PROTOCOL_ERROR', 'progress_bytes')
+        stream['count'] = max(count, stream['count'])
+        total = progress_number(data.get('total_bytes'), 2**53 - 1, integer=True, positive=True)
+        estimate = progress_number(data.get('total_bytes_estimate'), 2**53 - 1, integer=True, positive=True)
+        stream['total'] = total or stream['total']
+        stream['estimate'] = estimate or stream['estimate']
+        if stream['total'] is not None and stream['count'] > stream['total']:
+            raise EngineError('INCOMPLETE_MEDIA', 'progress_bytes')
+        totals = [s['total'] for s in self.streams.values()]
+        estimates = [s['total'] or s['estimate'] for s in self.streams.values()]
+        total = sum(totals) if all(totals) else None
+        estimate = sum(estimates) if total is None and all(estimates) else None
+        speed = progress_number(data.get('speed'), 10**12)
+        eta = progress_number(data.get('eta'), 7 * 86400)
+        if len(self.streams) > 1:
+            eta = (max(0, (total or estimate) - self.transferred) / speed
+                   if (total or estimate) and speed else None)
+            eta = progress_number(eta, 7 * 86400)
+        self.emit('progress', downloaded_bytes=self.transferred, total_bytes=total,
+                  total_bytes_estimate=estimate, speed_bps=speed, eta_seconds=eta)
+
+    def postprocess(self, data):
+        if data.get('postprocessor') == 'Merger' and data.get('status') == 'started' and not self.merging:
+            self.merging = True
+            self.emit('progress', downloaded_bytes=self.transferred, total_bytes=None,
+                      total_bytes_estimate=None, speed_bps=None, eta_seconds=None, phase='merging')
+
+
+def http_chunk_size(profile=None, platform=None):
+    # A saved YouTube mode takes precedence over the legacy probe override.
+    # None preserves per-stream extractor defaults; zero explicitly clears them.
+    if profile is not None and 'http_chunk_size' in profile:
+        value = profile['http_chunk_size']
+        if (platform != 'youtube' or value is not None and
+                (type(value) is not int or value != 0 and
+                 (not 1048576 <= value <= 1073741824 or value % 1048576))):
+            raise EngineError('CONFIG_INVALID', 'http_chunk_size')
+        return value
+    # Deployment/test override. Unset preserves extractor defaults (including YouTube chunks).
+    value = os.environ.get('YINGQU_HTTP_CHUNK_SIZE', '0')
+    if value not in ('0', '10485760'):
+        raise EngineError('CONFIG_INVALID', 'http_chunk_size')
+    return int(value)
 
 
 def parse_input(text):
@@ -108,7 +225,7 @@ def parse_input(text):
 
 
 def profile_config(profile):
-    if not isinstance(profile, dict) or set(profile) - {'cookie', 'user_agent', 'proxy'}:
+    if not isinstance(profile, dict) or set(profile) - {'cookie', 'user_agent', 'proxy', 'http_chunk_size'}:
         raise EngineError('CONFIG_INVALID', 'config')
     ua, cookie, proxy = profile.get('user_agent', DEFAULT_UA), profile.get('cookie', ''), profile.get('proxy')
     if (not isinstance(ua, str) or not ua or not isinstance(cookie, str)
@@ -239,6 +356,8 @@ def operate(method, params, emit):
     if not isinstance(profiles, dict):
         raise EngineError('CONFIG_INVALID', 'config')
     ua, cookies, proxy = profile_config(profiles.get(platform, {}))
+    chunk_size = http_chunk_size(profiles.get(platform, {}), platform)
+    chunk_configured = 'http_chunk_size' in profiles.get(platform, {})
     downloading = method == 'download_video'
     expected = params.get('expected')
     if resolver not in ('auto', 'yt-dlp', 'dtk'):
@@ -261,43 +380,32 @@ def operate(method, params, emit):
         if not preview.is_absolute() or not preview.is_dir() or preview.is_symlink() or any(preview.iterdir()):
             raise EngineError('IO_ERROR', 'preview')
 
+    audio_context = {}
+
     def match_filter(info, *, incomplete=False):
         if info.get('_type', 'video') in ('playlist', 'multi_video') or info.get('is_live'):
             raise EngineError('UNSUPPORTED_CONTENT', 'detail')
         if downloading and info.get('id') and info['id'] != expected['video_id']:
             raise EngineError('UPSTREAM_CHANGED', 'identity')
+        # The pinned selector callback only receives formats, not top-level language.
+        # match_filter sees the complete info before that callback runs.
+        for field in ('original_language', 'language'):
+            if isinstance(info.get(field), str) and info[field]:
+                audio_context[field] = info[field]
         return None
 
-    stream_bytes = {}
-    merging = False
-
-    def progress(data):
-        if data.get('status') in ('downloading', 'finished'):
-            total = data.get('total_bytes')
-            speed = data.get('speed')
-            count = data.get('downloaded_bytes', 0)
-            if platform == 'youtube':
-                stream_bytes[data.get('filename', '')] = count
-                count, total = sum(stream_bytes.values()), None
-            emit('progress', downloaded_bytes=count,
-                 total_bytes=total, speed_bps=speed if speed and math.isfinite(speed) else None)
-
-    def postprocess(data):
-        nonlocal merging
-        if data.get('postprocessor') == 'Merger' and data.get('status') == 'started':
-            merging = True
-            emit('progress', downloaded_bytes=sum(stream_bytes.values()), total_bytes=None,
-                 speed_bps=None, phase='merging')
+    progress = DownloadProgress(emit)
 
     logger = SafeLogger()
     options = dict(proxy=proxy or '', http_headers={'User-Agent': ua},
         logger=logger, quiet=True, noprogress=True, cachedir=False, noplaylist=True,
         allowed_extractors=(['Douyin$'] if platform == 'douyin' else ['Youtube$'] if platform == 'youtube'
                             else ['TikTok$', r'vm\.tiktok$']),
-        format=lambda context: select_format(context, params.get('format_id') if downloading else None, platform == 'youtube'), match_filter=match_filter, progress_hooks=[progress] if downloading else [],
-        postprocessor_hooks=[postprocess],
+        format=lambda context: select_format({**context, **audio_context}, params.get('format_id') if downloading else None, platform == 'youtube'), match_filter=match_filter, progress_hooks=[progress] if downloading else [],
+        postprocessor_hooks=[progress.postprocess],
         outtmpl=str(stage / 'video.%(ext)s') if stage else 'unused.%(ext)s',
-        overwrites=False, continuedl=False, socket_timeout=30, retries=0,
+        overwrites=False, continuedl=False, socket_timeout=30, retries=1,
+        retry_sleep_functions={'http': lambda n: 1}, http_chunk_size=chunk_size or 0,
         extractor_retries=0, fragment_retries=0, file_access_retries=0,
         postprocessors=[], fixup='never', external_downloader=None,
         js_runtimes={}, remote_components=set())
@@ -342,6 +450,8 @@ def operate(method, params, emit):
                                 or expected.get('kind', 'video') != 'image_album'
                                 or len(result['images']) != expected.get('image_count')):
                             raise EngineError('UPSTREAM_CHANGED', 'identity')
+                        # Album counters keep their existing conservative retry policy.
+                        ydl.params['retries'] = 0
                         dtk_adapter.download_images(ydl, content, stage, emit)
                     else:
                         if preview:
@@ -355,7 +465,9 @@ def operate(method, params, emit):
                 info = ydl.extract_info(url, download=False)
             if not isinstance(info, dict):
                 raise EngineError('UPSTREAM_CHANGED', 'detail')
-            result = metadata(info, platform)
+            # Selected stream fields can overwrite top-level language with None.
+            # Keep the same captured preference for the public choices and selector.
+            result = metadata({**info, **audio_context}, platform)
             result['resolver'] = actual_resolver
             result['source_url'] = source_url
             if cookie_warning:
@@ -380,6 +492,12 @@ def operate(method, params, emit):
                 from yt_dlp.postprocessor.ffmpeg import FFmpegMergerPP
                 if not FFmpegMergerPP(ydl).available:
                     raise EngineError('FFMPEG_UNAVAILABLE', 'merge')
+            if chunk_size is not None and (chunk_configured or 'YINGQU_HTTP_CHUNK_SIZE' in os.environ):
+                # Global 0 falls back to extractor downloader_options in HttpFD.
+                # Apply the explicit mode to the selected streams only.
+                for fmt in info.get('requested_formats') or [info]:
+                    fmt.setdefault('downloader_options', {})['http_chunk_size'] = options['http_chunk_size']
+            progress.prepare(info)
             ydl.process_info(info)
             file = Path(ydl.prepare_filename(info))
             if file.parent != stage or file.is_symlink() or not file.is_file() or file.stat().st_size == 0:
@@ -387,12 +505,14 @@ def operate(method, params, emit):
             emit('download_finished', platform=platform, video_id=result['video_id'],
                  filename=file.name, bytes=file.stat().st_size, container=info['ext'],
                  format_id=result['selected_format_id'], width=result['width'], height=result['height'],
-                 **({'transferred_bytes': sum(stream_bytes.values())} if platform == 'youtube' else {}),
+                 **({'transferred_bytes': progress.transferred} if platform == 'youtube' else {}),
                  **download_cover(ydl, info, stage))
     except DtkError as error:
         raise EngineError('UPSTREAM_CHANGED', 'dtk_signing') from None
-    except DownloadError:
-        code = 'MEDIA_MERGE_FAILED' if merging else logger.code
+    except DownloadError as error:
+        code = error_code(error)
+        if code == 'UPSTREAM_CHANGED':
+            code = 'MEDIA_MERGE_FAILED' if progress.merging else logger.code
         if code == 'ACCESS_DENIED' and cookie_warning:
             code = 'BROWSER_COOKIES_UNAVAILABLE'
         raise EngineError(code, 'yt_dlp') from None
@@ -401,9 +521,7 @@ def operate(method, params, emit):
     except RequestError as error:
         if isinstance(error.cause, TargetError):
             raise EngineError(error.cause.code, 'network_target') from None
-        code = ({401: 'ACCESS_DENIED', 403: 'ACCESS_DENIED', 404: 'NOT_FOUND', 429: 'RISK_CONTROL'}.get(error.status, 'NETWORK_ERROR')
-                if isinstance(error, HTTPError) else 'NETWORK_ERROR')
-        raise EngineError(code, 'request') from None
+        raise EngineError(error_code(error), 'request') from None
 
 
 def check_version():

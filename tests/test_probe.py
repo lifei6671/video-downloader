@@ -18,13 +18,56 @@ def config(tmp_path, proxy):
             'profiles':{'tiktok':{'proxy':proxy,'cookie':'session=must-not-leak'}},'output_dir':str(tmp_path)}
 
 
+@pytest.mark.parametrize('mode', ['estimate', 'unknown', 'no_progress', 'bad_eta', 'bad_speed',
+    'bad_count', 'zero_total', 'bad_estimate', 'exact_mismatch', 'regression'])
+def test_bridge_progress_optional_fields_and_completion_validation(tmp_path, mode):
+    script = tmp_path / 'progress.py'
+    script.write_text('''import json,sys
+from pathlib import Path
+dtk=json.loads(Path(sys.argv[1]).read_text())
+mode=sys.argv[2]
+print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.5',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
+r=json.loads(sys.stdin.readline())
+def emit(kind,**data): print(json.dumps(dict(type=kind,protocol_version=3,id=r['id'],**data)),flush=True)
+if r['method']=='resolve_video':
+ emit('resolved',result=dict(platform='tiktok',video_id='123',canonical_url='https://www.tiktok.com/@u/video/123'))
+else:
+ body=b'\\x00\\x00\\x00\\x18ftypmp42fixture'
+ (Path(r['params']['staging_dir'])/'video.mp4').write_bytes(body)
+ data=dict(downloaded_bytes=len(body),total_bytes=None,total_bytes_estimate=999 if mode=='estimate' else None,speed_bps=0,eta_seconds=2.5)
+ if mode=='bad_eta':data['eta_seconds']=-1
+ if mode=='bad_speed':data['speed_bps']=1e20
+ if mode=='bad_count':data['downloaded_bytes']=-1
+ if mode=='zero_total':data['total_bytes']=0
+ if mode=='bad_estimate':data['total_bytes_estimate']=-1
+ if mode=='exact_mismatch':data['total_bytes']=len(body)+1
+ if mode!='no_progress':emit('progress',**data)
+ if mode=='regression':emit('progress',**{**data,'downloaded_bytes':0})
+ emit('download_finished',platform='tiktok',video_id='123',filename='video.mp4',container='mp4',bytes=len(body))
+''', encoding='utf-8')
+    result = subprocess.run([str(PROBE), sys.executable, str(script), str(ROOT / 'vendor/dtk/manifest.json'), mode],
+        input=json.dumps(config(tmp_path, None)).encode(), capture_output=True, timeout=15)
+    success = mode in ('estimate', 'unknown')
+    assert result.returncode == (0 if success else 1), (result.stdout, result.stderr)
+    if success:
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        progress = next(e for e in events if e.get('event') == 'progress')
+        assert progress['eta_seconds'] == 2.5 and progress['speed_bps'] == 0
+        assert progress['total_bytes_estimate'] == (999 if mode == 'estimate' else None)
+        assert progress['total_bytes'] is None
+    else:
+        assert b'"event":"completed"' not in result.stdout
+        assert not (tmp_path / 'tiktok_123.mp4').exists()
+    assert not any(path.name.startswith('yingqu-') for path in tmp_path.iterdir())
+
+
 @pytest.mark.parametrize('bad_transfer', [False, True])
 def test_bridge_merged_file_size_is_distinct_from_transferred_bytes(tmp_path, bad_transfer):
     script = tmp_path / 'merged.py'
     script.write_text('''import json,sys
 from pathlib import Path
 dtk=json.loads(Path(sys.argv[1]).read_text())
-print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.3',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
+print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.5',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
 r=json.loads(sys.stdin.readline())
 def emit(kind,**data): print(json.dumps(dict(type=kind,protocol_version=3,id=r['id'],**data)),flush=True)
 if r['method']=='resolve_video':
@@ -52,7 +95,7 @@ def test_protocol_error_reaps_engine_descendant(tmp_path):
     script.write_text('''import json,sys,subprocess
 from pathlib import Path
 dtk=json.loads(Path(sys.argv[1]).read_text())
-print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.3',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
+print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.5',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
 r=json.loads(sys.stdin.readline())
 child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 Path(sys.argv[2]).write_text(str(child.pid))
@@ -98,7 +141,7 @@ def test_cancel_waits_until_descendant_media_handle_is_released(tmp_path):
     script.write_text('''import json,sys,subprocess,time
 from pathlib import Path
 dtk=json.loads(Path(sys.argv[1]).read_text())
-print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.3',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
+print(json.dumps(dict(type='ready',protocol_version=3,engine_version='0.7.5',yt_dlp_version='2026.08.19',dtk_version=dtk['upstream_version'],dtk_commit=dtk['upstream_commit'])),flush=True)
 r=json.loads(sys.stdin.readline())
 def emit(kind,**data): print(json.dumps(dict(type=kind,protocol_version=3,id=r['id'],**data)),flush=True)
 if r['method']=='resolve_video':
@@ -180,7 +223,7 @@ def test_bridge_stops_bad_engine(mode,tmp_path):
     script.write_text('''import json,sys
 mode=sys.argv[1]
 print(json.dumps({'type':'ready','protocol_version':1 if mode=='wrong_version' else 3,
- 'engine_version':'bad' if mode=='bad_ready' else '0.7.3','yt_dlp_version':'2026.08.19','dtk_version':sys.argv[2],'dtk_commit':sys.argv[3]}),flush=True)
+ 'engine_version':'bad' if mode=='bad_ready' else '0.7.5','yt_dlp_version':'2026.08.19','dtk_version':sys.argv[2],'dtk_commit':sys.argv[3]}),flush=True)
 request=json.loads(sys.stdin.readline())
 if mode=='eof': sys.exit(0)
 if mode=='secret_error':
@@ -200,11 +243,12 @@ if mode=='wrong_id': sys.stdin.read()
     assert b'private' not in result.stdout + result.stderr
 
 
-def test_eof_cancels_blocked_network(tmp_path,media_proxy):
+@pytest.mark.parametrize('chunk', ['0', '10485760'])
+def test_eof_cancels_blocked_network(tmp_path,media_proxy,chunk):
     proxy, _, started, _ = media_proxy
     stage=tmp_path/'stage'; stage.mkdir()
     process=subprocess.Popen([sys.executable,str(FIXTURE)],stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={**os.environ,'FIXTURE_MODE':'stall'})
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={**os.environ,'FIXTURE_MODE':'stall', 'YINGQU_HTTP_CHUNK_SIZE':chunk})
     assert json.loads(process.stdout.readline())['type']=='ready'
     request={'protocol_version':3,'id':'test','method':'download_video','params':{
         'input':'https://www.tiktok.com/@u/video/123','profiles':{'tiktok':{'proxy':proxy}},

@@ -76,11 +76,100 @@ def test_format_contract():
     video = dict(protocol='https',ext='mp4',vcodec='h264',acodec='none')
     combined = dict(protocol='https',ext='mp4',vcodec='h264',acodec='aac')
     assert list(engine.select_format({'formats':[combined, video, audio]})) == [{**combined, '_yingqu_format_id': engine.public_formats({'formats':[combined]})[0]['format_id']}]
-    assert list(engine.select_format({'formats':[video]})) == [{**video, '_yingqu_format_id': engine.public_formats({'formats':[video]})[0]['format_id']}]
+    with pytest.raises(engine.EngineError, match='UNSUPPORTED_CONTENT'):
+        list(engine.select_format({'formats':[video]}))
     for formats in [[audio,video], [{**combined,'protocol':'m3u8_native'}],
                     [{**combined,'has_drm':True}], [audio]]:
         with pytest.raises(engine.EngineError,match='UNSUPPORTED_CONTENT'):
             list(engine.select_format({'formats':formats}))
+
+
+def test_album_download_retains_no_retry_contract(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    monkeypatch.setattr(engine.dtk_adapter, 'extract', lambda *_: SimpleNamespace(kind='image_album'))
+    monkeypatch.setattr(engine.dtk_adapter, 'metadata', lambda *_: dict(platform='douyin',
+        video_id='123', kind='image_album', images=[{'quality_source': 'original'}]))
+    called = []
+    def images(ydl, content, stage, emit):
+        assert ydl.params['retries'] == 0
+        assert ydl.params['continuedl'] is False
+        called.append(True)
+    monkeypatch.setattr(engine.dtk_adapter, 'download_images', images)
+    engine.operate('download_video', dict(input='https://www.douyin.com/note/123', staging_dir=str(tmp_path),
+        expected=dict(platform='douyin', video_id='123', kind='image_album', image_count=1)), lambda *_a, **_k: None)
+    assert called == [True]
+
+
+@pytest.mark.parametrize('status,code', [(401, 'ACCESS_DENIED'), (403, 'ACCESS_DENIED'),
+    (404, 'NOT_FOUND'), (429, 'RISK_CONTROL'), (500, 'NETWORK_ERROR'), (502, 'NETWORK_ERROR'),
+    (503, 'NETWORK_ERROR'), (504, 'NETWORK_ERROR')])
+def test_structured_http_cause_beats_unrelated_numbers(status, code):
+    import io
+    from yt_dlp.networking.common import Response
+    from yt_dlp.networking.exceptions import HTTPError
+    from yt_dlp.utils import DownloadError, ExtractorError
+    http = HTTPError(Response(io.BytesIO(b''), 'https://v.tiktokcdn.com/?private', {}, status=status))
+    cause = ExtractorError('path403/404/file429.mp4', cause=http)
+    outer = DownloadError('HTTP Error 401: misleading wrapper', (type(cause), cause, None))
+    assert engine.error_code(outer) == code
+    logger = engine.SafeLogger()
+    logger.error('HTTP Error ' + str(status) + ': reason path404')
+    assert logger.code == code
+
+
+@pytest.mark.parametrize('text', ['file403.mp4', 'C:/401/404/429/503/video.mp4',
+    'Downloaded 404000 bytes', 'HTTP Error 4030', 'duration=503', 'format 401'])
+def test_error_numbers_alone_are_not_http_status(text):
+    logger = engine.SafeLogger()
+    logger.error(text)
+    assert logger.code == 'UPSTREAM_CHANGED'
+
+
+def test_structured_timeout_incomplete_target_and_merge_causes():
+    from yt_dlp.networking.exceptions import TransportError, IncompleteRead
+    from yt_dlp.utils import PostProcessingError
+    for error, code in [(TransportError(cause=TimeoutError()), 'TIMEOUT'),
+        (TransportError(cause=ConnectionResetError()), 'NETWORK_ERROR'),
+        (IncompleteRead(10, 20), 'INCOMPLETE_MEDIA'),
+        (PostProcessingError('private path'), 'MEDIA_MERGE_FAILED'),
+        (engine.TargetError(code='RISK_CONTROL'), 'RISK_CONTROL'),
+        (engine.EngineError('FORMAT_UNAVAILABLE'), 'FORMAT_UNAVAILABLE')]:
+        assert engine.error_code(error) == code
+
+
+def test_progress_stream_identity_monotonicity_estimates_and_merge():
+    events = []
+    progress = engine.DownloadProgress(lambda kind, **data: events.append(data))
+    progress.prepare({'requested_formats': [{'format_id': 'v', 'filesize': 100},
+                                            {'format_id': 'a', 'filesize_approx': 20}]})
+    def update(stream, count, **extra):
+        progress(dict(status='downloading', info_dict={'format_id': stream},
+            filename='same-file-name', downloaded_bytes=count, speed=10, eta=10, **extra))
+    update('v', 50, total_bytes=100)
+    assert events[-1]['total_bytes'] is None and events[-1]['total_bytes_estimate'] == 120
+    assert events[-1]['eta_seconds'] == 7
+    update('v', 40)  # Native retry restarts a file; never subtract or add a second copy.
+    update('v', 100)
+    update('a', 10, total_bytes=20)
+    update('a', 20)
+    update('a', 20)
+    assert [e['downloaded_bytes'] for e in events] == [50, 50, 100, 110, 120, 120]
+    assert events[-1]['total_bytes'] == 120 and events[-1]['total_bytes_estimate'] is None
+    progress.postprocess({'postprocessor': 'Merger', 'status': 'started'})
+    progress.postprocess({'postprocessor': 'Merger', 'status': 'started'})
+    assert events[-1]['phase'] == 'merging' and progress.transferred == 120
+
+
+@pytest.mark.parametrize('invalid', [None, -1, True, float('nan'), float('inf'), 10**20])
+def test_progress_rejects_bad_bytes_and_sanitizes_speed_eta(invalid):
+    events = []
+    progress = engine.DownloadProgress(lambda kind, **data: events.append(data))
+    progress.prepare({'format_id': 'single'})
+    progress(dict(status='downloading', downloaded_bytes=0, speed=invalid, eta=invalid,
+                  total_bytes=invalid, total_bytes_estimate=invalid))
+    assert all(events[-1][key] is None for key in ('speed_bps', 'eta_seconds', 'total_bytes', 'total_bytes_estimate'))
+    with pytest.raises(engine.EngineError, match='ENGINE_PROTOCOL_ERROR'):
+        progress(dict(status='downloading', downloaded_bytes=invalid))
 
 
 @pytest.mark.parametrize('url', ['http://127.0.0.1/v','https://eviltiktokcdn.com/v',

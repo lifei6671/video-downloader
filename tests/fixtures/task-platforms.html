@@ -13,6 +13,7 @@ api.settings=async()=>({download_directory:'C:\\TestVideos',max_downloads:2,prof
 api.subscribe=async callback=>{listener=callback;return()=>{if(listener===callback)listener=()=>{}}};
 api.tdlLoginStatus=async()=>null;
 api.cookie=async()=>'';
+api.proxy=async()=>null;
 api.reveal=async id=>{window.taskPlatformsTest.calls.push({type:'reveal',id})};
 await import('/src/main');
 </script></body></html>
