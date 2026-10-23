@@ -3,7 +3,8 @@
     "active": true,
     "resources": {
       "../python-engine/dist/video-engine/": "video-engine/",
-      "../vendor/tdl-ui-licenses.txt": "licenses/tdl-ui-licenses.txt"
+      "../vendor/tdl-ui-licenses.txt": "licenses/tdl-ui-licenses.txt",
+      "../vendor/transcription-licenses.txt": "licenses/transcription-licenses.txt"
     }
   }
 }

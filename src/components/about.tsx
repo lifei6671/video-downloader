@@ -141,7 +141,7 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
           <DialogTitle className="text-xl font-semibold leading-snug">发现新版本 v{release.latest_version}</DialogTitle>
           <DialogDescription>当前版本 v{release.current_version}{published && !Number.isNaN(published.getTime()) ? ` · 发布于 ${published.toLocaleDateString('zh-CN')}` : ''}</DialogDescription>
         </DialogHeader>
-        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
+        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto pr-3">
           <h3 className="shrink-0 text-sm font-medium">更新说明</h3>
           <ReleaseNotes content={release.release_notes} openLink={url => void openReleaseNoteLink(url)} />
           <p className="shrink-0 break-all text-xs text-muted-foreground">{release.installer ? `已匹配当前系统：${currentDownload?.filename ?? release.installer.name} · ${megabytes(currentDownload?.total_bytes ?? release.installer.size)}` : '此版本没有可验证的适用安装包，可前往发行页面手动下载。'}</p>

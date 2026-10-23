@@ -104,5 +104,61 @@ api.download = async (id,confirm=false) => {
 };
 api.image = async () => Array.from(Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ0kAAAAASUVORK5CYII='),c=>c.charCodeAt(0)));
 api.cover = async () => api.image();
+api.transcripts = async () => [];
+api.subscribeTranscripts = async () => () => {};
+if (scenario.startsWith('transcript')) {
+  tasks = [{...structuredClone(completed),id:'speech',video:{...video,title:scenario==='transcript-loading'?'用于检查长标题换行时提取弹窗加载布局是否稳定。'.repeat(8):'单个视频文案',kind:'video'},file_missing:scenario==='transcript-missing-file'},
+           {...structuredClone(completed),id:'album',video:{...video,title:'图集不转录',kind:'image_album'},files:[]}];
+  let value = null, transcriptListener = () => {}, sequence = 0;
+  const text=scenario==='transcript-long' ? '这是一段用于验证长文案滚动布局的测试内容，完整文案应在边框内显示。'.repeat(600)
+    : scenario==='transcript-unbroken' ? 'LongTranscriptWithoutSpaces0123456789'.repeat(700) : '开放时间早上9点。\nEnglish transcript.';
+  const saved={text,source:{path:'C:\\TestVideos\\speech.mp4',size:65536,mtime_ns:'1'},model_revision:'46e849502a86',model_name:'Fun-ASR-Nano',pipeline_revision:'fixture',completed_at:100,backend:'cpu'};
+  if (scenario.startsWith('transcript-legacy')) { delete saved.model_name; saved.model_revision='90c1c6191201'; saved.backend=scenario.includes('-cuda')?'cuda':undefined; }
+  if (scenario==='transcript-missing-file' || scenario.startsWith('transcript-legacy')) value={task_id:'speech',operation_id:'old',sequence:++sequence,state:'completed',phase:null,error_code:null,updated_at:100,result:saved,has_result:true,source_changed:scenario==='transcript-missing-file'};
+  if (scenario==='transcript-legacy-cuda-failed' || scenario==='transcript-legacy-cuda-unavailable') {
+    value.state='failed'; value.error_code=scenario.endsWith('failed')?'TRANSCRIPTION_CUDA_FAILED':'TRANSCRIPTION_CUDA_UNAVAILABLE';
+  }
+  const summary = () => value ? {...structuredClone(value),result:null} : null;
+  const publish = () => transcriptListener(summary());
+  api.transcripts = async () => value ? [summary()] : [];
+  api.subscribeTranscripts = async callback => {transcriptListener=callback;return ()=>{if(transcriptListener===callback)transcriptListener=()=>{}}};
+  api.transcript = async () => {
+    if (scenario==='transcript-loading' && !control.finishTranscriptRead) await new Promise(resolve=>control.finishTranscriptRead=resolve);
+    return structuredClone(value);
+  };
+  const tools=[{id:'ffmpeg',available:true,provider:'ffmpeg',version:'6.1.1',path:'C:\\ffmpeg.exe',source:'system',can_install:true},
+    {id:'fun-asr-nano',available:scenario!=='transcript-model',provider:'cpu',version:'46e849502a86',path:'C:\\runtime\\fun-asr-nano',source:'managed',can_install:true,download_bytes:1275804800}];
+  api.checkRuntimeDependencies=async()=>({platform:scenario==='runtime-mac'?'darwin-arm64':'win32-x64',directory:'C:\\runtime',tools:structuredClone(tools)});
+  tools.find(t=>t.id==='fun-asr-nano').variants=['cpu','cuda'];
+  if(scenario==='transcript-cuda')tools.find(t=>t.id==='fun-asr-nano').provider='cuda';
+  api.installRuntimeDependency=async(tool,progress,variant)=>{control.calls.push({type:'install',tool,variant});progress({tool,phase:'downloading',downloaded_bytes:1024,total_bytes:1275804800});await new Promise(resolve=>control.finishInstall=resolve);Object.assign(tools.find(t=>t.id===tool),{available:true,provider:variant??'cpu'});return api.checkRuntimeDependencies()};
+  api.startTranscription=async(id,force)=>{control.calls.push({type:'transcribe',id,force});value={task_id:id,operation_id:'current',sequence:++sequence,state:'running',phase:scenario==='transcript-cuda'?'segmenting':'recognizing',backend:tools.find(t=>t.id==='fun-asr-nano').provider,error_code:null,updated_at:100,result:value?.result??null,has_result:!!value?.result,source_changed:false};publish();return summary()};
+  control.finishTranscription=(state='completed')=>{value={...value,state,sequence:++sequence,phase:null,error_code:state==='failed'?'TRANSCRIPTION_FAILED':state==='canceled'?'CANCELED':null,result:state==='completed'?{...saved,model_name:'Fun-ASR-Nano',model_revision:'46e849502a86',backend:value.backend}:value?.result};value.has_result=!!value.result;publish()};
+  control.staleTranscription=()=>transcriptListener({task_id:'speech',operation_id:'stale',sequence:0,state:'running',phase:'extracting_audio',has_result:false,result:null});
+  api.cancelTranscription=async(id,operation)=>{control.calls.push({type:'cancel-transcription',id,operation});control.finishTranscription('canceled')};
+  api.copyTranscript=async()=>{control.calls.push({type:'copy-transcript',text:value.result.text})};
+  api.exportTranscript=async()=>{control.calls.push({type:'export-transcript',text:value.result.text});return 'C:\\TestVideos\\speech.txt'};
+}
+if (scenario.startsWith('runtime-')) {
+  const tools=[
+    {id:'ffmpeg',available:scenario==='runtime-mixed',provider:'ffmpeg',version:'6.1.1',path:'C:\\Tools\\ffmpeg.exe',source:'system',can_install:true},
+    {id:'javascript',available:scenario==='runtime-mixed',provider:'node',version:'22.0.0',path:'C:\\Tools\\node.exe',source:'system',can_install:true},
+    {id:'fun-asr-nano',available:scenario==='runtime-mixed',provider:'cpu',version:'46e849502a86',path:'C:\\runtime\\fun-asr-nano',source:'managed',can_install:scenario!=='runtime-unsupported',download_bytes:scenario==='runtime-size-unknown'?null:scenario==='runtime-size'?2147483648:1275804800},
+  ];
+  let rejectInstall;
+  Object.assign(tools.find(t=>t.id==='fun-asr-nano'),{variants:scenario==='runtime-mac'?['cpu']:['cpu','cuda'],variant_model_bytes:{cuda:1047054944},variant_download_bytes:{cuda:2118597225}});
+  if(scenario==='runtime-cuda')Object.assign(tools.find(t=>t.id==='fun-asr-nano'),{available:true,provider:'cuda',download_bytes:1047054944});
+  api.checkRuntimeDependencies=async()=>({platform:scenario==='runtime-mac'?'darwin-arm64':'win32-x64',directory:'C:\\runtime',tools:structuredClone(tools)});
+  api.installRuntimeDependency=async(tool,progress,variant)=>{
+    control.calls.push({type:'install-runtime',tool,variant});
+    if(scenario==='runtime-cuda-incompatible' && variant==='cuda')throw 'CUDA_UNSUPPORTED_GPU';
+    progress({tool,phase:'downloading',downloaded_bytes:1024,total_bytes:2048});
+    await new Promise((resolve,reject)=>{control.finishRuntimeInstall=resolve;rejectInstall=reject});
+    tools.find(t=>t.id===tool).available=true;
+    if(tool==='fun-asr-nano')tools.find(t=>t.id===tool).provider=variant??'cpu';
+    return api.checkRuntimeDependencies();
+  };
+  api.cancelRuntimeDependency=async()=>{control.calls.push({type:'cancel-runtime'});rejectInstall('CANCELED')};
+}
 await import('/src/main');
 </script></body></html>

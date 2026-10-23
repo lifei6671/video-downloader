@@ -5,7 +5,9 @@ export type Resolver = 'auto' | 'yt-dlp' | 'dtk' | 'tdl';
 export type ProjectPage = 'source' | 'issues' | 'releases' | 'license' | 'credits' | 'credit-ytdlp' | 'credit-dtk' | 'credit-tauri' | 'credit-react' | 'credit-shadcn' | 'credit-lucide';
 export interface UpdateCheck { current_version: string; latest_version: string; release_tag: string; has_update: boolean; release_notes: string; published_at: string | null; installer: { name: string; size: number } | null }
 export interface UpdateDownload { id: string; revision: number; release: UpdateCheck; phase: 'preparing' | 'downloading' | 'verifying' | 'canceling' | 'completed' | 'canceled' | 'failed'; downloaded_bytes: number; total_bytes: number | null; filename: string | null; error: string | null }
-export interface RuntimeTool { id: 'ffmpeg' | 'javascript'; available: boolean; provider: string | null; version: string | null; path: string | null; source: 'system' | 'managed' | null; can_install: boolean }
+export type ModelVariant = 'cpu' | 'cuda';
+export interface RuntimeTool { id: 'ffmpeg' | 'javascript' | 'fun-asr-nano'; available: boolean; provider: string | null; version: string | null; path: string | null; source: 'system' | 'managed' | null; can_install: boolean; download_bytes?: number | null; variants?: ModelVariant[]; variant_download_bytes?: Partial<Record<ModelVariant, number>>; variant_model_bytes?: Partial<Record<ModelVariant, number>> }
+export interface VideoTranscript { task_id: string; operation_id: string; sequence: number; state: 'running' | 'completed' | 'no_speech' | 'failed' | 'canceled' | 'interrupted'; phase: string | null; backend?: 'cpu' | 'cuda' | null; error_code: string | null; updated_at: number; has_result: boolean; source_changed: boolean; result: {text: string; source: {path: string; size: number; mtime_ns: string}; model_revision: string; model_name?: string | null; pipeline_revision: string; backend?: 'cpu' | 'cuda' | null; completed_at: number} | null }
 export interface RuntimeStatus { platform: string; directory: string; tools: RuntimeTool[] }
 export interface RuntimeProgress { tool: RuntimeTool['id']; phase: 'downloading' | 'verifying' | 'installing'; downloaded_bytes: number; total_bytes: number }
 export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string }
@@ -18,6 +20,13 @@ export interface TdlStatus { path: string; version: string }
 export interface TdlLoginStatus { id: string; phase: 'starting' | 'qr' | 'password' | 'verifying'; qr: boolean[][] | null }
 export interface Settings { download_directory: string; max_downloads: number; profiles: Profile[]; tdl: TdlSettings }
 export const api = {
+  transcripts: () => invoke<VideoTranscript[]>('list_video_transcripts'),
+  transcript: (taskId: string) => invoke<VideoTranscript | null>('get_video_transcript', {taskId}),
+  startTranscription: (taskId: string, force = false) => invoke<VideoTranscript>('start_video_transcription', {taskId, force}),
+  cancelTranscription: (taskId: string, operationId: string) => invoke<void>('cancel_video_transcription', {taskId, operationId}),
+  copyTranscript: (taskId: string) => invoke<void>('copy_video_transcript', {taskId}),
+  exportTranscript: (taskId: string) => invoke<string | null>('export_video_transcript', {taskId}),
+  subscribeTranscripts: (callback: (snapshot: VideoTranscript) => void) => listen<VideoTranscript>('transcription_updated', event => callback(event.payload)),
   proxy: (platform: string) => invoke<string | null>('get_profile_proxy', { platform }),
   saveTdlSettings: (config: TdlSettings) => invoke<Settings>('save_tdl_settings', { config }),
   selectTdlExecutable: () => invoke<string | null>('select_tdl_executable'),
@@ -36,10 +45,10 @@ export const api = {
   openUpdateInstaller: (downloadId: string) => invoke<void>('open_update_installer', { downloadId }),
   subscribeUpdateDownload: (callback: (status: UpdateDownload) => void) => listen<UpdateDownload>('update_download', event => callback(event.payload)),
   checkRuntimeDependencies: () => invoke<RuntimeStatus>('check_runtime_dependencies'),
-  installRuntimeDependency: (tool: RuntimeTool['id'], progress: (value: RuntimeProgress) => void) => {
+  installRuntimeDependency: (tool: RuntimeTool['id'], progress: (value: RuntimeProgress) => void, variant?: ModelVariant) => {
     const onProgress = new Channel<RuntimeProgress>();
     onProgress.onmessage = progress;
-    return invoke<RuntimeStatus>('install_runtime_dependency', { tool, onProgress });
+    return invoke<RuntimeStatus>('install_runtime_dependency', { tool, variant, onProgress });
   },
   cancelRuntimeDependency: () => invoke<void>('cancel_runtime_dependency'),
   cookie: (platform: string) => invoke<string>('get_profile_cookie', { platform }),
@@ -79,6 +88,26 @@ export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlyS
   return [...map.values()].sort((a, b) => b.created_at - a.created_at);
 }
 const errors: Record<string, string> = {
+  TRANSCRIPTION_BUSY: '已有视频正在提取文案，请完成或取消后再开始',
+  TRANSCRIPTION_ENGINE_UNAVAILABLE: '语音转录程序不可用，请检查应用安装是否完整',
+  TRANSCRIPTION_MODEL_UNAVAILABLE: '语音模型未安装或已损坏，请下载或修复模型',
+  TRANSCRIPTION_NO_AUDIO: '视频没有可识别的音轨',
+  TRANSCRIPTION_AUDIO_FAILED: '无法提取音频，请检查视频格式、文件完整性和磁盘空间',
+  TRANSCRIPTION_FAILED: '语音识别失败，请重新提取；重复失败时可重新下载模型修复',
+  TRANSCRIPTION_VAD_FAILED: '语音分段失败，请重试或重新下载模型修复',
+  TRANSCRIPTION_CUDA_FAILED: 'CUDA 识别失败，请重试或在运行依赖中改用 CPU 版',
+  TRANSCRIPTION_CUDA_UNAVAILABLE: 'CUDA 组件不可用，请在运行依赖中修复或改用 CPU 版',
+  CUDA_DRIVER_UNAVAILABLE: '未检测到 NVIDIA CUDA 驱动，请安装驱动或选择 CPU 版',
+  CUDA_DRIVER_TOO_OLD: 'NVIDIA 驱动需支持 CUDA 12.4 或更新版本，请更新驱动或选择 CPU 版',
+  CUDA_UNSUPPORTED_GPU: '当前显卡不支持此 CUDA 版，请选择 CPU 版',
+  CUDA_UNSUPPORTED_SYSTEM: '当前系统或架构不支持 CUDA 版，请选择 CPU 版',
+  TRANSCRIPTION_TIMEOUT: '文案提取超时，请重试',
+  TRANSCRIPTION_SOURCE_CHANGED: '处理期间视频文件发生变化，本次结果未保存',
+  TRANSCRIPTION_OUTPUT_TOO_LARGE: '识别输出超过大小限制，本次结果未保存',
+  TRANSCRIPTION_INTERRUPTED: '上次文案提取已中断，可重新提取',
+  TRANSCRIPTION_NOT_FOUND: '尚无已保存的文案',
+  TRANSCRIPTION_EXPORT_SOURCE: '不能将文案保存到原视频文件，请选择 TXT 文件',
+  CLIPBOARD_WRITE_FAILED: '无法写入系统剪贴板，请重试',
   DEPENDENCY_BUSY: '依赖检测或下载正在进行，可取消后重新检测',
   DEPENDENCY_UNSUPPORTED_SYSTEM: '当前系统或架构暂不支持自动下载，请自行安装后重新检测',
   DEPENDENCY_NETWORK_ERROR: '依赖下载失败，请检查网络或系统代理后重试',

@@ -68,6 +68,8 @@ jobs:
           python -m pytest -q
       - name: Rust lint
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings
+      - name: Build CPU speech helper
+        run: python scripts/build_asr.py
       - name: Package engine
         run: python -m PyInstaller --noconfirm --distpath python-engine/dist --workpath python-engine/build python-engine/pyinstaller.spec
       - name: Check packaged engine

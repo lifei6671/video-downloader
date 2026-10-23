@@ -30,6 +30,7 @@ cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 .venv/bin/python -m pytest -q
 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings
+.venv/bin/python scripts/build_asr.py
 .venv/bin/python -m PyInstaller --noconfirm --distpath python-engine/dist --workpath python-engine/build python-engine/pyinstaller.spec
 .venv/bin/python scripts/check_packaged_engine.py python-engine/dist/video-engine/video-engine
 npm run desktop
@@ -200,4 +201,21 @@ npm run build
 
 ## 运行依赖管理
 
-入口为系统设置 → 运行依赖。缺失时由用户点击下载 FFmpeg/FFprobe 或 Deno 到应用数据目录 runtime，已有系统工具优先。修改 Python 依赖模块后必须重建 PyInstaller 引擎；协议 v3、引擎 0.7.0。检查、下载、取消和平台验收见 [运行依赖说明](runtime-dependencies.md)。
+入口为系统设置 → 运行依赖。缺失时由用户点击下载 FFmpeg/FFprobe、Deno 或 Fun-ASR-Nano 模型（CPU / Windows CUDA）到应用数据目录 runtime，已有系统工具优先。修改 Python 依赖模块后必须重建 PyInstaller 引擎；协议 v3、引擎 0.12.0。检查、下载、取消和平台验收见 [运行依赖说明](runtime-dependencies.md)。
+
+## Fun-ASR-Nano 原生运行时
+
+按[集成说明](fun-asr-nano.md)固定源码和 GGUF 权重。Windows / macOS 均构建 `llama-funasr-cli` 与 `llama-funasr-vad`。Windows 可按需安装 audio.cpp CUDA，详见 [CUDA 集成](cuda-acceleration.md)；macOS 保留 CPU。没有 Python ML 环境，旧 SenseVoice CUDA 包不参与运行。
+
+```powershell
+.venv/Scripts/python.exe scripts/build_asr.py
+.venv/Scripts/python.exe -m PyInstaller --noconfirm --distpath python-engine/dist --workpath python-engine/build python-engine/pyinstaller.spec
+.venv/Scripts/python.exe scripts/check_packaged_engine.py python-engine/dist/video-engine/video-engine.exe
+.venv/Scripts/python.exe scripts/verify_transcription.py --download-models --engine python-engine/dist/video-engine/video-engine.exe
+```
+
+CMake 不在 PATH 时使用 `--cmake <绝对路径>`。构建沿用 `.local/sensevoice-build/` 的固定源码缓存，产物在忽略目录 `python-engine/asr/`；会移除该生成目录中的旧 SenseVoice helper，保留新程序、来源、许可及冒烟音频，模型不进安装包。Windows 静态 CRT、保守 CPU 指令基线及 UTF-8 manifest，macOS ad-hoc 签名。
+
+验证入口使用 `.local/nano-verification/runtime/`，不读取平台凭据或更改用户安装。`--download-models` 下载三份约 1.2 GiB 权重，SHA-256 校验后执行真实加载/推理；短视频使用 Matroska 与 PCM16 无损音轨，避免 AAC 二次编码改变参考样本。`--long-seconds 600` 可单独测试合成长期音频，不替代自然视频准确率验证。
+
+前端检查 `npm run build`。浏览器 IPC 隔离回归为 `tests/nano-cuda.browser.js`、`tests/transcription.browser.js`、`tests/transcription-model.browser.js`、`tests/transcript-overflow.browser.js` 与 `tests/runtime-dependencies.browser.js`，覆盖模型名称、旧 CPU/CUDA 结果、下载取消、长文本和三个视口。真实 Tauri 单独验证，不以 mock 替代。完整记录见[集成与验收](fun-asr-nano.md)。

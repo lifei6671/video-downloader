@@ -25,6 +25,8 @@
   --border: #DCE3EC;
   --input: #CBD5E1;
   --ring: #2563EB;
+  --scrollbar-thumb: #D1D5DB;
+  --scrollbar-thumb-hover: #000000;
   --radius: 0.375rem;
   --button-font-size: 12px;
   --sidebar: #FFFFFF;
@@ -74,6 +76,35 @@
 @layer base {
   * { @apply border-border outline-ring/50; }
   body { @apply m-0 bg-background font-sans text-sm text-foreground antialiased; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--scrollbar-thumb);
+  }
+  ::-webkit-scrollbar-thumb:hover,
+  ::-webkit-scrollbar-thumb:active { background: var(--scrollbar-thumb-hover); }
+  ::-webkit-scrollbar-button { display: none; }
+  ::-webkit-scrollbar-button:single-button {
+    display: block;
+    width: 6px;
+    height: 10px;
+    background: transparent center / 6px 6px no-repeat;
+  }
+  ::-webkit-scrollbar-button:vertical:decrement { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 6'%3E%3Cpath fill='%23D1D5DB' d='M0 5 3 1 6 5Z'/%3E%3C/svg%3E"); }
+  ::-webkit-scrollbar-button:vertical:decrement:hover,
+  ::-webkit-scrollbar-button:vertical:decrement:active { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 6'%3E%3Cpath fill='%23000000' d='M0 5 3 1 6 5Z'/%3E%3C/svg%3E"); }
+  ::-webkit-scrollbar-button:vertical:increment { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 6'%3E%3Cpath fill='%23D1D5DB' d='M0 1 3 5 6 1Z'/%3E%3C/svg%3E"); }
+  ::-webkit-scrollbar-button:vertical:increment:hover,
+  ::-webkit-scrollbar-button:vertical:increment:active { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 6'%3E%3Cpath fill='%23000000' d='M0 1 3 5 6 1Z'/%3E%3C/svg%3E"); }
+  ::-webkit-scrollbar-button:horizontal { width: 10px; height: 6px; }
+  ::-webkit-scrollbar-button:horizontal:decrement { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 6'%3E%3Cpath fill='%23D1D5DB' d='M5 0 1 3 5 6Z'/%3E%3C/svg%3E"); }
+  ::-webkit-scrollbar-button:horizontal:decrement:hover,
+  ::-webkit-scrollbar-button:horizontal:decrement:active { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 6'%3E%3Cpath fill='%23000000' d='M5 0 1 3 5 6Z'/%3E%3C/svg%3E"); }
+  ::-webkit-scrollbar-button:horizontal:increment { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 6'%3E%3Cpath fill='%23D1D5DB' d='M1 0 5 3 1 6Z'/%3E%3C/svg%3E"); }
+  ::-webkit-scrollbar-button:horizontal:increment:hover,
+  ::-webkit-scrollbar-button:horizontal:increment:active { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 6'%3E%3Cpath fill='%23000000' d='M1 0 5 3 1 6Z'/%3E%3C/svg%3E"); }
 }
 [data-slot="button"],
 [data-slot="alert-dialog-action"],

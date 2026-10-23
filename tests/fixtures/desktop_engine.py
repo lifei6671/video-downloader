@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.7.5", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.12.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
@@ -16,7 +16,7 @@ platform = 'youtube' if source.hostname == 'www.youtube.com' else 'tiktok' if so
 def emit(event_type, **data):
     print(json.dumps(dict(protocol_version=3, id=request["id"], type=event_type, **data)), flush=True)
 if request['method'] in ('check_dependencies', 'install_dependency'):
-    assert set(params).issubset({'runtime_directory', 'tool', 'staging_dir'})
+    assert set(params).issubset({'runtime_directory', 'tool', 'staging_dir', 'variant'})
     assert Path(params['runtime_directory']).is_absolute()
     if request['method'] == 'install_dependency':
         assert Path(params['staging_dir']).parent == Path(params['runtime_directory'])
@@ -25,7 +25,37 @@ if request['method'] in ('check_dependencies', 'install_dependency'):
         if params['tool'] == 'javascript':
             time.sleep(120)
         emit('dependency_progress', tool=params['tool'], phase='installing', downloaded_bytes=20, total_bytes=20)
+        mode_file = Path(params['runtime_directory']).parent / 'dependency-commit-mode'
+        if params['tool'] == 'fun-asr-nano' and mode_file.is_file():
+            stage, root = Path(params['staging_dir']), Path(params['runtime_directory'])
+            name = 'fun-asr-nano-cuda' if params.get('variant') == 'cuda' else 'fun-asr-nano'
+            prepared = stage / 'prepared'; prepared.mkdir()
+            (prepared / 'new-model').write_bytes(b'new')
+            previous = stage / 'previous'; previous.mkdir()
+            if (root / name).exists(): (root / name).rename(previous / name)
+            if mode_file.read_text() == 'between-renames':
+                mode_file.with_name('dependency-commit-started').write_text('ready')
+                time.sleep(120)
+            prepared.rename(root / name)
+            (root / 'fun-asr-nano-backend.json').write_text(json.dumps(dict(variant=params.get('variant'))))
+            mode_file.with_name('dependency-commit-started').write_text('ready')
+            time.sleep(120)
     emit('dependencies', result=dict(platform='fixture', directory=params['runtime_directory'], tools=[]))
+    sys.exit(0)
+if request['method'] == 'transcribe_video':
+    assert set(params) == {'source', 'staging_dir', 'runtime_directory'}
+    stage = Path(params['staging_dir'])
+    mode = Path(params['source']).stem
+    backend = 'cuda' if mode.startswith('cuda') else 'cpu'
+    if backend == 'cuda': emit('transcription_progress', phase='segmenting', duration_seconds=3, backend=backend)
+    emit('transcription_progress', phase='recognizing', duration_seconds=3, backend=backend)
+    if mode.startswith('hold'):
+        time.sleep(120)
+    if mode.startswith('fail'):
+        emit('error', error={'code':'TRANSCRIPTION_FAILED'}); sys.exit(1)
+    text = '' if mode.startswith('silent') else '欢迎体验。\nEnglish text.'
+    (stage / 'transcript.txt').write_text(text, encoding='utf-8', newline='\n')
+    emit('transcribed', filename='transcript.txt', bytes=len(text.encode()), no_speech=not text, duration_seconds=3, backend=backend)
     sys.exit(0)
 if request['method'] == 'extract_cover':
     assert set(params) == {'runtime_directory', 'staging_dir', 'filename'}

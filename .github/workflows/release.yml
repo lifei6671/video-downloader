@@ -76,6 +76,8 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q
+      - name: Build CPU speech helper
+        run: python scripts/build_asr.py
       - name: Package engine
         run: python -m PyInstaller --noconfirm --distpath python-engine/dist --workpath python-engine/build python-engine/pyinstaller.spec
       - name: Check packaged engine

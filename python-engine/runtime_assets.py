@@ -30,6 +30,15 @@ DENO = {
 def assets(tool, platform):
     """Return fixed URL, output name, compression, size, digest tuples."""
     suffix = '.exe' if platform.startswith('win32-') else ''
+    if tool == 'fun-asr-nano' and platform in FFMPEG:
+        from transcription import MODEL_REVISION, VAD_REVISION
+        return [
+            (f'https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/{MODEL_REVISION}/funasr-encoder-f16.gguf',
+             'funasr-encoder-f16.gguf', 'raw', 469331008, 'f92f91d01a24fbed6c863495b2ee8c6a6788144a02858b75743f0946668de8a2'),
+            (f'https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/resolve/{MODEL_REVISION}/qwen3-0.6b-q8_0.gguf',
+             'qwen3-0.6b-q8_0.gguf', 'raw', 804753280, '819f385dc0e035dccc3d9e7edaf6b7b044b8ba7ace63cbcbf84c7e397eecbf27'),
+            (f'https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF/resolve/{VAD_REVISION}/fsmn-vad.gguf',
+             'fsmn-vad.gguf', 'raw', 1720512, '1270f2559c495f4e7b6e739541151027d360761a3fda43fc147034f5719f5479')]
     if tool == 'ffmpeg' and platform in FFMPEG:
         names = [(f'ffmpeg-{platform}.gz', 'ffmpeg' + suffix, 'gzip'),
                  (f'ffprobe-{platform}.gz', 'ffprobe' + suffix, 'gzip'),

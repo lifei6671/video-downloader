@@ -1,6 +1,8 @@
 # 技术文档
 
 - [开发、验证与发布](development.md)：源码运行、测试、引擎打包、CI 与标签发布。
+- [单视频文案提取](fun-asr-nano.md)：Fun-ASR-Nano CPU / Windows CUDA、模型按需下载、旧结果保留与导出契约。
+- [文案提取验证](nano-cuda-validation.md)：Nano Windows 真实模型、Tauri、回归与跨平台验收边界。
 - [macOS 验证记录](macos-validation.md)：Apple Silicon 安装包、双平台 GUI 下载及正常重启恢复，以及 Intel / 旧系统验收边界。
 - [解析缓存验收](parse-cache-validation.md)：SQLite 元数据/图片缓存、链接别名、重启预览及下载重新解析。
 - [双引擎与图集验收](dual-engine-validation.md)：正式 macOS GUI、文件校验、重启及平台验收边界。
@@ -19,3 +21,5 @@
 
 - [视频规格选择与抖音 4K 验收](video-format-validation.md)
 - [TikTok 视频规格选择在线验收](tiktok-video-format-validation.md)
+
+- [Fun-ASR-Nano Windows CUDA](cuda-acceleration.md)：独立 VAD、版本选择与下载边界；[本轮验证](nano-cuda-validation.md)。

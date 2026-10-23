@@ -17,6 +17,8 @@ use std::{
 };
 use tokio::sync::watch;
 use uuid::Uuid;
+#[path = "transcription.rs"]
+pub mod transcription;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -96,7 +98,8 @@ fn file_missing(task: &Task) -> bool {
 fn same_download_variant(old: &Value, video: &Value) -> bool {
     let old_kind = old["kind"].as_str().unwrap_or("video");
     let kind = video["kind"].as_str().unwrap_or("video");
-    old["platform"] == video["platform"] && old["video_id"] == video["video_id"]
+    old["platform"] == video["platform"]
+        && old["video_id"] == video["video_id"]
         && old_kind == kind
         && (kind == "image_album" || video["platform"] == "telegram"
             // Legacy records without a format represent an unspecified variant.
@@ -111,7 +114,10 @@ fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
             old.id != task.id
                 && old.status == Status::Completed
                 && !file_missing(old)
-                && old.video.as_ref().is_some_and(|v| same_download_variant(v, video))
+                && old
+                    .video
+                    .as_ref()
+                    .is_some_and(|v| same_download_variant(v, video))
         })
     })
 }
@@ -119,6 +125,7 @@ fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
 pub enum TaskEvent {
     Updated(Box<Task>),
     Removed(String),
+    Transcription(Box<transcription::Snapshot>),
 }
 
 struct Active {
@@ -138,6 +145,8 @@ struct Inner {
     workers: Vec<tokio::task::JoinHandle<()>>,
     closing: bool,
     dependency_cancel: Option<watch::Sender<bool>>,
+    transcription: Option<transcription::ActiveTranscription>,
+    transcription_unsaved: HashMap<String, transcription::Snapshot>,
     tdl_login_cancel: Option<watch::Sender<bool>>,
     tdl_login_control: Option<tdl_bridge::LoginControl>,
 }
@@ -157,6 +166,27 @@ fn now() -> u64 {
         .expect("system clock before epoch")
         .as_secs()
 }
+fn remove_staging_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        // A terminating native process or filesystem filter can briefly retain a
+        // handle even after the Job has no active processes. Retry only these
+        // Windows sharing/lock violations, for at most 310 ms in total.
+        let mut delay = 10;
+        loop {
+            match std::fs::remove_dir_all(path) {
+                Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) && delay <= 160 => {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    delay *= 2;
+                }
+                result => return result,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    std::fs::remove_dir_all(path)
+}
+
 fn cleanup_staging(db: &Connection, id: &str, path: &Path) -> Result<()> {
     if path
         .file_name()
@@ -173,7 +203,7 @@ fn cleanup_staging(db: &Connection, id: &str, path: &Path) -> Result<()> {
                     bail!("INVALID_STAGING_PATH");
                 }
             }
-            std::fs::remove_dir_all(path).context("IO_ERROR")?;
+            remove_staging_directory(path).context("IO_ERROR")?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         _ => bail!("INVALID_STAGING_PATH"),
@@ -257,6 +287,7 @@ impl Core {
             db.execute("ALTER TABLE commit_intents ADD COLUMN manifest TEXT", [])?;
         }
         let migrate_cache = parse_cache::init(&db)?;
+        transcription::init(&db)?;
         let settings = settings::load(&db, directory)?;
         let mut tasks = {
             let mut query =
@@ -465,6 +496,8 @@ impl Core {
                 workers: Vec::new(),
                 closing: false,
                 dependency_cancel: None,
+                transcription: None,
+                transcription_unsaved: HashMap::new(),
                 tdl_login_cancel: None,
                 tdl_login_control: None,
             }),
@@ -619,9 +652,23 @@ impl Core {
         tool: Option<String>,
         progress: impl FnMut(Value) + Send + 'static,
     ) -> Result<Value> {
+        self.dependencies_variant(tool, None, progress).await
+    }
+
+    pub async fn dependencies_variant(
+        self: &Arc<Self>,
+        tool: Option<String>,
+        variant: Option<String>,
+        progress: impl FnMut(Value) + Send + 'static,
+    ) -> Result<Value> {
         if tool
             .as_ref()
-            .is_some_and(|v| !matches!(v.as_str(), "ffmpeg" | "javascript"))
+            .is_some_and(|v| !matches!(v.as_str(), "ffmpeg" | "javascript" | "fun-asr-nano"))
+        {
+            bail!("INVALID_INPUT");
+        }
+        if variant.as_ref().is_some_and(|v| !matches!(v.as_str(), "cpu" | "cuda"))
+            || (variant.is_some() && tool.as_deref() != Some("fun-asr-nano"))
         {
             bail!("INVALID_INPUT");
         }
@@ -635,19 +682,27 @@ impl Core {
             if inner.dependency_cancel.is_some() {
                 bail!("DEPENDENCY_BUSY");
             }
+            if tool.is_some() && inner.transcription.is_some() {
+                bail!("TRANSCRIPTION_BUSY");
+            }
             inner.dependency_cancel = Some(cancel);
             let core = self.clone();
             inner.workers.retain(|worker| !worker.is_finished());
             inner.workers.push(tokio::spawn(async move {
                 let result = async {
                     let mut params = json!({"runtime_directory":core.runtime_directory});
+                    let mut rollback = None;
                     let stage = if let Some(tool) = tool {
                         std::fs::create_dir_all(&core.runtime_directory).context("IO_ERROR")?;
+                        rollback = Some(crate::runtime_dependencies::InstallRollback::capture(
+                            &core.runtime_directory, &tool, variant.as_deref(),
+                        )?);
                         let stage = tempfile::Builder::new()
                             .prefix(".install-")
                             .tempdir_in(&core.runtime_directory)
                             .context("IO_ERROR")?;
                         params["tool"] = tool.into();
+                        params["variant"] = json!(variant);
                         params["staging_dir"] = stage.path().to_string_lossy().into_owned().into();
                         Some(stage)
                     } else {
@@ -671,6 +726,16 @@ impl Core {
                     )
                     .await;
                     // The bridge reaps the whole process tree before staging is removed.
+                    if result.is_err() {
+                        if let (Some(rollback), Some(prepared_stage)) = (rollback, stage.as_ref()) {
+                            if let Err(error) = rollback.restore(prepared_stage.path()) {
+                                // Preserve recoverable backups rather than deleting them
+                                // when an OS error prevents restoration.
+                                if let Some(stage) = stage { let _ = stage.keep(); }
+                                return Err(error);
+                            }
+                        }
+                    }
                     drop(stage);
                     result.map(|value| value["result"].clone())
                 }
@@ -832,7 +897,11 @@ impl Core {
         if !matches!(
             task.status,
             Status::Completed | Status::Failed | Status::Canceled
-        ) || inner.active.contains_key(id)
+        ) || inner
+            .transcription
+            .as_ref()
+            .is_some_and(|a| a.snapshot.task_id == id)
+            || inner.active.contains_key(id)
             || inner.downloads.contains(id)
         {
             bail!("TASK_BUSY");
@@ -864,6 +933,10 @@ impl Core {
                     )
                     && !inner.active.contains_key(&task.id)
                     && !inner.downloads.contains(&task.id)
+                    && !inner
+                        .transcription
+                        .as_ref()
+                        .is_some_and(|a| a.snapshot.task_id == task.id)
             })
             .map(|task| task.id.clone())
             .collect();
@@ -907,6 +980,8 @@ impl Core {
             .collect();
         let tx = inner.db.transaction().context("DATABASE_ERROR")?;
         for id in &ids {
+            tx.execute("DELETE FROM video_transcripts WHERE task_id=?", [id])
+                .context("DATABASE_ERROR")?;
             tx.execute("DELETE FROM commit_intents WHERE task_id=?", [id])
                 .context("DATABASE_ERROR")?;
             tx.execute("DELETE FROM download_tasks WHERE id=?", [id])
@@ -919,6 +994,9 @@ impl Core {
         // Staging records, if cleanup previously failed, remain available for
         // startup cleanup. Removing history never touches a completed video.
         inner.tasks.retain(|t| !removing.contains(t.id.as_str()));
+        inner
+            .transcription_unsaved
+            .retain(|id, _| !removing.contains(id.as_str()));
         for id in &ids {
             (self.emit)(TaskEvent::Removed(id.clone()));
         }
@@ -949,7 +1027,13 @@ impl Core {
 
     pub fn delete_local_file(&self, id: &str) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.active.contains_key(id) || inner.downloads.contains(id) {
+        if inner.active.contains_key(id)
+            || inner.downloads.contains(id)
+            || inner
+                .transcription
+                .as_ref()
+                .is_some_and(|a| a.snapshot.task_id == id)
+        {
             bail!("TASK_BUSY");
         }
         let task = inner
@@ -1794,6 +1878,9 @@ impl Core {
         let (active, workers) = {
             let mut inner = self.inner.lock().unwrap();
             inner.closing = true;
+            if let Some(active) = &inner.transcription {
+                let _ = active.cancel.send(true);
+            }
             if let Some(cancel) = &inner.dependency_cancel {
                 let _ = cancel.send(true);
             }
@@ -1840,6 +1927,295 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn staging_cleanup_waits_for_transient_exclusive_handles_and_preserves_persistent_errors() {
+        use std::os::windows::fs::OpenOptionsExt;
+        for transient in [true, false] {
+            let stage = tempfile::Builder::new().prefix("yingqu-lock-test-").tempdir().unwrap();
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch("CREATE TABLE task_staging(task_id TEXT PRIMARY KEY,path TEXT NOT NULL);").unwrap();
+            db.execute("INSERT INTO task_staging VALUES(?1,?2)", params!["lock-test", stage.path().to_string_lossy()]).unwrap();
+            let file = std::fs::OpenOptions::new().write(true).create_new(true).share_mode(0)
+                .open(stage.path().join("audio.wav")).unwrap();
+            if transient {
+                let release = std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                    drop(file);
+                });
+                cleanup_staging(&db, "lock-test", stage.path()).unwrap();
+                release.join().unwrap();
+            } else {
+                assert_eq!(cleanup_staging(&db, "lock-test", stage.path()).unwrap_err().to_string(), "IO_ERROR");
+                assert_eq!(db.query_row("SELECT count(*) FROM task_staging", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+                drop(file);
+                cleanup_staging(&db, "lock-test", stage.path()).unwrap();
+            }
+            assert!(!stage.path().exists());
+            assert_eq!(db.query_row("SELECT count(*) FROM task_staging", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        }
+    }
+    async fn transcript_done(app: &Core, id: &str) -> transcription::Snapshot {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = app.transcript(id).unwrap().unwrap();
+                if snapshot.state != "running" && app.inner.lock().unwrap().transcription.is_none()
+                {
+                    return snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    async fn transcript_video(app: &Arc<Core>, name: &str) -> Task {
+        let task = app.resolve("valid".into()).unwrap();
+        wait(app, &task.id, Status::Ready).await;
+        app.download(&task.id, true).unwrap();
+        let mut task = wait(app, &task.id, Status::Completed).await;
+        let path = task.path.as_ref().unwrap().parent().unwrap().join(name);
+        std::fs::rename(task.path.as_ref().unwrap(), &path).unwrap();
+        task.path = Some(path);
+        let mut inner = app.inner.lock().unwrap();
+        persist(&inner.db, &task).unwrap();
+        *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
+        task
+    }
+    #[tokio::test]
+    async fn transcription_result_copy_export_restart_and_history_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = transcript_video(&app, "speech.mp4").await;
+        let original = std::fs::read(task.path.as_ref().unwrap()).unwrap();
+        app.start_transcription(&task.id, false).unwrap();
+        let result = transcript_done(&app, &task.id).await;
+        assert_eq!(result.state, "completed", "{:?}", result.error_code);
+        assert_eq!(
+            app.transcript_text(&task.id).unwrap().text,
+            "欢迎体验。\nEnglish text."
+        );
+        assert_eq!(
+            std::fs::read(task.path.as_ref().unwrap()).unwrap(),
+            original
+        );
+        assert!(app.transcripts().unwrap()[0].result.is_none());
+        assert!(app.transcripts().unwrap()[0].has_result);
+        let exported = root.path().join("文案.txt");
+        transcription::export_txt(&app.transcript_text(&task.id).unwrap(), &exported).unwrap();
+        assert!(std::fs::read(&exported)
+            .unwrap()
+            .starts_with(b"\xef\xbb\xbf"));
+        let alias = root.path().join("video-alias.txt");
+        std::fs::hard_link(task.path.as_ref().unwrap(), &alias).unwrap();
+        assert_eq!(
+            transcription::export_txt(&app.transcript_text(&task.id).unwrap(), &alias)
+                .unwrap_err()
+                .to_string(),
+            "TRANSCRIPTION_EXPORT_SOURCE"
+        );
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(
+            app.transcript(&task.id).unwrap().unwrap().state,
+            "completed"
+        );
+        app.remove_after_transcription(&task.id, false)
+            .await
+            .unwrap();
+        assert!(app.transcripts().unwrap().is_empty());
+        assert!(exported.is_file() && task.path.unwrap().is_file());
+        app.shutdown().await;
+    }
+    #[test]
+    fn transcription_export_cannot_recreate_a_missing_video_as_text() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().canonicalize().unwrap().join("video.mp4");
+        let result = transcription::TranscriptResult {
+            text: "文案".into(),
+            source: transcription::Source {
+                path: source.clone(),
+                size: 123,
+                mtime_ns: "1".into(),
+            },
+            model_revision: "fixture".into(),
+            model_name: None,
+            pipeline_revision: "fixture".into(),
+            backend: None,
+            completed_at: 1,
+        };
+        assert_eq!(
+            transcription::export_txt(&result, &root.path().join("video.mp4"))
+                .unwrap_err()
+                .to_string(),
+            "TRANSCRIPTION_EXPORT_SOURCE"
+        );
+        assert!(!source.exists());
+    }
+    #[tokio::test]
+    async fn transcription_cuda_vad_progress_and_model_identity_survive_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        for (tool, variant) in [(None, Some("cuda")), (Some("ffmpeg"), Some("cuda")), (Some("fun-asr-nano"), Some("metal"))] {
+            assert_eq!(app.dependencies_variant(tool.map(str::to_owned), variant.map(str::to_owned), |_| {}).await.unwrap_err().to_string(), "INVALID_INPUT");
+        }
+        let task = transcript_video(&app, "cuda-speech.mp4").await;
+        app.start_transcription(&task.id, false).unwrap();
+        let value = transcript_done(&app, &task.id).await;
+        assert_eq!(value.state, "completed", "{:?}", value.error_code);
+        let result = value.result.unwrap();
+        assert_eq!(result.backend.as_deref(), Some("cuda"));
+        assert_eq!(result.model_revision, "ce72677f84900f0dc57f498ace253bfb3c9155b6");
+        assert_eq!(result.pipeline_revision, "fun-asr-nano-audiocpp-50749561-fsmn-v1");
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(app.transcript(&task.id).unwrap().unwrap().result.unwrap().backend.as_deref(), Some("cuda"));
+        app.shutdown().await;
+    }
+    #[tokio::test]
+    async fn transcription_nano_identity_is_persisted_and_legacy_results_remain_readable() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = transcript_video(&app, "speech.mp4").await;
+        app.start_transcription(&task.id, false).unwrap();
+        let value = transcript_done(&app, &task.id).await;
+        assert_eq!(value.state, "completed", "{:?}", value.error_code);
+        assert_eq!(value.backend.as_deref(), Some("cpu"));
+        let result = value.result.as_ref().unwrap();
+        assert_eq!(result.backend.as_deref(), Some("cpu"));
+        assert_eq!(result.model_name.as_deref(), Some("Fun-ASR-Nano"));
+        assert_eq!(result.model_revision, "46e849502a867080d66d351b8dfb1018b607e509");
+        assert_eq!(result.pipeline_revision, "fun-asr-nano-cpu-fbbfe018-v1");
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        let value = app.transcript(&task.id).unwrap().unwrap();
+        assert_eq!(value.backend.as_deref(), Some("cpu"));
+        let mut old = serde_json::to_value(value).unwrap();
+        old["backend"] = json!("cuda");
+        old["result"]["backend"] = json!("cuda");
+        old["result"]["model_revision"] = json!("90c1c61912018b70ada0fcc024ea24aca62f2e63");
+        old["result"]["pipeline_revision"] = json!("sensevoice-cuda-fbbfe018-v1");
+        old["result"].as_object_mut().unwrap().remove("model_name");
+        app.inner.lock().unwrap().db.execute("UPDATE video_transcripts SET snapshot=? WHERE task_id=?",
+            params![serde_json::to_string(&old).unwrap(), task.id]).unwrap();
+        let legacy = app.transcript(&task.id).unwrap().unwrap().result.unwrap();
+        assert_eq!(legacy.backend.as_deref(), Some("cuda"));
+        assert!(legacy.model_name.is_none());
+        assert_eq!(legacy.text, "欢迎体验。\nEnglish text.");
+        old.as_object_mut().unwrap().remove("backend");
+        old["result"].as_object_mut().unwrap().remove("backend");
+        let old: transcription::Snapshot = serde_json::from_value(old).unwrap();
+        assert!(old.backend.is_none() && old.result.unwrap().backend.is_none());
+        app.shutdown().await;
+    }
+    #[tokio::test]
+    async fn transcription_failure_empty_and_cancel_preserve_previous_success() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let mut task = transcript_video(&app, "speech.mp4").await;
+        app.start_transcription(&task.id, false).unwrap();
+        transcript_done(&app, &task.id).await;
+        for (name, expected) in [
+            ("fail.mp4", "failed"),
+            ("silent.mp4", "no_speech"),
+            ("hold.mp4", "canceled"),
+        ] {
+            let path = task.path.as_ref().unwrap().with_file_name(name);
+            std::fs::rename(task.path.as_ref().unwrap(), &path).unwrap();
+            task.path = Some(path);
+            {
+                let mut inner = app.inner.lock().unwrap();
+                *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
+            }
+            let started = app.start_transcription(&task.id, true).unwrap();
+            if expected == "canceled" {
+                app.cancel_transcription(&task.id, &started.operation_id)
+                    .await
+                    .unwrap();
+            }
+            let result = transcript_done(&app, &task.id).await;
+            assert_eq!(result.state, expected);
+            assert_eq!(
+                app.transcript_text(&task.id).unwrap().text,
+                "欢迎体验。\nEnglish text."
+            );
+        }
+        assert!(
+            app.inner
+                .lock()
+                .unwrap()
+                .db
+                .query_row("SELECT count(*) FROM task_staging", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap()
+                == 0
+        );
+        app.shutdown().await;
+    }
+    #[tokio::test]
+    async fn transcription_exclusion_delete_and_shutdown_reap_workers() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let one = transcript_video(&app, "hold.mp4").await;
+        let two = transcript_video(&app, "other.mp4").await;
+        app.start_transcription(&one.id, false).unwrap();
+        assert_eq!(
+            app.start_transcription(&two.id, false)
+                .err()
+                .unwrap()
+                .to_string(),
+            "TRANSCRIPTION_BUSY"
+        );
+        assert_eq!(
+            app.dependencies(Some("fun-asr-nano".into()), |_| {})
+                .await
+                .unwrap_err()
+                .to_string(),
+            "TRANSCRIPTION_BUSY"
+        );
+        assert!(!app.clear_history(None).unwrap().contains(&one.id));
+        app.remove_after_transcription(&one.id, true).await.unwrap();
+        assert!(!one.path.unwrap().exists());
+        assert!(app.transcripts().unwrap().is_empty());
+        let task = transcript_video(&app, "hold-again.mp4").await;
+        app.start_transcription(&task.id, false).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), app.shutdown())
+            .await
+            .unwrap();
+        assert_eq!(app.transcript(&task.id).unwrap().unwrap().state, "canceled");
+    }
+    #[tokio::test]
+    async fn transcription_database_failure_remains_queryable_without_unsaved_result() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = transcript_video(&app, "speech.mp4").await;
+        app.inner.lock().unwrap().db.execute_batch("CREATE TRIGGER reject_transcript_end BEFORE UPDATE ON video_transcripts WHEN json_extract(NEW.snapshot,'$.state') != 'running' BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        app.start_transcription(&task.id, false).unwrap();
+        let result = transcript_done(&app, &task.id).await;
+        assert_eq!(result.state, "failed");
+        assert_eq!(result.error_code.as_deref(), Some("DATABASE_ERROR"));
+        assert!(!result.has_result && result.result.is_none());
+        assert_eq!(app.transcripts().unwrap()[0].state, "failed");
+        assert!(app.transcript_text(&task.id).is_err());
+        app.inner
+            .lock()
+            .unwrap()
+            .db
+            .execute_batch("DROP TRIGGER reject_transcript_end;")
+            .unwrap();
+        app.start_transcription(&task.id, true).unwrap();
+        assert_eq!(transcript_done(&app, &task.id).await.state, "completed");
+        app.inner.lock().unwrap().db.execute_batch("CREATE TRIGGER reject_transcript_end BEFORE UPDATE ON video_transcripts WHEN json_extract(NEW.snapshot,'$.state') != 'running' BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        app.start_transcription(&task.id, true).unwrap();
+        let result = transcript_done(&app, &task.id).await;
+        assert_eq!(result.state, "failed");
+        assert_eq!(result.result.unwrap().text, "欢迎体验。\nEnglish text.");
+        app.shutdown().await;
+    }
     #[tokio::test]
     async fn cover_export_preserves_cached_legacy_and_album_bytes_and_real_format() {
         let root = tempfile::tempdir().unwrap();
@@ -2220,6 +2596,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         let status = app.dependencies(None, |_| {}).await.unwrap();
+        for tool in ["sensevoice", "sensevoice-cuda", "arbitrary-url"] {
+            assert_eq!(app.dependencies(Some(tool.into()), |_| {}).await.unwrap_err().to_string(), "INVALID_INPUT");
+        }
         assert_eq!(
             status["directory"],
             root.path().join("runtime").to_string_lossy().as_ref()
@@ -2275,6 +2654,51 @@ mod tests {
         );
         app.dependencies(None, |_| {}).await.unwrap();
         app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn canceled_dependency_commit_restores_directories_and_backend_choice() {
+        for variant in ["cpu", "cuda"] {
+            for had_target in [false, true] {
+                for phase in ["between-renames", "after-choice"] {
+                    let root = tempfile::tempdir().unwrap();
+                    let app = core(root.path());
+                    let runtime = root.path().join("runtime");
+                    std::fs::create_dir_all(&runtime).unwrap();
+                    let name = if variant == "cuda" { "fun-asr-nano-cuda" } else { "fun-asr-nano" };
+                    let target = runtime.join(name);
+                    if had_target {
+                        std::fs::create_dir(&target).unwrap();
+                        std::fs::write(target.join("old-model"), b"original").unwrap();
+                    }
+                    let selection = runtime.join("fun-asr-nano-backend.json");
+                    let original = (phase == "after-choice").then_some(b"{\"variant\":\"cpu\"}".to_vec());
+                    if let Some(bytes) = &original { std::fs::write(&selection, bytes).unwrap(); }
+                    std::fs::write(root.path().join("dependency-commit-mode"), phase).unwrap();
+                    let running = app.clone();
+                    let worker = tokio::spawn(async move {
+                        running.dependencies_variant(Some("fun-asr-nano".into()), Some(variant.into()), |_| {}).await
+                    });
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        while !root.path().join("dependency-commit-started").is_file() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    }).await.unwrap();
+                    if phase == "after-choice" && variant == "cuda" && had_target {
+                        app.shutdown().await;
+                    } else { app.cancel_dependency().unwrap(); }
+                    assert_eq!(worker.await.unwrap().unwrap_err().to_string(), "CANCELED");
+                    assert_eq!(std::fs::read(&selection).ok(), original);
+                    if had_target {
+                        assert_eq!(std::fs::read(target.join("old-model")).unwrap(), b"original");
+                        assert!(!target.join("new-model").exists());
+                    } else { assert!(!target.exists()); }
+                    assert!(!std::fs::read_dir(&runtime).unwrap().any(|entry|
+                        entry.unwrap().file_name().to_string_lossy().starts_with(".install-")));
+                    app.shutdown().await;
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -2889,9 +3313,13 @@ mod tests {
         let app = core(root.path());
         app.set_max_downloads(1).unwrap();
         app.save_profile(settings::ProfileUpdate {
-            platform: "youtube".into(), user_agent: "youtube-fixture".into(),
-            cookie: None, proxy: None, http_chunk_size: Some(Some(10_485_760)),
-        }).unwrap();
+            platform: "youtube".into(),
+            user_agent: "youtube-fixture".into(),
+            cookie: None,
+            proxy: None,
+            http_chunk_size: Some(Some(10_485_760)),
+        })
+        .unwrap();
         let a = enqueue(&app, "8201").await;
         let old = app.settings().profiles[0].user_agent.clone();
         let b = enqueue(&app, "8202").await;
@@ -2904,9 +3332,13 @@ mod tests {
         })
         .unwrap();
         app.save_profile(settings::ProfileUpdate {
-            platform: "youtube".into(), user_agent: "youtube-fixture".into(),
-            cookie: None, proxy: None, http_chunk_size: Some(Some(0)),
-        }).unwrap();
+            platform: "youtube".into(),
+            user_agent: "youtube-fixture".into(),
+            cookie: None,
+            proxy: None,
+            http_chunk_size: Some(Some(0)),
+        })
+        .unwrap();
         app.cancel(&a.id).await.unwrap();
         started(root.path(), "8202").await;
         let captured: Value = serde_json::from_str(
@@ -3517,7 +3949,12 @@ mod tests {
         let mut legacy = original.clone();
         legacy.video.as_mut().unwrap()["selected_format_id"] = Value::Null;
         assert!(previously_downloaded(&[legacy], &different));
-        for status in [Status::Failed, Status::Canceled, Status::Queued, Status::Downloading] {
+        for status in [
+            Status::Failed,
+            Status::Canceled,
+            Status::Queued,
+            Status::Downloading,
+        ] {
             let mut old = original.clone();
             old.status = status;
             assert!(!previously_downloaded(&[old], &ready));
@@ -3535,11 +3972,17 @@ mod tests {
             tokio::spawn(async move { one.download(&id_one, false) }),
             tokio::spawn(async move { two.download(&id_two, false) })
         );
-        assert_eq!(usize::from(one.unwrap().is_ok()) + usize::from(two.unwrap().is_ok()), 1);
+        assert_eq!(
+            usize::from(one.unwrap().is_ok()) + usize::from(two.unwrap().is_ok()),
+            1
+        );
         wait(&app, &second.id, Status::Completed).await;
         let third = app.resolve("valid".into()).unwrap();
         wait(&app, &third.id, Status::Ready).await;
-        assert_eq!(app.download(&third.id, false).unwrap_err().to_string(), "ALREADY_DOWNLOADED");
+        assert_eq!(
+            app.download(&third.id, false).unwrap_err().to_string(),
+            "ALREADY_DOWNLOADED"
+        );
         std::fs::remove_file(original.path.unwrap()).unwrap();
         // The other completed format must not block this exact, now-missing variant.
         app.download(&third.id, false).unwrap();
@@ -3549,7 +3992,8 @@ mod tests {
 
     #[test]
     fn album_telegram_and_legacy_variants_have_explicit_identity_rules() {
-        let video = json!({"platform":"douyin","video_id":"123","kind":"video","selected_format_id":"a"});
+        let video =
+            json!({"platform":"douyin","video_id":"123","kind":"video","selected_format_id":"a"});
         let mut other = video.clone();
         other["selected_format_id"] = "b".into();
         assert!(!same_download_variant(&video, &other));

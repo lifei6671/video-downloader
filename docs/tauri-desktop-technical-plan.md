@@ -405,3 +405,11 @@ Rust 使用 reqwest（系统 TLS 与系统代理支持）请求固定 GitHub 公
 平台账号编辑器通过 get_profile_proxy 专用命令读取完整已保存代理（含系统凭据存储中的认证地址），输入框在保存后、切换平台及重开设置时回显。普通设置仍只含无账号密码的地址；数据库与任务事件不新增代理密码。代理未改提交 null，直连明确提交空值；读取中或失败时禁止编辑代理，其他字段可以保存且保留旧代理。复用既有凭据存储和配置快照，不新增持久化或认证方式。
 
 设置分类标题与平台 Tab 固定在操作区顶部，当前平台表单独立滚动，左侧分类导航保持可见；下载设置和运行依赖也仅滚动分类内容。保留既有隐藏面板、未保存草稿、方向键和焦点行为。验证入口和边界见 [YouTube 设置验证](youtube-validation.md#代理回显与设置顶部固定2026-10-21)。
+
+### Fun-ASR-Nano 单视频文案（2026-10-23）
+
+按用户新要求，语音模型更换为 Fun-ASR-Nano：固定 F16 音频编码器、Q8_0 Qwen3-0.6B 解码器与 FSMN-VAD；官方 C++ CPU helper 随 sidecar 分发，模型约 1.2 GiB，由用户点击后下载到 `runtime/fun-asr-nano/`。Windows 提供 audio.cpp CUDA 与独立 FSMN-VAD 可选加速，macOS 保留 CPU，不沿用旧 SenseVoice CUDA 文件或选择，不要求用户安装 Python、PyTorch 或 CUDA Toolkit。
+
+协议 v3，引擎 0.12.0。`tool=fun-asr-nano` 提供 `variant=cpu|cuda`（省略为 CPU），仅 Windows x64 提供 CUDA；其他工具不接受 variant。CPU 与 CUDA 是同一依赖的版本，分别安装、验证后保存选择；[CUDA 契约](cuda-acceleration.md) 定义独立分段、显卡检测、固定下载、复用与回滚。模型三文件固定长度/SHA-256，全部校验与真实离线冒烟通过后整目录提交；修复失败回滚旧 Nano。取消/退出回收整棵进程树，模型安装与转录互斥。
+
+保留原单任务转录、关闭弹窗继续、取消、失败/空语音保留旧文案、原视频不变、完整 TXT 导出与数据库恢复契约。新结果保存 `model_name=Fun-ASR-Nano`、固定模型修订和 pipeline；旧记录缺少 model_name 时显示 SenseVoiceSmall 与其原后端，不自动重算，不删除旧模型或结果。新模型来源、资源、超时及验收见[集成说明](fun-asr-nano.md)。

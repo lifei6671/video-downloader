@@ -6,8 +6,8 @@ async page => {
   const row=title=>page.locator('[data-slot="card"]').filter({has:page.getByText(title,{exact:true})});
   const calls=()=>page.evaluate(()=>window.backgroundTest.calls);
   const results=[];
-  const labels=['播放视频','打开文件夹','从列表移除','复制原链接','删除本地视频'];
-  const tips=['使用系统默认播放器播放','打开文件夹','从列表移除（保留本地文件）','复制原链接','删除本地视频及下载记录'];
+  const labels=['播放视频','提取文案','打开文件夹','从列表移除','复制原链接','删除本地视频'];
+  const tips=['使用系统默认播放器播放','提取视频语音文案','打开文件夹','从列表移除（保留本地文件）','复制原链接','删除本地视频及下载记录'];
   const load=async(scenario='actions')=>{
     await page.goto(base+'/tests/fixtures/background-download.html?scenario='+scenario);
     await page.getByRole('button',{name:'下载任务',exact:true}).click();

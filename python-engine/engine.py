@@ -22,13 +22,14 @@ from browser_cookies import load_default_cookies
 from local_tools import installed_tool, javascript_runtime
 import runtime_dependencies
 import local_cover
+import transcription
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/dtk/upstream/src'))
 import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.7.5'
+ENGINE_VERSION = '0.12.0'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.08.19'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -335,14 +336,19 @@ def operate(method, params, emit):
         raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
     try:
         runtime_dependencies.configure(params.get('runtime_directory'))
+        if method == 'transcribe_video':
+            emit('transcribed', **transcription.transcribe(params, emit))
+            return
         if method == 'extract_cover':
             emit('cover_extracted', **local_cover.extract(params))
             return
         if method in ('check_dependencies', 'install_dependency'):
             result = (runtime_dependencies.status() if method == 'check_dependencies' else
-                      runtime_dependencies.install(params.get('tool'), params.get('staging_dir'), emit))
+                      runtime_dependencies.install(params.get('tool'), params.get('staging_dir'), emit, params.get('variant')))
             emit('dependencies', result=result)
             return
+    except transcription.TranscriptionError as error:
+        raise EngineError(str(error), 'transcription') from None
     except runtime_dependencies.DependencyError as error:
         raise EngineError(str(error), 'dependencies') from None
     platform, url, short = parse_input(params.get('input'))

@@ -4,6 +4,8 @@ import sys
 import sysconfig
 
 root = Path(SPECPATH).parent
+if not (root / 'python-engine/asr' / ('llama-funasr-cli.exe' if sys.platform == 'win32' else 'llama-funasr-cli')).is_file():
+    raise RuntimeError('Build the pinned ASR helper first: python scripts/build_asr.py')
 pyinstaller = distribution('pyinstaller')
 bootloader_license = next(pyinstaller.locate_file(p) for p in pyinstaller.files
                           if str(p).endswith('licenses/COPYING.txt'))
@@ -23,6 +25,7 @@ for name in ('pydantic', 'pydantic-core', 'annotated-types', 'typing-inspection'
 a = Analysis([str(root / 'python-engine' / 'bridge.py')],
              pathex=[str(root / 'python-engine'), str(root / 'vendor/dtk/upstream/src')],
              binaries=[], datas=[
+                 (str(root / 'python-engine/asr'), 'asr'),
                  (str(root / 'vendor/dtk/upstream/LICENSE'), 'licenses/dtk'),
                  (str(root / 'vendor/dtk/upstream/NOTICE'), 'licenses/dtk'),
                  (str(root / 'vendor/yt-dlp-LICENSE'), 'licenses/yt-dlp'),

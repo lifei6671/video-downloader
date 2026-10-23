@@ -33,6 +33,88 @@ fn list_tasks(core: State<AppCore>) -> Vec<Task> {
     core.list()
 }
 #[tauri::command]
+fn list_video_transcripts(
+    core: State<AppCore>,
+) -> Result<Vec<yingqu_core::desktop_core::transcription::Snapshot>, String> {
+    core.transcripts().map_err(error)
+}
+#[tauri::command]
+fn get_video_transcript(
+    core: State<AppCore>,
+    task_id: String,
+) -> Result<Option<yingqu_core::desktop_core::transcription::Snapshot>, String> {
+    core.transcript(&task_id).map_err(error)
+}
+#[tauri::command]
+async fn start_video_transcription(
+    core: State<'_, AppCore>,
+    task_id: String,
+    force: Option<bool>,
+) -> Result<yingqu_core::desktop_core::transcription::Snapshot, String> {
+    core.start_transcription(&task_id, force.unwrap_or(false))
+        .map_err(error)
+}
+#[tauri::command]
+async fn cancel_video_transcription(
+    core: State<'_, AppCore>,
+    task_id: String,
+    operation_id: String,
+) -> Result<(), String> {
+    core.cancel_transcription(&task_id, &operation_id)
+        .await
+        .map_err(error)
+}
+#[tauri::command]
+fn copy_video_transcript(
+    app: tauri::AppHandle,
+    core: State<AppCore>,
+    task_id: String,
+) -> Result<(), String> {
+    let result = core.transcript_text(&task_id).map_err(error)?;
+    app.clipboard()
+        .write_text(result.text)
+        .map_err(|_| "CLIPBOARD_WRITE_FAILED".into())
+}
+#[tauri::command]
+async fn export_video_transcript(
+    app: tauri::AppHandle,
+    core: State<'_, AppCore>,
+    task_id: String,
+) -> Result<Option<String>, String> {
+    let result = core.transcript_text(&task_id).map_err(error)?;
+    let directory = result
+        .source
+        .path
+        .parent()
+        .filter(|p| p.is_dir())
+        .map(|p| p.to_path_buf())
+        .unwrap_or(core.settings().download_directory);
+    let filename = result
+        .source
+        .path
+        .file_stem()
+        .ok_or("IO_ERROR")?
+        .to_string_lossy()
+        .into_owned()
+        + ".txt";
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("导出视频文案")
+        .set_directory(directory)
+        .set_file_name(filename)
+        .add_filter("文本文件", &["txt"])
+        .save_file(move |file| {
+            let _ = tx.send(file);
+        });
+    let Some(file) = rx.await.map_err(|_| "IO_ERROR")? else {
+        return Ok(None);
+    };
+    let path = file.into_path().map_err(|_| "IO_ERROR")?;
+    yingqu_core::desktop_core::transcription::export_txt(&result, &path).map_err(error)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+#[tauri::command]
 fn get_settings(core: State<AppCore>) -> Settings {
     core.settings()
 }
@@ -245,8 +327,10 @@ async fn retry_task(core: State<'_, AppCore>, task_id: String) -> Result<Task, S
     core.retry(&task_id).map_err(error)
 }
 #[tauri::command]
-fn remove_history(core: State<AppCore>, task_id: String) -> Result<(), String> {
-    core.remove_history(&task_id).map_err(error)
+async fn remove_history(core: State<'_, AppCore>, task_id: String) -> Result<(), String> {
+    core.remove_after_transcription(&task_id, false)
+        .await
+        .map_err(error)
 }
 #[tauri::command]
 fn clear_download_history(
@@ -256,8 +340,10 @@ fn clear_download_history(
     core.clear_history(platform.as_deref()).map_err(error)
 }
 #[tauri::command]
-fn delete_local_file(core: State<AppCore>, task_id: String) -> Result<(), String> {
-    core.delete_local_file(&task_id).map_err(error)
+async fn delete_local_file(core: State<'_, AppCore>, task_id: String) -> Result<(), String> {
+    core.remove_after_transcription(&task_id, true)
+        .await
+        .map_err(error)
 }
 #[tauri::command]
 async fn cancel_task(core: State<'_, AppCore>, task_id: String) -> Result<(), String> {
@@ -402,10 +488,11 @@ async fn check_runtime_dependencies(core: State<'_, AppCore>) -> Result<RuntimeS
 async fn install_runtime_dependency(
     core: State<'_, AppCore>,
     tool: String,
+    variant: Option<String>,
     on_progress: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<RuntimeStatus, String> {
     let result = core
-        .dependencies(Some(tool), move |value| {
+        .dependencies_variant(Some(tool), variant, move |value| {
             let _ = on_progress.send(value);
         })
         .await
@@ -496,6 +583,9 @@ fn main() {
                     TaskEvent::Removed(id) => {
                         let _ = handle.emit("task_removed", id);
                     }
+                    TaskEvent::Transcription(snapshot) => {
+                        let _ = handle.emit("transcription_updated", snapshot);
+                    }
                 },
             )?;
             app.manage(core);
@@ -530,6 +620,12 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            list_video_transcripts,
+            get_video_transcript,
+            start_video_transcription,
+            cancel_video_transcription,
+            copy_video_transcript,
+            export_video_transcript,
             list_tasks,
             get_settings,
             save_tdl_settings,

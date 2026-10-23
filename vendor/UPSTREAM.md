@@ -81,3 +81,38 @@ yt-dlp 2026.08.19 的 URL-key parser 对该作品 `bytevc1_4k` 未填尺寸；�
 - FFmpeg/FFprobe：采用 [eugeneware/ffmpeg-static b6.1.1](https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1) 的 Windows x64 / macOS x64、arm64 gzip 静态构建。SHA-256、压缩大小直接核对该 Release 的公开资产元数据，与 Downvid 固定 manifest 对照一致；没有复用其源码。下载保留各平台 LICENSE、README（包含构建/源码说明），二者亦校验 SHA-256。许可依实际构建的 LGPL/GPL 声明，不将静态构建统一描述为 MIT。资产来源及校验值见 `python-engine/runtime_assets.py`。
 - Deno：采用官方 [denoland/deno v2.9.7](https://github.com/denoland/deno/releases/tag/v2.9.7)，按三目标下载 zip，仅提取 deno/deno.exe；固定 Release 资产 digest 和大小。安装时保留同 tag 的 LICENSE.md（MIT，原作者声明），同样固定 SHA-256；SOURCE.txt 记录下载 URL。
 - 下载源只有上述固定 GitHub Release/官方源码地址，无执行远程安装脚本、镜像降级或 PATH 改写。新增工具版本升级须重新核验产物哈希、许可、平台实际执行和本项目媒体接入，不能只更改版本文案。
+
+## Fun-ASR-Nano 本地转录（2026-10-23，当前）
+
+按用户更换模型要求，当前改用下节所列同一固定 FunASR / llama.cpp 源码基线的 `llama-funasr-cli`，由 `scripts/build_asr.py` 构建。`vendor/asr-windows.manifest` 保留 UTF-8 路径支持；CPU helper 与独立 `llama-funasr-vad` 使用相同固定基线构建。Windows 可选 audio.cpp CUDA，macOS 保留 CPU，不再调用 SenseVoice CUDA 组件。
+
+模型来自 [FunAudioLLM/Fun-ASR-Nano-GGUF](https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-GGUF/tree/46e849502a867080d66d351b8dfb1018b607e509)：F16 编码器、Q8_0 解码器，共用上述固定 FSMN-VAD。三份文件的 revision、大小、SHA-256 见[当前集成契约](../docs/fun-asr-nano.md)，均保留 Apache-2.0。既有 `sensevoice-model-LICENSE` 文件名仅为历史命名，内容是两者共用的 Apache-2.0 标准许可，安装时仍复制为模型目录 LICENSE。
+
+不复制或修改推理算法，不引入 FunASR Python/PyTorch。新程序来源 JSON 标明 `model=Fun-ASR-Nano`，生成资源目录移除旧 SenseVoice helper，原用户安装和旧文案保留。下文 SenseVoice/CUDA 为历史来源与验收记录，文件名及旧构建命令不代表当前可执行入口。
+
+## SenseVoiceSmall 本地 CPU 转录（2026-10-23，历史记录）
+
+用户批准单个已下载视频提取文案、复制和 TXT 导出，选择官方 GGUF/C++ CPU 路径，复用现有 sidecar 编排，不引入 FunASR Python、PyTorch、CUDA 或服务端。`scripts/build_sensevoice.py` 下载以下固定源码，完整核对归档 SHA-256，只构建 `llama-funasr-sensevoice`；不修改识别算法。
+
+| 来源 | 固定提交 | 源码 tar.gz SHA-256 | 许可 |
+| --- | --- | --- | --- |
+| [modelscope/FunASR runtime/llama.cpp](https://github.com/modelscope/FunASR/tree/fbbfe01800a8c4c9103cb2150fb1a5d06cc64758/runtime/llama.cpp) | `fbbfe01800a8c4c9103cb2150fb1a5d06cc64758` | `be42f6f6fa86468c3db8ea93b7c1ae80e7389a49be9df989f82a5c59577290bd` | MIT |
+| [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp/tree/803b7fcae893e9caaee3921779628fef83ac0965) | `803b7fcae893e9caaee3921779628fef83ac0965` | `8fe8528e89d8fca8c8b81696efa83ff82c996bf84d17be65e884c1ceae35351e` | MIT |
+
+固定 CMake 参数禁用 GGML_NATIVE、AVX/AVX2/FMA/F16C/SSE42/BMI2、CUDA、Metal、Vulkan、OpenMP 和 llamafile，避免继承构建机指令集或引入 GPU/runtime 依赖。Windows 静态 MSVC runtime，加 `vendor/sensevoice-windows.manifest` 的 UTF-8 activeCodePage 元数据以支持中文路径；macOS helper 使用 deployment target 12.0 和 ad-hoc 签名（应用最低 macOS 13.3 不变）。输出 helper、源码修订 SOURCE.json、FunASR/llama.cpp MIT、miniaudio 的 public-domain/MIT-0 选择许可、模型 Apache-2.0 和冒烟 WAV 一起进入 PyInstaller 资源 `asr/`。模型权重不进安装包。
+
+两个官方模型分别来自 [SenseVoiceSmall-GGUF](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF/tree/90c1c61912018b70ada0fcc024ea24aca62f2e63) 和 [fsmn-vad-GGUF](https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF/tree/6840bae4c5c92ee8c04faaf4db23dd0105098d7f)。官方模型卡均标 Apache-2.0；标准许可全文保存于 `sensevoice-model-LICENSE`，每次模型安装也复制到模型目录。固定文件大小/hash 已在 Windows 完整下载核对，详见 `python-engine/runtime_assets.py` 和[方案](../docs/sensevoice-transcription-plan.md)。升级须重新核对源代码/模型许可、query_tokens、CLI 契约和三平台真实推理，不能仅更新版本标签。
+
+冒烟音频为 [FunAudioLLM/Fun-ASR-Nano-2512 的官方 example/zh.mp3](https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512/blob/272c57b82523ada6fd87095e955f8e29100979ab/example/zh.mp3) 前 3 秒，经 FFmpeg 转为 16 kHz 单声道 PCM16，来源模型卡标 Apache-2.0。原 MP3 SHA-256 `0e64de19e4ff9a02e682955c9112f32d2317cfdbb5bc2f3504664044c993f195`；入库 `python-engine/assets/sensevoice-smoke.wav` SHA-256 `ff683faa421d58af0c3f6c5831954ce0e2eb1e71da89196ec9b3d3eb5105cb6a`。它仅用于模型可加载、可推理检测，不代表语言/自然视频识别质量验收。
+
+Rust 增加 `same-file 1.0.6` 直接依赖（原锁文件已有），通过原生文件身份拒绝 TXT 覆盖源视频及硬链接/符号链接别名；Windows 传递依赖 `winapi-util 0.1.11`。二者均 `MIT OR Unlicense`，选择 MIT，许可全文见 `transcription-licenses.txt`，随安装包放入 `licenses/transcription-licenses.txt`。未复制其源码实现。
+
+## SenseVoice Windows CUDA 可选组件（2026-10-23，历史记录）
+
+复用 [modelscope/FunASR v1.4.11](https://github.com/modelscope/FunASR/releases/tag/v1.4.11) 的 `funasr-llamacpp-windows-x64-cuda.zip` / `funasr-llamacpp-windows-x64-cuda-blackwell.zip`，分别为 sm_86 / sm_120、CUDA 13.2、静态 MSVC runtime；不自行改写推理算法。固定完整 ZIP 大小与 SHA-256 位于 `python-engine/cuda_runtime.py` 和 [CUDA 集成说明](../docs/cuda-acceleration.md)，升级需重新核对架构、DLL、许可证、离线加载、识别及取消/打包。标准包已完整下载计算哈希并在 RTX 4070 SUPER 推理；Blackwell 包仅核对官方元数据，物理硬件未测。
+
+仅安装 SenseVoice helper、`cublas64_13.dll`、`cublasLt64_13.dll` 和 `NVIDIA-CUDA-LICENSE.txt`，原样保留 NVIDIA CUDA 再分发许可。FunASR Apache-2.0、llama.cpp MIT、miniaudio 双许可文本从当前内置资源一并复制；原生源码基线仍见上节，不引入完整 Python FunASR 或 CUDA Toolkit。模型沿用现有 Q8/VAD 来源和 Apache-2.0 许可，CUDA 组件不包含权重。
+
+## audio.cpp Nano CUDA（2026-10-23，当前）
+
+复用 [0xShug0/audio.cpp v0.9.2-drama3-base-small](https://github.com/0xShug0/audio.cpp/releases/tag/v0.9.2-drama3-base-small)，固定模型、程序 ZIP 和 CUDA 12.4 DLL ZIP 的 URL、大小、SHA-256 见 [CUDA 集成](../docs/cuda-acceleration.md) 与 `python-engine/nano_cuda.py`。只提取 CLI、所需 DLL、LICENSE，不运行 server/下载管理器。模型 Apache-2.0，原生库许可随包保留；CUDA EULA 本地副本 `vendor/nvidia-cuda-12.4-EULA.html` 随 native 资源和 CUDA 安装保存。VAD 复用已固定的 FunASR `llama-funasr-vad` 目标，不改写检测算法。无新增 Python ML 依赖。

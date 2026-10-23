@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import io
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -11,6 +12,41 @@ import engine
 import local_tools
 import runtime_assets
 import runtime_dependencies as deps
+import transcription as asr
+
+
+@pytest.mark.parametrize('failure', [None, 'checksum', 'load'])
+def test_model_repair_validates_entire_set_before_replacing_old_install(isolated, monkeypatch, failure):
+    resources = isolated / 'asr'; resources.mkdir()
+    (resources / 'native').write_bytes(b'fixture')
+    (resources / 'models-LICENSE').write_text('fixture license')
+    monkeypatch.setattr(asr, 'native_program', lambda: resources / 'native')
+    monkeypatch.setattr(asr, 'resources', lambda: resources)
+    monkeypatch.setattr(asr, 'FILES', [('model.gguf', 4), ('decoder.gguf', 4), ('vad.gguf', 4)])
+    model = isolated / 'fun-asr-nano'; model.mkdir()
+    for name, _ in asr.FILES: (model / name).write_bytes(b'old!')
+    (model / 'manifest.json').write_text(json.dumps(asr.MANIFEST))
+    (model / 'old-marker').write_text('preserve on failure')
+    downloads = [(f'https://huggingface.co/fixture/{name}', name, 'raw', 4, hashlib.sha256(b'new!').hexdigest()) for name, _ in asr.FILES]
+    monkeypatch.setattr(deps, 'assets', lambda tool, platform: downloads if tool == 'fun-asr-nano' else [])
+    class Response(io.BytesIO): status = 200
+    class Opener:
+        def open(self, request, timeout): return Response(b'bad!' if failure == 'checksum' else b'new!')
+    monkeypatch.setattr(deps, 'build_opener', lambda *_: Opener())
+    def smoke(directory, stage, emit):
+        assert all((directory / name).read_bytes() == b'new!' for name, _ in asr.FILES)
+        emit()
+        if failure == 'load': raise asr.TranscriptionError('TRANSCRIPTION_FAILED')
+    monkeypatch.setattr(asr, 'smoke', smoke)
+    stage = isolated / '.install-asr'; stage.mkdir()
+    if failure:
+        with pytest.raises(deps.DependencyError): deps.install('fun-asr-nano', stage, lambda *_a, **_k: None)
+        assert (model / 'old-marker').exists()
+        assert (model / 'model.gguf').read_bytes() == b'old!'
+    else:
+        assert next(row for row in deps.install('fun-asr-nano', stage, lambda *_a, **_k: None)['tools'] if row['id'] == 'fun-asr-nano')['available']
+        assert (model / 'model.gguf').read_bytes() == b'new!'
+        assert not (model / 'old-marker').exists()
 
 
 @pytest.fixture

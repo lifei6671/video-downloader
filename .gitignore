@@ -26,6 +26,7 @@ __pycache__/
 .pytest_cache/
 python-engine/build/
 python-engine/dist/
+python-engine/asr/
 .local/
 tests/douyin.txt
 tests/TikTok.txt
