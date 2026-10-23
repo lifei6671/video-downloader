@@ -46,3 +46,6 @@ src-tauri/icons/icon.iconset/
 src-tauri/icons/icon.png
 src-tauri/icons/tray-icon.png
 src-tauri/icons/tray-icon@2x.png
+
+output/
+.playwright-cli/
