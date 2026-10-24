@@ -7,10 +7,11 @@ import { Badge } from '@/components/ui/badge';
 export const labels = { parsing: '解析中', ready: '已解析，可下载', queued: '等待中', downloading: '下载中', completed: '已完成', failed: '失败', canceled: '已取消' };
 export const statusVariant = { parsing: 'info', ready: 'info', queued: 'warning', downloading: 'info', completed: 'success', failed: 'destructive', canceled: 'muted' } as const;
 
-export function TaskRow({ task, selected, onSelect, cover, title, metadata, progress, actions, queuePosition }: {
+export function TaskRow({ task, selected, onSelect, onPlay, cover, title, metadata, progress, actions, queuePosition }: {
   task: Task;
   selected: boolean;
   onSelect: () => void;
+  onPlay?: () => void;
   cover: ReactNode;
   title: ReactNode;
   metadata: ReactNode;
@@ -18,7 +19,9 @@ export function TaskRow({ task, selected, onSelect, cover, title, metadata, prog
   actions: ReactNode;
   queuePosition: number;
 }) {
-  return <Card size="sm" data-task-id={task.id} data-status={task.status} data-selected={selected || undefined} onClick={onSelect} onFocus={onSelect} className={`task-row${task.status === 'downloading' ? ' is-active' : ''}`}>
+  return <Card size="sm" data-task-id={task.id} data-status={task.status} data-selected={selected || undefined} onClick={onSelect} onFocus={onSelect} onDoubleClick={event => {
+    if (event.target instanceof Element && !event.target.closest('button, a, input, select, textarea, [role="button"], [role="dialog"], [role="menuitem"]')) onPlay?.();
+  }} className={`task-row${task.status === 'downloading' ? ' is-active' : ''}`}>
     <CardContent className="task-row-content">
       {cover}
       <div className="task-row-information">

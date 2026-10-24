@@ -38,7 +38,7 @@ async page => {
     await first.locator('.task-row-status').click();
     check(await first.getAttribute('data-selected')==='true','click does not select row');
     const second = rows().nth(1);
-    await second.locator('.task-row-title').focus();
+    await second.getByRole('button',{name:'查看封面',exact:true}).focus();
     check(await second.getAttribute('data-selected')==='true' && await page.locator('.task-row[data-selected="true"]').count()===1,'keyboard selection not exclusive');
     await page.waitForFunction(()=>{const n=document.querySelector('.task-row[data-selected="true"]'); return n && getComputedStyle(n).backgroundColor==='rgb(237, 242, 254)';});
     check(await second.evaluate(n=>getComputedStyle(n).backgroundColor==='rgb(237, 242, 254)'), 'selected background is not Radix indigo-3');

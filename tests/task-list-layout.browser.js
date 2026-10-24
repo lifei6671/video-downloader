@@ -49,6 +49,8 @@ async page => {
     check(await row(1).getByLabel(/下载时间：/).count()===0, 'unfinished task shows download timestamp');
     const adjacent = await page.locator('[data-task-row]').evaluateAll(rows=>rows.slice(0,7).map(n=>{const r=n.getBoundingClientRect();return {top:r.top,bottom:r.bottom}}));
     check(adjacent.every((r,i)=>!i || Math.abs(r.top-adjacent[i-1].bottom)<1), 'gaps between media rows');
+    const backgrounds = await page.locator('.task-row').evaluateAll(rows=>rows.slice(0,7).map(n=>{const r=n.getBoundingClientRect();return {top:r.top,bottom:r.bottom}}));
+    check(backgrounds.every((r,i)=>!i || Math.abs(r.top-backgrounds[i-1].bottom-4)<1), 'task backgrounds need 4px of whitespace');
     check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth), 'horizontal overflow');
     await screenshot(`mixed-${width}`);
 
@@ -100,6 +102,9 @@ async page => {
     await row(6).getByRole('img', {name:'第 1 张图片', exact:true}).waitFor();
     check(await row(7).getByRole('button', {name:'查看封面', exact:true}).getAttribute('aria-disabled')==='false', 'missing cover blocks task details');
     check((await row(8).innerText()).includes('Telegram 视频 1001234567890_12345'), 'untitled source identity invented/lost');
+    await row(3).click({position:{x:8,y:8}});
+    await row(5).hover({position:{x:8,y:8}});
+    check(await row(3).getAttribute('data-selected')==='true', 'selected background lost');
     await screenshot(`completed-${width}`);
     for (const id of [3,9,10]) {
       const img = row(id).locator('.media-cover-image');

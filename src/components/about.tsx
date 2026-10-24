@@ -126,7 +126,7 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
         </div>
       </CardHeader>
       <CardFooter className="flex flex-wrap justify-between gap-3 border-t">
-        <div className="flex flex-wrap gap-2">{['抖音', 'TikTok', 'YouTube'].map(platform => <Badge key={platform} variant="secondary">{platform}</Badge>)}</div>
+        <div className="flex flex-wrap gap-2">{['抖音', 'TikTok', 'YouTube', 'Telegram'].map(platform => <Badge key={platform} variant="secondary" title={platform === 'Telegram' ? 'Telegram 实验模式' : undefined}>{platform}</Badge>)}</div>
         <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy} onClick={copyVersion}><Copy data-icon="inline-start" />复制版本信息</Button>{download && <Button variant="outline" onClick={() => { setUpdate({ status: 'checked', result: download.release }); setUpdateOpen(true); }}><Download data-icon="inline-start" />{downloading ? '查看下载进度' : download.phase === 'completed' ? '查看安装包' : '查看更新下载'}</Button>}<Button ref={checkButton} aria-busy={checking} aria-disabled={opening || downloading || starting} disabled={busy || checking} onClick={() => void checkUpdates()}>{checking ? <Spinner aria-hidden="true" data-icon="inline-start" /> : <RefreshCw data-icon="inline-start" />}{checking ? '正在检查…' : '检查更新'}</Button></div>
       </CardFooter>
     </Card>

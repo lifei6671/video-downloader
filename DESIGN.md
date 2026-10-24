@@ -160,7 +160,7 @@ components:
   input-compact: { height: 28px }
   share-input: { rows: 3, height: 80px, lineHeight: 20px, padding: "{spacing.xs}" }
   card: { rounded: "{rounded.lg}", padding: "{spacing.md}" }
-  task-list: { rounded: 0px, backgroundColor: "{colors.surface}", hoverBackgroundColor: "{colors.surface-subtle}" }
+  task-list: { rounded: 0px, rowGap: 4px, backgroundColor: "{colors.surface}", hoverBackgroundColor: "{colors.surface-subtle}" }
   navigation: { height: 40px, rounded: "{rounded.md}", iconSize: 16px }
   chip-neutral: { height: 24px, rounded: "{rounded.full}" }
   preview:
@@ -341,7 +341,7 @@ YAML `palette` 记录本版使用的 Radix Colors light sRGB 色值，`colors` �
 
 在现有 `@theme inline` 中保持 `--color-*` 指向语义变量；新增状态底色、进度和媒体变量按需补齐。`--font-sans` / `--font-mono` 对应 `typography.font-family` / `font-mono`；`--text-xs` / `--text-sm` / `--text-xl` 固定为 12 / 14 / 20px，行高按角色应用；`--button-font-size` 固定 12px。`--radius` 为 8px，`--radius-xs/sm/md/lg/xl` 明确映射为 4/6/8/12/16px，不使用默认推导产生额外圆角。
 
-布局尺寸以同名 CSS 自定义属性映射，如 `--sidebar-width`、`--sidebar-width-icon` 对应 `spacing.sidebar-width`、`sidebar-compact-width`。任务行的 `--task-row-min-height`、`--task-row-active-min-height`、`--task-cover-size`、`--task-status-width`、`--task-action-width` 分别对应 `components.task-row` 的 `minHeight`、`activeMinHeight`、`coverSize`、`statusWidth`、`actionWidth`。`task-list` 的表面、分隔线和悬停色复用语义色，列表圆角为 0，行反馈背景圆角为 8px；不在页面另建尺寸或颜色常量。
+布局尺寸以同名 CSS 自定义属性映射，如 `--sidebar-width`、`--sidebar-width-icon` 对应 `spacing.sidebar-width`、`sidebar-compact-width`。任务行的 `--task-row-min-height`、`--task-row-active-min-height`、`--task-cover-size`、`--task-status-width`、`--task-action-width` 分别对应 `components.task-row` 的 `minHeight`、`activeMinHeight`、`coverSize`、`statusWidth`、`actionWidth`。`task-list` 的表面、分隔线和悬停色复用语义色，列表圆角为 0，行反馈背景圆角为 8px，`--task-row-gap` 对应 `task-list.rowGap` 的 4px 行间留白；不在页面另建尺寸或颜色常量。
 
 侧栏颜色使用 YAML 定义的 slate-2 / slate-3 混色，阴影使用已定义的 slate alpha 变量。按钮 hover 不再使用 `primary/80`；Badge 不再用透明度猜测状态底色。集中覆盖默认字号、border/ring、圆角和动效，保留官方组件键盘与焦点能力。Radix `asChild` 可替换 `data-slot`，按钮规则按真实元素与 `data-variant` / `data-size` 映射，并为 ToggleGroup 选中态、媒体缩略图、多行内容链接保留明确的样式优先级。滚动箭头使用原生滚动条按钮的 CSS 渐变背景和 Radix slate-11/12；不使用 WebView2 滚动条伪元素无法可靠绘制的 mask，避免遗留旧十六进制色。
 
@@ -443,7 +443,7 @@ YAML `palette` 记录本版使用的 Radix Colors light sRGB 色值，`colors` �
 
 平台筛选不显示标签下划线或整栏底边框，仅以浅蓝背景标识选中项。列表空状态同样无外边框、圆角和阴影，与上方筛选区域自然衔接；仅保留空状态信息，不显示“去下载作品”按钮。
 
-平台筛选与列表直接融入连续白色 `surface` 工作区，不再套带外边框和圆角的内层卡片；每行无独立边框、阴影、外间距或行间分隔线；通过 8px 圆角的悬停、选中背景定位任务。悬停只使用 `surface-subtle` 的轻微背景差异，不改变尺寸；点击行或聚焦行内控件后，当前行使用 `surface-selected` 浅蓝底。菜单展开时对应行同样保持活动底色；键盘焦点沿用可见轮廓。选择仅用于视觉定位，不触发下载、播放或删除。列表仍由平台 Tab 面板独立滚动，容器不额外创建第二个滚动区。
+平台筛选与列表直接融入连续白色 `surface` 工作区，不再套带外边框和圆角的内层卡片；每行无独立边框、阴影、外间距或行间分隔线；通过 8px 圆角的悬停、选中背景定位任务。悬停只使用 `surface-subtle` 的轻微背景差异，不改变尺寸；点击行或聚焦行内控件后，当前行使用 `surface-selected` 浅蓝底。菜单展开时对应行同样保持活动底色；键盘焦点沿用可见轮廓。单击选择仅用于视觉定位，不触发下载、播放或删除。双击已完成且本地文件可用的视频任务行信息或空白区域，使用系统默认播放器播放；忙碌中、图集及其他任务状态不触发。行内按钮、作者链接、封面及详情弹窗保留各自交互，不冒泡触发行双击播放。列表仍由平台 Tab 面板独立滚动，容器不额外创建第二个滚动区。
 
 每行是横向四列布局：**56 × 56px 封面容器 → 弹性信息区 → 88px 状态区 → 144px 操作区**，列间距 12px、水平内边距 16px、垂直内边距 8px。常规已完成行采用 80px 最小高度，落在 76–84px 的常规密度范围；等待任务最小高 84px，状态列显示队列位置；下载中最小高 120px，等待说明、失败原因、封面错误、必要元数据换行或特殊长文字动作可自然增高，不能裁切反馈来维持固定高度。
 
@@ -550,7 +550,7 @@ Toast 复用 Sonner，顶部居中、实色浅表面、0.5px 边界，标题 14p
 
 ### 7.1 封面读取、预览、保存和复制
 
-首页与任务行共用 `VideoCover` 的行为；视频封面来自平台，Telegram 新下载原始视频通过现有 FFmpeg 从前 30 秒抽取非近黑 JPEG，失败保留占位。缺少封面不影响视频成功，不补处理历史记录。图集以实际图片预览，沿用 `GalleryImage` 的受控读取。
+首页与任务行共用 `VideoCover` 的行为；视频封面来自平台，Telegram 新下载原始视频通过现有 FFmpeg 从前 30 秒抽取非近黑 JPEG，失败保留占位。抖音以原有封面为基准，只有实际尺寸更大、静态且画面高度一致的候选才替换，保留原始图片字节；候选不可用或无法确认时沿用基准，详见 vendor/UPSTREAM.md。缺少封面不影响视频成功，不补处理历史记录。图集以实际图片预览，沿用 `GalleryImage` 的受控读取。
 
 新下载视频封面字节只存现有 SQLite 缓存，不自动放入视频目录；旧同目录封面保持原样。优先读取已有本地/数据库字节；前端使用现有受控 API 与 Blob URL，共享进行中的读取和已加载图片，页面切换与筛选不重复读取。缓存按任务及图片来源标识，来源或缓存时间变化后重新加载；普通进度修订不清空封面。保留最多 128 张、64 MiB 未使用的近期图片，仍显示的图片不提前回收；淘汰或任务移除并结束退出动画后释放 Blob URL，失败读取不永久缓存。不要为媒体舞台另建远程图片代理或下载逻辑。
 
@@ -619,7 +619,7 @@ HTTP 实验开关、风险确认、登录/重新登录与取消登录统一在�
 
 ### 9.1 关于页
 
-沿用统一外壳，内容最大宽 1040px 居中，最小视口内纵向滚动。品牌区为本地应用图标、20px “映取”、构建注入的当前版本和一句简介；三平台标识使用中性标签，不将实验能力作为正式承诺。
+沿用统一外壳，内容最大宽 1040px 居中，最小视口内纵向滚动。品牌区为本地应用图标、20px “映取”、构建注入的当前版本和一句简介；品牌区底部展示抖音、TikTok、YouTube、Telegram 中性徽章；Telegram 提示文本标注实验模式，不将实验能力作为正式承诺。
 
 按品牌/版本操作、已有能力、项目支持、开源致谢顺序组织。能力和支持区在宽屏可两列、窄窗单列；常规分组圆角 12px、内边距 16px、间距 16px，无大阴影与装饰背景。保留复制版本信息、手动检查更新、现有下载进度/安装包入口。
 
@@ -649,7 +649,7 @@ HTTP 实验开关、风险确认、登录/重新登录与取消登录统一在�
 | 多行内容链接 / 图集缩略图 | 项目支持链接为自动高度、最小 56px、padding 8px；图集缩略图 40 × 48px，选中使用浅蓝边界和 CircleCheck 标记，均不套标准按钮固定高度 |
 | Input / Select | 标准高 32px、文字 14px、圆角 8px、0.5px 输入边界；搜索可用 28px 紧凑规格 |
 | Textarea | 14px 自然换行；首页固定三行 80px，Cookie 初始四行且沿用可调整高度，不套单行高度 |
-| Card / 媒体列表 | 分组圆角 12px、实色和 0.5px 边界；任务列表融入白色工作区，不另套外边框，内部行无分隔线及外边框，以 8px 圆角悬停/选中背景提供反馈，任务行 padding 按 YAML |
+| Card / 媒体列表 | 分组圆角 12px、实色和 0.5px 边界；任务列表融入白色工作区，不另套外边框，内部行无分隔线及外边框，相邻行背景间留白 4px（随移除动画收起），以 8px 圆角悬停/选中背景提供反馈，任务行 padding 按 YAML |
 | Dropdown / ContextMenu | 通用最小宽 192px、条目最小高 32px；任务更多菜单宽 236px、条目 36px、padding 8px、圆角 10px。14px 文字，实色浅表面及轻柔任务菜单阴影 |
 | Tooltip | 12px，实色浅表面、0.5px 边界、小圆角，内容简短，不替代必需的持续错误 |
 | 通用 Dialog / AlertDialog | 默认宽 480px、最大视口减 32px、最大高 85dvh、padding 20px、圆角 16px、实底和弹窗阴影 |
