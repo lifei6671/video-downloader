@@ -45,6 +45,8 @@ packaging==26.3
     #   pytest
 pefile==2024.8.26 ; sys_platform == 'win32'
     # via pyinstaller
+pillow==13.0.0
+    # via -r python-engine/requirements.txt
 pluggy==1.6.0
     # via pytest
 pydantic==2.14.1

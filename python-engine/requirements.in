@@ -3,3 +3,4 @@ yt-dlp-ejs==0.8.0
 pydantic==2.14.1
 structlog==26.1.0
 httpx==0.28.1
+pillow==13.0.0

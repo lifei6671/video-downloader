@@ -18,6 +18,8 @@ idna==3.20
     # via
     #   anyio
     #   httpx
+pillow==13.0.0
+    # via -r python-engine/requirements.in
 pydantic==2.14.1
     # via -r python-engine/requirements.in
 pydantic-core==2.50.1

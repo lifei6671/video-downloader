@@ -10,7 +10,7 @@ import structlog
 from yt_dlp.downloader.http import HttpFD
 from yt_dlp.networking import Request
 from yt_dlp.networking.exceptions import HTTPError
-from douyin import original_scale_cover
+from douyin import original_scale_cover, cover_candidates
 
 
 def discard_log(_logger, _method, _event):
@@ -229,6 +229,7 @@ def video_info(content):
     if not formats:
         raise EngineError('UNSUPPORTED_CONTENT', 'format')
     return dict(id=content.content_id, webpage_url=content.web_url, title=content.title,
+                _yingqu_douyin_covers=cover_candidates(content.raw) if str(content.platform) == 'douyin' else [],
                 _yingqu_author=metadata(content)['author_profile'],
                 _yingqu_author_avatar=content.author.avatar.url if content.author.avatar else None,
                 uploader=content.author.unique_id or content.author.nickname,

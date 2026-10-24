@@ -40,6 +40,7 @@ def test_video_cover_priority_is_douyin_only_and_falls_back(platform, cover):
                 'https://p.douyinpic.com/designed' in cover.get('url_list', []) else legacy)
     assert dtk_adapter.metadata(item)['cover_url'] == expected
     assert engine.cover_url(dtk_adapter.video_info(item)) == expected
+    assert dtk_adapter.video_info(item)['_yingqu_douyin_covers'] == ([expected] if expected.endswith('/designed') else [])
     item.media.covers = []
     expected = expected if expected != legacy else None
     assert dtk_adapter.metadata(item)['cover_url'] == expected

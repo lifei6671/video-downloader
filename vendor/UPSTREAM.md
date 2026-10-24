@@ -64,6 +64,16 @@ yt-dlp 2026.08.19 的 URL-key parser 对该作品 `bytevc1_4k` 未填尺寸；�
 
 来源为作品 `7697086330987981242` 的本机授权详情响应：`origin_cover` 是橙字热榜画面，`cover_original_scale` 是白字设计封面，不能按字段名称将两者视为同一图片。引擎升为 0.7.3，使后续解析不再命中旧版本缓存；不主动替换历史任务封面。预览与下载复用同一选择结果及原有图片校验，封面下载失败不影响视频成功。升级上游时核对该字段是否已原生提取，保留优先级与缺失回退测试。
 
+### 同画面高清静态封面（2026-10-24）
+
+用户批准在原有封面基准上选择同画面的高清静态候选。实测作品 `7699844701738235301` 的 `cover_original_scale` 为 360×480 JPEG，`dynamic_cover` 为同画面的 766×1022 静态 JPEG，而 `origin_cover` 是不同画面的 360×640 JPEG；响应声明尺寸与实际图片也不一致，不能按字段名或声明尺寸选图。
+
+自有 `douyin.cover_candidates` 从 `cover_original_scale`、`dynamic_cover`、`origin_cover`、`cover` 各取第一个 HTTPS 地址并去重，不拼接或改写 CDN 模板，不修改 vendored parser。yt-dlp 和 DTK 视频路径均将这些候选仅保留在 Python 内存；先按既有 `cover_url` 取得基准，基准不可用时保留原有失败结果。候选请求沿用 GuardedRH、代理和凭据，最多增加 4 次（通常 3 次），每次使用既有 socket timeout 扩展设为 5 秒，单图仍限 10 MiB；候选失败不影响基准封面和视频。
+
+复用 [Pillow 13.0.0](https://github.com/python-pillow/Pillow) 的解码、EXIF 方向校正、Lanczos 缩放和 ImageChops/ImageStat 比较，不依赖用户安装 FFmpeg。只比较不超过 2000 万像素、不带透明通道的单帧 JPEG/PNG/WebP；候选宽高均不小于基准且像素数更大，宽高比偏差不超过 1%。在 128×128 RGB 归一化图上，各通道整体平均绝对差不超过 4/255，所有 16×16 分块的通道均差不超过 10/255，才视为同图候选；始终与原基准比较，选择符合条件的最大图。该规则为保守近似匹配，不能证明像素内容完全相同；无法确认时保留基准。动画、不同画面、显著文字改动、模糊专用封面和失败候选不替换。保存获选图片的原始字节，不转码、不把比较缩略图写入缓存。
+
+Pillow 精确锁定并随 sidecar 分发，PyInstaller 一并收集其许可。引擎 0.13.1、协议仍为 v3，使后续解析不命中旧引擎缓存；已有历史任务封面不自动批量替换。图集、TikTok、YouTube、Telegram、存储及删除语义保持。对应测试为 `tests/test_douyin_cover.py`，升级上游或 Pillow 时核对格式、实际尺寸、同图与不同图及原有回退。
+
 ## Telegram tdl 外部工具（2026-10-18）
 
 按用户决定只调用用户自行安装的 [iyear/tdl v0.20.4](https://github.com/iyear/tdl/tree/9d7d49eef2bcb04da720c26e33598c49c68b9ddd)，commit `9d7d49eef2bcb04da720c26e33598c49c68b9ddd`，上游许可 AGPL-3.0。未 vendoring、复制其 Go 源码或随安装包分发 tdl；自有 Rust 适配器依据 `app/dl/serve.go`、`serve.go.tmpl`、`cmd/dl.go`、`cmd/version.go`、`cmd/root.go` 和 `core/util/tutil/tutil.go` 的 CLI/HTTP 契约实现。用户另行授权运行依赖登录，依据 `cmd/login.go`、`app/login/login.go`、`app/login/qr.go` 调用显式 QR 模式和独立存储；禁止默认 desktop 导入及覆盖既有命名空间。当前全接口监听、缺少令牌及请求白名单须作为已知实验风险持续呈现；升级和真实运行边界见 [集成说明](../docs/tdl-integration.md)。

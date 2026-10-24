@@ -163,6 +163,9 @@ def test_original_scale_cover_priority_and_legacy_fallback(media_detail, cover):
                 'https://p.douyinpic.com/designed' in cover.get('url_list', [])
                 else 'https://p.douyinpic.com/origin')
     assert engine.cover_url(info) == expected
+    assert 'https://p.douyinpic.com/origin' in info['_yingqu_douyin_covers']
+    assert 'https://p.douyinpic.com/preview' in info['_yingqu_douyin_covers']
+    assert ('https://p.douyinpic.com/designed' in info['_yingqu_douyin_covers']) == (expected.endswith('/designed'))
     assert media_detail == original
 
 

@@ -21,6 +21,19 @@ def original_scale_cover(detail):
     return None
 
 
+def cover_candidates(detail):
+    # One actual HTTPS address per field bounds the extra requests. Alternative
+    # CDN hosts usually serve the same bytes; no URL templates are rewritten.
+    urls = []
+    for field in ('cover_original_scale', 'dynamic_cover', 'origin_cover', 'cover'):
+        for url in traverse_obj(detail, ('video', field, 'url_list', ..., {url_or_none})):
+            if url.startswith('https://'):
+                if url not in urls:
+                    urls.append(url)
+                break
+    return urls
+
+
 class DouyinIE(UpstreamDouyinIE):
     def _download_json(self, url, video_id, *args, **kwargs):
         if url == 'https://www.douyin.com/aweme/v1/web/aweme/detail/':
@@ -42,6 +55,7 @@ class DouyinIE(UpstreamDouyinIE):
     def _parse_aweme_video_app(self, detail):
         info = super()._parse_aweme_video_app(detail)
         attach(info, detail.get('author'), 'douyin')
+        info['_yingqu_douyin_covers'] = cover_candidates(detail)
         video = detail.get('video') or {}
         cover = original_scale_cover(detail)
         if cover:

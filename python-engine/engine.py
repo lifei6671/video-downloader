@@ -14,6 +14,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.globals import plugin_dirs
 from yt_dlp.utils import DownloadError, ContentTooShortError, PostProcessingError
 from yt_dlp.networking.exceptions import RequestError, HTTPError, IncompleteRead
+from yt_dlp.networking import Request
 from yt_dlp.version import __version__
 
 from network import GuardedRH, TargetError, MediaRangeError
@@ -24,13 +25,14 @@ import runtime_dependencies
 import local_cover
 import transcription
 import author_profile
+import douyin_cover
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/dtk/upstream/src'))
 import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.13.0'
+ENGINE_VERSION = '0.13.1'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.08.19'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -272,18 +274,30 @@ def cover_url(info):
     return url if isinstance(url, str) and urlsplit(url).scheme == 'https' else None
 
 
-def download_cover(ydl, info, stage):
-    url = cover_url(info)
-    if not url:
-        return dict(cover_error='COVER_UNAVAILABLE')
+def read_cover(ydl, url, *, optional=False):
     try:
         # Goes through the same guarded transport, proxy, cookies and timeout as the video.
-        with ydl.urlopen(url) as response:
+        request = Request(url, extensions={'timeout': 5}) if optional else url
+        with ydl.urlopen(request) as response:
             body = response.read(10 * 1024 * 1024 + 1)
         valid = (body.startswith(b'\xff\xd8\xff') or body.startswith(b'\x89PNG\r\n\x1a\n')
                  or (body.startswith(b'RIFF') and body[8:12] == b'WEBP'))
         if not valid or len(body) > 10 * 1024 * 1024:
-            return dict(cover_error='COVER_UNAVAILABLE')
+            return None
+        return body
+    except (OSError, RequestError, TargetError, DownloadError):
+        return None
+
+
+def download_cover(ydl, info, stage):
+    url = cover_url(info)
+    body = read_cover(ydl, url) if url else None
+    if body is None:
+        return dict(cover_error='COVER_UNAVAILABLE')
+    candidates = [candidate for candidate in info.get('_yingqu_douyin_covers', []) if candidate != url]
+    if candidates:
+        body = douyin_cover.upgrade(body, candidates, lambda candidate: read_cover(ydl, candidate, optional=True))
+    try:
         partial = stage / 'cover.part'
         partial.write_bytes(body)
         partial.rename(stage / 'cover')
