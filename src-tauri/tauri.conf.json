@@ -12,7 +12,8 @@
   "app": {
     "windows": [{
       "label": "main", "title": "映取", "width": 1440, "height": 900,
-      "minWidth": 1024, "minHeight": 680, "decorations": true
+      "minWidth": 1024, "minHeight": 680, "decorations": true,
+      "theme": "Light", "backgroundColor": "#f9f9fb"
     }],
     "security": {
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' https: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"

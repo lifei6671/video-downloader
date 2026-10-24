@@ -1,11 +1,12 @@
 // Run through the installed Playwright CLI against npm run dev. All IPC is mocked.
 async page => {
   const results = [];
+  const base = page.url().split('/').slice(0,3).join('/');
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   const check = (value, message) => { if (!value) throw new Error(message); };
   for (const platform of ['douyin', 'tiktok', 'youtube', 'telegram', 'missing', 'broken']) {
-    await page.goto(`http://127.0.0.1:1420/tests/fixtures/background-download.html?scenario=author-${platform}`);
+    await page.goto(`${base}/tests/fixtures/background-download.html?scenario=author-${platform}`);
     await page.waitForFunction(() => window.backgroundTest.loaded);
     const group = page.getByRole('group', {name: platform === 'telegram' ? '频道信息' : '作者信息', exact: true});
     await group.waitFor();

@@ -7,7 +7,8 @@ async page => {
   for (const [scenario, label] of [['transcript-legacy-cuda','SenseVoiceSmall CUDA 加速识别'], ['transcript-legacy-cpu','SenseVoiceSmall CPU 本地识别'], ['transcript','Fun-ASR-Nano CPU 本地识别'], ['transcript-legacy-cuda-failed','SenseVoiceSmall CUDA 加速识别'], ['transcript-legacy-cuda-unavailable','SenseVoiceSmall CUDA 加速识别']]) {
     await page.goto(base + '/tests/fixtures/background-download.html?scenario=' + scenario);
     await page.getByRole('button',{name:'下载任务',exact:true}).click();
-    await page.getByRole('button',{name:scenario==='transcript'?'提取文案':'查看文案',exact:true}).click();
+    await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:scenario==='transcript'?'提取文案':'查看文案',exact:true}).click();
     if (scenario !== 'transcript') {
       await dialog.getByText(new RegExp(label)).waitFor();
       if (scenario.endsWith('failed') || scenario.endsWith('unavailable')) {
@@ -24,7 +25,8 @@ async page => {
     await dialog.getByLabel('识别文案',{exact:true}).waitFor();
     await dialog.getByText(/Fun-ASR-Nano CPU 本地识别/).waitFor();
     await page.keyboard.press('Escape');
-    await page.getByRole('button',{name:'查看文案',exact:true}).click();
+    await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'查看文案',exact:true}).click();
     await dialog.getByText(/Fun-ASR-Nano CPU 本地识别/).waitFor();
     cases.push(scenario + ': correct model identity, re-extraction and reopen');
   }

@@ -87,6 +87,7 @@ api.settings = async () => ({download_directory:'C:\\TestVideos',max_downloads:1
 api.checkTdl = async () => ({path:'C:\\TestTools\\tdl.exe',version:'0.20.4'});
 api.resolve = async input => {control.calls.push({type:'resolve',input});const task={...structuredClone(original),id:'next-'+(++next),created_at:10+next,video:{...structuredClone(video),video_id:['duplicate','race'].includes(scenario)||scenario.startsWith('variant')?video.video_id:'100_'+(9+next),canonical_url:input,title:'新作品 '+next}};tasks.unshift(task);return structuredClone(task)};
 api.cancel = async id => {control.calls.push({type:'cancel',id});const task=tasks.find(t=>t.id===id);Object.assign(task,{status:'canceled',revision:task.revision+1});listener(structuredClone(task))};
+api.retry = async id => {control.calls.push({type:'retry',id});const task=tasks.find(t=>t.id===id);Object.assign(task,{status:'downloading',error:null,bytes:0,revision:task.revision+1});listener(structuredClone(task));return structuredClone(task)};
 api.clearHistory = async (platform=null) => {
   control.calls.push({type:'clear-history',platform});
   if(scenario==='clear-pending')await new Promise(resolve=>control.release=resolve);
@@ -178,6 +179,60 @@ if (scenario.startsWith('runtime-')) {
     return api.checkRuntimeDependencies();
   };
   api.cancelRuntimeDependency=async()=>{control.calls.push({type:'cancel-runtime'});rejectInstall('CANCELED')};
+}
+if (scenario.startsWith('visual')) {
+  const photo='/docs/ui/a_vertical_9_16_aesthetic_evening_city_street_scene_during_twilight_warm/screen.png';
+  const titles=['日落之后，沿着街道走回家','镜头里的周末时光','山间散步，听见风的声音','把这一刻留给自己'];
+  const row=(i,status)=>({...structuredClone(original),id:'visual-'+i,status,download_requested:status!=='ready',
+    revision:2,created_at:100-i,completed_at:status==='completed'?1792644480:null,
+    path:status==='completed'?'C:\\TestVideos\\evening-'+i+'.mp4':null,
+    bytes:status==='completed'?167772160:status==='downloading'?83676364:0,
+    total_bytes:status==='downloading'?167772160:null,speed_bps:status==='downloading'?5033164:null,
+    eta_seconds:status==='downloading'?17:null,queue_order:status==='queued'?i:null,
+    error:status==='failed'?'NETWORK_ERROR':null,file_missing:i===5,
+    video:{...structuredClone(video),platform:i%2?'youtube':'douyin',resolver:'yt-dlp',video_id:'visual-'+i,title:titles[i%4],
+      cover_url:photo,width:1080,height:1920,duration_ms:48000,filesize:167772160,
+      author_profile:{id:'local-author-'+i,nickname:i%2?'光影日记':'沿途记录',kind:'user',avatar_cached:false},
+      selected_format_id:'hd',formats:[{format_id:'hd',width:1080,height:1920,container:'mp4',codec:'h264',filesize:167772160},{format_id:'sd',width:720,height:1280,container:'mp4',codec:'h264',filesize_approx:67108864}]}});
+  tasks=['ready','downloading','queued','completed','failed','completed','canceled',...Array(28).fill('completed')].map((status,i)=>row(i,status));
+  if (scenario.startsWith('visual-list')) {
+    tasks[3].video.title='镜头里的城市漫游：从清晨的街角走到暮色中的河岸，记录沿途遇见的人与风景，保留这一段完整的周末时光，穿过旧城区与沿江步道，慢慢发现日常生活中值得珍藏的瞬间';
+    tasks[3].video.author_profile.nickname='周末影像记录者与城市漫游摄影档案';
+    Object.assign(tasks[6],{status:'completed',completed_at:1792644480,path:'C:\\TestVideos\\城市图集',bytes:16777216,files:[{filename:'01.png'},{filename:'02.png'}]});
+    Object.assign(tasks[6].video,{title:'街角光影，城市漫游图集',kind:'image_album',images:[{quality_source:'original',width:768,height:1376},{quality_source:'original',width:768,height:1376}]});
+    tasks[7].video.cover_url=null;
+    tasks[7].video.title='封面暂不可用的本地视频';
+    tasks[8].video.title='';
+    tasks[8].video.platform='telegram';
+    tasks[8].video.video_id='1001234567890_12345';
+    tasks[9].video.cover_url='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900"><rect width="100%" height="100%" fill="#e6f4fe"/><circle cx="65%" cy="35%" r="120" fill="#5eb1ef"/><path d="M0 900L800 300L1600 900Z" fill="#113264"/></svg>');
+    tasks[10].video.cover_url='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="900" height="900"><rect width="100%" height="100%" fill="#e6f4fe"/><circle cx="50%" cy="50%" r="240" fill="#5eb1ef"/></svg>');
+    api.image=async()=>Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));
+    if (scenario==='visual-list-completed') tasks=tasks.filter(task=>task.status==='completed');
+    if (scenario==='visual-list-long-details') {
+      tasks[3].video.title=tasks[3].video.title.repeat(40);
+      tasks[3].path='C:\\TestVideos\\'+('长路径完整文件名'.repeat(80))+'.mp4';
+    }
+  }
+  if (scenario==='visual-landscape' || scenario==='visual-square') {
+    const [w,h]=scenario==='visual-square'?[900,900]:[1600,900];
+    tasks[0].video.cover_url='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'"><rect width="100%" height="100%" fill="#e6f4fe"/><circle cx="65%" cy="35%" r="120" fill="#acd8fc"/><path d="M0 '+h+'L'+w/2+' '+h/3+'L'+w+' '+h+'Z" fill="#113264"/></svg>');
+  }
+  if (scenario==='visual-album') {
+    Object.assign(tasks[0].video,{kind:'image_album',resolver:'dtk',formats:[],images:[{quality_source:'original',width:768,height:1376},{quality_source:'high_definition',width:768,height:1376}]});
+    api.image=async()=>Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));
+  }
+  api.cookie=async()=>''; api.proxy=async()=>null;
+  api.cover=async()=>Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));
+  api.saveCover=async id=>{control.calls.push({type:'save-cover',id});return true};
+  api.copyCover=async image=>{control.calls.push({type:'copy-cover',width:image.width,height:image.height})};
+  api.checkRuntimeDependencies=async()=>({platform:'win32-x64',directory:'C:\\TestRuntime',tools:[
+    {id:'ffmpeg',available:true,provider:'ffmpeg',version:'6.1.1',path:'C:\\Tools\\ffmpeg.exe',source:'system',can_install:true},
+    {id:'javascript',available:true,provider:'node',version:'22.0.0',path:'C:\\Tools\\node.exe',source:'system',can_install:true},
+    {id:'fun-asr-nano',available:true,provider:'cpu',version:'fixture',path:'C:\\TestRuntime\\fun-asr-nano',source:'managed',can_install:true,variants:['cpu','cuda'],download_bytes:1275804800}]});
+  api.openProjectPage=async page=>control.calls.push({type:'open-project',page});
+  api.updateDownload=async()=>null;api.subscribeUpdateDownload=async()=>()=>{};
+  api.checkForUpdates=async()=>({current_version:'1.8.0',latest_version:'1.8.1',release_tag:'v1.8.1',has_update:true,published_at:'2026-10-24T01:00:00Z',installer:{name:'yingqu_1.8.1_x64-setup.exe',size:104857600},release_notes:'## 更清楚的作品预览\n\n保持真实封面比例，优化下载任务与状态反馈。\n\n- 精致媒体列表\n- 更便捷的任务操作\n\n'.repeat(12)+(scenario.startsWith('visual-list')?'\n- [x] 已完成项目\n- [ ] 后续项目\n':'')});
 }
 await import('/src/main');
 </script></body></html>

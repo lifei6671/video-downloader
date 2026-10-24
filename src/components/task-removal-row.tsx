@@ -20,10 +20,10 @@ export function TaskRemovalRow({ id, removing, onExited, children }: {
     const animation = node.animate([
       { height: `${node.getBoundingClientRect().height}px`, paddingBottom: getComputedStyle(node).paddingBottom, opacity: 1, transform: 'translateY(0)' },
       { height: '0px', paddingBottom: '0px', opacity: 0, transform: 'translateY(-12px)' },
-    ], { duration: 220, easing: 'ease-in-out', fill: 'forwards' });
+    ], { duration: 220, easing: 'ease-out', fill: 'forwards' });
     node.style.overflow = 'hidden';
     animation.finished.then(finish, () => {});
     return () => { animation.cancel(); finish(); };
   }, [id, removing, onExited]);
-  return <div ref={row} data-task-row={id} data-removing={removing || undefined} inert={removing} className="shrink-0 pb-2 last:pb-0">{children}</div>;
+  return <div ref={row} role="listitem" data-task-row={id} data-removing={removing || undefined} inert={removing} className="task-list-item shrink-0">{children}</div>;
 }

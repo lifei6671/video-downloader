@@ -29,7 +29,7 @@ export function useVideoTranscripts() {
     })();
     return () => { disposed = true; unsubscribe?.(); };
   }, []);
-  function open(id: string) { trigger.current = document.activeElement as HTMLElement; setError(''); setSelected(id); }
+  function open(id: string, returnFocus?: HTMLElement | null) { trigger.current = returnFocus ?? document.activeElement as HTMLElement; setError(''); setSelected(id); }
   function remove(ids: string[]) {
     ids.forEach(id => removed.current.add(id));
     setValues(old => Object.fromEntries(Object.entries(old).filter(([id]) => !removed.current.has(id))));
@@ -72,7 +72,7 @@ export function VideoTranscriptDialog({client, tasks, runtime}: {client: ReturnT
   const backend = running ? state.backend : detail?.result ? detail.result.backend ?? 'cpu' : model?.provider;
   const modelName = running || !detail?.result ? 'Fun-ASR-Nano' : detail.result.model_name ?? 'SenseVoiceSmall';
   return <Dialog open={!!task} onOpenChange={open => { if (!open) client.setSelected(null); }}>
-    <DialogContent className="flex max-h-[85dvh] max-w-[calc(100vw-32px)] flex-col sm:max-w-[720px]" onCloseAutoFocus={event => {
+    <DialogContent className="transcript-dialog flex max-h-[85dvh] max-w-[calc(100vw-32px)] flex-col sm:max-w-[720px]" onCloseAutoFocus={event => {
       event.preventDefault(); const target = client.trigger.current;
       (target?.isConnected ? target : document.querySelector<HTMLElement>('[aria-current="page"]'))?.focus({preventScroll:true});
     }}>

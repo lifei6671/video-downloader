@@ -39,12 +39,14 @@ async page => {
       const image=dialog.getByRole('img',{name:'封面大图',exact:true});await image.evaluate(image=>image.decode());
       check(await image.getAttribute('src')===source,'preview fetched another image');
       const bounds=await dialog.boundingBox();check(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=width&&bounds.y+bounds.height<=height,'dialog outside viewport');
-      await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});check(await trigger(id).evaluate(node=>document.activeElement===node),'focus was not restored');
+      await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});
+      await page.waitForFunction(id=>document.activeElement?.closest('[data-slot="card"]')?.textContent.includes(id+' cover'),id);
+      check(await trigger(id).evaluate(node=>document.activeElement===node),'focus was not restored');
     }
     results.push('PNG/JPEG/WebP/album preview, viewport and focus '+width);
   }
   await load();await trigger('douyin').focus();await page.keyboard.press('Enter');await dialog.waitFor();
-  await dialog.getByRole('button',{name:'Close',exact:true}).click();await dialog.waitFor({state:'hidden'});
+  await dialog.getByRole('button',{name:'关闭',exact:true}).click();await dialog.waitFor({state:'hidden'});
   await trigger('douyin').focus();await page.keyboard.press('Space');await dialog.waitFor();
   await page.locator('[data-slot="dialog-overlay"]').click({position:{x:5,y:5}});await dialog.waitFor({state:'hidden'});results.push('Enter/Space, close button and backdrop');
   return {passed:results.length,cases:results};

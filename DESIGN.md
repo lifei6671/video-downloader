@@ -1,80 +1,97 @@
 ---
-version: alpha
-name: "映取 · 双平台视频下载器"
-description: "面向 Windows 与 macOS 的本地视频下载工具；Stitch 桌面界面统一视觉规范 v1.2。"
+version: "2.3"
+name: "映取"
+description: "Windows / macOS 精致型影音下载器，浅色桌面下载器设计规范。"
+theme: light
+palette:
+  white: "#ffffff"
+  slate-1: "#fcfcfd"
+  slate-2: "#f9f9fb"
+  slate-3: "#f0f0f3"
+  slate-4: "#e8e8ec"
+  slate-5: "#e0e1e6"
+  slate-6: "#d9d9e0"
+  slate-7: "#cdced6"
+  slate-8: "#b9bbc6"
+  slate-11: "#60646c"
+  slate-12: "#1c2024"
+  slate-a3: "#0000330f"
+  slate-a4: "#00002d17"
+  slate-a9: "#00051d74"
+  indigo-3: "#edf2fe"
+  indigo-4: "#e1e9ff"
+  indigo-5: "#d2deff"
+  indigo-8: "#8da4ef"
+  indigo-9: "#3e63dd"
+  indigo-10: "#3358d4"
+  indigo-11: "#3a5bc7"
+  indigo-12: "#1f2d5c"
+  jade-3: "#e6f7ed"
+  jade-11: "#208368"
+  jade-12: "#1d3b31"
+  amber-3: "#fff7c2"
+  amber-11: "#ab6400"
+  amber-12: "#4f3422"
+  red-3: "#feebec"
+  red-4: "#ffdbdc"
+  red-11: "#ce2c31"
+  red-12: "#641723"
 colors:
-  primary: "#2563EB"
-  on-primary: "#FFFFFF"
-  primary-hover: "#1D4ED8"
-  primary-pressed: "#1E40AF"
-  primary-tint: "#E8F0FF"
-  background: "#F6F8FB"
-  sidebar: "#FFFFFF"
-  surface: "#FFFFFF"
-  surface-raised: "#EDF2F8"
-  surface-input: "#FFFFFF"
-  surface-hover: "#E8EEF6"
-  surface-selected: "#E8F0FF"
-  border: "#DCE3EC"
-  border-strong: "#CBD5E1"
-  on-surface: "#182536"
-  on-surface-secondary: "#475569"
-  on-surface-muted: "#64748B"
-  success: "#167556"
-  warning: "#946200"
-  error: "#C5304B"
-  focus-ring: "#2563EB"
-  scrollbar-thumb: "#D1D5DB"
-  scrollbar-thumb-hover: "#000000"
-  progress-track: "#E2E8F0"
-  backdrop: "#18253666"
+  background: "{palette.slate-2}"
+  sidebar: "color-mix(in srgb, {palette.slate-2} 60%, {palette.slate-3})"
+  surface: "{palette.white}"
+  surface-raised: "{palette.white}"
+  surface-input: "{palette.slate-1}"
+  surface-subtle: "{palette.slate-2}"
+  surface-control: "{palette.slate-3}"
+  surface-hover: "{palette.slate-4}"
+  surface-pressed: "{palette.slate-5}"
+  surface-selected: "{palette.indigo-3}"
+  primary: "{palette.indigo-11}"
+  primary-text: "{palette.indigo-12}"
+  on-primary: "{palette.slate-1}"
+  primary-hover: "color-mix(in srgb, {palette.indigo-11} 88%, {palette.indigo-12})"
+  primary-pressed: "color-mix(in srgb, {palette.indigo-11} 76%, {palette.indigo-12})"
+  primary-tint: "{palette.indigo-3}"
+  primary-tint-hover: "{palette.indigo-4}"
+  primary-tint-pressed: "{palette.indigo-5}"
+  on-surface: "{palette.slate-12}"
+  on-surface-secondary: "{palette.slate-11}"
+  on-surface-muted: "{palette.slate-11}"
+  border: "{palette.slate-4}"
+  border-input: "{palette.slate-7}"
+  border-strong: "{palette.slate-8}"
+  focus-ring: "{palette.indigo-11}"
+  success: "{palette.jade-11}"
+  success-bg: "{palette.jade-3}"
+  success-text: "{palette.jade-12}"
+  warning: "{palette.amber-12}"
+  warning-bg: "{palette.amber-3}"
+  warning-text: "{palette.amber-12}"
+  error: "{palette.red-11}"
+  error-bg: "{palette.red-3}"
+  error-hover: "{palette.red-4}"
+  error-text: "{palette.red-12}"
+  info-bg: "{palette.indigo-3}"
+  info-text: "{palette.indigo-12}"
+  progress-track: "{palette.slate-4}"
+  progress-value: "{palette.indigo-11}"
+  media-placeholder: "{palette.slate-3}"
+  scrollbar-thumb: "{palette.slate-7}"
+  scrollbar-thumb-hover: "{palette.slate-12}"
+  backdrop: "{palette.slate-a9}"
 typography:
-  title-page:
-    fontFamily: "Segoe UI, PingFang SC, Microsoft YaHei, sans-serif"
-    fontSize: 20px
-    fontWeight: 650
-    lineHeight: 1.3
-    letterSpacing: -0.01em
-  title-section:
-    fontFamily: "Segoe UI, PingFang SC, Microsoft YaHei, sans-serif"
-    fontSize: 18px
-    fontWeight: 600
-    lineHeight: 1.4
-  title-card:
-    fontFamily: "Segoe UI, PingFang SC, Microsoft YaHei, sans-serif"
-    fontSize: 15px
-    fontWeight: 600
-    lineHeight: 1.45
-  body:
-    fontFamily: "Segoe UI, PingFang SC, Microsoft YaHei, sans-serif"
-    fontSize: 14px
-    fontWeight: 400
-    lineHeight: 1.6
-  button:
-    fontFamily: "Segoe UI, PingFang SC, Microsoft YaHei, sans-serif"
-    fontSize: 12px
-    fontWeight: 500
-    lineHeight: 1.5
-  body-emphasis:
-    fontFamily: "Segoe UI, PingFang SC, Microsoft YaHei, sans-serif"
-    fontSize: 14px
-    fontWeight: 600
-    lineHeight: 1.6
-  label:
-    fontFamily: "Segoe UI, PingFang SC, Microsoft YaHei, sans-serif"
-    fontSize: 13px
-    fontWeight: 500
-    lineHeight: 1.5
-  caption:
-    fontFamily: "Segoe UI, PingFang SC, Microsoft YaHei, sans-serif"
-    fontSize: 12px
-    fontWeight: 400
-    lineHeight: 1.5
-  telemetry:
-    fontFamily: "Inter, SFMono-Regular, Consolas, monospace"
-    fontSize: 12px
-    fontWeight: 500
-    lineHeight: 1.5
+  font-family: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif'
+  font-mono: 'ui-monospace, "SFMono-Regular", Consolas, monospace'
+  title-page: { fontSize: 20px, fontWeight: 600, lineHeight: 28px }
+  title-section: { fontSize: 14px, fontWeight: 600, lineHeight: 20px }
+  title-card: { fontSize: 14px, fontWeight: 600, lineHeight: 20px }
+  body: { fontSize: 14px, fontWeight: 400, lineHeight: 22px }
+  body-emphasis: { fontSize: 14px, fontWeight: 600, lineHeight: 22px }
+  label: { fontSize: 14px, fontWeight: 500, lineHeight: 20px }
+  button: { fontSize: 12px, fontWeight: 500, lineHeight: 18px }
+  caption: { fontSize: 12px, fontWeight: 400, lineHeight: 18px }
+  telemetry: { fontSize: 12px, fontWeight: 500, lineHeight: 18px }
 spacing:
   xxs: 4px
   xs: 8px
@@ -83,436 +100,605 @@ spacing:
   lg: 20px
   xl: 24px
   xxl: 32px
-  section: 40px
-  sidebar-width: 176px
+  section: 32px
+  sidebar-width: 192px
   sidebar-compact-width: 56px
-  content-padding: 16px
+  content-padding: 24px
+  content-padding-compact: 16px
   content-max: none
 rounded:
   xs: 4px
-  sm: 4px
-  md: 6px
-  lg: 8px
-  xl: 18px
+  sm: 6px
+  md: 8px
+  lg: 12px
+  xl: 16px
   full: 9999px
+borders:
+  width: 0.5px
+  focus-width: 2px
+  focus-offset: 2px
+materials:
+  media-atmosphere:
+    opacity: 0.16
+    blur: 20px
+    background: "{colors.media-placeholder}"
+  shadow-menu: "0 8px 24px {palette.slate-a3}, 0 2px 6px {palette.slate-a4}"
+  shadow-task-menu: "0 12px 32px {palette.slate-a3}"
+  shadow-dialog: "0 16px 48px {palette.slate-a4}"
+motion:
+  duration: 250ms
+  easing: ease-out
+  removal-duration: 220ms
 components:
+  app-shell: { brandHeight: 64px, brandIconSize: 32px, headerMinHeight: 56px }
   button-primary:
     backgroundColor: "{colors.primary}"
     textColor: "{colors.on-primary}"
     typography: "{typography.button}"
     rounded: "{rounded.md}"
     height: 32px
-  button-primary-hover:
-    backgroundColor: "{colors.primary-hover}"
-    textColor: "{colors.on-primary}"
+    paddingInline: "{spacing.sm}"
   button-secondary:
-    backgroundColor: "{colors.surface-raised}"
+    backgroundColor: "{colors.surface-control}"
     textColor: "{colors.on-surface}"
     rounded: "{rounded.md}"
-    height: 28px
+    height: 32px
   button-ghost:
     backgroundColor: transparent
     textColor: "{colors.on-surface-secondary}"
     rounded: "{rounded.md}"
-    height: 28px
-  input-default:
-    backgroundColor: "{colors.surface-input}"
-    textColor: "{colors.on-surface}"
-    rounded: "{rounded.md}"
     height: 32px
-  input-focus:
+  button-small: { height: 28px, rounded: "{rounded.sm}" }
+  button-icon: { width: 32px, height: 32px, iconSize: 16px }
+  button-multiline: { minHeight: 56px, padding: "{spacing.xs}" }
+  input-default:
+    height: 32px
     backgroundColor: "{colors.surface-input}"
     textColor: "{colors.on-surface}"
+    borderColor: "{colors.border-input}"
     rounded: "{rounded.md}"
-  card:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.on-surface}"
-    rounded: "{rounded.lg}"
-  sidebar-selected:
-    backgroundColor: "{colors.surface-selected}"
-    textColor: "{colors.primary}"
+  input-compact: { height: 28px }
+  share-input: { rows: 3, height: 80px, lineHeight: 20px, padding: "{spacing.xs}" }
+  card: { rounded: "{rounded.lg}", padding: "{spacing.md}" }
+  task-list: { rounded: 0px, backgroundColor: "{colors.surface}", hoverBackgroundColor: "{colors.surface-subtle}" }
+  navigation: { height: 40px, rounded: "{rounded.md}", iconSize: 16px }
+  chip-neutral: { height: 24px, rounded: "{rounded.full}" }
+  preview:
+    mediaFraction: 0.4
+    infoFraction: 0.6
+    stageHeight: 360px
+    stageHeight-medium: 320px
+    stageHeight-compact: 300px
+    rounded: "{rounded.xl}"
+    gap: "{spacing.xl}"
+    formatsMaxHeight: 196px
+    formatMinHeight: 56px
+  task-toolbar: { minHeight: 64px, statusHeight: 48px, platformHeight: 52px, searchWidth: 240px }
+  task-row:
+    minHeight: 80px
+    activeMinHeight: 120px
+    coverSize: 56px
+    queuedMinHeight: 84px
+    statusWidth: 88px
+    actionWidth: 144px
+    gap: "{spacing.sm}"
+    paddingBlock: "{spacing.xs}"
+    paddingInline: "{spacing.md}"
     rounded: "{rounded.md}"
-  chip-neutral:
-    backgroundColor: "{colors.surface-raised}"
-    textColor: "{colors.on-surface-secondary}"
-    rounded: "{rounded.full}"
-  progress-track:
-    backgroundColor: "{colors.progress-track}"
-    rounded: "{rounded.full}"
-  progress-value:
-    backgroundColor: "{colors.primary}"
-    rounded: "{rounded.full}"
+  progress: { height: 4px, rounded: "{rounded.full}" }
+  task-menu: { width: 236px, itemHeight: 36px, padding: 8px, rounded: 10px }
+  menu: { minWidth: 192px, itemHeight: 32px, padding: "{spacing.xxs}", rounded: "{rounded.lg}" }
+  dialog: { width: 480px, maxHeight: 85dvh, viewportGap: 16px, padding: "{spacing.lg}", rounded: "{rounded.xl}" }
+  transcript-dialog: { width: 720px, maxHeight: 85dvh }
+  update-dialog: { width: 640px, maxHeight: 85dvh }
+  album-dialog: { width: 680px, maxHeight: 90dvh }
+  cover-dialog: { maxWidth: 90vw, maxHeight: 90dvh }
+  avatar: { size: 32px, compactSize: 24px }
+  album-thumbnail: { width: 40px, height: 48px }
+  settings: { navigationWidth: 184px, navigationWidth-compact: 160px, gap: "{spacing.xl}" }
+  about: { maxWidth: 1040px }
+  scrollbar: { size: 6px, contentGap: 12px, aboutOuterGap: 4px }
 ---
 
-# 映取：桌面视频下载器设计系统（DESIGN.md）
+# 映取桌面客户端设计规范
 
-> 版本：1.2 · 产品类型：Windows / macOS 本地应用 · 设计基准：1440 × 900 桌面视口 · 界面语言：简体中文。
+> 版本 2.3，2026-10-24。适用于 Windows / macOS，界面语言为简体中文，基准视口为 1440 × 900。
 >
-> 本文件是 Stitch 和后续前端实现的**唯一视觉规范**。页面布局、文案、组件状态与体验验收也以此为准。应用名称“映取”为统一设计占位名，产品确定正式名称时全局替换一次。
-
-## Overview
-
-### 产品与目标
-
-“映取”是一款支持**抖音和 TikTok** 的轻量级桌面视频下载工具。核心路径是：粘贴分享链接 → 解析单条作品 → 查看封面与信息 → 开始下载 → 查看下载进度 → 在已完成列表定位文件。用户能分别维护抖音与 TikTok 的 Cookie、代理与浏览器标识，并配置下载目录。
-
-它是一款独立运行的**桌面工具**，面向普通用户、内容整理者和创作者。界面不呈现服务器管理后台，不包含身份池仪表盘、数据采集监控、评论、作者批量抓取、MCP、付费套餐、帐号注册或云同步流程。
-
-### 视觉定位：Daylight Utility / 明亮工具感
-
-- 情绪：沉静、可靠、清晰、高完成度；更接近精密桌面生产力工具，不像娱乐网站或运营管理后台。
-- 核心视觉：浅灰蓝背景、极低噪声的分层面板、干净的排版和一抹克制的清晰蓝色。
-- 信息密度：中等偏紧凑。任务页面强调可扫读效率，首页强调操作聚焦和视频预览。
-- 品牌感：几何化“播放三角形 + 向下箭头”组合图标，尺寸克制，不使用大型插画、夸张渐变或玻璃拟态装饰。
-- 主主题：亮色（2026-10-13 用户确认）。生产 UI 全部使用 shadcn/ui 官方组件；页面只做布局与业务组合，不自研基础控件。原 docs/ui 暗色图仅保留结构参考，颜色以本文件亮色 token 为准。
-- 平台标识：使用中性文字标签“抖音”“TikTok”，避免借用官方界面结构。不同平台**不改变整个应用的主色**。
-
-### 使用原则
-
-1. 一屏只突出当前最重要的操作。首页的主动作是“解析链接”，成功解析后是“下载视频”。
-2. 解析和下载是两个明确阶段：解析成功不代表已经保存文件。
-3. 状态持续可见：正在解析、等待中、下载中、已完成、失败、已取消有不同的文字与动作。
-4. 所有进度、文件大小、速度和剩余时间只在有数据时展示；未知值使用“计算中”或“—”。
-5. 视频媒体预览保持原图比例，竖版作品优先展示 9:16，不强制裁成横屏 16:9。
-6. Cookie 按用户决定直接存本机 SQLite；设置页多行文本框回显已保存值，支持显示/隐藏及编辑。代理密码继续使用系统凭据存储。
-7. 设计使用真实可实现的桌面操作，避免网页导航栏、浏览器地址栏、虚构的系统控制按钮。
-
-## Colors
-
-### 语义色与用途
-
-| 语义角色 | 色值 | 视觉说明与使用规则 |
-|---|---|---|
-| `background` | `#F6F8FB` | 浅灰蓝；应用主内容区底色，形成安静的操作画布 |
-| `sidebar` | `#FFFFFF` | 略亮于主底色；左侧固定导航背景 |
-| `surface` | `#FFFFFF` | 常规卡片、任务行、设置分组的主要容器 |
-| `surface-raised` | `#EDF2F8` | 弹窗、菜单、悬浮层和次级按钮 |
-| `surface-input` | `#FFFFFF` | 链接输入、Cookie 文本框和只读路径字段 |
-| `surface-hover` | `#E8EEF6` | 行悬停与可操作区域悬停 |
-| `surface-selected` | `#E8F0FF` | 导航选中及轻度强调背景 |
-| `primary` | `#2563EB` | 清晰蓝色；主按钮、焦点、活动进度、选中态 |
-| `primary-hover` | `#1D4ED8` | 主按钮鼠标悬停 |
-| `primary-pressed` | `#1E40AF` | 主按钮按下 |
-| `on-primary` | `#FFFFFF` | 蓝色实心按钮中的白色文字/图标 |
-| `primary-tint` | `#E8F0FF` | 弱强调底色，用于导航与信息强调 |
-| `on-surface` | `#182536` | 标题、正文主文字 |
-| `on-surface-secondary` | `#475569` | 描述、元数据、按钮次级文字 |
-| `on-surface-muted` | `#64748B` | 占位符、辅助说明、时间戳 |
-| `border` | `#DCE3EC` | 1px 基础边框与分隔线 |
-| `border-strong` | `#CBD5E1` | 强调边框、必要的输入轮廓 |
-| `success` | `#167556` | 已完成、配置验证成功 |
-| `warning` | `#946200` | 需要处理但并非失败的提示 |
-| `error` | `#C5304B` | 下载失败、字段校验错误、危险操作 |
-| `focus-ring` | `#2563EB` | 键盘焦点可视轮廓 |
-| `progress-track` | `#E2E8F0` | 进度条背景 |
-| `backdrop` | `#18253666` | 模态对话框遮罩 |
-
-颜色由 YAML 前置配置定义；正文色值仅作为可读的使用说明。**全应用只有一个主交互强调色 `primary`。** 成功、警告、失败色只表达状态，不能替代主操作色。
-
-### 对比度及状态
-
-- 正文 `on-surface` 与常规面板保持明显对比；辅助文字 `on-surface-muted` 在 `surface` 上也应达到普通文本 WCAG AA 4.5:1 的对比度。
-- 选中态通过底色、文字、形状或图标同时区分，不仅靠颜色。
-- 进度条：下载中为蓝色；完成后任务徽标用绿色；失败只强调错误文字/图标，不把整张卡片染红。
-- 输入框聚焦出现 2px `focus-ring` 外轮廓，与默认边框区分。
-- 平台标签为中性底色，不使用抖音或 TikTok 的大面积品牌配色。
-
-## Typography
-
-### 字体气质
-
-正文采用 `Segoe UI / PingFang SC / Microsoft YaHei / 系统无衬线` 的回退栈，确保 Windows 与 macOS 中文阅读体验一致。数字和技术指标采用清晰的等宽数字，传输速度、百分比、文件大小以良好的数字对齐展示。
-
-| 层级 | 大小 / 字重 | 用途 |
-|---|---|---|
-| 页面标题 | 20px / 650 | “下载视频”“下载任务”“设置”“关于软件” |
-| 分组标题 | 18px / 600 | 设置分组、页面分区标题 |
-| 卡片标题 | 15px / 600 | 视频标题、任务名称 |
-| 正文 | 14px / 400 | 通用内容、描述与元数据 |
-| 正文强调 | 14px / 600 | 重要数值 |
-| 按钮 | 12px / 500 | 主次按钮、侧栏导航、代理切换与折叠按钮 |
-| 标签 | 13px / 500 | 表单字段、过滤条件 |
-| 辅助信息 | 12px / 400 | 日期、技术提示、次要说明 |
-| 下载遥测 | 12px / 500 | `6.8 MB/s`、`76%`、`120 / 158 MB` 等数字 |
-
-- 页面标题行高 1.3；正文行高 1.6；避免在中文正文中添加额外字符间距。
-- 作品标题最多显示 2 行，溢出省略；鼠标悬停可通过提示框看全名。
-- 不使用满屏的大字号营销标题；首页主标题与其他页面保持一致。
-- 全界面按钮、导航和表单统一使用简体中文，平台名称保留 `TikTok` 品牌拼写。
-
-## Layout
-
-### 桌面画布
-
-- **基准视口：1440 × 900**；次级校验视口：1280 × 800；最小设计支持：1024 × 680。
-- 主容器：左侧固定导航栏 176px + 右侧可滚动内容。侧栏使用独立背景并以 1px 细边框隔开。
-- 内容区：页面内边距 16px；顶部标题与说明同行，标题区约 40px；正文随窗口扩展，不使用居中网页式容器。
-- 1024–1100px：左侧导航可收为 56px 图标栏，右侧内边距保持 16px。不得水平溢出。
-- 栅格：8px 基准节奏，微调允许 4px；卡片内边距 12px；卡片间距 8–12px；页面分组间距 16px。
-- 导航固定；仅内容区域滚动；需要滚动的设置页面保持当前导航项可见。
-- 系统窗口边框保留平台原生风格，Stitch 只绘制应用**内容区域**，不生成浏览器地址栏、伪 macOS 红黄绿窗口按钮和重复的 Windows 标题栏。
-
-### 应用外壳（所有页面一模一样）
-
-```text
-┌──────────────────────┬──────────────────────────────────────────────┐
-│ Logo 映取            │ 页标题                               工具  │
-│                      │                                              │
-│  下载视频            │ 页面主体内容                                 │
-│  下载任务       [2]  │                                              │
-│                      │                                              │
-│                      │                                              │
-│                      │                                              │
-│  设置                │                                              │
-│  本地运行            │                                              │
-└──────────────────────┴──────────────────────────────────────────────┘
-```
+> 本文件是前端实现与后续维护的唯一视觉规范，包含四个页面的布局、组件规格、媒体交互和有效业务规则。顶部 YAML 定义唯一视觉令牌，正文解释用途；数值如有冲突，先修正文档再实施。本版已应用到 React/shadcn 界面，本次桌面下载器调整见 [验证记录](docs/task-ui-v4-validation.md)，上一版记录见 [视觉重构验证记录](docs/visual-redesign-validation.md)。
 
-- 侧栏顶部标志区域高约 48px；品牌图标 16px；名称 “映取” 14px / 600。
-- 四个固定导航条目：**下载视频、下载任务、设置、关于软件**。导航行高 32px、图标 16px、圆角 6px，图文水平对齐；当前项使用蓝色字色和浅蓝背景。
-- “下载任务”仅在存在进行中或等待中的任务时显示数量徽标；徽标为数字，不使用大红点。
-- 侧栏底部是非交互的状态文案“本地运行”和一个小状态点。状态故障时应改成明确提示。
-- 内容区顶部为页面标题、简短描述与必要的上下文操作；不另设二级全局导航。
+## 1. 产品定位与规范边界
 
-### 交互密度与媒体布局
+### 1.1 精致型影音下载器
 
-- 首页粘贴区域随内容区铺满可用宽度，聚焦链接输入；解析结果直接出现在输入区下方。
-- 预览视频封面遵循作品原比例。常见竖版封面使用 9:16，推荐可视尺寸约 96 × 171px；卡片正文水平排列，空间不足时收紧元数据而不拉伸图片。
-- 列表项是可扫读的桌面列表行，不使用多列瀑布流。任务项基础高度约 88px，缩略图约 42 × 56px，卡片内部横向对齐。
-- 设置页为纵向分组结构。Cookie 的抖音/TikTok 配置可使用两个对齐的卡片并排显示；窗口较窄时纵向排列。
+映取帮助普通用户、内容整理者和创作者将喜欢的作品保存到本地。核心路径是：粘贴单条分享链接 → 解析作品 → 识别封面与作者 → 选择真实可用规格 → 下载 → 管理本地作品与记录。
 
-## Elevation & Depth
+视觉由珍珠白内容表面、雾蓝灰结构、清透蓝交互强调和真实媒体封面组成。作品识别优先于技术参数，下载操作优先于装饰，过程反馈优先于空泛说明。分享链接、封面、图集原图、等待队列、本地文件夹构成产品的主要视觉语境。
 
-整体采用**色阶层次 + 细边界**形成深度。主页面避免过度投影，使用留白、分组和对比建立秩序。
+- 首页以大封面舞台识别作品，任务页使用统一容器内的连续媒体列表，常规行高 80px；标题、作者、来源与文件信息形成稳定的阅读顺序。
+- 固定导航和顶栏采用浅灰实色，列表与表单保持实色；通过色阶、留白和 0.5px 边界区分结构。
+- 行尾保留高频动作，次要操作通过整行右键菜单访问，避免一排无层级的操作图标。
+- 全局只有一种蓝色交互体系；抖音、TikTok、YouTube、Telegram 使用中性来源标签，不切换应用主色。
+- 应用名称保持“映取”。不用营销横幅、数据看板、大插画、彩色左边线或装饰性眉题制造层次。
 
-- 普通卡片：1px `border`，背景 `surface`；默认不投明显阴影。
-- 下拉菜单与对话框：背景 `surface-raised`，边框 `border-strong`，柔和阴影 `0 16px 48px rgba(0,0,0,0.32)`。
-- 输入区域：通过清晰边界的 `surface-input` 与卡片区分，focus ring 是主要交互反馈。
-- 缩略图：边框 1px，圆角 6px；适度暗角可以提高封面上短标签的可读性。
-- 避免大面积磨砂、强玻璃拟态、发光描边和多层霓虹渐变。
+### 1.2 已有能力与实施边界
 
-## Shapes
+正式支持抖音、TikTok、YouTube 单作品；图集沿用已支持的平台和引擎能力。Telegram 原始视频是默认关闭的 tdl HTTP 实验模式，不能作为无条件可用的第四个正式平台宣传。
 
-形状语言为**精确、微圆角、低装饰**，同类组件保持一致。
+前端继续复用 Tauri 2、React、TypeScript、Tailwind CSS 4、shadcn/ui radix-nova、Radix 与 Lucide。所有基础控件复用 `src/components/ui/`，页面负责布局和业务组合。设计中的组件名称表示展示职责，不要求逐个新建文件。
 
-| 对象 | 圆角 | 其他尺寸 |
-|---|---|---|
-| 主卡片 / 弹窗 | 8px | 边框 1px |
-| 输入框 / 主按钮 / 导航选中 | 6px | 标准按钮高 32px |
-| 小按钮 / 标签菜单 | 4–6px | 小按钮高 28px |
-| 视频封面 | 6px | 保留源图比例 |
-| 状态徽标 | 9999px | 高 22–24px |
-| 进度条 | 9999px | 高 5–6px |
-| 图标按钮 | 6px | 推荐可点区域 28 × 28px |
+Rust 仍是任务、队列、文件提交与持久化的唯一状态权威，`src/api.ts` 是前端调用边界。重构保持既有事件订阅、`revision` 合并、移除屏蔽、配置快照、取消清理与恢复语义。不改 Rust、Python、SQLite、协议或下载逻辑来配合外观。
 
-图标采用 1.75px 或 2px 线宽的统一线性风格（参考 Lucide 图标体系），不要混入彩色拟物图标、表情符号或不一致的填充图标。交互箭头/播放/下载/打开文件夹/设置/关闭等图标视觉重量应一致。
+不新增平台内容搜索、作者批量采集、播放列表、直播、转码、内置播放器、暂停、断点续传、账号注册、付费套餐、云同步、开放 API 或 MCP。作者昵称进入的是本地记录搜索；视频播放使用系统默认播放器。
 
-## Components
+### 1.3 权威关系与历史整理
 
-### 全局组件约束
+当前用户指令决定任务范围；本文件决定视觉和下述界面行为，技术方案与专项契约说明底层实现。功能冲突须记录并核对，不能借重构改变契约。`docs/ui/` 的旧稿只帮助辨认页面状态和内容，旧颜色、字号、密度及控件位置不约束新界面。
 
-- `AppSidebar`：品牌、4 项导航、下载任务计数、本地状态。所有页面**几何尺寸、位置、选中逻辑完全一致**。
-- `PageHeader`：左侧页面标题与一行描述；右侧只放该页面的必要操作。
-- `PrimaryButton`：一个界面分区只允许一个主按钮。标准高度 32px；禁用时降低对比并避免激活动画。
-- `SecondaryButton`：常规次级操作，背景 `surface-raised`，清楚的 hover 态。
-- `GhostIconButton`：打开文件、更多、复制、移除等小操作；鼠标悬停才强化背景。
-- `TextField` / `SecureTextArea`：输入、高度、焦点、校验态统一。Cookie 默认掩码，不在页面普通文本中完整显示。
-- `StatusChip`：文字 + 小图标/标记，含“等待中”“解析中”“下载中”“已完成”“失败”“已取消”。
-- `VideoCover`：保留 9:16 比例；缺图时使用浅色图形占位，图标居中，不拉伸。
-- `DownloadProgress`：5–6px 蓝色进度轨道，下方展示已下载/总大小、速度、百分比或剩余时间；未知总量采用不确定状态。
-- `EmptyState`：单个线性图标、简短标题、一句解释、唯一操作入口；在导航/列表下方居中，但不要产生过量留白。
-- `Toast`：复用 shadcn/ui Sonner，屏幕顶部居中轻提示，自动消失；成功、错误、警告、信息分别使用语义色与状态图标，默认/加载保留中性色，关闭按钮固定在提示卡片内部右上角并为正文留出空间，支持键盘焦点与“关闭通知”可访问名称。任务成功或失败发生时提示一次，不重放恢复记录；操作失败同步显示错误 Toast，失败原因仍在页面或任务项内持续可见。
-- `ConfirmDialog`：取消正在执行任务、批量清理历史等既有确认操作继续保留；单条从列表移除和删除本地文件均直接执行，不弹确认框。
+旧版按 M2 任务卡追加的要求已合并到对应章节，不再保留另一套阶段性视觉规则：
 
-### 页面 A：首页 · 未解析
+| 旧记录 | 本版有效规则 |
+| --- | --- |
+| M2 单任务、并发、历史管理 | 保留队列、重试、取消和文件操作，见第 5、6 节；不再把已实现操作当作未来按钮 |
+| 紧凑密度、固定 9:16 小封面 | 改为本版大媒体舞台与 80px 连续任务行，所有源图保持自然比例 |
+| 行尾全部平铺、取消更多菜单 | 由本次要求覆盖为高频直达和整行右键菜单，执行条件与副作用不变 |
+| ToggleGroup 并发选择 | 当前使用 Select，默认 2、可设 1–3；不恢复旧控件要求 |
+| 双平台文案、独立已完成导航 | 使用当前四个主入口；已完成仍在下载任务内，平台范围见 1.2 |
+| 本地封面与视频同目录保存 | 新封面只存现有 SQLite 缓存；显式保存封面仍可用，见第 7 节 |
+| 历史二次确认删除 | 单条移除与本地文件删除均直接执行；取消、重复下载及批量清理保留各自确认 |
+| 黑色滚动条悬停、旧阴影与多档字号 | 统一使用本版 Radix、材质与三档字号令牌 |
 
-**导航高亮：下载视频**。
+## 2. 设计令牌与样式映射
 
-版面顺序：
+### 2.1 Radix 浅色色阶
 
-1. 页面标题“下载视频”；描述“粘贴抖音或 TikTok 分享链接，保存视频到本地”。
-2. 主输入卡片：标题“视频链接”，固定三行的宽输入框，占位文字“粘贴视频分享链接或分享口令…”，右侧上下排列次级按钮“粘贴链接”和主按钮“解析链接”。粘贴按钮仅在点击时通过 Tauri 原生剪贴板命令读取文本、填入输入框并聚焦，不使用网页剪贴板读取接口、不自动解析或后台监听；剪贴板为空或读取失败时通过顶部 Toast 提醒，读取失败可使用 Ctrl / ⌘ + V。输入框支持完整的多行粘贴内容，始终保持三行高度，超出内容在输入框内纵向滚动，不随文本长度撑高页面。
-3. 输入区下方灰色提示“支持抖音与 TikTok · 自动识别平台”，并可显示 `Ctrl / ⌘ + V` 提示，保持非常克制。
-4. 无结果时，下方为干净的媒体占位卡：线性链接图标、标题“粘贴链接开始解析”、一句说明“作品信息将显示在这里”。
-5. 页面底部可以有 2–3 条最近完成记录的紧凑区域，但首屏应以链接输入为视觉主角。
+YAML `palette` 记录本版使用的 Radix Colors light sRGB 色值，`colors` 为语义别名。来源为 [Radix 浅色源码](https://github.com/radix-ui/colors/blob/main/src/light.ts)，用法依据 [色阶用途](https://www.radix-ui.com/colors/docs/palette-composition/understanding-the-scale)。不从封面自动提取应用强调色，不在页面加入另一套近似灰蓝或状态色。
 
-### 页面 B：首页 · 解析成功
+| 用途 | 语义令牌 | Radix 来源与使用方式 |
+| --- | --- | --- |
+| 窗口内容底色、侧栏基底 | `background`、`sidebar` | slate-2；侧栏混入 40% slate-3，略深于主背景 |
+| 内容、输入、浮层 | `surface`、`surface-input`、`surface-raised` | white，列表与浮层为白色；输入使用 slate-1 |
+| 次表面 | `surface-subtle` | slate-2，与内容轻微区分 |
+| 控件默认、悬停、按下 | `surface-control`、`surface-hover`、`surface-pressed` | slate-3 / 4 / 5 |
+| 导航选中、弱强调及其交互 | `surface-selected`、`primary-tint` 系列 | indigo-3 / 4 / 5，文字使用 `primary-text` 的 indigo-12 |
+| 普通分隔、输入、悬停边界 | `border`、`border-input`、`border-strong` | slate-4 / 7 / 8 |
+| 标题正文、次级及辅助文字 | `on-surface`、`on-surface-secondary`、`on-surface-muted` | slate-12 / 11 / 11，以字号和字重区分次级层次 |
+| 主按钮、链接、进度、焦点 | `primary`、`progress-value`、`focus-ring` | indigo-11；主按钮文字使用 slate-1 |
+| 已完成 | `success-bg` + `success-text` | jade-3 + jade-12 |
+| 等待、取消中、实验风险 | `warning-bg` + `warning-text` | amber-3 + amber-12 |
+| 失败、危险操作 | `error-bg` + `error-text` | red-3 + red-12；独立错误文字用 `error` |
+| 解析中、下载中、已解析 | `info-bg` + `info-text` | indigo-3 + indigo-12 |
+| 遮罩、阴影 | `backdrop`、`materials.shadow-*` | slate alpha 色阶 |
 
-保持页面 A 的**同一导航、标题、输入区位置与尺寸**。输入框内为一条示例分享链接，主输入按钮变为次级“重新解析”。输入下方出现一张横向 `VideoPreviewCard`：
+普通文本及按钮文字在实际背景上至少达到 WCAG AA 4.5:1。indigo-9 / 10 保留为原始色阶，不直接用来承载本项目 12px 浅色按钮文字；主按钮使用 indigo-11，hover / pressed 按 YAML 混入 indigo-12 加深，不通过降低整个按钮透明度变浅。导航与筛选使用 indigo-11 文字配 indigo-3 背景，各类状态徽标使用对应第 12 阶文字。焦点除颜色外还具有独立轮廓。
 
-- 左侧 9:16 视频海报；右侧作品标题（最多两行）、作者、平台标签、时长、清晰度（若可得）、文件大小（若可得）。
-- 标题使用示例“周末去海边，记录日落前的最后十分钟”；作者示例“@海边观察员”；平台标签“抖音”或“TikTok”。
-- 右下角主按钮“下载视频”；其前增加次按钮“后台下载”，使用同一下载队列，提交成功后立即清空链接与预览并聚焦输入框，留在当前页继续解析。提交失败或取消重复下载确认保留预览；原下载按钮仍保留当前进度展示。
-- 解析完后显示“已解析，可下载”；不提前写“下载成功”。
-- 初次解析失败时在输入区下方出现简短错误提示和对应补救操作。
+媒体像素和应用图标原始素材不受界面调色板重着色；Telegram 二维码保持足够扫描对比。除这些内容外，所有界面色、渐隐、阴影及 SVG 滚动箭头均来自令牌。状态色只表达真实状态。
 
-### 页面 C：下载任务
+### 2.2 字体、间距和形状
 
-**导航高亮：下载任务**。统一展示已提交下载的进行中、等待、失败、取消及已完成记录；纯解析/预览不进入列表。顶部显示下载中、等待、已完成数量及并发上限，右侧搜索框“搜索作品标题或作者”搜索全部下载记录。保持等待任务按 FIFO 排列，其余按创建时间倒序展示。标题、搜索框和平台 Tab 栏固定在内容区顶部，仅下方任务列表纵向滚动；列表滚动不带动 Tab 栏，长列表中的任务行保持原有高度。
+| 层级 | YAML 角色 | 规格与用途 |
+| --- | --- | --- |
+| 页面级 | `title-page` | 20px / 600 / 28px，主页面标题和关于页品牌名称 |
+| 正文级 | `body`、`label`、`title-section`、`title-card` | 14px，正文 400、标签 500、标题 600；行高按 YAML |
+| 辅助级 | `caption`、`telemetry`、`button` | 12px，说明 400、数值与按钮 500，行高 18px |
 
-搜索框前提供“清理历史”图标按钮，使用 shadcn/ui Button 与 Tooltip，无可见文字；有可清理记录时可操作，悬停或键盘聚焦显示提示。点击后确认移除当前平台 Tab 内已完成、失败、已取消的下载记录；“全部”Tab 才覆盖所有平台，搜索条件不改变当前 Tab 的清理范围；进行中、排队、未提交的预览以及仍被工作进程占用的记录保留。只清理 SQLite 记录、提交证据及无剩余引用的 Telegram 封面缓存，不删除本地视频、封面或图集文件。批量清理整批成功或回滚，处理中禁止重复操作，成功后刷新列表并提示实际条数；失败保留弹窗供重试。关闭后恢复清理按钮焦点，当前 Tab 无历史时按钮禁用并将焦点交回列表，使用 preventScroll 保持滚动位置。单条删除不主动聚焦搜索框。成功删除的列表项在约 220ms 内向上淡出并收起高度，下方条目随之上移；批量清理的可见项同时退场，失败不播放删除动画，减少动态效果时立即移除。
+全局只有 12 / 14 / 20px 三档字号；弹窗标题、更新说明、徽标、格式信息、作者 ID 不增加第四档，也不使用 11px。分组与任务标题使用 14px / 600。字体为本机系统无衬线，不加载远程字体；数值使用 `tabular-nums`，技术标识需要时才用 `font-mono`。
 
-列表至少展示三个清晰不同的状态：
+辅助说明统一为 12px 常规字重和 `text-muted-foreground`，优先复用 `FieldDescription`、`CardDescription`。作品正文、标题、字段标签、用户输入、更新说明正文和实际进度数值不属于辅助说明。错误、警告、成功保留语义色。界面不使用中点分隔文案，多项信息通过间距、换行或完整短句组织。
 
-- **下载中**：竖版缩略图、两行标题、平台与作者、蓝色进度条、`68%`、`83.4 / 122 MB`、`4.8 MB/s`，右侧“取消”操作。
-- **等待中**：竖版缩略图、作品标题、“等待下载”，进度条保持空状态，不凭空显示速度。
-- **失败**：竖版缩略图、作品标题、红色小徽标“失败”、具体文案“下载链接已过期，请重新解析”，右侧“重试”。失败项目保留在列表，不能只弹出瞬时通知。
+间距使用 4 / 8 / 12 / 16 / 20 / 24 / 32px。正文常规内边距 24px，窄窗 16px；常规分组内边距 16px，表单字段间距 12px。避免为每个字段另套卡片。
 
-不在首版 UI 中设计“暂停”“继续”“断点续传”按钮；首版只提供取消、重试以及重新解析操作。取消后保留记录，并提供移除入口。
+圆角按功能使用：小控件 6px、按钮和输入 8px、分组与菜单 12px，任务列表不使用外层圆角、大舞台和弹窗 16px；任务行悬停、选中背景为 8px 圆角。4px 仅用于紧邻的小型内部元素，胶囊只用于状态和进度。嵌套时内圆角约为外圆角减去间距并限定为非负值，不给每层相同的大圆角。
 
-### 下载任务中的已完成记录
+所有结构边框、分隔线、菜单分隔和表格线为 0.5px。2px 焦点轮廓属于可访问反馈，不是结构边框；Lucide 图标保留统一的 1.75–2px 线宽。避免再叠 shadcn 默认 1px ring 和自定义边框形成双线。
 
-已完成记录保留在“下载任务”同一列表内，不再提供独立侧栏入口；任务完成后保持可见，搜索同样适用。
+### 2.3 材质、阴影与动效
 
-完成列表为高密度清晰任务行：缩略图、标题、作者、平台、文件大小、完成时间、绿色“已完成”标识；行尾按“播放视频”（仅已完成且本地文件存在的视频）、“打开文件夹”、“从列表移除”、“复制原链接”、“删除本地视频/图集”排列，不再收进更多菜单。所有操作使用 `ghost` 图标 Button，默认透明背景且无可见边框，鼠标悬停时显示背景；删除本地文件的垃圾桶图标默认红色。所有图标保留 Tooltip、可访问名称及键盘操作。播放使用系统默认播放器；图集保留“查看图集”和文件夹入口，文件缺失时不显示播放、文件夹或本地删除。“从列表移除”在已完成、失败、取消记录上可用，直接删除记录、保留文件；本地删除直接删除任务所属文件，并同步移除任务与数据库下载记录。两者均不弹二次确认，处理中禁用重复操作，失败保留记录并提示错误。
+| 区域 | 材质规则 |
+| --- | --- |
+| 固定侧栏、固定页顶栏 | 侧栏使用 sidebar 实色，任务页工作区和顶栏使用 surface，其他页顶栏使用 background 实色；不使用背景模糊 |
+| 首页媒体舞台 | 清晰源图在前；允许同源图片的 16% 氛围层、20px 模糊，裁切在舞台内，不能覆盖标题、按钮或进度 |
+| 任务行、设置表单、文案正文 | 实色 `surface`，不使用逐行 blur、封面染色或持续投影 |
+| Dialog、菜单、Tooltip、Toast | 实色 `surface-raised`，0.5px 边界和 YAML 浮层阴影；不透出正文干扰阅读 |
+| 系统窗口 | 保留原生装饰，不依赖 Windows Mica、macOS vibrancy 或透明窗口；本次不新增平台材质能力 |
 
-当实际本地文件不存在时，使用温和警示“文件已移动或删除”，操作改为“定位文件 / 移除记录”，避免继续展示虚假的可播放状态。
+应用外壳采用浅色实底，仅首页媒体舞台保留局部氛围。禁止多层模糊叠加、霓虹光晕和滚动列表滤镜。系统要求降低透明度时关闭媒体氛围，布局和可读性不变。
 
-列表空状态文案：“还没有下载记录” / “下载任务和已完成记录会显示在这里”，提供“去下载作品”入口。搜索无结果时显示“没有匹配的下载任务” / “试试其他作品标题或作者”。
+常规表面无阴影；菜单与弹窗仅使用各自 `materials.shadow-*`。默认交互即时反馈，任务行背景使用 140ms ease-out，任务右键菜单进入使用 80ms 从 65% 不透明度淡入、退出使用 60ms 淡出，其他必要的颜色或浮层显隐使用 250ms ease-out，不使用弹簧、缩放入场或按钮位移。成功移除行保留既有 220ms 收起生命周期，下方项目自然上移；减少动态效果时立即移除。高频下载进度和数值不添加延迟过渡，不用动画制造速度；不确定进度辅以文字。
 
-### 页面 E：系统设置
+### 2.4 `src/style.css` 的唯一映射路径
 
-**导航高亮：系统设置**。页面内部采用左右分栏：左侧 184px 二级菜单，最小视口缩为 160px，右侧为当前分类操作区；两栏间距 24px。左侧菜单在内容区滚动时保持可见，1024 × 680 仍保留左右布局。基础导航与控件均复用现有 shadcn/ui。
+`src/style.css` 已按本节集中映射，无新增主题依赖。映射顺序固定为 **YAML palette → Radix CSS 原始变量 → 语义变量 → `@theme inline` → shadcn 与业务布局**。
 
-二级导航不套独立卡片，以右侧细分隔线组织区域。分类行高 40px、间距 8px，仅包含图标和 13px 名称，不显示分类说明。选中项使用 `primary-tint` 浅蓝背景和蓝色名称，不绘制边框或左侧竖线。未选中项悬停使用 `surface-hover` 浅灰底和正文文字，保持选中项原样，避免相邻两项呈现同一种蓝色高亮。保留键盘焦点环。
+在 `src/style.css` 集中定义本版所需的 `--slate-*`、`--slate-a*`、`--indigo-*`、`--jade-*`、`--amber-*`、`--red-*` 原始值，逐项对应 YAML。以后如改为官方 CSS 导入，须明确依赖变更并删除重复原始值。组件只消费语义变量。不能只写 `var(--indigo-11)` 而未定义或导入。
 
-按使用对象组织为三个分类：
+| 现有 / 目标 CSS 变量 | YAML 来源 |
+| --- | --- |
+| `--background` / `--foreground` | `colors.background` / `colors.on-surface` |
+| `--card` / `--card-foreground` | `colors.surface` / `colors.on-surface` |
+| `--popover` / `--popover-foreground` | `colors.surface-raised` / `colors.on-surface` |
+| `--primary` / `--primary-foreground` | `colors.primary` / `colors.on-primary` |
+| `--primary-text` | `colors.primary-text` |
+| `--primary-hover` / `--primary-pressed` | `colors.primary-hover` / `colors.primary-pressed` |
+| `--secondary` / `--secondary-foreground` | `colors.surface-control` / `colors.on-surface` |
+| `--muted` / `--muted-foreground` | `colors.surface-control` / `colors.on-surface-muted` |
+| `--surface-input` / `--surface-hover` | `colors.surface-input` / `colors.surface-hover` |
+| `--surface-subtle` / `--surface-pressed` | `colors.surface-subtle` / `colors.surface-pressed` |
+| `--accent` / `--accent-foreground` | `colors.surface-selected` / `colors.primary-text` |
+| `--border` / `--input` / `--ring` | `colors.border` / `colors.border-input` / `colors.focus-ring` |
+| `--border-strong` / `--backdrop` | `colors.border-strong` / `colors.backdrop` |
+| `--success` / `--warning` / `--destructive` | `colors.success` / `colors.warning` / `colors.error` |
+| `--success-bg` / `--success-text` | `colors.success-bg` / `colors.success-text` |
+| `--warning-bg` / `--warning-text` | `colors.warning-bg` / `colors.warning-text` |
+| `--error-bg` / `--error-hover` / `--error-text` | 对应 `colors.error-*` |
+| `--info-bg` / `--info-text` | 对应 `colors.info-*` |
+| `--progress-track` / `--progress-value` | 对应 `colors.progress-*` |
+| `--media-placeholder` | `colors.media-placeholder` |
+| `--scrollbar-thumb` / `--scrollbar-thumb-hover` | 对应 `colors.scrollbar-*` |
+| `--sidebar` / `--sidebar-foreground` | `colors.sidebar` / `colors.on-surface-secondary` |
+| `--sidebar-primary` / `--sidebar-primary-foreground` | `colors.primary` / `colors.on-primary` |
+| `--sidebar-accent` / `--sidebar-accent-foreground` | `colors.surface-selected` / `colors.primary-text` |
+| `--sidebar-border` / `--sidebar-ring` | `colors.border` / `colors.focus-ring` |
 
-1. **下载设置**：下载目录（只读路径字段 + “选择文件夹”）和同时下载数量（默认 2、可选 1–3）。沿用现有即时保存行为。
-2. **平台账号**：抖音、TikTok、YouTube 的 Cookie、网络代理和 User-Agent 放在同一张配置卡片中，以分隔线分组，通过“保存平台配置”一并保存。Cookie 保留状态、多行编辑、显示/隐藏与清除；网络代理可选直连或自定义 HTTP / SOCKS5 代理，使用原有系统凭据存储，地址字段仅在自定义模式出现；User-Agent 使用与对应 Cookie 来源一致的浏览器标识。公开作品解析成功不证明登录身份有效。
-3. **运行依赖**：每次软件启动自动检测一次，检测结果、错误与进行中状态在本次运行中保留；切换页面或设置分类不重复检查。“重新检测”和左侧依赖说明与运行依赖标题同属固定头部，不随卡片列表滚动；依赖安装完成后更新结果。依次显示 FFmpeg、JavaScript 运行时、tdl，tdl 紧接 JavaScript 运行时卡片，并位于下载位置和内置引擎说明之前。FFmpeg 和 JavaScript 运行时显示真实可用状态、版本、路径及系统/应用专属来源；tdl 自动执行 `tdl version`，显示实际版本及可执行路径，不绑定版本号；结果保留于应用本次运行，切换页面不重复检查。tdl 路径输入框右侧提供无文字的文件夹图标与 Tooltip，点击打开系统可执行文件选择器，选中后自动保存并立即检测，同一路径也重新检测；保存成功使用成功 Toast，不在卡片下方追加提示；取消不改配置，也不提示成功。底部“检测 tdl”“保存 tdl 路径”移除。手动输入或清空后按 Enter 保存并检测；保存/检测失败持续显示原因，保存失败保留原配置，检测失败保留已保存路径。选择、保存和检测期间禁用控件。自动查找仍覆盖 PATH、GOBIN、GOPATH/bin、Go 配置及常见安装目录。JavaScript 运行时满足 Node.js 22+ 或 Deno 2.3+ 之一即可。每项依赖使用独立卡片，缺失时分别提供“下载 FFmpeg”“下载 Deno”；模型卡提供“下载语音模型”，点击只下载所属项，进度与取消在同一卡片内显示。下载、模型修复及取消按钮与依赖信息同处卡片内容区，不使用独立灰底页脚或分隔线。FFmpeg 包含 FFprobe；已有工具不提供重复安装，模型保留显式重新下载修复入口。语音转录模型只使用一张 Fun-ASR-Nano 卡片，Windows x64 可选择 CPU 或 CUDA 版后下载，macOS 保留 CPU。模型大小随选择显示，CPU 约 1.2 GiB、CUDA 约 1.0 GiB（首次另需程序与 CUDA 组件）。选择框不自动切换后端，安装验证通过后才保存；失败或取消保留原安装与后端。首次提取弹窗提供相同版本选择及缺失 FFmpeg 的独立下载。文案弹窗显示该份结果实际使用的模型和后端，旧文案仍显示 SenseVoiceSmall，重新提取后显示 Fun-ASR-Nano。滚动容器保留 1px 内边距，避免 Card 外侧 ring 的左右边框裁切。未知状态不能显示为缺失或可用。
+在现有 `@theme inline` 中保持 `--color-*` 指向语义变量；新增状态底色、进度和媒体变量按需补齐。`--font-sans` / `--font-mono` 对应 `typography.font-family` / `font-mono`；`--text-xs` / `--text-sm` / `--text-xl` 固定为 12 / 14 / 20px，行高按角色应用；`--button-font-size` 固定 12px。`--radius` 为 8px，`--radius-xs/sm/md/lg/xl` 明确映射为 4/6/8/12/16px，不使用默认推导产生额外圆角。
 
-依赖下载显示实际字节与总大小，校验、解压、可执行版本验证分别展示状态，完成后重新检测才显示成功。支持取消，失败原因持续显示并可重试；不支持自动下载的系统明确提示。下载保存在应用数据目录 runtime 下，不修改系统 PATH，不覆盖系统工具，不使用平台 Cookie 或平台代理。内置 Python、yt-dlp、DTK 随软件更新，不提供单独下载或热更新。
+布局尺寸以同名 CSS 自定义属性映射，如 `--sidebar-width`、`--sidebar-width-icon` 对应 `spacing.sidebar-width`、`sidebar-compact-width`。任务行的 `--task-row-min-height`、`--task-row-active-min-height`、`--task-cover-size`、`--task-status-width`、`--task-action-width` 分别对应 `components.task-row` 的 `minHeight`、`activeMinHeight`、`coverSize`、`statusWidth`、`actionWidth`。`task-list` 的表面、分隔线和悬停色复用语义色，列表圆角为 0，行反馈背景圆角为 8px；不在页面另建尺寸或颜色常量。
 
-平台账号右侧顶部使用 shadcn/ui 下划线 Tabs 切换抖音、TikTok、YouTube、Telegram，每次只展示一个平台的全部配置；选中标签使用蓝色文字和下划线。下载设置不显示平台标签。隐藏平台不进入 Tab 键焦点顺序；标签支持方向键切换。
+侧栏颜色使用 YAML 定义的 slate-2 / slate-3 混色，阴影使用已定义的 slate alpha 变量。按钮 hover 不再使用 `primary/80`；Badge 不再用透明度猜测状态底色。集中覆盖默认字号、border/ring、圆角和动效，保留官方组件键盘与焦点能力。Radix `asChild` 可替换 `data-slot`，按钮规则按真实元素与 `data-variant` / `data-size` 映射，并为 ToggleGroup 选中态、媒体缩略图、多行内容链接保留明确的样式优先级。滚动箭头使用原生滚动条按钮的 CSS 渐变背景和 Radix slate-11/12；不使用 WebView2 滚动条伪元素无法可靠绘制的 mask，避免遗留旧十六进制色。
 
-切换二级分类或平台标签均保留各平台未保存输入，保存按钮同时提交当前平台的 Cookie、代理修改和 User-Agent，不提交其他平台。未修改的代理使用原有 null 保留语义，避免覆盖已保存的代理凭据；Cookie 读取失败时禁用其编辑和清除，保存其他字段传 cookie=null 保留原值并持续显示读取错误。保存结果及错误按平台展示。关于软件和检查更新继续使用独立页面。
+## 3. 应用外壳与四页布局
 
-布局的信息组织参考 [Downvid SettingsView](https://github.com/Downvid/downvid/blob/46a18d10649dc5329ed69fe502d5349703ca8c66/app/frontend/src/components/SettingsView.svelte)，不复制其配置项目或素材。
+### 3.1 导航和窗口
 
-### Telegram 原始视频实验模式
+四个固定入口依次为 **下载作品、下载任务、系统设置、关于软件**，默认进入下载作品。已完成记录属于下载任务；作者搜索结果是该页的子视图，不新增第五个侧栏入口。
 
-Telegram 原始视频实验模式沿用首页输入、预览、下载任务和原始规格选择。默认不启用；在“系统设置 → 运行依赖”提供 tdl 自动检测/自定义路径与依赖检测；在“系统设置 → 平台账号 → Telegram”集中提供 HTTP 实验模式开关、风险确认、“登录 tdl / 重新登录 tdl”和登录时的“取消登录”。两处保存分别保留另一处已保存的配置，进行中的 tdl 检测、保存或登录禁用两处配置操作。登录使用已保存的路径配置，点击后以 shadcn Dialog 显示二维码；官方提示 2FA 后切换密码框，提交即清空并显示验证状态，错误时可重新扫码，Escape/关闭弹窗取消本次登录。使用隐藏伪终端运行官方认证，密码仅短时传递给本次进程、不保存；提示独立会话、不覆盖已有登录、等待上限 5 分钟。命令成功后显示已配置独立会话，实际权限以解析/下载结果为准；失败持续展示原因。确认框须明确说明全接口监听、无令牌、无消息白名单及 loopback 不构成隔离。未知时长、尺寸、编码不填造值，仅显示一个原始文件规格。具体能力与安全边界见 [tdl 集成说明](docs/tdl-integration.md)。
+侧栏展开宽 192px，收起宽 56px；品牌区高 64px，图标 32px、名称 14px / 600，当前版本使用 12px 次级文字。导航项高 40px、图标 16px、圆角 8px、项间距 4px；选中使用浅蓝底、蓝色文字和 `aria-current`。收起时保留 Tooltip、可访问名称、当前项及活动任务数，计数不得覆盖图标。任务计数只包括已提交后的解析、等待、下载，不包含纯预览。
 
-### 关于软件
+侧栏底部“本地运行 / 连接不可用”来自真实连接状态；不是新操作入口，不展示端口、守护进程或虚构在线指标。保留原生窗口边框与控制按钮，不绘制假标题栏、浏览器地址栏或重复的红黄绿按钮。关闭窗口、托盘恢复、退出与单实例行为沿用现有实现；隐藏窗口可继续任务，退出回收当前操作。
 
-**导航高亮：关于软件**。沿用统一应用外壳、亮色 token 与 shadcn/ui；内容居中、最大宽度 1040px，在最小视口内纵向滚动。
+右侧标题区最小高 56px，包含 20px 页标题和必要的上下文操作；不要求每页都有副标题。任务页标题区最小高 64px，显示“下载任务”，右侧保留搜索和清理历史；状态筛选位于标题下方独立一行。
 
-- 顶部展示本地应用图标、“映取”、构建注入的当前版本、简介与三平台标识。支持复制版本信息及手动“检查更新”；检查期间仅在按钮内显示旋转图标和“正在检查…”，禁用重复请求，不增加下方过程提示。由 Rust 请求本项目 GitHub Releases 最新正式版本，使用实际应用版本按 SemVer 比较，明确呈现无需更新、发现新版本和检查失败。
-- 中部展示视频预览、原格式图集、本地记录等当前已有能力；项目源码、问题反馈和 Apache-2.0 许可证入口均指向映取自身仓库，由 Rust 通过现有 opener 在系统默认浏览器打开，失败持续显示原因。
-- 下方分别展示 yt-dlp、DTK、Tauri、React、shadcn/ui 与 Lucide 的主要开源致谢；组件名支持点击及键盘操作，在系统浏览器打开已核实的对应 GitHub 仓库。折叠区提供内置解析组件版本和本机 Node.js / Deno、FFmpeg 要求。完整来源与许可链接指向本项目 `vendor/UPSTREAM.md`，不宣称此处摘要涵盖全部传递依赖。
-- 页面离线可读，不加载远程头像、赞助二维码、虚构贡献者或更新日志。页面入口、链接、折叠区与版本复制均支持键盘操作。
-- 发现更新时自动打开弹窗，展示新版本、当前版本、发布日期和 GitHub 更新说明；更新说明按 Markdown 渲染标题、列表、加粗、代码、引用、表格及只读任务列表，不执行原始 HTML，图片仅展示替代文字。HTTP/HTTPS 链接在系统默认浏览器打开，其他链接仅展示文字；打开失败在弹窗持续显示原因。长说明可滚动并通过键盘阅读，底部操作在最小视口仍可见。缺少说明时明确提示。无需更新通过顶部居中 Toast 提醒；检查失败在关于页持续展示，保留通用发行页入口。
-- 弹窗提供“下载更新”，自动匹配 Windows x64、macOS Intel 或 Apple Silicon 的安装包，展示包名和真实大小；缺少适用包或 SHA-256 时禁用自动下载，保留“前往发行页面”。下载过程显示真实字节、百分比及校验状态，支持“取消下载”，等待后台停止并清理临时文件后才显示已取消；失败原因持续显示并可重新下载。
-- “后台下载”、Escape 或遮罩可关闭弹窗，焦点回到检查按钮；下载在本机继续，关于页提供“查看下载进度”。切换页面再返回可恢复当前进度，不重复启动下载。下载完成并通过大小与 SHA-256 校验后，提供“打开安装包”和“重新下载”；打开时再次校验，文件缺失或被修改时提示重新下载。
-- 更新文件存入应用数据目录的 updates 子目录，使用系统网络及系统代理，不使用平台 Cookie 或平台代理。不自动检查、不静默下载安装、不自动退出或重启应用；只有用户点击后才下载，安装由用户打开安装包后继续。应用退出会取消未完成的更新下载；重启后需重新检查与下载，不提供断点续传。
+### 3.2 三个设计视口
 
-信息组织参考 [Downvid 的 AboutView](https://github.com/Downvid/downvid/blob/46a18d10649dc5329ed69fe502d5349703ca8c66/app/frontend/src/components/AboutView.svelte)，独立实现本项目界面，未复制其源码、素材或品牌。
+下表宽度均指应用内容视口，不包含系统原生窗口装饰。
 
-### 交互反馈与状态映射
+| 规格 | 1440 × 900 | 1280 × 800 | 1024 × 680 |
+| --- | --- | --- | --- |
+| 侧栏 / 主内容内边距 | 192px / 24px | 192px / 24px | 56px / 16px |
+| 内容可用宽度 | 1200px | 1040px | 936px |
+| 首页预览 | 两栏 40% / 60%，舞台高 360px | 两栏 40% / 60%，舞台高 320px | 单栏，舞台高 300px，信息在下 |
+| 任务行 | 封面 56px，状态 88px，操作 144px | 同左 | 同左；标题单行省略，必要元数据/反馈换行、行高增长 |
+| 设置二级栏 / 栏间距 | 184px / 24px | 184px / 24px | 160px / 24px |
+| 关于页 | 最大宽 1040px | 使用可用宽度 | 单列纵向滚动 |
 
-| 发生情况 | 用户可见内容 | 可执行操作 |
-|---|---|---|
-| 输入为空 | “请输入视频分享链接” | 聚焦输入框 |
-| 链接无法识别 | “请粘贴抖音或 TikTok 的视频分享链接” | 修改链接 |
-| 解析中 | 按钮内转圈 + “正在解析…” | 取消本次解析（如果已实现） |
-| 解析成功 | “已解析，可下载” + 作品预览 | 下载视频 |
-| 网络不可达 | “网络连接失败，请检查网络或代理设置” | 重试 / 打开设置 |
-| 会话可能过期 | “登录信息可能已失效，请更新 Cookie” | 前往平台设置 |
-| 平台限制访问 | “平台暂时限制访问，请稍后重试” | 稍后重试 |
-| 作品私密或已删除 | “当前视频无法访问” | 查看详情 / 修改链接 |
-| 下载进度总量未知 | 进度条不确定动画 + 已接收数据量 | 取消 |
-| 下载完成 | “已完成” + 文件路径 | 打开文件夹 |
-| 下载失败 | 保留失败任务与原因 | 重试 / 重新解析 |
-| 保存路径不可写 | “无法写入下载目录” | 选择其他目录 |
-| 重启恢复记录 | 显示已保存任务与最后状态 | 重试未完成任务 |
+窗口宽度 ≤1100px 时收起侧栏、正文内边距降为 16px、首页预览改为单列；宽度 1101–1280px 使用中档舞台；更宽时使用基准舞台。两栏比例按减去内部间距后的剩余宽度计算。空间不足时缩短次要元数据或换行，不缩小字号、隐藏更多菜单、裁切焦点或强制横向滚动。
 
-### 动效与反馈
+### 3.3 滚动责任
 
-- 交互动效 120–180ms，主要用于 hover、按下、弹窗显隐。任务进度更新平滑过渡，不使用花哨演出。
-- 进度数值变化不能靠动画虚构下载速度；不确定进度动画需标示“正在下载”。
-- 保持键盘可用：`Enter` 提交聚焦的解析输入，`Esc` 关闭菜单/弹窗，Tab 顺序由输入框到主按钮再到结果操作；保留系统复制粘贴快捷键。
-- 尊重系统“减少动态效果”偏好；焦点轮廓始终可见。
-- 桌面鼠标操作的按钮高 28–32px，图标按钮为 28 × 28px；危险操作提供明确的可访问名称和提示；单条记录移除与本地文件删除按用户要求直接执行，无二次确认。
+- 侧栏固定；首页仅主内容纵向滚动，输入和结果按自然文档顺序排列，不把整页锁死在首屏。
+- 任务页状态筛选、搜索及平台 Tabs 固定，只滚动媒体列表；列表项不受 Flex 压缩，错误和下载信息可扩高。
+- 设置页左侧二级菜单和右侧分类标题固定，只有右侧内容滚动；依赖“重新检测”属于固定分类头部。
+- 关于页主内容滚动；弹窗固定标题与操作区，仅正文滚动。代码/表格及图集缩略图可在各自区域横向滚动，不传导为整页横向溢出。
+- 滚动条宽/高 6px，轨道透明、滑块圆角；默认 slate-7，hover / 拖动为 slate-12。保留原生上下/左右箭头和滚动方式，箭头同色且按钮背景透明。平台不显示原生箭头时不伪造。
+- 任务列表与滚动条间保留 8px，设置、关于、文案正文与滚动条间保留 12px；仅关于页主滚动容器保留右侧 4px 外侧空隙。列表/表单内预留不小于 0.5px 的边界空间，避免 ring 或边线裁切，不叠加不必要的双滚动条。
 
-## Do's and Don'ts
+## 4. 页面 A：下载作品
 
-### Do — 视觉和体验验收
+### 4.1 固定结构与输入
 
-- 每张页面都使用同一个 176px 侧栏、同一品牌位置、导航行高、顶部标题区和 16px 正文内边距。
-- 所有页面使用统一颜色 token、统一的 14px 常规字体、同一套 4/6/8px 圆角阶梯。
-- 首页采用横向输入区和竖版视频封面，作品可以被真实地识别为短视频内容。
-- 列表中提供至少一条正在下载、等待中、失败或已完成的可信示例数据；各状态配套正确动作。
-- 用户随时能看清“正在解析”“下载到本地”“已完成保存”这三个不同阶段。
-- 使用真实简体中文操作文案和符合中国用户阅读习惯的单位，如“124 MB”“4.8 MB/s”。
-- 默认做精致、紧凑、可信的桌面程序；保证 1280 × 800 时无需左右滚动。
-- 视频示意封面采用可授权的抽象风景、美食、城市素材，不模仿真实博主身份。
+从上到下为页标题、分享链接输入区、解析结果/媒体舞台、下载目录。首页不增加最近记录区或另一套任务列表。
 
-### Don't — 统一性与信息边界
+输入区使用 `ShareLinkInput` + shadcn `InputGroupTextarea`，始终三行，高 80px、内边距 8px、14px 字号与 20px 行高；长分享文案在框内滚动，不随输入撑高。右侧纵向放置“粘贴链接”“解析链接”两个 32px 按钮，宽度保持一致；解析成功后后者为次级“重新解析”。下方保留解析引擎 Select：自动、yt-dlp、DTK、tdl，使用简明标签，不使用中点。
 
-- 不生成营销官网式顶部导航、定价卡、注册登录、会员升级、数据看板、客服聊天悬浮窗。
-- 不设计整页霓虹色、紫粉色大渐变、强发光、过量玻璃拟态、拟物 3D 插画和巨幅欢迎横幅。
-- 不在每个页面重新排版侧栏或改变应用主色；抖音和 TikTok 只是来源标签。
-- 不把桌面应用画成手机视口，不添加浏览器地址栏或重复平台窗口控制键。
-- 不混用中文/英文按钮文案，不将“解析成功”渲染为“下载完成”。
-- 不显示未经确认的高清分辨率、文件大小、速度或虚构的账户头像；数据未知时明确展示未知。
-- 不将 Cookie 明文长期显示，不把认证失败与网络失败合并成同一个错误。
-- 不添加首版没有定义的批量用户作品抓取、视频编辑、转码、上传、断点续传控制。
+“粘贴链接”仅在点击后通过 Tauri 原生命令读取并聚焦输入，不自动解析、不后台监听剪贴板。空剪贴板及失败用 Toast 提醒，保留 Ctrl / ⌘ + V。右键菜单保留全选、剪切、复制、粘贴、清空及原有禁用条件；异步剪贴板操作不得覆盖后输入的新文本。Enter 提交、Shift+Enter 换行，中文输入法组词时 Enter 不提交。
 
-### Stitch 页面一致性检查
+自动模式沿用视频默认 yt-dlp、图集按能力选择 DTK 的现有决策；YouTube 仅 yt-dlp，Telegram 使用 tdl 实验路径。不因网络、凭据或风控错误自动切换引擎。下载进行时仍可解析下一条作品，每次只提交一条。
 
-1. **导航**：5 张关键设计稿保持完全相同的外壳、栏宽和导航位置。
-2. **组件**：输入框、按钮、封面、列表项、状态徽标不因换页而改变样式。
-3. **状态**：解析成功、下载中、下载完成、下载失败、Cookie 未配置/已配置都能独立识别。
-4. **尺寸**：先生成 1440 × 900，复核 1280 × 800；设置页允许纵向滚动。
-5. **可实现性**：每个 UI 元素对应明确的桌面本地操作；设计稿中的示例数据仅用于呈现布局。
+### 4.2 大封面预览
 
-## M2 第一张任务卡范围（2026-10-13）
+解析成功后在输入下方直接显示媒体预览，不跳新页面。预览分为 40% 媒体舞台、60% 信息区，中间距 24px、容器内边距 16px；舞台圆角 16px，外层不再叠加装饰性阴影卡。
 
-本卡交付亮色 shadcn/ui 桌面单任务闭环：分平台设置、真实解析/预览/下载/取消、SQLite 记录与重启恢复。并发设置与队列、手动重试、历史移除和二次确认文件删除留至下一卡；未实现的动作不显示伪按钮。Cookie 测试不在本卡内。
+媒体舞台根据视口高 360 / 320 / 300px。清晰封面位于视觉中心，`object-fit: contain`，使用真实自然比例，横版、竖版、方形都不拉伸或强裁成 9:16。可用同源弱模糊层填充剩余空间；没有封面则使用等尺寸中性占位，不显示可播放三角形误导用户。点击清晰封面打开大图预览，不启动视频播放。
 
-组件来源：shadcn/ui 官方 radix-nova，由 CLI 加入 `src/components/ui`。主题集中映射在 `src/style.css`，布局尺寸延续本规范；不另写按钮、输入、侧栏、卡片、徽标、进度和弹窗组件。
+信息区依次显示：作品标题（14px / 600，最多两行）、作者/频道资料、平台/实际引擎/解析状态、时长或图片数量、真实清晰度与大小、规格选择、原声信息及必要警告、进度/错误、下载操作。可换行但保持组间距 12–16px；不让格式标签挤压封面。源内容和实际数值优先，作品缺标题时使用真实可用链接或中性占位，不伪造作者和时长。
 
-### 桌面紧凑密度（2026-10-13 用户修订）
+底部动作右对齐：一个主按钮“下载视频”或“下载图集”，次级“后台下载”，以及当前状态允许的取消/重试；下载目录为页面底部 12px 路径与“修改设置”入口，长路径省略并可查看完整值。
 
-按钮使用 shadcn/ui 默认 32px 或 sm 28px，移除此前人为放大的 min-height。输入框 32px、表单分组间距 12px；任务与已完成采用横向行，封面、标题、状态、元数据与操作同列对齐，错误和进度仍完整显示。设置目录为单行，左侧二级菜单与右侧分类操作区分栏，平台卡片通过顶部标签单个展示；系统窗口边框与全部原有业务行为保持。字体优先 Segoe UI / PingFang SC / Microsoft YaHei。
+### 4.3 规格、图集和解析缓存
 
-按钮文字统一为 12px，按钮高度保持 28–32px；通过主题的 `--button-font-size` 集中配置，正文与输入文字大小不变。
+- 视频规格复用 `api.chooseFormat()` 和现有单选 ToggleGroup，默认最高分辨率；两栏预览中规格区按空间使用两列，窄窗改一列，最大高 196px 后内部滚动。选项最小高 56px，14px 尺寸，12px 容器/编码/帧率/码率与大小；不使用 11px。选择通过标记、浅蓝底和边界共同表达。
+- 只显示真实可下载规格及稳定 ID。显示实际尺寸、容器、编码、已知大小；估算明确标“约”，未知为“大小未知”。YouTube 需合并时注明 FFmpeg，无损合并不转码。下载重新提取同一规格，规格失效明确失败，不自动降级。重启和重试保留选择。
+- 图集复用 `AlbumGallery`，使用同一舞台尺寸、可操作缩略图条、当前序号和每张“原图/高清”来源、已知尺寸；不将整套图集都标原图。图片原图优先、高清次选，仅在原图候选缺失或原图 HTTP 404/410 时使用高清；网络/身份/风控错误不静默降级，保留原格式，不转码或截图。
+- `cache_hit` 只显示低权重“解析缓存”，不代表已下载或地址仍有效。缓存来自现有 SQLite 白名单元数据/预览；下载仍重新提取并校验作品身份。正常重启可恢复完整 ready 预览，遗留 `parsing` / `queued` / `downloading` 标为 `failed` / `INTERRUPTED`，不自动续传。
+- 作者头像、昵称、ID 和频道语义见第 7 节；Cookie 自动读取警告与封面错误不能覆盖真正的任务状态。
 
-## M2 第二张任务卡：并发与等待队列
+### 4.4 首页状态与提交行为
 
-设置页新增 shadcn/ui ToggleGroup：同时下载 1 / 2 / 3 个，默认 2。提高上限立即补位，降低不打断已运行任务。任务页展示真实下载数、等待数、上限和 FIFO 等待位置；等待任务可取消。下载期间仍能解析下一条链接，每次提交一个作品。重启遗留等待任务标记中断，不自动开始。沿用当前紧凑亮色布局与 12px 按钮字；重试、历史移除和文件删除不在本卡范围。
+| 状态 | 预览与操作 |
+| --- | --- |
+| 无输入/无结果 | 小型媒体占位、标题“粘贴链接开始解析”；保留正式平台标签，Telegram 按实验能力表述 |
+| `parsing` | 原结果区显示骨架/“正在获取作品信息”，按钮“正在解析…”，提供既有取消；不伪造百分比 |
+| `ready` | 显示“已解析，可下载”、完整预览与规格，主动作变为下载 |
+| `queued` | 保留当前预览并显示真实等待位置，无速度和假进度；可取消 |
+| `downloading` | 预览内展示与任务页一致的进度，规格不再可改；可取消 |
+| `failed` / `canceled` | 保留可用作品信息与持续原因，按第 6 节提供重试/重新解析 |
+| `TDL_CHANNEL_ID_REQUIRED` 且有 Telegram 链接 | 显示等待服务说明与“加入待下载队列”；沿用既有延迟解析路径 |
 
-## M2 第三张任务卡：重试与历史管理
+“后台下载”在 Rust 接受任务后才提示“已加入下载任务”，立即清空本次输入与预览、聚焦输入，下载或等待仍在任务页继续。失败或取消重复下载确认则保留预览。普通“下载视频/图集”保留首页过程，当前作品完成后清空对应预览与尚未被用户改动的输入。后台其他作品完成、迟到事件或初始历史加载均不得清空新输入或重新占用首页。
 
-保持现有紧凑亮色布局。失败/取消行提供“重试”；缺少作品身份时提供“重新解析”并聚焦链接输入。行尾的图标与 Tooltip 承载播放视频、打开文件夹、从列表移除、复制原链接和删除本地视频，取消原更多操作菜单。移除记录保留本地文件，删除本地文件同时移除任务和数据库下载记录；两者直接执行，不显示 AlertDialog（2026-10-21 用户覆盖）。
+重复下载按当前作品身份、类型和规格判断：同平台/作品的同规格成功记录，或规格未知的历史成功记录，且文件仍存在时提示“该规格已下载过”；图集和 Telegram 按其原始内容身份判断，不引入虚构规格。单纯失败、取消、预览或文件缺失记录不触发此提醒。这是对旧文档“同作品无条件提醒”的纠正，依据 `src/lib/download-identity.ts` 当前契约。
 
-## 下载列表与状态徽章修正
+提示在首次解析命中及再次下载提交校验时沿用现有流程；展示原路径，提供“暂不下载”“重新下载”。暂不下载保留预览；确认只授权当前规格，切换规格后重新判断；确认后保存新文件，不覆盖原文件。
 
-仅解析和预览不进入下载任务，也不计入侧栏下载任务数；点击下载或手动重试后才进入。状态统一使用 shadcn/ui Badge：已完成浅绿、失败浅红、下载中/解析中浅蓝、等待/取消中浅黄、已取消浅灰，保持文字标签以免只依赖颜色辨识。
+## 5. 页面 B：下载任务
 
-## 设置与本地封面更新
+### 5.1 统计、筛选与本地搜索
 
-同时下载数量改为 shadcn/ui Select，选项 1–3、默认 2。Cookie 使用 InputGroupTextarea 回显；三平台通过当前分类顶部标签切换，保存按钮位于卡片底部。解析预览封面使用源图自然比例、自适应宽高（容器宽度及最大高度约束），不强制固定 9:16。新下载保存最高可用分辨率本地封面，已完成优先读取本地图片。任务列表错误使用图标与小号文字持续显示，无边框。
+页标题右侧保留“清理历史”及搜索框；下方第一层为全部、下载中、等待中、已完成、失败状态筛选，以 48px 高的下划线导航突出当前状态；第二层为全部、抖音、TikTok、YouTube、Telegram 平台 Tabs，高 52px，标签紧凑左对齐。状态标签旁的计数由当前平台与搜索匹配的真实任务派生，不受当前状态选择影响，排除已移除的退出快照，不新增统计卡片。状态、平台与关键词取交集；下载中包含已提交的解析任务，已取消仍可在全部查看。状态筛选不影响批量清理原有的平台范围与确认语义，作者结果子视图不套用状态筛选。搜索标题或作者资料，只查询本地记录，不访问平台搜索。
 
-## 已下载作品提醒
+常规列表只包含 `download_requested` 的记录，纯解析/ready 预览不进入，也不计入侧栏活动数。等待任务按真实 FIFO 位置排在前，其余按创建时间倒序；同时间保持稳定顺序，完成不自动消失。筛选、搜索、退出动画均不得破坏任务身份或已移除记录屏蔽。
 
-解析成功后，按平台与作品 ID 匹配已完成记录，弹出 shadcn/ui AlertDialog 提示“该视频已下载过”，展示原路径；提供“暂不下载”“重新下载”。暂不下载保留预览，不创建下载；再次点击下载仍需确认。确认后加入队列并保存新文件，不覆盖原视频。失败/取消/纯预览不计为已下载；已完成但本地文件缺失仍提醒并说明。
+点击可识别身份的作者昵称进入本地作者结果子视图，侧栏仍高亮下载任务；有 ID 按平台+ID 精确匹配，旧记录按既有账号名规则回退，不混入不同 ID 的同名作者。该视图可包含已有的解析预览，且不显示批量清理按钮。手动编辑搜索框恢复普通记录搜索；返回下载任务退出作者筛选。
 
-## 首页下载完成反馈
+### 5.2 连续媒体列表与 80px 常规行
 
-“后台下载”在 Rust 接受任务后提示“已加入下载任务”，立即重置当前输入和预览；任务出现在下载任务页，按现有并发名额下载或等待。迟到的任务事件不重新占用预览，也不取消后台任务；后台作品完成不清除后续新输入或预览。视频、Telegram 原始文件与图集均使用同一入口，重复作品仍需明确确认后才提交和重置。
+平台筛选不显示标签下划线或整栏底边框，仅以浅蓝背景标识选中项。列表空状态同样无外边框、圆角和阴影，与上方筛选区域自然衔接；仅保留空状态信息，不显示“去下载作品”按钮。
 
-当前作品通过原下载按钮下载成功后清空首页解析预览和对应输入，通过 shadcn/ui Sonner Toast 提示下载完成及作品标题。完成历史保留在下载任务页。后台其他作品完成不清除当前预览或新输入；初次加载与重启恢复已有完成记录不重放 Toast，刷新不重复提醒。
+平台筛选与列表直接融入连续白色 `surface` 工作区，不再套带外边框和圆角的内层卡片；每行无独立边框、阴影、外间距或行间分隔线；通过 8px 圆角的悬停、选中背景定位任务。悬停只使用 `surface-subtle` 的轻微背景差异，不改变尺寸；点击行或聚焦行内控件后，当前行使用 `surface-selected` 浅蓝底。菜单展开时对应行同样保持活动底色；键盘焦点沿用可见轮廓。选择仅用于视觉定位，不触发下载、播放或删除。列表仍由平台 Tab 面板独立滚动，容器不额外创建第二个滚动区。
 
-## 滚动条（2026-10-23）
+每行是横向四列布局：**56 × 56px 封面容器 → 弹性信息区 → 88px 状态区 → 144px 操作区**，列间距 12px、水平内边距 16px、垂直内边距 8px。常规已完成行采用 80px 最小高度，落在 76–84px 的常规密度范围；等待任务最小高 84px，状态列显示队列位置；下载中最小高 120px，等待说明、失败原因、封面错误、必要元数据换行或特殊长文字动作可自然增高，不能裁切反馈来维持固定高度。
 
-应用内纵向和横向滚动条统一为 6px，轨道透明、滑块圆角。滑块默认浅灰色（scrollbar-thumb），鼠标悬停滑块或拖动时为黑色（scrollbar-thumb-hover）；保留原生上下（横向为左右）箭头按钮及点击滚动，箭头默认浅灰、悬停或按下变黑，按钮背景始终透明；任务、设置、关于和文案面板的内容与滚动条之间保留 12px 间距，已有更宽留白保持；仅“关于软件”主页面滚动区域右侧留 4px 外侧空隙；其他面板不统一增加外侧间距。沿用原生滚动、键盘和触控操作。
+任务列表封面容器始终等尺寸，圆角 8px、0.5px 边界；视频和图集首图使用 `object-fit: cover` 居中等比例铺满，允许裁切边缘，不拉伸或平铺重复图片。首页与大图预览仍完整显示原始比例。缺封面、加载失败和文件缺失不改变列宽，不显示虚假缩略图。点击封面查看大图，行内不嵌入播放器。
 
-## 单视频文案提取（2026-10-23）
+常规信息区为两层：单行标题，以及作者、来源、清晰度/图片数量、大小组成的一行元信息，两层间距 6px。异常反馈可以额外扩高。标题 14px / 600、行高 20px，超长省略，保留全文 title；标题同时是可聚焦的“查看任务详情”入口，Enter/Space 可打开实色 Dialog。详情展示完整标题、作者与作者 ID、来源、作品 ID、任务 ID、创建/完成时间、完整文件路径和媒体规格；内容可选择复制、长路径换行，正文独立滚动，关闭返回标题按钮。不以逐行展示 ID、路径或完整时间挤占浏览空间。
 
-已完成视频行在播放之后增加 FileText 图标和 Tooltip，按状态显示“提取文案”“正在提取文案”“查看文案”；图集和未完成记录不显示此操作。已有文案在原视频缺失后仍可查看、复制、导出。转录不改变下载状态，每次仅处理一个视频，关闭弹窗继续处理。
+任务行不重复展示作者头像，昵称保留本地作者搜索行为；来源使用中性文字，12px，始终紧邻作者，不放在行尾。作者长名称占元信息行最多 30%，省略且可查看全文，完整 ID 放在详情中。清晰度、图片数量、大小与文件缺失提示同属第二信息层，不添加多余图标；文件缺失仍以红色文字和提示图标持续显示。已完成大小使用实际文件字节，清晰度按真实短边显示如“1080P”，悬停给完整宽高。详情内时间格式如“2026年10月16日 20:48”，未知字段显示“—”或明确未知。
 
-复用 shadcn/ui Dialog，标题“视频文案”，宽 720px、最大视口减 32px、高度不超过 85dvh；只读内容区独立滚动，文案按自然高度排版，不被 Flex 压缩；连续长文本允许换行，提取时间排列在文案之后。标题与底部操作固定，长文案不溢出边框或覆盖时间、按钮；保留换行和全文选择。依赖缺失提供手动下载，安装后仍需点击“开始提取”；处理时展示真实阶段和不确定进度，允许取消。成功提供复制全文、导出 TXT、重新提取；失败/取消保留上次结果并持续说明本次状态。Esc/关闭后恢复入口焦点。
+标题缺失或仅含空白时，按真实来源、媒体类型和作品标识展示，例如“Telegram 视频 1001234567890_12345”；仅有 Telegram 链接时展示来源与原链接，没有作品信息时使用任务标识。不编造作品名称，不将已完成作品显示成“单条视频解析”。
 
-运行依赖页在原有 FFmpeg、JavaScript、tdl 之后显示一张 Fun-ASR-Nano 语音模型卡，提供下载/重新下载和所属进度、取消，Windows x64 可选择 CPU 或 CUDA 版，macOS 保留 CPU 版；沿用现有 token 和 12px 帮助文字。旧文案保留原模型及后端标识，重新提取成功后才更新为 Nano。导出使用系统保存对话框，只包含已保存正文。完整行为见 [集成方案](docs/fun-asr-nano.md)。
+状态和操作分别位于最后两列，都相对整行垂直居中；状态不放在右上角，操作不沉到右下角。常规已完成视频只显示 32px 无边框播放图标，保留“播放视频”可访问名称与 Tooltip；图集显示“查看图集”。文案等次要操作位于整行右键菜单，不再显示末尾更多图标。直达动作不超过两个；作者结果 ready 预览、Telegram 延迟解析等特殊长文字动作可在操作列内换行，整组仍居中，必要时行高增长。
+
+### 5.3 下载进度
+
+进度位于信息区元数据下方，不跨过封面或与右侧操作混排。轨道高 4px，`progress-track` / `progress-value`；下方显示真实百分比、已接收/总字节、速度、可用 ETA，图集另显示已完成/总张数。遥测为 12px / 500，允许窄窗换行。
+
+总量优先实际 `total_bytes`，再用明确标“约”的 `total_bytes_estimate`；没有总量使用不确定进度和已接收量，速度/ETA 不存在时不估造。下载阶段百分比最多 99%，只有 Rust 校验、提交文件及记录成功后才显示已完成。
+
+`merging=true` 时显示“正在合并音视频…”和不确定阶段反馈，不将传输完成当作业务完成，也不伪造合并速度。取消期间显示“正在取消…”，等待后端回收结果后才显示已取消；合并、图集均占一个原有下载槽位。
+
+### 5.4 行尾操作与更多菜单
+
+下表决定默认入口位置；所有入口仍复用原有回调、忙碌/禁用判断和错误传播。仅移动入口，不扩大动作权限。
+
+| 任务条件 | 直达高频操作 | 更多菜单中的次要操作 |
+| --- | --- | --- |
+| 已提交的解析、等待或下载中 | 取消，`canceling` 时禁用并显示过程 | 有原链接时复制原链接 |
+| 已完成视频且文件存在 | 播放 | 提取/查看文案、打开文件夹、复制原链接、从列表移除、删除本地视频 |
+| 已完成图集且目录存在 | 查看图集 | 打开文件夹、复制原链接、从列表移除、删除本地图集 |
+| 已完成视频但文件缺失 | 无文件动作 | 已有文案时查看文案、有链接时复制原链接、从列表移除 |
+| 已完成图集但目录缺失 | 无文件动作 | 有链接时复制原链接、从列表移除 |
+| 失败/已取消且有作品身份，或已提交的 Telegram 链接 | 重试 | 有链接时复制原链接、从列表移除 |
+| 失败/已取消且无法重试 | 重新解析 | 有链接时复制原链接、从列表移除 |
+| 作者结果中的 `ready` 预览 | 下载视频/图集、取消 | 有链接时复制原链接；不提供历史移除或文件删除 |
+| 尚未提交且命中 Telegram 延迟解析条件 | 加入待下载队列 | 有链接时复制原链接；其他动作遵循原条件 |
+
+文案入口位于更多菜单的打开文件夹之后（无文件夹入口时排在首项），图标/名称区分“提取文案”“正在提取文案”“查看文案”；运行中点击查看同一操作进度，不重复启动。图集与未完成记录不显示文案入口。文件缺失但有旧结果仍可查看。任务列表播放为 32px ghost 图标按钮，没有文字与边框，保留可访问名称；下载作品页保持原有按钮及更多入口。查看图集、取消、重试使用清晰文字。
+
+任务列表的更多操作由 shadcn `ContextMenu` 提供，整行右键打开，不提供末尾更多图标。任务行可聚焦，Shift+F10 或菜单键可打开同一菜单；封面区域优先保留已有保存/复制封面菜单。菜单宽 236px、条目最小高 36px、内边距 8px、圆角 10px，使用独立的轻柔 `shadow-task-menu` 阴影，在指针附近显示，由 Radix 自动避让窗口边缘。进入为 80ms ease-out 从 65% 不透明度淡入（无位移），退出为 60ms ease-out 淡出，退出期间不拦截点击；减少动态效果时立即显隐。菜单内部使用图标和文字，不另套 Tooltip。顺序为文件夹、文案、复制链接、分隔、记录移除、删除文件，按原条件省略不适用项。保留方向键、Enter、Escape；关闭返回当前任务行，任务移除后返回相邻任务或列表，菜单转文案弹窗不抢焦点。下载作品页沿用原有 DropdownMenu 入口。
+
+“从列表移除”与“删除本地视频/图集”名称必须区分；删除文件使用红色文字/图标及与其他菜单项一致的浅蓝聚焦背景，不能只用垃圾桶而无名称。不将危险操作放到封面点击或整行点击上。可用动作临时忙碌时禁用，非适用动作按现有条件隐藏；复制原链接须有规范链接或 Telegram 链接。封面保存/复制仍保留在封面右键菜单和预览内，不因行尾收纳而丢失。
+
+### 5.5 历史与文件管理
+
+| 操作 | 执行条件与结果 | 确认规则 |
+| --- | --- | --- |
+| 重试 | 失败/取消且身份可用；复用任务 ID、创建时间、实际 resolver 和所选规格，使用最新配置重新解析并从头下载，加入 FIFO 队尾 | 沿用原流程，不增加确认 |
+| 重新解析 | 无可重试身份；回首页聚焦链接输入 | 不擅自创建下载 |
+| 取消 | 解析/ready/等待/下载的既有入口；只取消当前操作并清理暂存，保留记录 | 既有 AlertDialog：“返回 / 确认取消” |
+| 从列表移除 | 已完成/失败/取消，且不再被工作进程占用；删除任务及其记录，保留本地媒体 | 直接执行，无二次确认 |
+| 删除本地视频/图集 | 已完成且文件/目录存在，后端确认可操作；删除任务所属媒体并同步删除任务与数据库下载记录 | 直接执行，无二次确认 |
+| 清理历史 | 当前平台 Tab 内可清理的已完成/失败/取消记录，搜索不改变范围；全部 Tab 才覆盖全部平台 | 既有批量确认，显示平台范围及保留文件的结果 |
+
+文件缺失是独立维度：保留“已完成”历史状态，在元数据行用红色小号文字及图标提示“文件已移动或删除”，无边框；不显示播放、打开文件夹和本地删除，也不新增未实现的“重新定位/关联文件”。保留复制链接、移除及已保存文案。
+
+单条操作处理中禁用重复点击；失败保留记录并持续显示原因。批量清理保留进行中、排队、纯预览及仍被进程占用的记录，整批成功或回滚；只清理记录、提交证据及无剩余引用的缓存字节，不删除本地文件。成功后提示实际条数，失败保留弹窗供重试。
+
+删除成功才播放收起动画；批量可见项目同时退场，失败不动画。关闭菜单/弹窗通常返回触发器；触发器随成功删除消失时，聚焦相邻可用行操作或列表容器并 `preventScroll`，不主动跳搜索框。批量清理后清理按钮不可用则回列表，避免滚动跳动。
+
+空列表：“还没有下载记录”，提供“去下载作品”；当前平台为空：“该平台暂无下载任务”；搜索无结果：“没有匹配的下载任务”。说明只在有帮助时保留一句，不添加演示计数。
+
+## 6. 状态、错误与反馈
+
+### 6.1 下载状态映射
+
+`Task.status` 仍只有下列七种；`canceling`、`merging`、`file_missing`、`cover_error`、`cache_hit` 是附加维度，不扩充后端状态枚举。
+
+| 数据 | 可见文字 | 视觉和边界 |
+| --- | --- | --- |
+| `parsing` | 解析中 | info 徽标，纯解析在首页；已提交重试解析可在任务列表 |
+| `ready` | 已解析，可下载 | info 徽标和真实预览；不计为下载任务 |
+| `queued` | 等待中 / 等待解析 | warning 徽标，真实队列位置，无虚构速度 |
+| `downloading` | 下载中 | info 徽标及进度；合并阶段改为明确阶段文案 |
+| `completed` | 已完成 | success 徽标，以最终提交为准 |
+| `failed` | 失败 | error 徽标、图标和持续原因，不将整行染红 |
+| `canceled` | 已取消 | 中性徽标，可按条件重试 |
+| `canceling=true` | 正在取消… | warning 徽标与禁用取消，不提前改终态 |
+| `file_missing=true` | 文件已移动或删除 | 与历史状态并列，收回失效文件动作 |
+| `cover_error` | 封面未保存 / 预览不可用 | 稳定占位与低权重提示，不把视频任务改失败 |
+| `cache_hit=true` | 解析缓存 | 中性标签，不冒充已下载 |
+
+徽标高 24px、12px / 500、图标加文字，不能只用色点区分。平台与引擎标签使用中性样式，错误与缺失资源不抢占真实下载状态。
+
+### 6.2 错误表达
+
+沿用 `errorText()` 的稳定映射。任务错误位于任务信息区，用图标和 12px 语义色文字，无额外边框；必要时换行，不能被省略到只剩 Toast。表单错误紧邻字段、带 `aria-invalid` 与关联说明；全局连接错误位于页顶。重试失败不清空上次有效信息。
+
+网络/代理失败、平台拒绝访问、平台要求验证、资源不可访问、规格失效、目录写入失败、引擎/依赖缺失须保留不同原因和可行补救。不把所有 403 或请求失败解释为 Cookie 过期，不把公开作品解析成功称为登录验证成功；无法区分的原因使用通用失败，不推断作品已删除。
+
+使用真实、简短、面向桌面用户的文案；“解析成功”“已加入下载任务”“已完成”是三个不同阶段。未知分辨率、大小、速度、ETA 显示未知，不凭封面、分辨率或计时器推算。
+
+### 6.3 Toast、加载和键盘
+
+空分享链接提交时，以 Toast 提示“请输入视频分享链接”，并聚焦链接输入框，不新增页内错误提示。
+
+Toast 复用 Sonner，顶部居中、实色浅表面、0.5px 边界，标题 14px、辅助内容 12px；状态图标和语义色表达成功/错误/警告/信息，默认和加载使用中性样式。关闭按钮位于内部右上角，正文预留空间，中文可访问名称“关闭通知”。操作反馈仅提示一次；恢复已有记录不重放成功/失败，Toast 不替代页面持续错误。
+
+输入、控件、行操作均覆盖默认、hover、pressed/selected、focus-visible、disabled、busy。忙碌状态使用真实 Spinner 与动作名称，禁用重复提交；未检测不显示“可用”或“缺失”。Skeleton 不包含伪造作者/大小/进度。
+
+键盘顺序为导航、页内输入/筛选、结果和操作；图标按钮有中文名称。Tabs 支持方向键，菜单支持方向键/Enter/Space/Escape、焦点可见。Dialog 限定焦点范围，关闭返回合理入口；不可因收纳菜单丢失焦点恢复。保留系统复制粘贴、文本选择与触控板滚动，尊重减少动态效果。
+
+## 7. 媒体、封面与作者资料
+
+### 7.1 封面读取、预览、保存和复制
+
+首页与任务行共用 `VideoCover` 的行为；视频封面来自平台，Telegram 新下载原始视频通过现有 FFmpeg 从前 30 秒抽取非近黑 JPEG，失败保留占位。缺少封面不影响视频成功，不补处理历史记录。图集以实际图片预览，沿用 `GalleryImage` 的受控读取。
+
+新下载视频封面字节只存现有 SQLite 缓存，不自动放入视频目录；旧同目录封面保持原样。优先读取已有本地/数据库字节；前端使用现有受控 API 与 Blob URL，共享进行中的读取和已加载图片，页面切换与筛选不重复读取。缓存按任务及图片来源标识，来源或缓存时间变化后重新加载；普通进度修订不清空封面。保留最多 128 张、64 MiB 未使用的近期图片，仍显示的图片不提前回收；淘汰或任务移除并结束退出动画后释放 Blob URL，失败读取不永久缓存。不要为媒体舞台另建远程图片代理或下载逻辑。
+
+点击可用封面打开“封面预览”Dialog，最大 90vw × 90dvh，自然比例，清晰图可键盘聚焦。任务缩略图与大图的右键菜单保留“保存封面/另存为…”和“复制封面”；无图片、加载失败或保存/复制中按原条件禁用，图像可用性变化时关闭失效预览。保留系统保存对话框、取消不报成功及失败反馈。
+
+保存封面是用户显式导出图片，与自动缓存不同；复制使用已有像素读取及原生剪贴板接口，不改变下载作品。图集原图依旧按整套独立目录保存、全套校验与不覆盖提交后才完成。移除最后一个同作品任务/预览时，按现有同事务引用规则清空封面/头像 BLOB，保留解析文字元数据与别名；不删除旧旁路文件。
+
+### 7.2 作者与频道
+
+使用已有 `AuthorInfo`、shadcn Avatar 与 `author_profile`：显示真实昵称/账号名和缓存头像，缺头像回退首字符或中性占位；旧记录可用 `author`，不自动联网补全。首页头像 32px 并保留 ID；任务行仅显示昵称、ID 收纳到任务详情，其他 compact 场景仍使用 24px。作者长名称省略并提供全文，详情中的 ID 使用 12px，不与标题争主位。
+
+抖音、TikTok、YouTube 保留各自已确认的作者 ID/handle 语义，昵称不统一添加 `@`。Telegram 显示频道 ID与已知公开用户名，缺名称时为“Telegram 频道”，不猜个人发帖者或频道头像。昵称只有在可匹配身份时作为本地作者搜索入口，详见 [作者资料契约](docs/author-profile.md)；头像失败不影响作品解析/下载。
+
+## 8. 页面 C：系统设置
+
+### 8.1 分类结构与外观
+
+保持左右布局：左侧二级导航 184px，窄窗 160px，栏间距 24px；右侧为当前分类。左栏不套卡片、不增加“设置分类”装饰标题，使用 0.5px 右侧分隔。分类为下载设置、平台账号、运行依赖；导航项高 40px、14px / 500，选中浅蓝、普通 hover 为中性底，不用彩色左线。
+
+右侧分类标题 14px / 600，必要说明 12px；表单分组背景 `surface`、圆角 12px、内边距 16px、字段间距 12px。标题/操作与字段边缘对齐；辅助说明不重复标签。输入、Select 高 32px，Cookie/UA 使用多行区域，密码/长路径不撑宽布局。1024 × 680 仍保留左右布局，右侧内部滚动。
+
+### 8.2 下载设置
+
+下载目录为单行只读字段和“选择文件夹”，沿用系统目录选择与即时保存。并发使用 Select 1 / 2 / 3，默认 2，即时保存；提高上限立即补位，降低不打断已运行任务。队列为 FIFO，每次提交单个作品，设置改变不恢复重启后中断的任务。
+
+### 8.3 平台账号
+
+右侧顶部为下划线 Tabs：抖音、TikTok、YouTube、Telegram，每次只显示一个平台；隐藏面板不进入焦点顺序，切换分类/平台保留未保存输入。抖音/TikTok/YouTube 每个平台一张配置表单，Cookie、代理、YouTube HTTP 分块、User-Agent 按需分组；Telegram 使用独立账号流程。
+
+- Cookie 经专用读取接口在多行输入中回显，初次展示可见，支持显示/隐藏和编辑，沿用当前账号编辑器行为；旧文档默认掩码的描述不再适用。仅在账号编辑器显示，不进入普通设置摘要、事件或日志。沿用“使用系统默认浏览器 Cookie（保存后清除手动值）”，手动值优先；留空只尝试系统当前 HTTPS 默认浏览器，不扫描其他浏览器、不回写自动值。读取失败持续显示原因并禁用编辑/清除，保存其他字段用 `cookie=null` 保留原值。
+- 网络代理保留直连、自定义 HTTP/SOCKS5 与原有配置读取/保存；仅自定义显示地址。代理密码仍经系统凭据存储，未修改时传 `proxy=null` 保留。读取失败持续显示，不用空值覆盖已有配置。系统 TUN 可用直连，不新增 TUN 模式开关。
+- YouTube 保留“继承上游默认 / 关闭分块 / 自定义”HTTP 分块设置；自定义为 1–1024 MiB 整数，非法时提示并禁止保存。继承与关闭不是同一值；只影响新任务下载，不更改视频规格或音轨。
+- User-Agent 保持与 Cookie 来源匹配的浏览器标识。当前平台底部“保存平台配置”同时提交该平台修改，不提交其他平台，未改动/无效/忙碌时禁用。成功及失败按平台展示，只影响新任务，进行中任务沿用配置快照。
+- 保留公开解析不等于登录身份有效的必要提示；不新增未实现的“测试 Cookie”按钮，也不以公开作品成功模拟认证检测。
+
+### 8.4 运行依赖
+
+固定分类头显示“重新检测”与一条必要依赖策略；本次运行自动检测一次，结果、错误和进行中状态跨页面保留，切换不重复检测。卡片顺序为 **FFmpeg → JavaScript 运行时 → tdl → Fun-ASR-Nano**，下方是下载位置与内置引擎说明。
+
+每项卡片使用相同标题、状态徽标、版本/路径和来源位置。独立的下载、修复、取消与进度都放在该卡片内容区，不使用单独灰底页脚。可用、缺失/版本不足、检测中、未检测必须区分，不能把未知当作缺失。
+
+| 依赖 | 保留能力与交互 |
+| --- | --- |
+| FFmpeg / FFprobe | 实际版本、路径、系统/应用专属来源；缺失时“下载 FFmpeg”，包含 FFprobe，已可用不重复安装 |
+| JavaScript | Node.js 22+ 或 Deno 2.3+ 满足其一；缺失时“下载 Deno”，已有符合要求的运行时不重复下载 |
+| tdl | 用户自行安装，只检测 `tdl version`；显示实际版本/路径，不绑定版本或宣称登录有效 |
+| Fun-ASR-Nano | 一张语音模型卡，下载/重新下载修复；Windows x64 按实际可用能力选择 CPU / CUDA，macOS 保留 CPU；不展示虚假可用后端 |
+
+模型选择只改变待安装选项，不立即切换运行后端；安装验证成功才保存，失败/取消保留原安装和后端。模型大小随选择显示实际返回值，未知明确未知；CPU 约 1.2 GiB、CUDA 约 1.0 GiB 仅为理解量级，首次附加程序/组件和实际传输大小以数据为准。CUDA 错误提供现有修复或选择 CPU 的明确路径，不静默改后端。
+
+tdl 路径使用单行输入及右侧无文字文件夹按钮、Tooltip 和中文名称；选择系统单文件后自动保存并立即检测，同路径也检测，取消不改配置或提示成功。手动输入/清空按 Enter 保存检测；保存失败保留旧配置，检测失败保留已保存路径并持续报错。过程中禁用选择/输入，不恢复底部“检测 tdl / 保存路径”按钮。自动查找范围沿用 PATH、GOBIN、GOPATH/bin、Go 配置及常见安装目录。
+
+依赖下载保留真实字节、总量、校验、解压、执行验证和重新检测，支持取消与错误重试；仅通过验证才成功。下载进入应用数据目录 runtime，不改系统 PATH、不覆盖系统工具，不使用平台 Cookie 或平台代理；不支持自动下载的系统明确说明。Python、yt-dlp、DTK 随软件分发，通过应用更新升级，不提供单独热更新。
+
+### 8.5 Telegram 实验模式与登录
+
+HTTP 实验开关、风险确认、登录/重新登录与取消登录统一在平台账号 → Telegram；运行依赖只提供 tdl 检测和路径。两处保存保留另一处配置，检测/保存/登录忙碌时沿用互斥条件，活动 Telegram 任务需先取消。
+
+默认不启用。启用沿用 AlertDialog，必须清楚说明已知 tdl HTTP 服务全接口监听、无访问令牌、无消息白名单，loopback 与随机端口不构成隔离；这段必要风险信息不能因减少说明文字而删除。tdl 检测不代表已登录或实际操作可用，详见 [tdl 集成说明](docs/tdl-integration.md)。
+
+用户点击登录后用实色 Dialog 呈现连接、二维码、两步验证、验证中与失败；二维码周围保留安静留白，不加玻璃、滤镜或模糊。通过已保存路径调用官方 QR 登录，使用映取新建独立会话，不读取、导入、覆盖已有 Telegram Desktop/tdl 会话。2FA 只在官方要求时出现，提交、关闭和结束清空密码，短时内存传递，不写配置、数据库、日志或普通事件。
+
+最长等待 5 分钟；Escape/关闭会取消本次登录，与更新/文案弹窗的关闭继续后台处理不同。失败/取消保留原会话配置并持续显示原因，成功只表示独立会话已配置，实际权限以解析/下载为准。Telegram 预览只提供真实原始文件规格，未知时长/尺寸/编码不猜测。
+
+## 9. 页面 D：关于软件与更新
+
+### 9.1 关于页
+
+沿用统一外壳，内容最大宽 1040px 居中，最小视口内纵向滚动。品牌区为本地应用图标、20px “映取”、构建注入的当前版本和一句简介；三平台标识使用中性标签，不将实验能力作为正式承诺。
+
+按品牌/版本操作、已有能力、项目支持、开源致谢顺序组织。能力和支持区在宽屏可两列、窄窗单列；常规分组圆角 12px、内边距 16px、间距 16px，无大阴影与装饰背景。保留复制版本信息、手动检查更新、现有下载进度/安装包入口。
+
+项目源码、问题反馈、Apache-2.0 许可证均指向本仓库，由现有 opener 在系统浏览器打开。致谢保留 yt-dlp、DTK、Tauri、React、shadcn/ui、Lucide 的已核实仓库和键盘入口；折叠区展示真实组件版本与本机工具要求，完整来源/许可指向 `vendor/UPSTREAM.md`，不把摘要称为完整传递依赖列表。
+
+页面离线可读，不加载远程贡献者头像、赞助二维码或虚构更新日志。应用版本来自构建，不能把旧硬编码引擎文案当作当前安装版本事实。
+
+### 9.2 更新流程与弹窗
+
+“检查更新”仅在用户点击后由现有 Rust 命令请求本仓库 GitHub Releases 最新正式版本并按 SemVer 比较；检查中只在按钮显示 Spinner 和“正在检查…”，禁用重复请求。无更新使用 Toast，失败在关于页持续展示并保留发行页入口，发现更新打开 Dialog。
+
+更新 Dialog 宽 640px、最大高 85dvh，标题/底部操作固定，正文滚动。显示新版本、当前版本、真实发布日期、GitHub Markdown 更新说明、适用安装包名称和真实大小。说明正文 14px，各级标题统一 14px / 600，通过间距区分；支持列表、加粗、代码、引用、表格及只读任务列表，不执行原始 HTML，图片只显示替代文字；HTTP/HTTPS 链接走系统浏览器，其余链接为文字，失败原因在弹窗内可见。
+
+自动匹配 Windows x64、macOS Intel、Apple Silicon 的安装包，缺适用包或 SHA-256 则禁用自动下载并保留“前往发行页面”。下载、取消、校验、完成及失败沿用 `UpdateDownload`，真实字节/总量/百分比按可得数据展示；取消需等后台停止并清理后才显示已取消。失败可重新下载。
+
+“后台下载”、Escape 和遮罩关闭弹窗均继续当前更新下载，焦点回检查按钮，关于页可查看进度；切页再返回恢复现有操作，不重复启动。下载完通过大小和 SHA-256 校验后才提供“打开安装包 / 重新下载”；打开时再次校验，文件缺失或被修改提示重新下载。
+
+更新存于应用数据目录 updates，使用系统网络/系统代理，不用平台凭据。没有自动检查、静默安装、自动退出/重启；用户下载并打开安装包后继续安装。退出取消未完成下载，重启后重新检查下载，不承诺断点续传。
+
+## 10. 弹窗、菜单与视频文案
+
+### 10.1 通用组件规格
+
+| 组件 | 尺寸与视觉 |
+| --- | --- |
+| Button | 标准/次级/ghost 高 32px；紧凑附属按钮 28px；文字 12px，标准水平内边距 12px，图标 16px |
+| 多行内容链接 / 图集缩略图 | 项目支持链接为自动高度、最小 56px、padding 8px；图集缩略图 40 × 48px，选中使用浅蓝边界和 CircleCheck 标记，均不套标准按钮固定高度 |
+| Input / Select | 标准高 32px、文字 14px、圆角 8px、0.5px 输入边界；搜索可用 28px 紧凑规格 |
+| Textarea | 14px 自然换行；首页固定三行 80px，Cookie 初始四行且沿用可调整高度，不套单行高度 |
+| Card / 媒体列表 | 分组圆角 12px、实色和 0.5px 边界；任务列表融入白色工作区，不另套外边框，内部行无分隔线及外边框，以 8px 圆角悬停/选中背景提供反馈，任务行 padding 按 YAML |
+| Dropdown / ContextMenu | 通用最小宽 192px、条目最小高 32px；任务更多菜单宽 236px、条目 36px、padding 8px、圆角 10px。14px 文字，实色浅表面及轻柔任务菜单阴影 |
+| Tooltip | 12px，实色浅表面、0.5px 边界、小圆角，内容简短，不替代必需的持续错误 |
+| 通用 Dialog / AlertDialog | 默认宽 480px、最大视口减 32px、最大高 85dvh、padding 20px、圆角 16px、实底和弹窗阴影 |
+| 专用 Dialog | 视频文案 720px、更新 640px、图集 680px；各自最大高见 YAML，宽度仍受视口减 32px 限制 |
+| Alert | 通常内联图标和文字；必要风险分组可浅语义底、0.5px 边界，避免整块饱和色 |
+
+弹窗标题 14px / 600，说明 12px / 400，内容正文 14px；标题与关闭按钮留出独立空间。上下操作区域使用相同实色，以间距组织，不给每个弹窗增加灰色大页脚。长正文使用 `min-height: 0` 与单一滚动区，正文块不被 Flex 压缩；底部按钮在 1024 × 680 仍可见，必要时换行，不覆盖文字。Dialog 保留焦点约束与中文关闭名称。
+
+普通菜单无遮罩，打开/关闭不滚动页面。ContextMenu 保留输入编辑和封面操作的现有作用域，不为所有页面启用浏览器默认菜单。菜单键盘关闭返回触发器；菜单转弹窗时先结束菜单焦点生命周期，再将焦点交给弹窗。
+
+### 10.2 关闭、确认与后台处理
+
+| 对象 | 关闭或操作语义 |
+| --- | --- |
+| 单条移除/本地删除 | 直接执行，不新增确认 |
+| 当前任务取消 | 保留取消确认，仅操作该任务 |
+| 重复下载 | 保留当前规格确认，不覆盖已有文件 |
+| 批量清理历史 | 保留范围确认及失败后重试，忙碌时防止重复提交 |
+| Telegram 启用 | 保留风险确认 |
+| Telegram 登录 Dialog | Escape / 关闭取消登录并清空密码 |
+| 视频文案 Dialog | Escape / 关闭只收起，继续提取 |
+| 更新下载 Dialog | Escape / 遮罩 / 后台下载只收起，继续下载 |
+| 封面/图集 Dialog | 关闭结束查看，回到可用的原触发器 |
+
+不要因为统一弹窗外观而统一这些不同的操作语义。
+
+### 10.3 单视频文案
+
+保留 `VideoTranscriptDialog` 与现有转录客户端：仅已完成视频可开始，图集不支持；每次只提取一个视频，转录不改变下载状态。已有文案在原视频缺失后仍可查看、复制、导出；没有文件时不能新提取或重新提取。
+
+标题“视频文案”，宽 720px、最大视口减 32px、最大高 85dvh。标题及底部固定，只读正文独立滚动；保留换行、全文选择和连续长文本换行，提取时间排在正文之后，不被文本或按钮覆盖。展示该份结果实际模型和 CPU/CUDA 后端；旧结果保留 SenseVoiceSmall，重新成功后才更新 Fun-ASR-Nano，不用当前安装模型冒充历史结果来源。
+
+依赖不足时提供手动检测/下载、模型版本选择和缺失 FFmpeg 的独立下载；安装完成仍需用户点击“开始提取”。提取中显示真实音频提取、语音分段、模型识别阶段及不确定进度，可取消；其他视频正在提取时提供查看该操作入口，不开启第二个。关闭窗口继续处理，再开恢复状态。
+
+成功提供复制全文、系统保存对话框导出 TXT、重新提取；只导出已保存正文，不混入时间和提示。失败、取消、中断、无语音及源文件变化保留各自状态，存在上次成功结果时继续显示并说明来源，不能用空白结果覆盖旧文案。操作错误持续显示；关闭后恢复入口焦点，入口已消失则回到合理列表/导航位置。完整边界见 [Fun-ASR-Nano 集成方案](docs/fun-asr-nano.md)。
+
+## 11. 后续前端实施验收
+
+### 11.1 本版文档验收
+
+- YAML 可解析、无重复键，所有 `{路径}` 引用存在且无循环；颜色追溯到 Radix，材质/阴影不夹带另一套调色板。
+- 正文与 YAML 的字号、行高、按钮/输入、侧栏、媒体舞台、任务行、进度、菜单和弹窗尺寸一致；特殊尺寸有明确作用域。
+- 四页及其子状态完整，任务动作矩阵覆盖现有入口、显示/禁用条件和执行副作用；没有旧任务卡要求与新视觉并存。
+- Markdown 标题、表格、链接及本地路径有效；运行 `git diff --check`。本次规范交付不等于界面、打包或平台验收完成。
+
+### 11.2 实施后的视觉与行为验收
+
+后续修改前端时，在 1440 × 900、1280 × 800、1024 × 680 检查外壳、缩放、长标题/路径、横竖封面、图集、所有任务状态和大段文案；Windows 125%/150% 缩放检查 0.5px 边线、焦点与文字清晰度。保留 Windows/macOS 原生装饰、键盘、托盘和减少动态效果支持；关闭媒体氛围后仍可用。
+
+逐项验证解析引擎/规格选择、剪贴板、封面预览/保存/复制、作者本地搜索、队列/取消/重试、重复提醒、后台下载、文件缺失、移除/删除/批量清理、文案提取/导出、平台草稿/凭据隔离、运行依赖、Telegram 实验登录和关于/更新。截图或 fixture 使用明确隔离的示例，生产数据必须来自真实接口。
+
+前端验证依据现有 `package.json` 执行 `npm run build` 并执行 `git diff --check`；浏览器预览与 Tauri 真实运行分开记录，Windows / macOS Intel / Apple Silicon 分开标注 PASS、FAIL、NOT_RUN 或 UNAVAILABLE。源码构建不能替代真实平台、视觉、在线下载或全新设备安装验收。本次已实现本规范的前端重构，最终交付与验证范围见 [UI 调整汇总](docs/task-ui-final-validation.md)，各阶段记录保留当时的运行证据。

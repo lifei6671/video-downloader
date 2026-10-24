@@ -14,7 +14,7 @@ import { api, errorText, type ProjectPage, type UpdateCheck, type UpdateDownload
 import { ReleaseNotes } from '@/components/release-notes';
 
 const brandIcon = new URL('../../src-tauri/icons/128x128.png', import.meta.url).href;
-const engineInfo = '引擎 0.7.5 · yt-dlp 2026.08.19 · DTK 5.1.3';
+const engineInfo = '引擎 0.7.5，yt-dlp 2026.08.19，DTK 5.1.3';
 export const aboutVersionInfo = `映取 v${__APP_VERSION__}\n${engineInfo}\nWindows / macOS`;
 const features = [
   { Icon: Link, title: '从分享链接开始', description: '粘贴抖音、TikTok 或 YouTube 链接，先看预览，再选择视频规格。' },
@@ -74,7 +74,7 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
       const result = await api.checkForUpdates();
       setUpdate({ status: 'checked', result });
       setUpdateOpen(result.has_update);
-      if (!result.has_update) toast.info(result.current_version === result.latest_version ? '当前已是最新版本' : '当前没有可用更新', { id: 'update-check', description: `当前版本 v${result.current_version} · 最新正式版本 v${result.latest_version}` });
+      if (!result.has_update) toast.info(result.current_version === result.latest_version ? '当前已是最新版本' : '当前没有可用更新', { id: 'update-check', description: `当前版本 v${result.current_version}，最新正式版本 v${result.latest_version}` });
     }
     catch (error) { setUpdate({ status: 'error', message: errorText(error) }); }
   }
@@ -120,8 +120,8 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
       <CardHeader className="flex flex-row items-center gap-4">
         <img src={brandIcon} alt="映取图标" className="size-20 shrink-0 object-contain" />
         <div className="flex min-w-0 flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-2"><h2 className="text-2xl font-semibold tracking-tight">映取</h2><Badge variant="outline">v{__APP_VERSION__}</Badge></div>
-          <p className="text-base">把喜欢的作品，留在本地。</p>
+          <div className="flex flex-wrap items-center gap-2"><h2 className="text-xl font-semibold tracking-tight">映取</h2><Badge variant="outline">v{__APP_VERSION__}</Badge></div>
+          <p className="text-sm">把喜欢的作品，留在本地。</p>
           <CardDescription>面向 Windows 与 macOS 的轻量桌面下载器。</CardDescription>
         </div>
       </CardHeader>
@@ -136,18 +136,18 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
     </div>
 
     {release?.has_update && <Dialog open={updateOpen} onOpenChange={setUpdateOpen}>
-      <DialogContent showCloseButton={false} className="flex max-h-[calc(100dvh-3rem)] flex-col sm:max-w-[640px]" onCloseAutoFocus={event => { event.preventDefault(); checkButton.current?.focus(); }}>
+      <DialogContent showCloseButton={false} className="update-dialog flex max-h-[85dvh] flex-col sm:max-w-[640px]" onCloseAutoFocus={event => { event.preventDefault(); checkButton.current?.focus(); }}>
         <DialogHeader className="shrink-0">
           <DialogTitle className="text-xl font-semibold leading-snug">发现新版本 v{release.latest_version}</DialogTitle>
-          <DialogDescription>当前版本 v{release.current_version}{published && !Number.isNaN(published.getTime()) ? ` · 发布于 ${published.toLocaleDateString('zh-CN')}` : ''}</DialogDescription>
+          <DialogDescription>当前版本 v{release.current_version}{published && !Number.isNaN(published.getTime()) ? `，发布于 ${published.toLocaleDateString('zh-CN')}` : ''}</DialogDescription>
         </DialogHeader>
         <div className="flex min-h-0 flex-col gap-3 overflow-y-auto pr-3">
           <h3 className="shrink-0 text-sm font-medium">更新说明</h3>
           <ReleaseNotes content={release.release_notes} openLink={url => void openReleaseNoteLink(url)} />
-          <p className="shrink-0 break-all text-xs text-muted-foreground">{release.installer ? `已匹配当前系统：${currentDownload?.filename ?? release.installer.name} · ${megabytes(currentDownload?.total_bytes ?? release.installer.size)}` : '此版本没有可验证的适用安装包，可前往发行页面手动下载。'}</p>
+          <p className="shrink-0 break-all text-xs text-muted-foreground">{release.installer ? `已匹配当前系统：${currentDownload?.filename ?? release.installer.name}，${megabytes(currentDownload?.total_bytes ?? release.installer.size)}` : '此版本没有可验证的适用安装包，可前往发行页面手动下载。'}</p>
           {currentDownload && <div className="flex shrink-0 flex-col gap-2 rounded-md border p-3" aria-label="安装包下载状态">
             <p className="flex items-center gap-2 text-sm" role="status">{downloading ? <Spinner aria-hidden="true" /> : currentDownload.phase === 'completed' ? <Check aria-hidden="true" className="size-4" /> : null}{downloadPhases[currentDownload.phase]}</p>
-            {['downloading', 'verifying', 'canceling', 'completed'].includes(currentDownload.phase) && <><Progress aria-label="安装包下载进度" value={percent} /><p className="text-xs tabular-nums text-muted-foreground">{megabytes(currentDownload.downloaded_bytes)} / {currentDownload.total_bytes == null ? '大小未知' : megabytes(currentDownload.total_bytes)}{percent == null ? '' : ` · ${percent}%`}</p></>}
+            {['downloading', 'verifying', 'canceling', 'completed'].includes(currentDownload.phase) && <><Progress aria-label="安装包下载进度" value={percent} /><p className="text-xs tabular-nums text-muted-foreground">{megabytes(currentDownload.downloaded_bytes)} / {currentDownload.total_bytes == null ? '大小未知' : megabytes(currentDownload.total_bytes)}{percent == null ? '' : `，${percent}%`}</p></>}
             {currentDownload.phase === 'completed' && <p className="text-xs text-muted-foreground">点击“打开安装包”继续安装，软件不会自动退出。</p>}
             {currentDownload.error && <Alert variant="destructive" role="alert"><AlertCircle /><AlertDescription>{errorText(currentDownload.error)}</AlertDescription></Alert>}
           </div>}
@@ -168,7 +168,7 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
       </Card>
       <Card size="sm" className="[--card-spacing:16px]">
         <CardHeader><CardTitle>项目与支持</CardTitle><CardDescription>在系统默认浏览器中打开。</CardDescription></CardHeader>
-        <CardContent className="flex flex-col gap-1">{projectLinks.map(({ page, Icon, title, description }) => <Button key={page} variant="ghost" className="h-auto w-full justify-start gap-3 px-2 py-2.5" disabled={busy} onClick={() => openPage(page)}><Icon data-icon="inline-start" /><span className="flex min-w-0 flex-1 flex-col gap-1 text-left"><span>{title}</span><span className="truncate text-xs font-normal text-muted-foreground">{description}</span></span><ExternalLink data-icon="inline-end" /></Button>)}</CardContent>
+        <CardContent className="flex flex-col gap-1">{projectLinks.map(({ page, Icon, title, description }) => <Button key={page} variant="ghost" className="project-support-link w-full justify-start gap-3" disabled={busy} onClick={() => openPage(page)}><Icon data-icon="inline-start" /><span className="flex min-w-0 flex-1 flex-col gap-1 text-left"><span>{title}</span><span className="truncate text-xs font-normal text-muted-foreground">{description}</span></span><ExternalLink data-icon="inline-end" /></Button>)}</CardContent>
       </Card>
     </div>
 

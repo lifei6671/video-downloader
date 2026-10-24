@@ -36,7 +36,7 @@ async page => {
   await load('multiple');await background.click();await empty();results.push('reset hides older restored previews');
   await load('queued');await background.click();await empty();
   await page.getByRole('button',{name:'下载任务',exact:true}).click();
-  await page.getByText('队列第 1 位 · 等待下载名额',{exact:true}).waitFor();results.push('existing queue');
+  await page.locator('.task-row-status').getByText('队列第 1 位',{exact:true}).waitFor();results.push('existing queue');
   await load('failure');const originalInput=await input.inputValue();
   await background.click();await page.getByRole('alert').filter({hasText:'网络连接失败'}).waitFor();
   check(await input.inputValue()===originalInput && await background.isEnabled(),'failure discarded preview');

@@ -9,7 +9,8 @@ async page => {
     for (const scenario of ['transcript-long','transcript-unbroken']) {
       await page.goto(base+'/tests/fixtures/background-download.html?scenario='+scenario);
       await page.getByRole('button',{name:'下载任务',exact:true}).click();
-      await page.getByRole('button',{name:'提取文案',exact:true}).click();
+      await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'提取文案',exact:true}).click();
       const dialog=page.getByRole('dialog',{name:'视频文案'});
       await dialog.getByRole('button',{name:'开始提取',exact:true}).click();
       await page.getByText(/正在加载模型并识别/).waitFor();

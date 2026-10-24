@@ -5,7 +5,7 @@ async page=>{
   const tabs=()=>page.getByRole('tablist',{name:'按平台筛选下载任务'});
   const panel=()=>page.getByRole('tabpanel');
   const titles=()=>panel().locator('[data-slot="card-title"]').allTextContents();
-  const expected={全部:['douyin-live','tiktok-wait','youtube-done','youtube-failed','https://t.me/c/100/9','单条视频解析'],抖音:['douyin-live'],TikTok:['tiktok-wait'],YouTube:['youtube-done','youtube-failed'],Telegram:['https://t.me/c/100/9']};
+  const expected={全部:['douyin-live','tiktok-wait','youtube-done','youtube-failed','Telegram https://t.me/c/100/9','下载任务 unknown-failed'],抖音:['douyin-live'],TikTok:['tiktok-wait'],YouTube:['youtube-done','youtube-failed'],Telegram:['Telegram https://t.me/c/100/9']};
   const load=async(query='')=>{await page.goto(base+'/tests/fixtures/task-platforms.html'+query);await page.getByRole('button',{name:'下载任务',exact:true}).click();await tabs().waitFor()};
   const results=[];
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
@@ -38,7 +38,8 @@ async page=>{
   await panel().getByText('youtube-new',{exact:true}).waitFor();
   check(!(await titles()).includes('douyin-new'),'event bypassed filter');
   const completed=panel().locator('[data-slot="card"]').filter({has:page.getByText('youtube-done',{exact:true})});
-  await completed.getByRole('button',{name:'打开文件夹',exact:true}).click();
+  await completed.click({button:'right',position:{x:200,y:30}});
+  await page.getByRole('menuitem',{name:'打开文件夹',exact:true}).click();
   check(await page.evaluate(()=>window.taskPlatformsTest.calls.some(c=>c.type==='reveal' && c.id==='youtube-done')),'filtered action targeted wrong task');
   await page.getByRole('button',{name:'系统设置',exact:true}).click();await page.getByRole('button',{name:'下载任务',exact:true}).click();
   check(await tabs().getByRole('tab',{name:'YouTube',exact:true}).getAttribute('aria-selected')==='true','navigation lost filter');

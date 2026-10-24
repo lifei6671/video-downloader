@@ -26,7 +26,8 @@ async page => {
     await page.setViewportSize({width,height});
     await page.goto(base+'/tests/fixtures/background-download.html?scenario=transcript-loading');
     await page.getByRole('button',{name:'下载任务',exact:true}).click();
-    await page.getByRole('button',{name:'提取文案',exact:true}).click();
+    await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'提取文案',exact:true}).click();
     await page.getByText('正在读取文案…',{exact:true}).waitFor();
     await sample('reading',width);
     await page.evaluate(()=>window.backgroundTest.finishTranscriptRead());

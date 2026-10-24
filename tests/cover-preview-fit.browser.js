@@ -24,7 +24,7 @@ async page => {
       check(picture.y>=box.y&&picture.y+picture.height<=box.y+box.height,'image clipped vertically');
       const ratio=await image.evaluate(image=>image.naturalWidth/image.naturalHeight);
       check(Math.abs(picture.width/picture.height-ratio)<0.01,'image aspect ratio changed');
-      check(await dialog.evaluate(node=>node.scrollHeight<=node.clientHeight+1),'preview needs vertical scrolling');
+      check(await dialog.evaluate(node=>node.scrollHeight<=node.clientHeight+1),'preview needs vertical scrolling: '+JSON.stringify(await dialog.evaluate(node=>({height:node.clientHeight,scroll:node.scrollHeight,image:node.querySelector('img').getBoundingClientRect().height,header:node.querySelector('[data-slot="dialog-header"]').getBoundingClientRect().height,gap:getComputedStyle(node).gap,padding:getComputedStyle(node).padding}))));
       widths.push(box.width);await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});
     }
     check(widths[0]<widths[1]*0.7,'portrait and landscape dialogs have the same fixed width');

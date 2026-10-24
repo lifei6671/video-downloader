@@ -3,7 +3,8 @@ async page => {
  page.setDefaultTimeout(15000);
  await page.getByRole('button',{name:'下载任务',exact:true}).click();
  await page.getByText('Fun-ASR-Nano 本机真实验证',{exact:true}).waitFor();
- await page.getByRole('button',{name:'提取文案',exact:true}).click();
+ await page.locator('.task-row').filter({has:page.getByText('Fun-ASR-Nano 本机真实验证',{exact:true})}).click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'提取文案',exact:true}).click();
  const dialog=page.getByRole('dialog',{name:'视频文案'});
  await dialog.getByRole('button',{name:/^(开始提取|重新提取)$/}).click();
  const text=dialog.getByLabel('识别文案',{exact:true});await text.waitFor({timeout:60000});
@@ -15,6 +16,7 @@ async page => {
  const tasks=await page.evaluate(()=>window.__TAURI_INTERNALS__.invoke('list_tasks'));
  if(snapshot.state!=='completed' || tasks[0].status!=='completed')throw Error('native persistence/state failed');
  await page.keyboard.press('Escape');
- await page.getByRole('button',{name:'查看文案',exact:true}).click();await text.waitFor();
+ await page.locator('.task-row').filter({has:page.getByText('Fun-ASR-Nano 本机真实验证',{exact:true})}).click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'查看文案',exact:true}).click();await text.waitFor();
  return {nativeTauri:'PASS',copy:'PASS',text:await text.innerText(),state:snapshot.state,model:snapshot.result.model_revision,reopen:'PASS'};
 }

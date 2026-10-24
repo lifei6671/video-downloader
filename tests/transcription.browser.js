@@ -13,13 +13,19 @@ async page => {
   };
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
     await page.setViewportSize({width,height});await load('transcript');
-    check(await page.getByRole('button',{name:'提取文案',exact:true}).count()===1,'album exposes transcription');
-    await page.getByRole('button',{name:'提取文案',exact:true}).click();
+    await page.locator('[data-task-id=album]').click({button:'right',position:{x:200,y:30}});
+    check(await page.getByRole('menuitem',{name:'提取文案',exact:true}).count()===0,'album exposes transcription');
+    await page.keyboard.press('Escape');
+    await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'提取文案',exact:true}).click();
     const start=dialog.getByRole('button',{name:'开始提取',exact:true});await start.waitFor();
     await page.waitForFunction(()=>document.querySelector('[role="dialog"] button:not([disabled])'));
     await start.click();await page.getByText(/正在加载模型并识别/).waitFor();
     await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});
-    await page.getByRole('button',{name:'正在提取文案',exact:true}).click();
+    await page.waitForFunction(()=>document.activeElement?.classList.contains('task-context-target'));
+    check(await page.locator('[data-task-id=speech]').locator('..').evaluate(n=>n===document.activeElement),'transcript did not restore menu trigger focus');
+    await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'正在提取文案',exact:true}).click();
     check((await calls()).filter(v=>v.type==='transcribe').length===1,'reopening repeats transcription');
     await page.evaluate(()=>window.backgroundTest.finishTranscription());
     await dialog.getByLabel('识别文案',{exact:true}).waitFor();
@@ -37,14 +43,16 @@ async page => {
     check(await dialog.getByLabel('识别文案',{exact:true}).isVisible(),'cancel erased successful text');
     results.push(width+'x'+height+' lifecycle, copy/export, stale events, cancel');
   }
-  await load('transcript-model');await page.getByRole('button',{name:'提取文案',exact:true}).click();
+  await load('transcript-model');await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'提取文案',exact:true}).click();
   await dialog.getByRole('button',{name:'下载或修复语音模型',exact:true}).click();
   await dialog.getByRole('progressbar',{name:'依赖下载进度'}).waitFor();
   await page.evaluate(()=>window.backgroundTest.finishInstall());
   await dialog.getByRole('button',{name:'开始提取',exact:true}).waitFor();
   check((await calls()).filter(v=>v.type==='transcribe').length===0,'model install starts transcription automatically');
   results.push('on-demand model download requires explicit start');
-  await load('transcript-missing-file');await page.getByRole('button',{name:'查看文案',exact:true}).click();
+  await load('transcript-missing-file');await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'查看文案',exact:true}).click();
   await dialog.getByLabel('识别文案',{exact:true}).waitFor();
   check(await dialog.getByRole('button',{name:'重新提取',exact:true}).isDisabled(),'missing video can be transcribed');
   check(await dialog.getByRole('button',{name:'复制全文',exact:true}).isEnabled(),'saved transcript inaccessible after video loss');

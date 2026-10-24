@@ -14,11 +14,12 @@ async page => {
   };
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
     await page.setViewportSize({width,height});await load('clear');
-    const remove=page.getByRole('button',{name:'从列表移除',exact:true}).last();
+    await page.locator('.task-row').filter({has:page.getByText('已完成作品',{exact:true})}).click({button:'right',position:{x:200,y:30}});
+    const remove=page.getByRole('menuitem',{name:'从列表移除',exact:true});
     await remove.waitFor();
     check(await remove.evaluate(item=>item.firstElementChild?.tagName.toLowerCase()==='svg'
-      && item.firstElementChild.getAttribute('aria-hidden')==='true'
-      && item.textContent.trim()===''),'remove must be icon only');
+      && item.textContent.trim()==='从列表移除'),'remove must remain a named menu action');
+    await page.keyboard.press('Escape');
     const buttonBox=await clear.boundingBox();const searchBox=await search.boundingBox();
     check(buttonBox.x<searchBox.x,'button must precede search');
     check(await clear.evaluate(button=>button.textContent.trim()==='' && !!button.querySelector('svg')),'expected icon only');

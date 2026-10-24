@@ -43,7 +43,8 @@ async page => {
   cases.push('CUDA incompatibility stays visible and CPU remains available');
   await page.goto(base+'/tests/fixtures/background-download.html?scenario=transcript-cuda');
   await page.getByRole('button',{name:'下载任务',exact:true}).click();
-  await page.getByRole('button',{name:'提取文案',exact:true}).click();
+  await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'提取文案',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'视频文案'});
   await dialog.getByRole('button',{name:'开始提取',exact:true}).click();
   await dialog.getByText(/正在检测语音片段/).waitFor();
@@ -53,12 +54,14 @@ async page => {
   await dialog.getByRole('button',{name:'复制全文',exact:true}).click();
   await dialog.getByRole('button',{name:'导出 TXT',exact:true}).click();
   await page.keyboard.press('Escape');
-  await page.getByRole('button',{name:'查看文案',exact:true}).click();
+  await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'查看文案',exact:true}).click();
   await dialog.getByText(/Fun-ASR-Nano CUDA 加速识别/).waitFor();
   cases.push('independent VAD progress, saved CUDA identity, copy/export/reopen');
   await page.goto(base+'/tests/fixtures/background-download.html?scenario=transcript-model');
   await page.getByRole('button',{name:'下载任务',exact:true}).click();
-  await page.getByRole('button',{name:'提取文案',exact:true}).click();
+  await page.locator('[data-task-id=speech]').click({button:'right',position:{x:200,y:30}});
+    await page.getByRole('menuitem',{name:'提取文案',exact:true}).click();
   await dialog.getByRole('combobox',{name:'语音模型版本'}).click();
   await page.getByRole('option',{name:'CUDA 版',exact:true}).click();
   await dialog.getByRole('button',{name:'下载或修复语音模型',exact:true}).click();
