@@ -21,8 +21,9 @@ export function AuthorInfo({ task, compact = false, showId = true, showAvatar = 
   }, [task.id, task.cached_at, profile?.id, profile?.avatar_cached, showAvatar]);
   if (!task.video) return null;
   const telegram = task.video.platform === 'telegram';
-  const id = showId ? profile?.id ?? (telegram ? task.video.video_id.split('_')[0] : undefined) : undefined;
-  const name = profile?.nickname || profile?.handle || task.video.author || (telegram ? 'Telegram 频道' : '作者未知');
+  const authorId = profile?.id?.trim() || (telegram ? task.video.video_id.split('_')[0] : undefined);
+  const id = showId ? authorId : undefined;
+  const name = profile?.nickname?.trim() || (!showId && authorId) || profile?.handle || task.video.author || (telegram ? 'Telegram 频道' : '作者未知');
   return <div data-author-info="" role="group" aria-label={telegram ? '频道信息' : '作者信息'} className="flex min-w-0 items-center gap-2">
     {showAvatar && <Avatar size={compact ? 'sm' : 'default'}>
       <AvatarImage src={source} alt={`${name}的头像`} />

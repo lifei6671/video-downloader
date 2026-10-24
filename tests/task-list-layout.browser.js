@@ -43,7 +43,10 @@ async page => {
     check(await row(3).locator('.task-row-byline').innerText().then(text=>text.includes('YouTube') && !text.includes('ID:')), 'source/author hierarchy');
     check(await row(3).locator('.task-row-title span').evaluate(node=>node.scrollWidth>node.clientWidth), 'long title did not truncate');
     check(await row(3).locator('.task-row-title').evaluate(node=>getComputedStyle(node).fontSize==='14px'), 'title typography');
-    check(await row(3).getByLabel(/下载时间：/).count()===0, 'full timestamp clutters row');
+    const downloadedAt = row(3).getByLabel(/下载时间：/);
+    check(await downloadedAt.isVisible(), 'download timestamp missing');
+    check(await downloadedAt.evaluate(node => node.previousElementSibling?.getAttribute('title') === '文件大小'), 'download timestamp must follow file size');
+    check(await row(1).getByLabel(/下载时间：/).count()===0, 'unfinished task shows download timestamp');
     const adjacent = await page.locator('[data-task-row]').evaluateAll(rows=>rows.slice(0,7).map(n=>{const r=n.getBoundingClientRect();return {top:r.top,bottom:r.bottom}}));
     check(adjacent.every((r,i)=>!i || Math.abs(r.top-adjacent[i-1].bottom)<1), 'gaps between media rows');
     check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth), 'horizontal overflow');

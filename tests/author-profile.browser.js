@@ -22,6 +22,9 @@ async page => {
     }
     for (const pageName of ['下载作品', '下载任务']) {
       await page.getByRole('button', {name: pageName, exact: true}).click();
+      if (pageName === '下载任务') {
+        check((await group.innerText()).trim() === (platform === 'telegram' ? '100' : '作者昵称'), `task name must prefer nickname then ID: ${platform}`);
+      }
       for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
         await page.setViewportSize({width, height});
         check(await group.isVisible(), `${platform} ${pageName}: author hidden at ${width}`);
@@ -40,6 +43,27 @@ async page => {
         check(await group.count() === 0, 'nonmatching author stayed visible');
         await search.fill('');
       }
+    }
+    if (platform === 'douyin') {
+      await page.evaluate(async () => {
+        const { api } = await import('/src/api.ts');
+        const tasks = await api.tasks();
+        tasks[0].revision++;
+        tasks[0].video.author_profile.nickname = '   ';
+        api.tasks = async () => structuredClone(tasks);
+        window.dispatchEvent(new Event('focus'));
+      });
+      await page.waitForFunction(() => document.querySelector('.task-row [data-author-info]')?.textContent.trim() === 'MS4w.' + 'author-id-'.repeat(6));
+      await page.evaluate(async () => {
+        const { api } = await import('/src/api.ts');
+        const tasks = await api.tasks();
+        tasks[0].revision++;
+        tasks[0].video.author_profile = null;
+        tasks[0].video.author = '旧记录昵称';
+        api.tasks = async () => structuredClone(tasks);
+        window.dispatchEvent(new Event('focus'));
+      });
+      await page.waitForFunction(() => document.querySelector('.task-row [data-author-info]')?.textContent.trim() === '旧记录昵称');
     }
     results.push(platform);
   }

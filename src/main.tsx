@@ -77,8 +77,8 @@ function TaskMetadata({ task, details = false, compact = false }: { task: Task; 
     {task.file_missing && <Alert variant="destructive" className="inline-flex w-auto shrink-0 items-center gap-1.5 border-0 bg-transparent p-0 text-xs [&>svg]:size-3.5! [&>svg]:translate-y-0!"><AlertCircle aria-hidden="true" /><AlertDescription>文件不存在</AlertDescription></Alert>}
     {video?.kind === 'image_album' ? <span title="图片数量" className="inline-flex items-center gap-1.5"><Images aria-hidden="true" className="size-3.5 shrink-0" />{task.files.length || video.images?.length || 0} 张图片</span>
       : <span title={width && height ? `清晰度：${width} × ${height}` : '清晰度未知'} aria-label={`清晰度：${resolution}`} className="inline-flex items-center gap-1.5"><Monitor aria-hidden="true" className="size-3.5 shrink-0" />{resolution}</span>}
-    {details && <span title="下载时间" aria-label={`下载时间：${downloadedAt}`} className="inline-flex items-center gap-1.5"><CalendarClock aria-hidden="true" className="size-3.5 shrink-0" />{downloadedAt}</span>}
     <span title="文件大小" aria-label={`文件大小：${size}`} className="inline-flex items-center gap-1.5"><HardDrive aria-hidden="true" className="size-3.5 shrink-0" />{size}</span>
+    {(details || (compact && task.completed_at != null)) && <span title="下载时间" aria-label={`下载时间：${downloadedAt}`} className="inline-flex items-center gap-1.5"><CalendarClock aria-hidden="true" className="size-3.5 shrink-0" />{downloadedAt}</span>}
   </div>;
 }
 function TaskDetails({ task }: { task: Task }) {
