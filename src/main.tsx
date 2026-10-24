@@ -81,17 +81,17 @@ function TaskMetadata({ task, details = false, compact = false }: { task: Task; 
     {(details || (compact && task.completed_at != null)) && <span title="下载时间" aria-label={`下载时间：${downloadedAt}`} className="inline-flex items-center gap-1.5"><CalendarClock aria-hidden="true" className="size-3.5 shrink-0" />{downloadedAt}</span>}
   </div>;
 }
+function taskTitle(task: Task) {
+  const video = task.video;
+  const platform = platformName(video?.platform ?? (task.telegram_link ? 'telegram' : undefined));
+  return video?.title?.trim() || (video ? `${platform} ${video.kind === 'image_album' ? '图集' : '视频'} ${video.video_id}` : task.telegram_link ? `Telegram ${task.telegram_link}` : `下载任务 ${task.id}`);
+}
 function TaskDetails({ task }: { task: Task }) {
   const video = task.video;
   const platform = platformName(video?.platform ?? (task.telegram_link ? 'telegram' : undefined));
-  const title = video?.title?.trim() || (video ? `${platform} ${video.kind === 'image_album' ? '图集' : '视频'} ${video.video_id}` : task.telegram_link ? `Telegram ${task.telegram_link}` : `下载任务 ${task.id}`);
   const authorId = video?.author_profile?.id ?? (video?.platform === 'telegram' ? video.video_id.split('_')[0] : undefined);
-  return <Dialog>
-    <DialogTrigger asChild><Button variant="link" className="task-row-title" title={title} aria-label={`查看任务详情：${title}`}><span className="truncate">{title}</span></Button></DialogTrigger>
-    <DialogContent className="task-details-dialog">
-      <DialogHeader><DialogTitle>任务详情</DialogTitle><DialogDescription className="sr-only">完整作品信息与本地文件记录</DialogDescription></DialogHeader>
-      <div className="task-details-content" role="region" aria-label="任务详细信息" tabIndex={0}>
-        <p className="text-sm font-semibold break-words">{title}</p>
+  return <div className="task-details-content" role="region" aria-label="任务详细信息" tabIndex={0}>
+        <p className="text-sm font-semibold break-words">{taskTitle(task)}</p>
         <TaskMetadata task={task} details />
         <dl className="task-details-fields">
           <dt>来源</dt><dd>{platform}</dd>
@@ -102,9 +102,7 @@ function TaskDetails({ task }: { task: Task }) {
           <dt>创建时间</dt><dd>{downloadTime(task.created_at)}</dd>
           <dt>文件路径</dt><dd>{task.path ? displayPath(task.path) : '尚无本地文件'}</dd>
         </dl>
-      </div>
-    </DialogContent>
-  </Dialog>;
+      </div>;
 }
 function GalleryImage({ task, index, className, onReadyChange }: { task: Task; index: number; className?: string; onReadyChange?: (source: string | undefined) => void }) {
   const { source, failed: readFailed } = useTaskImage(task, index);
@@ -136,7 +134,7 @@ function VideoCover({ task, small = false }: { task: Task; small?: boolean }) {
   const album = task.video?.kind === 'image_album';
   const source = album ? albumSource : task.cover_path || task.cover_cached ? local : task.video?.cover_url;
   const available = !!source && (album || !failed && !readFailed);
-  useEffect(() => { if (!available) setPreviewOpen(false); }, [available]);
+  useEffect(() => { if (!small && !available) setPreviewOpen(false); }, [available, small]);
   async function saveCover() {
     if (saving || copying) return;
     setSaving(true);
@@ -160,8 +158,8 @@ function VideoCover({ task, small = false }: { task: Task; small?: boolean }) {
     finally { setCopying(false); }
   }
   const cover = <DialogTrigger asChild><Button ref={coverRef} type="button" variant="ghost"
-    data-media-cover={small ? "thumbnail" : "preview"} data-cover-context-menu={small ? '' : undefined} aria-label="查看封面" aria-disabled={!available}
-    onClick={event => { if (!available) event.preventDefault(); }}
+    data-media-cover={small ? "thumbnail" : "preview"} data-cover-context-menu={small ? '' : undefined} aria-label="查看封面" aria-disabled={!small && !available}
+    onClick={event => { if (!small && !available) event.preventDefault(); }}
     className={cn('flex shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-muted p-0', small ? 'media-thumbnail' : 'media-stage')}>
     {!small && source && !failed && <img className="media-atmosphere" src={source} alt="" aria-hidden="true" />}{album ? <GalleryImage task={task} index={0} onReadyChange={setAlbumSource} /> : source && !failed ? <img className="media-cover-image" src={source} referrerPolicy="no-referrer" alt="作品封面" onError={() => setFailed(true)} /> : <Film className={cn('text-muted-foreground', !small && 'm-8')} aria-hidden="true" />}
   </Button></DialogTrigger>;
@@ -171,15 +169,21 @@ function VideoCover({ task, small = false }: { task: Task; small?: boolean }) {
       <ContextMenuItem disabled={saving || copying || !available} onSelect={() => void copyCover()}><Copy />{copying ? '复制中…' : '复制封面'}</ContextMenuItem>
     </ContextMenuGroup></ContextMenuContent>
   </ContextMenu> : cover}
-    <DialogContent className="cover-preview-dialog max-h-[90vh] w-fit min-w-56 max-w-[90vw] overflow-y-auto sm:max-w-[90vw]">
-      <DialogHeader className="w-0 min-w-full pr-8"><DialogTitle>封面预览</DialogTitle><DialogDescription className="line-clamp-2 text-sm">{task.video?.title || '作品封面'}</DialogDescription></DialogHeader>
-      {source && <ContextMenu><ContextMenuTrigger asChild>
+    <DialogContent className={small ? 'task-cover-dialog' : 'cover-preview-dialog max-h-[90vh] w-fit min-w-56 max-w-[90vw] overflow-y-auto sm:max-w-[90vw]'}>
+      <DialogHeader className={small ? 'pr-8' : 'w-0 min-w-full pr-8'}><DialogTitle>{small ? '任务详情' : '封面预览'}</DialogTitle><DialogDescription className={small ? 'sr-only' : 'line-clamp-2 text-sm'}>{small ? '作品封面与完整任务信息' : task.video?.title || '作品封面'}</DialogDescription></DialogHeader>
+      <div className={small ? 'task-cover-body' : 'contents'}>
+      <div className={small ? 'task-cover-image' : 'contents'}>
+      {small && available && <img className="media-atmosphere" src={source} alt="" aria-hidden="true" />}
+      {available ? <ContextMenu><ContextMenuTrigger asChild>
         <img ref={previewImageRef} src={source} alt="封面大图" data-cover-context-menu="" tabIndex={0}
-          className="mx-auto h-auto max-h-[calc(90dvh-128px)] w-auto max-w-[calc(90vw-42px)] object-contain outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+          className={cn('object-contain outline-none focus-visible:ring-2 focus-visible:ring-ring', small ? 'max-h-full max-w-full h-auto w-auto' : 'mx-auto h-auto max-h-[calc(90dvh-128px)] w-auto max-w-[calc(90vw-42px)]')} />
       </ContextMenuTrigger><ContextMenuContent aria-label="封面预览操作"><ContextMenuGroup>
         <ContextMenuItem disabled={saving || copying || !available} onSelect={() => void saveCover()}><Download />{saving ? '保存中…' : '另存为…'}</ContextMenuItem>
         <ContextMenuItem disabled={saving || copying || !available} onSelect={() => void copyCover(previewImageRef.current)}><Copy />{copying ? '复制中…' : '复制封面'}</ContextMenuItem>
-      </ContextMenuGroup></ContextMenuContent></ContextMenu>}
+      </ContextMenuGroup></ContextMenuContent></ContextMenu> : <Film className="size-10 text-muted-foreground" aria-label="封面不可用" />}
+      </div>
+      {small && <TaskDetails task={task} />}
+      </div>
     </DialogContent>
   </Dialog>;
 }
@@ -524,7 +528,7 @@ function App() {
     {page === 'tasks' && <TaskStatusFilters value={taskStatus} counts={statusCounts} onChange={value => { setTaskStatus(value); taskListRef.current?.scrollTo(0, 0); }} />}
     {taskListPage && <TaskList tasks={visible} platform={taskPlatform} onPlatformChange={setTaskPlatform} listRef={taskListRef} removingIds={removedIds.current} onExited={finishRemoval} empty={emptyState(true)} renderRow={task => taskMenu(task, <TaskRow
       task={task} selected={selectedRow === task.id} onSelect={() => setSelectedRow(task.id)}
-      cover={<VideoCover task={task} small />} title={<TaskDetails task={task} />}
+      cover={<VideoCover task={task} small />} title={<span className="task-row-title" title={taskTitle(task)}>{taskTitle(task)}</span>}
       metadata={<div className="task-row-byline"><AuthorInfo task={task} compact showId={false} showAvatar={false} onAuthorClick={authorSearch(task.video) ? () => showAuthorWorks(task) : undefined} /><span className="task-row-platform">{platformName(task.video?.platform ?? (task.telegram_link ? 'telegram' : undefined))}</span><TaskMetadata task={task} compact /></div>}
       progress={task.status === 'downloading' ? <DownloadProgress task={task} /> : null}
       queuePosition={queued.findIndex(t => t.id === task.id) + 1} actions={taskActions(task)}

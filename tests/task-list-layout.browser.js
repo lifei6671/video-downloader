@@ -41,7 +41,7 @@ async page => {
     check((await row(2).innerText()).includes('队列第 1 位'), 'queue position missing');
     check(await row(4).getByRole('alert').isVisible(), 'failure is not persistent');
     check(await row(3).locator('.task-row-byline').innerText().then(text=>text.includes('YouTube') && !text.includes('ID:')), 'source/author hierarchy');
-    check(await row(3).locator('.task-row-title span').evaluate(node=>node.scrollWidth>node.clientWidth), 'long title did not truncate');
+    check(await row(3).locator('.task-row-title').evaluate(node=>node.scrollWidth>node.clientWidth), 'long title did not truncate');
     check(await row(3).locator('.task-row-title').evaluate(node=>getComputedStyle(node).fontSize==='14px'), 'title typography');
     const downloadedAt = row(3).getByLabel(/下载时间：/);
     check(await downloadedAt.isVisible(), 'download timestamp missing');
@@ -52,9 +52,12 @@ async page => {
     check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth), 'horizontal overflow');
     await screenshot(`mixed-${width}`);
 
-    const title = row(3).getByRole('button', {name:/查看任务详情/});
+    const title = row(3).locator('.task-row-title');
+    const cover = row(3).getByRole('button', {name:'查看封面',exact:true});
+    await title.click();
+    check(await page.getByRole('dialog').count()===0, 'title opens separate details');
     const fullTitle = await title.getAttribute('title');
-    await title.focus();
+    await cover.focus();
     await page.keyboard.press('Enter');
     const dialog = page.getByRole('dialog', {name:'任务详情'});
     await dialog.waitFor();
@@ -66,8 +69,8 @@ async page => {
     check(dialogBox.y>=0 && dialogBox.y+dialogBox.height<=height, 'details outside viewport');
     await screenshot(`details-${width}`);
     await page.keyboard.press('Escape');
-    await page.waitForFunction(()=>document.activeElement?.classList.contains('task-row-title'));
-    check(await title.evaluate(node=>node===document.activeElement), 'details focus not restored');
+    await page.waitForFunction(()=>document.activeElement?.getAttribute('data-media-cover')==='thumbnail');
+    check(await cover.evaluate(node=>node===document.activeElement), 'details focus not restored');
 
     const more = row(3).locator('..');
     await more.focus();
@@ -95,7 +98,7 @@ async page => {
     const albumMore = await row(6).locator('.task-row-controls').boundingBox();
     check(Math.abs(albumAction.y+albumAction.height/2-albumMore.y-albumMore.height/2)<1, 'album actions split into two rows');
     await row(6).getByRole('img', {name:'第 1 张图片', exact:true}).waitFor();
-    check(await row(7).getByRole('button', {name:'查看封面', exact:true}).getAttribute('aria-disabled')==='true', 'missing cover appears available');
+    check(await row(7).getByRole('button', {name:'查看封面', exact:true}).getAttribute('aria-disabled')==='false', 'missing cover blocks task details');
     check((await row(8).innerText()).includes('Telegram 视频 1001234567890_12345'), 'untitled source identity invented/lost');
     await screenshot(`completed-${width}`);
     for (const id of [3,9,10]) {
@@ -114,7 +117,7 @@ async page => {
     results.push(`${width}: continuous rows, status/actions, media ratios, long/absent title, details, menu/keyboard, completed/missing/album, scroll`);
   }
   await load('visual-list-long-details');
-  const longTitle = row(3).getByRole('button', {name:/查看任务详情/});
+  const longTitle = row(3).getByRole('button', {name:'查看封面',exact:true});
   await longTitle.focus();
   await page.keyboard.press('Enter');
   const longDialog = page.getByRole('dialog', {name:'任务详情'});
@@ -131,7 +134,7 @@ async page => {
   check(await longDialog.getByRole('button', {name:'关闭',exact:true}).isVisible(), 'close control clipped');
   await screenshot('long-details-1024');
   await page.keyboard.press('Escape');
-  await page.waitForFunction(()=>document.activeElement?.classList.contains('task-row-title'));
+  await page.waitForFunction(()=>document.activeElement?.getAttribute('data-media-cover')==='thumbnail');
   await page.getByRole('button', {name:'关于软件',exact:true}).click();
   await page.getByRole('button', {name:'检查更新',exact:true}).click();
   const checklist = page.locator('.release-notes .task-list-item');

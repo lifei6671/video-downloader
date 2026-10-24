@@ -5,7 +5,7 @@ async page => {
   const check=(value,message)=>{if(!value)throw Error(message)};
   const menu=page.getByRole('menu',{name:'封面操作',exact:true});
   const copy=menu.getByRole('menuitem',{name:'复制封面',exact:true});
-  const dialog=page.getByRole('dialog',{name:'封面预览',exact:true});
+  const dialog=page.getByRole('dialog',{name:'任务详情',exact:true});
   const trigger=id=>page.locator('[data-slot="card"]').filter({has:page.getByText(id+' cover',{exact:true})}).locator('[data-cover-context-menu]');
   const load=async()=>{await page.goto(base+'/tests/fixtures/cover-save.html');await page.getByRole('button',{name:'下载任务',exact:true}).click();await page.waitForFunction(()=>[...document.querySelectorAll('[data-cover-context-menu] img')].filter(image=>image.complete&&image.naturalWidth).length===6)};
   const open=async id=>{await trigger(id).click({button:'right',force:true});await menu.waitFor();check(await dialog.count()===0,'right click opened the preview')};
@@ -28,9 +28,12 @@ async page => {
   check(await page.evaluate(()=>window.coverSaveTest.copies.length)===1,'duplicate clipboard write');results.push('pending copy blocks repeated actions');
   for(const id of ['missing','broken','broken-album']) {
     await load();await open(id);check(await copy.isDisabled(),'missing cover copy enabled');await page.keyboard.press('Escape');
-    await trigger(id).click({force:true});check(await dialog.count()===0,'missing cover opened preview');
+    await trigger(id).click({force:true});await dialog.waitFor();
+    check(await dialog.getByRole('region',{name:'任务详细信息'}).isVisible(),'missing cover lost details');
+    check(await dialog.getByRole('img',{name:'封面大图',exact:true}).count()===0,'failed image shown in details');
+    await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});
   }
-  results.push('missing and failed video/album cannot copy or preview');
+  results.push('missing and failed video/album disable copy but retain details');
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
     await page.setViewportSize({width,height});await load();
     for(const id of ['douyin','legacy','youtube','album']) {
