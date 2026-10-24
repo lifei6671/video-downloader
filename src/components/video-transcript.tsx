@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { AlertCircle, Copy, Download, FileText, RotateCcw, Square } from 'lucide-react';
+import { AlertCircle, Check, Copy, Download, FileText, RotateCcw, Square } from 'lucide-react';
 import { api, errorText, type Task, type VideoTranscript } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -45,6 +45,15 @@ export function VideoTranscriptDialog({client, tasks, runtime}: {client: ReturnT
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState('');
   const [reading, setReading] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyResetTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const copyScope = useRef({active: true});
+  useEffect(() => {
+    const scope = {active: true};
+    copyScope.current = scope;
+    setCopied(false);
+    return () => { scope.active = false; clearTimeout(copyResetTimer.current); };
+  }, [client.selected]);
   useEffect(() => {
     let disposed = false;
     setDetail(null); setNotice('');
@@ -99,7 +108,19 @@ export function VideoTranscriptDialog({client, tasks, runtime}: {client: ReturnT
         {task?.file_missing && <p className="text-xs text-muted-foreground">视频已移动或删除，已有文案仍可复制和导出。</p>}
       </div>
       <DialogFooter className="shrink-0 flex-wrap">
-        <Button variant="outline" disabled={pending || !text} onClick={() => void act(async () => { await api.copyTranscript(task!.id); setNotice('文案已复制'); })}><Copy />复制全文</Button>
+        <Button variant="outline" className="group/copy" data-copied={copied} aria-label={copied ? '已复制' : '复制全文'} disabled={pending || !text} onClick={() => void act(async () => {
+          const scope = copyScope.current;
+          setCopied(false); clearTimeout(copyResetTimer.current);
+          await api.copyTranscript(task!.id);
+          if (!scope.active) return;
+          setCopied(true); setNotice('文案已复制');
+          copyResetTimer.current = setTimeout(() => setCopied(false), 1800);
+        })}>
+          <span aria-hidden="true" className="grid">
+            <span className="col-start-1 row-start-1 inline-flex items-center justify-center gap-1.5 transition-opacity duration-250 ease-out group-data-[copied=true]/copy:opacity-0 motion-reduce:transition-none"><Copy />复制全文</span>
+            <span className="col-start-1 row-start-1 inline-flex items-center justify-center gap-1.5 opacity-0 transition-opacity duration-250 ease-out group-data-[copied=true]/copy:opacity-100 motion-reduce:transition-none"><Check />已复制</span>
+          </span>
+        </Button>
         <Button variant="outline" disabled={pending || !text} onClick={() => void act(async () => { const path = await api.exportTranscript(task!.id); if (path) setNotice(`已导出：${path}`); })}><Download />导出 TXT</Button>
         {running ? <Button variant="outline" disabled={pending} onClick={() => void act(async () => { await api.cancelTranscription(task!.id, state.operation_id); })}><Square />取消提取</Button> :
           <Button disabled={pending || reading || !ready || runtime.busy || !!other || task?.file_missing} onClick={() => void act(async () => { client.merge(await api.startTranscription(task!.id, !!state)); })}>{state ? <RotateCcw /> : <FileText />}{state ? '重新提取' : '开始提取'}</Button>}
