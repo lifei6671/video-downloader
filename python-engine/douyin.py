@@ -11,6 +11,7 @@ from yt_dlp.extractor.tiktok import DouyinIE as UpstreamDouyinIE
 from yt_dlp.utils import ExtractorError, float_or_none, url_or_none
 from yt_dlp.utils.traversal import traverse_obj
 from video_formats import positive
+from author_profile import attach
 
 
 def original_scale_cover(detail):
@@ -40,6 +41,7 @@ class DouyinIE(UpstreamDouyinIE):
 
     def _parse_aweme_video_app(self, detail):
         info = super()._parse_aweme_video_app(detail)
+        attach(info, detail.get('author'), 'douyin')
         video = detail.get('video') or {}
         cover = original_scale_cover(detail)
         if cover:

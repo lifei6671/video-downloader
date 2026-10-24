@@ -260,6 +260,10 @@ fn get_task_cover(core: State<AppCore>, task_id: String) -> Result<Vec<u8>, Stri
     core.cover(&task_id).map_err(error)
 }
 #[tauri::command]
+fn get_author_avatar(core: State<AppCore>, task_id: String) -> Result<Vec<u8>, String> {
+    core.author_avatar(&task_id).map_err(error)
+}
+#[tauri::command]
 async fn save_task_cover(
     app: tauri::AppHandle,
     core: State<'_, AppCore>,
@@ -640,6 +644,7 @@ fn main() {
             get_profile_cookie,
             get_profile_proxy,
             get_task_cover,
+            get_author_avatar,
             save_task_cover,
             get_task_image,
             save_profile,

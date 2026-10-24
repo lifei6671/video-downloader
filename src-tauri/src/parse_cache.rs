@@ -30,6 +30,13 @@ pub fn init(db: &Connection) -> Result<bool> {
            url TEXT PRIMARY KEY, platform TEXT NOT NULL, video_id TEXT NOT NULL);",
     )
     .context("DATABASE_ERROR")?;
+    let has_avatar: bool = db.prepare("PRAGMA table_info(parse_cache)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|name| name == "author_avatar");
+    if !has_avatar {
+        db.execute("ALTER TABLE parse_cache ADD COLUMN author_avatar BLOB", [])
+            .context("DATABASE_ERROR")?;
+    }
     Ok(!existed)
 }
 
@@ -98,16 +105,19 @@ pub fn share_url(input: &str) -> Option<String> {
 
 pub fn get(db: &Connection, platform: &str, id: &str, resolver: &str) -> Result<Option<Preview>> {
     let row = db.query_row(
-        "SELECT cache_key,metadata,saved_at,cover IS NOT NULL FROM parse_cache
+        "SELECT cache_key,metadata,saved_at,cover IS NOT NULL,author_avatar IS NOT NULL FROM parse_cache
          WHERE platform=?1 AND video_id=?2 AND revision=?4 AND
            (resolver=?3 OR (?3='auto' AND resolver=CASE WHEN kind='image_album' THEN 'dtk' ELSE 'yt-dlp' END))",
         params![platform,id,resolver,revision(resolver)],
-        |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,bool>(3)?)),
+        |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,bool>(3)?,r.get::<_,bool>(4)?)),
     ).optional().context("DATABASE_ERROR")?;
-    let Some((stored_key, metadata, saved_at, has_cover)) = row else {
+    let Some((stored_key, metadata, saved_at, has_cover, has_avatar)) = row else {
         return Ok(None);
     };
-    let video: Value = serde_json::from_str(&metadata).context("DATABASE_ERROR")?;
+    let mut video: Value = serde_json::from_str(&metadata).context("DATABASE_ERROR")?;
+    if let Some(profile) = video["author_profile"].as_object_mut() {
+        profile.insert("avatar_cached".into(), has_avatar.into());
+    }
     if key(&video)? != stored_key {
         bail!("DATABASE_ERROR");
     }
@@ -374,6 +384,8 @@ pub fn save(
         "cover_error",
         "source_url",
         "cookie_warning",
+        "author_avatar_filename",
+        "author_avatar_bytes",
     ] {
         object.remove(field);
     }
@@ -382,6 +394,8 @@ pub fn save(
     tx.execute(
         "INSERT INTO parse_cache(cache_key,platform,video_id,resolver,kind,metadata,saved_at,revision,cover)
         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(cache_key) DO UPDATE SET
+        author_avatar=CASE WHEN json_extract(parse_cache.metadata,'$.author_profile.id')=json_extract(excluded.metadata,'$.author_profile.id')
+            THEN parse_cache.author_avatar ELSE NULL END,
         metadata=excluded.metadata,kind=excluded.kind,saved_at=excluded.saved_at,revision=excluded.revision,cover=excluded.cover",
         params![
             cache_key,
@@ -456,11 +470,11 @@ pub fn save_cover(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {
     ).context("DATABASE_ERROR")? != 0)
 }
 
-// Task removal can release a shared video cover while preserving reusable
-// metadata and aliases. The caller decides whether any other task still uses it.
+// Task removal can release shared cover/avatar bytes while preserving reusable
+// album images, metadata and aliases. The caller checks for remaining references.
 pub fn clear_cover(db: &Connection, video: &Value) -> Result<()> {
     db.execute(
-        "UPDATE parse_cache SET cover=NULL WHERE cache_key=?",
+        "UPDATE parse_cache SET cover=NULL,author_avatar=NULL WHERE cache_key=?",
         [key(video)?],
     )
     .context("DATABASE_ERROR")?;
@@ -468,9 +482,26 @@ pub fn clear_cover(db: &Connection, video: &Value) -> Result<()> {
 }
 
 pub fn cover(db: &Connection, video: &Value) -> Result<Vec<u8>> {
+    cached_image(db, video, "SELECT cover FROM parse_cache WHERE cache_key=?", 10 * 1024 * 1024)
+}
+
+pub fn save_avatar(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {
+    if body.len() > 2 * 1024 * 1024
+        || !matches!(image_extension(body), Some("jpeg" | "png" | "webp")) {
+        bail!("INVALID_MEDIA_CONTENT");
+    }
+    Ok(db.execute("UPDATE parse_cache SET author_avatar=?1 WHERE cache_key=?2",
+        params![body, key(video)?]).context("DATABASE_ERROR")? != 0)
+}
+
+pub fn avatar(db: &Connection, video: &Value) -> Result<Vec<u8>> {
+    cached_image(db, video, "SELECT author_avatar FROM parse_cache WHERE cache_key=?", 2 * 1024 * 1024)
+}
+
+fn cached_image(db: &Connection, video: &Value, query: &str, limit: usize) -> Result<Vec<u8>> {
     let body: Option<Vec<u8>> = db
         .query_row(
-            "SELECT cover FROM parse_cache WHERE cache_key=?",
+            query,
             [key(video)?],
             |r| r.get(0),
         )
@@ -478,7 +509,7 @@ pub fn cover(db: &Connection, video: &Value) -> Result<Vec<u8>> {
         .context("DATABASE_ERROR")?
         .flatten();
     let body = body.context("FILE_MISSING")?;
-    if body.len() > 10 * 1024 * 1024
+    if body.len() > limit
         || !matches!(image_extension(&body), Some("jpeg" | "png" | "webp"))
     {
         bail!("INVALID_MEDIA_CONTENT");
@@ -490,6 +521,43 @@ pub fn cover(db: &Connection, video: &Value) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn author_avatar_migrates_persists_and_is_removed_with_last_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("old.db");
+        let mut db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE parse_cache(cache_key TEXT PRIMARY KEY,platform TEXT NOT NULL,video_id TEXT NOT NULL,resolver TEXT NOT NULL,kind TEXT NOT NULL,metadata TEXT NOT NULL,saved_at INTEGER NOT NULL,revision TEXT NOT NULL,cover BLOB);").unwrap();
+        init(&db).unwrap();
+        init(&db).unwrap();
+        let mut video = json!({"platform":"douyin","video_id":"123","canonical_url":"https://www.douyin.com/video/123","resolver":"yt-dlp","kind":"video",
+            "author_profile":{"id":"author-1","nickname":"昵称","handle":"handle","kind":"user"},
+            "author_avatar_filename":"author-avatar","author_avatar_bytes":15});
+        let body = b"\x89PNG\r\n\x1a\nfixture";
+        let saved = save(&mut db, &video, vec![], None, 100).unwrap();
+        assert!(saved.video.get("author_avatar_filename").is_none());
+        assert!(saved.video.get("author_avatar_bytes").is_none());
+        assert!(save_avatar(&db, &video, b"<html>login</html>").is_err());
+        assert!(save_avatar(&db, &video, body).unwrap());
+        drop(db);
+        let mut db = Connection::open(&path).unwrap();
+        init(&db).unwrap();
+        let hit = get(&db, "douyin", "123", "yt-dlp").unwrap().unwrap();
+        assert_eq!(hit.video["author_profile"]["nickname"], "昵称");
+        assert_eq!(hit.video["author_profile"]["avatar_cached"], true);
+        assert_eq!(avatar(&db, &hit.video).unwrap(), body);
+        save(&mut db, &video, vec![], None, 101).unwrap();
+        assert_eq!(avatar(&db, &video).unwrap(), body);
+        video["author_profile"]["id"] = "another-author".into();
+        save(&mut db, &video, vec![], None, 102).unwrap();
+        assert!(avatar(&db, &video).is_err());
+        save_avatar(&db, &video, body).unwrap();
+        clear_cover(&db, &video).unwrap();
+        assert!(avatar(&db, &video).is_err());
+        let hit = get(&db, "douyin", "123", "yt-dlp").unwrap().unwrap();
+        assert_eq!(hit.video["author_profile"]["avatar_cached"], false);
+        assert_eq!(hit.video["author_profile"]["id"], "another-author");
+    }
 
     #[test]
     fn telegram_channel_mapping_reuses_valid_aliases_across_messages_and_restart() {

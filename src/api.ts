@@ -12,7 +12,8 @@ export interface RuntimeStatus { platform: string; directory: string; tools: Run
 export interface RuntimeProgress { tool: RuntimeTool['id']; phase: 'downloading' | 'verifying' | 'installing'; downloaded_bytes: number; total_bytes: number }
 export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string }
 export interface VideoFormat { requires_merge?: boolean; format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
-export interface Video { cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
+export interface AuthorProfile { id?: string | null; nickname?: string | null; handle?: string | null; kind: 'user' | 'channel'; avatar_cached?: boolean }
+export interface Video { author_profile?: AuthorProfile; cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
 export interface Task { total_bytes_estimate?: number | null; telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
 export interface Profile { http_chunk_size?: number | null; platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
 export interface TdlSettings { enabled: boolean; path: string | null; session_directory?: string | null }
@@ -53,6 +54,7 @@ export const api = {
   cancelRuntimeDependency: () => invoke<void>('cancel_runtime_dependency'),
   cookie: (platform: string) => invoke<string>('get_profile_cookie', { platform }),
   image: (taskId: string, index: number) => invoke<number[]>('get_task_image', { taskId, index }),
+  authorAvatar: (taskId: string) => invoke<number[]>('get_author_avatar', { taskId }),
   cover: (taskId: string) => invoke<number[]>('get_task_cover', { taskId }),
   saveCover: (taskId: string) => invoke<boolean>('save_task_cover', { taskId }),
   copyCover: (image: ImageData) => invoke<void>('copy_cover_image', { rgba: Array.from(image.data), width: image.width, height: image.height }),

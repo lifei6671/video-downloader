@@ -4,7 +4,7 @@
 // Explicit browser-only mock of IPC. No download, login or platform request occurs.
 import {api} from '/src/api';
 const scenario = new URLSearchParams(location.search).get('scenario') || 'telegram';
-const sourcePlatform = scenario.replace('cached-cover-', '');
+const sourcePlatform = ['author-missing','author-broken','author-results'].includes(scenario) ? 'douyin' : scenario.replace('cached-cover-', '').replace('author-', '');
 const platform = ['douyin','tiktok','youtube'].includes(sourcePlatform) ? sourcePlatform : scenario === 'album' ? 'douyin' : 'telegram';
 const video = {platform, video_id:'100_9', canonical_url:platform === 'telegram' ? 'https://t.me/c/100/9' : platform === 'youtube' ? 'https://www.youtube.com/watch?v=test1234567' : platform === 'tiktok' ? 'https://www.tiktok.com/@test/video/123' : 'https://www.douyin.com/video/123', title:'原作品', resolver:scenario === 'album' ? 'dtk' : platform === 'telegram' ? 'tdl' : 'yt-dlp', kind:scenario === 'album' ? 'image_album' : 'video', filesize:65536, selected_format_id:scenario === 'album' ? null : 'original', formats:scenario === 'album' ? [] : [{format_id:'original',container:'mp4',filesize:65536}], images:scenario === 'album' ? [{quality_source:'original',width:1,height:1}] : undefined};
 if (scenario.startsWith('variant')) Object.assign(video, {platform:'youtube',resolver:'yt-dlp',
@@ -18,6 +18,25 @@ let tasks = [structuredClone(original), ...(scenario === 'duplicate' ? [complete
 let listener = () => {}; let removedListener = () => {}; let next = 0; const pendingUpdates = [], pendingSnapshots = [];
 const control = {loaded:false,calls:[],holdEvents:scenario === 'delayed',holdRefresh:scenario === 'delayed',race:scenario === 'race',release:()=>{},snapshot:()=>structuredClone(tasks),flush:()=>{control.holdEvents=false;control.holdRefresh=false;for(const task of pendingUpdates.splice(0))listener(task);for(const [resolve,snapshot] of pendingSnapshots.splice(0))resolve(snapshot)},complete:id=>{const task=tasks.find(t=>t.id===id);Object.assign(task,{revision:task.revision+1,status:'completed',bytes:65536,path:'C:\\TestVideos\\'+id+'.mp4',completed_at:20});listener(structuredClone(task))},stale:()=>listener(structuredClone(original))};
 window.backgroundTest = control;
+if (scenario.startsWith('author-')) {
+  tasks[0].download_requested = true;
+  tasks[0].video.author_profile = {id:platform === 'telegram' ? '100' : 'MS4w.'+'author-id-'.repeat(6),nickname:platform === 'telegram' ? null : '作者昵称',handle:platform === 'telegram' ? 'channel_name' : 'account_handle',kind:platform === 'telegram' ? 'channel' : 'user',avatar_cached:platform !== 'telegram' && scenario !== 'author-missing'};
+  api.authorAvatar = async id => {control.calls.push({type:'avatar',id}); if(scenario === 'author-broken') throw 'FILE_MISSING'; return api.cover(id)};
+}
+if (scenario === 'author-results') {
+  const make = (id, platform, authorId, nickname, title) => ({...structuredClone(tasks[0]),id,status:'completed',download_requested:true,
+    bytes:65536,completed_at:Math.floor(new Date(2026,9,16,20,48).getTime()/1000),path:'C:\\TestVideos\\'+id+'.mp4',
+    video:{...structuredClone(video),platform,video_id:id,title,author:'account_handle',selected_format_id:'original',
+      formats:[{format_id:'original',container:'mp4',width:1080,height:1920,filesize:65536}],
+      author_profile:{id:authorId,nickname,handle:'account_handle',kind:'user',avatar_cached:true}}});
+  tasks=[make('first','douyin','author-1','作者昵称','原作品'),make('second','douyin','author-1','更早的昵称','另一条作品'),
+    make('different','douyin','author-2','作者昵称','同名其他作者'),make('cross-platform','tiktok','author-1','作者昵称','其他平台作品'),
+    make('legacy','douyin',null,null,'旧版作品')];
+  tasks[0].file_missing=true;
+  Object.assign(tasks[1],{status:'ready',download_requested:false,completed_at:null,path:null});
+  Object.assign(tasks[1].video.formats[0],{width:720,height:1280});
+  delete tasks[4].video.author_profile;
+}
 if(scenario.startsWith('variant') && scenario!=='variant-race')tasks.push(completed);
 if(scenario==='variant-race')control.race=true;
 control.progress = data => {const task=tasks.find(t=>t.status==='downloading');Object.assign(task,data,{revision:task.revision+1});listener(structuredClone(task))};

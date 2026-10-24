@@ -34,7 +34,7 @@ def test_video_cover_priority_is_douyin_only_and_falls_back(platform, cover):
     item = SimpleNamespace(platform=platform, content_id='123', kind='video',
         raw={'video': {'cover_original_scale': cover}}, web_url='https://www.douyin.com/video/123',
         title='fixture', duration_ms=1000, music=None,
-        author=SimpleNamespace(unique_id='fixture', nickname='fixture'),
+        author=SimpleNamespace(uid='author-id', unique_id='fixture', nickname='fixture', avatar=None),
         media=SimpleNamespace(video=stream, streams=[], covers=[SimpleNamespace(url=legacy)]))
     expected = ('https://p.douyinpic.com/designed' if platform == 'douyin' and cover and
                 'https://p.douyinpic.com/designed' in cover.get('url_list', []) else legacy)
@@ -123,7 +123,7 @@ def test_dtk_video_uses_same_guarded_single_file_downloader(monkeypatch, tmp_pat
                              width=1280, height=720, size_bytes=len(BODY), bitrate=None)
     item = SimpleNamespace(platform='douyin', content_id='123', kind='video', raw={},
         web_url='https://www.douyin.com/video/123', title='fixture', duration_ms=1000, music=None,
-        author=SimpleNamespace(unique_id='fixture',nickname='fixture'),
+        author=SimpleNamespace(uid='author-id',unique_id='fixture',nickname='fixture',avatar=None),
         media=SimpleNamespace(video=stream,streams=[stream],covers=[]))
     monkeypatch.setattr(dtk_adapter,'extract',lambda *args:item)
     from yt_dlp import YoutubeDL

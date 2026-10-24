@@ -23,13 +23,14 @@ from local_tools import installed_tool, javascript_runtime
 import runtime_dependencies
 import local_cover
 import transcription
+import author_profile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/dtk/upstream/src'))
 import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.12.0'
+ENGINE_VERSION = '0.13.0'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.08.19'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -313,6 +314,7 @@ def metadata(info, platform):
         selected[field] = max(1, round(value)) if valid else None
     return dict(platform=platform, video_id=video_id, canonical_url=canonical,
                 title=info.get('title'), author=info.get('uploader'), cover_url=cover,
+                author_profile=author_profile.metadata(info, platform),
                 duration_ms=duration_ms, resolver='yt-dlp', kind='video',
                 formats=public_formats(info, platform == 'youtube'), selected_format_id=info.get('_yingqu_format_id'), **selected)
 
@@ -430,6 +432,8 @@ def operate(method, params, emit):
                 cookies = {c.name: c.value for c in ydl.cookiejar if not c.is_expired()}
             if platform == 'douyin':
                 ydl.add_info_extractor(DouyinIE())
+            elif platform == 'tiktok':
+                ydl.add_info_extractor(author_profile.TikTokIE())
             ydl._request_director = ydl.build_request_director(
                 [functools.partial(GuardedRH, platform=platform)])
             if short:
@@ -464,6 +468,8 @@ def operate(method, params, emit):
                             names = dtk_adapter.preview_images(ydl, content, preview)
                             for image, name in zip(result['images'], names):
                                 image['preview_filename'] = name
+                            result.update(author_profile.download_avatar(ydl,
+                                content.author.avatar.url if content.author.avatar else None, preview))
                         emit('resolved', result=result)
                     return
                 info = ydl.process_ie_result(dtk_adapter.video_info(content), download=False)
@@ -483,6 +489,8 @@ def operate(method, params, emit):
             if not downloading:
                 if preview:
                     result.update(download_cover(ydl, info, preview))
+                    result.update(author_profile.download_avatar(ydl,
+                        author_profile.avatar_url(ydl, info, platform), preview))
                 emit('resolved', result=result)
                 return
             if result['video_id'] != expected['video_id'] or expected.get('kind', 'video') != 'video':

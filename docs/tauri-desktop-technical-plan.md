@@ -122,12 +122,14 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 | `identify_input` 请求/`identified` | 识别平台、作品 ID、规范链接、类型和实际 resolver；长链接纯本地识别，短链只经 GuardedRH 展开，不请求详情或媒体 |
 | `resolve_video` 请求 | `id`、单条 `input`、`resolver`（auto/yt-dlp/dtk）、可选 Rust 专属 `preview_dir`、两平台配置快照；凭据只经 stdin |
 | `download_video` 请求 | `id`、规范作品链接、预期 platform/video_id/kind/image_count、实际 resolver、原任务配置快照、Rust 创建的专属 staging 目录 |
-| `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、cover_url、duration_ms、width、height、filesize、filesize_approx、kind/resolver、images（尺寸/来源/本地相对预览名）、music（title/author）；可选字段可空 |
+| `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、可选 author_profile（id/nickname/handle/kind）、cover_url、duration_ms、width、height、filesize、filesize_approx、kind/resolver、images（尺寸/来源/本地相对预览名）、music（title/author）；可选字段可空。头像只返回暂存文件标识和字节数，详见下文作者资料 |
 | `progress` | 同一 `id`、downloaded_bytes、total_bytes、speed_bps、completed_items/total_items；不包含上游原始 dict |
 | `download_finished` | 同一 `id`、平台/作品身份、staging 内相对文件名、实际字节数与容器；图集为 files 清单（每文件 bytes/hash/尺寸/来源），不含媒体 URL；仅表示引擎文件写入结束 |
 | `error` | 同一 `id`、稳定 code、脱敏 message、stage；可可靠获得时附 HTTP 状态 |
 
 请求和响应均包含 `protocol_version`。每个操作最多一个终端结果：身份识别以 `identified` 结束、解析以 `resolved` 结束、下载以 `download_finished` 结束，或以 `error` 结束。成功还必须伴随正常进程退出；EOF、超限、错 ID、错版本、重复终端消息、非零退出或缺失结果都明确失败。单条消息上限 1 MiB。
+
+作者资料与 SQLite 头像缓存按 [作者资料契约](author-profile.md) 实现；扩展字段保持协议 v3，引擎升级为 0.13.0。头像为可选资源，不影响作品解析或下载成功。
 
 `download_finished` 之后 Rust 校验路径确实位于所分配暂存目录，视频拒绝目录，图集核对专属 album 目录与全文件清单；两者均拒绝符号链接/重解析跳转及非预期文件，再执行第 7 节文件提交。这个消息不直接映射为 UI 的 completed。
 
@@ -140,6 +142,8 @@ YouTube 请求被重定向至 `https://www.google.com/sorry/index` 或 `/sorry/`
 流程：设置 → 粘贴单链接 → 解析预览 → 点击下载 → 排队/下载 → 文件与记录提交 → 已完成。使用首页、下载任务、设置和关于软件四个视图；下载任务统一展示已提交的任务与已完成记录，并支持按标题或作者搜索。
 
 下载任务页顶部提供横向平台标签，顺序为全部、抖音、TikTok、YouTube、Telegram，首次进入默认全部。平台筛选与标题/作者搜索同时生效，仅影响列表展示；进行中计数、FIFO 等待位置仍按全部任务计算；清理历史限定当前 Tab 的平台，“全部”Tab 才覆盖全部平台，搜索不改变清理范围。尚无元数据的 Telegram 任务按已有 Telegram 链接归类，其他平台未知的记录保留在全部；空列表提示当前平台无任务，筛选在本次运行切换页面时保留，不额外持久化。
+
+点击列表作者昵称打开本地搜索结果视图，复用任务列表展示该作者已有记录，按平台和作者 ID 精确匹配，旧记录按账号名回退。包含本地解析预览，不请求平台作者作品接口。搜索结果视图隐藏批量清理入口，其他记录操作保持原有规则，详见 [作者资料](author-profile.md)。
 
 | Tauri 命令 | 行为 |
 | --- | --- |

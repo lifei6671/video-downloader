@@ -18,7 +18,7 @@ from yt_dlp.networking.exceptions import TransportError, IncompleteRead
 # This is application policy, not a generated dtk asset or a general-site downloader.
 DOMAINS = {
     'youtube': ('youtube.com', 'youtu.be', 'youtube-nocookie.com', 'googlevideo.com',
-                'ytimg.com', 'youtubei.googleapis.com'),
+                'ytimg.com', 'youtubei.googleapis.com', 'yt3.ggpht.com', 'yt3.googleusercontent.com'),
     'douyin': ('douyin.com', 'iesdouyin.com', 'amemv.com', 'douyinvod.com',
                'bytecdn.cn', 'byteimg.com', 'douyinstatic.com', 'zjcdn.com', '365yg.com', 'douyinpic.com'),
     'tiktok': ('tiktok.com', 'tiktokv.com', 'tiktokcdn.com', 'tiktokcdn-us.com',

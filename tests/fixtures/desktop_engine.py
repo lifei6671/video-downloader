@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.12.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.13.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
@@ -106,11 +106,13 @@ if request["method"] == "resolve_video":
             image=b"\x89PNG\r\n\x1a\nfixture"
             (Path(params["preview_dir"])/"cover").write_bytes(image)
             cover=dict(cover_filename="cover",cover_bytes=len(image))
+            (Path(params['preview_dir'])/'author-avatar').write_bytes(image)
+            cover.update(author_avatar_filename='author-avatar',author_avatar_bytes=len(image))
         if params["input"] == "cookie-warning":
             cover['cookie_warning'] = 'BROWSER_COOKIES_UNAVAILABLE'
         emit("resolved", result=dict(platform=platform, video_id=video_id,
             canonical_url=params['input'] if platform != 'douyin' else "https://www.douyin.com/video/" + video_id,
-            title="离线生命周期验证", author="fixture", duration_ms=1000, resolver=params.get("resolver") if params.get("resolver") in ("dtk","yt-dlp") else "yt-dlp",kind="video", width=1080, height=1920, selected_format_id="1"*24,
+            title="离线生命周期验证", author="fixture", author_profile=dict(id='fixture-author',nickname='作者昵称',handle='fixture',kind='user'), duration_ms=1000, resolver=params.get("resolver") if params.get("resolver") in ("dtk","yt-dlp") else "yt-dlp",kind="video", width=1080, height=1920, selected_format_id="1"*24,
             formats=[dict(format_id="1"*24,container="mp4",width=1080,height=1920,filesize=40),
                      dict(format_id="2"*24,container="mp4",width=720,height=1280,filesize=20)], **cover))
 else:

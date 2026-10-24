@@ -1019,6 +1019,7 @@ impl Session {
                 } else {
                     Ok(json!({"platform":"telegram","resolver":"tdl","kind":"video","video_id":format!("{}_{}",media.channel,media.message),
                         "canonical_url":format!("https://t.me/c/{}/{}",media.channel,media.message),"title":media.name,"original_filename":media.name,"mime_type":media.mime,
+                        "author_profile":{"id":media.channel.to_string(),"nickname":null,"handle":public_peer(&link),"kind":"channel","avatar_cached":false},
                         "filesize":media.size,"duration_ms":null,"width":null,"height":null,"selected_format_id":"original","tdl_revision":PROTOCOL_REVISION,
                         "formats":[{"format_id":"original","container":media.container,"codec":null,"width":null,"height":null,"filesize":media.size}]}))
                 }

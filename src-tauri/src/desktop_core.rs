@@ -758,6 +758,12 @@ impl Core {
         }
         crate::files::read_cover(task.cover_path.as_deref().context("FILE_MISSING")?)
     }
+    pub fn author_avatar(&self, id: &str) -> Result<Vec<u8>> {
+        let inner = self.inner.lock().unwrap();
+        let video = inner.tasks.iter().find(|task| task.id == id)
+            .context("TASK_NOT_FOUND")?.video.as_ref().context("FILE_MISSING")?;
+        parse_cache::avatar(&inner.db, video)
+    }
     pub fn export_cover(&self, id: &str) -> Result<(String, Vec<u8>)> {
         let task = self
             .list()
@@ -967,7 +973,6 @@ impl Core {
             .iter()
             .filter(|t| removing.contains(t.id.as_str()))
             .filter_map(|t| t.video.as_ref())
-            .filter(|v| v["kind"].as_str().unwrap_or("video") == "video")
             .filter(|v| {
                 let identity = (
                     v["platform"].as_str(),
@@ -1312,6 +1317,17 @@ impl Core {
                     } else { None };
                     let mut inner = core.inner.lock().unwrap();
                     let mut cached = parse_cache::save(&mut inner.db, &video, images, cover, now())?;
+                    // Optional avatar failures must not fail an otherwise valid video/album preview.
+                    if video["author_avatar_filename"] == "author-avatar" {
+                        if let Ok(body) = crate::files::read_cover(&stage.path().join("author-avatar")) {
+                            if video["author_avatar_bytes"].as_u64() == Some(body.len() as u64) {
+                                let _ = parse_cache::save_avatar(&inner.db, &cached.video, &body);
+                            }
+                        }
+                    }
+                    if let Some(profile) = cached.video["author_profile"].as_object_mut() {
+                        profile.insert("avatar_cached".into(), parse_cache::avatar(&inner.db, &video).is_ok().into());
+                    }
                     parse_cache::remember(&inner.db, &input, &cached.video)?;
                     let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
                     task.cached_at = Some(cached.saved_at);
@@ -2259,6 +2275,53 @@ mod tests {
         let (name, bytes) = app.export_cover(&album.id).unwrap();
         assert!(name.starts_with("douyin_601.cover."));
         assert_eq!(bytes, app.image(&album.id, 0).unwrap());
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn author_avatar_survives_restart_and_reads_only_task_owned_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = app.resolve("valid".into()).unwrap();
+        let ready = wait(&app, &task.id, Status::Ready).await;
+        let video = ready.video.as_ref().unwrap();
+        assert_eq!(video["author_profile"]["id"], "fixture-author");
+        assert_eq!(video["author_profile"]["nickname"], "作者昵称");
+        assert_eq!(video["author_profile"]["avatar_cached"], true);
+        assert!(video.get("author_avatar_filename").is_none());
+        let body = app.author_avatar(&task.id).unwrap();
+        assert_eq!(body, b"\x89PNG\r\n\x1a\nfixture");
+        assert!(app.author_avatar("not-a-task").is_err());
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(app.author_avatar(&task.id).unwrap(), body);
+        app.download(&task.id, false).unwrap();
+        wait(&app, &task.id, Status::Completed).await;
+        app.remove_history(&task.id).unwrap();
+        assert!(app.author_avatar(&task.id).is_err());
+        assert!(parse_cache::avatar(&app.inner.lock().unwrap().db, video).is_err());
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn album_author_avatar_is_released_without_deleting_cached_album_images() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = app.resolve("album".into()).unwrap();
+        let ready = wait(&app, &task.id, Status::Ready).await;
+        let video = ready.video.unwrap();
+        let body = b"\x89PNG\r\n\x1a\nfixture";
+        parse_cache::save_avatar(&app.inner.lock().unwrap().db, &video, body).unwrap();
+        assert_eq!(app.author_avatar(&task.id).unwrap(), body);
+        app.download(&task.id, false).unwrap();
+        wait(&app, &task.id, Status::Completed).await;
+        app.remove_history(&task.id).unwrap();
+        {
+            let inner = app.inner.lock().unwrap();
+            assert!(parse_cache::avatar(&inner.db, &video).is_err());
+            assert!(parse_cache::image(&inner.db, &video, 0).is_ok());
+        }
         app.shutdown().await;
     }
 
