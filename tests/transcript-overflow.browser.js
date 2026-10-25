@@ -1,4 +1,4 @@
-// Long text must stay inside its border and scroll without overlapping metadata/actions.
+// Long text scrolls inside its fixed frame; all focus edges and actions stay visible.
 async page => {
   page.setDefaultTimeout(7000);
   const base=page.url().split('/').slice(0,3).join('/');
@@ -18,7 +18,7 @@ async page => {
       const text=dialog.getByLabel('识别文案',{exact:true}); await text.waitFor();
       const content=await text.inputValue();
       check(content.length>15000,'fixture is not long enough');
-      const scroll=text.locator('..');
+      const scroll=text;
       const time=dialog.getByText(/^提取时间：/);
       const header=dialog.locator('[data-slot="dialog-header"]');
       const footer=dialog.locator('[data-slot="dialog-footer"]');
@@ -30,14 +30,31 @@ async page => {
           textBottom:element.getBoundingClientRect().bottom,timeTop:stamp.getBoundingClientRect().top,
           scrollHeight:body.scrollHeight,clientHeight:body.clientHeight,scrollWidth:body.scrollWidth,clientWidth:body.clientWidth};
       });
-      check(geometry.textHeight+1>=geometry.textScrollHeight,'text escaped its own border at '+scenario+' '+width);
+      check(geometry.textScrollHeight>geometry.textHeight,'long text has no internal scroll at '+scenario+' '+width);
       check(geometry.timeTop>=geometry.textBottom,'text overlaps extraction time');
-      check(geometry.scrollHeight>geometry.clientHeight,'long text has no scrollable container');
+      check(geometry.scrollHeight<=geometry.clientHeight+1,'text frame overflowed the dialog body');
       check(geometry.textScrollWidth<=geometry.textWidth+1 && geometry.scrollWidth<=geometry.clientWidth+1,'unbroken text causes horizontal overflow');
       const box=await dialog.boundingBox();
       check(box.x>=0 && box.y>=0 && box.x+box.width<=width+1 && box.y+box.height<=height+1,'dialog exceeds viewport');
       await text.focus(); await page.keyboard.press('PageDown');
-      await page.waitForFunction(()=>document.querySelector('[aria-label="识别文案"]').parentElement.scrollTop>0);
+      await page.waitForFunction(()=>document.querySelector('[aria-label="识别文案"]').scrollTop>0);
+      const frame=await text.boundingBox();
+      for(const position of [0,0.5,1]) {
+        await scroll.evaluate((element,position)=>{element.scrollTop=(element.scrollHeight-element.clientHeight)*position},position);
+        const focus=await text.evaluate(element=>{
+          const r=element.getBoundingClientRect(),b=element.parentElement.getBoundingClientRect(),css=getComputedStyle(element);
+          const outside=Math.max(0,parseFloat(css.outlineWidth)+parseFloat(css.outlineOffset));
+          return {top:r.top-outside-b.top,left:r.left-outside-b.left,right:b.right-r.right-outside,bottom:b.bottom-r.bottom-outside,
+            visible:element.matches(':focus-visible') && css.outlineStyle!=='none',width:parseFloat(css.outlineWidth),scroll:element.scrollTop};
+        });
+        check(focus.visible && focus.width>0,'keyboard focus indicator missing');
+        check([focus.top,focus.left,focus.right,focus.bottom].every(edge=>edge>=-0.5),'focus edge clipped at '+position+' '+scenario+' '+width);
+        const moved=await text.boundingBox();
+        check(Math.abs(moved.x-frame.x)<1 && Math.abs(moved.y-frame.y)<1 && Math.abs(moved.height-frame.height)<1,'scrolling moved the text frame');
+        if(position>0)check(focus.scroll>0,'text did not scroll internally');
+      }
+      await page.keyboard.press('Control+A');
+      check(await text.evaluate(el=>el.selectionStart===0 && el.selectionEnd===el.value.length),'long text cannot be selected in full');
       await scroll.evaluate(element=>{element.scrollTop=element.scrollHeight});
       const headerAfter=await header.boundingBox(),footerAfter=await footer.boundingBox(),timeBox=await time.boundingBox();
       check(Math.abs(headerAfter.y-headerBefore.y)<1 && Math.abs(footerAfter.y-footerBefore.y)<1,'header or actions moved with text');
@@ -51,8 +68,9 @@ async page => {
       await dialog.getByRole('button',{name:'导出 TXT',exact:true}).click();
       const outputs=await page.evaluate(()=>window.backgroundTest.calls.filter(c=>c.type==='copy-transcript'||c.type==='export-transcript'));
       check(outputs.length===2 && outputs.every(v=>v.text===content),'copy/export lost long text');
-      await page.screenshot({path:'.local/transcript-overflow/'+scenario+'-'+width+'.png'});
-      cases.push(scenario+' '+width+'x'+height+': bounded text, keyboard scroll, fixed actions, complete copy/export');
+      await text.focus();
+      await page.screenshot({path:'output/playwright/transcript-focus-'+scenario+'-'+width+'.png'});
+      cases.push(scenario+' '+width+'x'+height+': internal scroll, four focus edges, keyboard select/scroll, fixed actions, complete copy/export');
     }
   }
   return {passed:cases.length,cases};

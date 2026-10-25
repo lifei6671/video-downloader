@@ -89,7 +89,7 @@ export function VideoTranscriptDialog({client, tasks, runtime}: {client: ReturnT
       (target?.isConnected ? target : document.querySelector<HTMLElement>('[aria-current="page"]'))?.focus({preventScroll:true});
     }}>
       <DialogHeader className="min-w-0 shrink-0"><DialogTitle>视频文案</DialogTitle><DialogDescription className="line-clamp-2">{task?.video?.title || '已下载视频'}，{modelName} {backend === 'cuda' ? 'CUDA 加速识别' : backend === 'cpu' ? 'CPU 本地识别' : '本地识别'}</DialogDescription></DialogHeader>
-      <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto pr-3 [&>*]:shrink-0">
+      <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto pr-3 [&>*]:shrink-0 [&>textarea]:shrink">
         {client.error && <Alert variant="destructive" role="alert"><AlertCircle /><AlertDescription>{errorText(client.error)}</AlertDescription></Alert>}
         {runtime.error && <Alert variant="destructive" role="alert"><AlertCircle /><AlertDescription>{errorText(runtime.error)}</AlertDescription></Alert>}
         {notice && <p role="status" className="break-all text-xs text-muted-foreground">{notice}</p>}
@@ -99,7 +99,7 @@ export function VideoTranscriptDialog({client, tasks, runtime}: {client: ReturnT
         {/* Keep the rotating spinner's bounds out of the surrounding scroll area. */}
         {running && <div className="flex flex-col gap-2" role="status">{recognized && <Progress aria-label="文案识别进度" value={recognitionPercent} />}<p className="flex flex-wrap items-center gap-2 overflow-clip text-xs text-muted-foreground"><Spinner aria-hidden="true" />{state.phase === 'extracting_audio' ? '正在提取音频…' : state.phase === 'segmenting' ? '正在检测语音片段…' : state.phase === 'loading_model' ? '正在加载语音模型…' : recognized ? `已识别 ${state.completed_segments ?? 0} / ${state.total_segments} 段，${recognitionPercent}%` : '正在完成文案提取…'}关闭此窗口后仍会继续处理。</p></div>}
         {reading && <p role="status" className="flex items-center gap-2 overflow-clip text-xs text-muted-foreground"><Spinner />正在读取文案…</p>}
-        {text && <><Textarea readOnly aria-label="识别文案" value={text} className="min-h-40 min-w-0 resize-none [overflow-wrap:anywhere] rounded-md border-[0.5px] bg-background p-4 text-sm leading-relaxed" /><p className="text-xs text-muted-foreground">提取时间：{new Date(detail!.result!.completed_at * 1000).toLocaleString('zh-CN')}{state?.state !== 'completed' ? '，上次成功保存的文案' : ''}</p></>}
+        {text && <><Textarea readOnly aria-label="识别文案" value={text} className="min-h-40 min-w-0 resize-none overflow-y-auto [overflow-wrap:anywhere] rounded-md border-[0.5px] bg-background p-4 text-sm leading-relaxed" /><p className="text-xs text-muted-foreground">提取时间：{new Date(detail!.result!.completed_at * 1000).toLocaleString('zh-CN')}{state?.state !== 'completed' ? '，上次成功保存的文案' : ''}</p></>}
         {!running && !ready && !task?.file_missing && <div className="flex flex-col gap-3"><p className="text-xs text-muted-foreground">首次使用需要下载所选模型及缺失的 FFmpeg；下载后可离线提取文案。</p>
           {!runtime.status && <Button variant="outline" disabled={runtime.busy} onClick={() => void runtime.check()}>检测运行依赖</Button>}
           {model && !model.available && <div className="flex flex-wrap items-center gap-2"><ModelVersionSelect runtime={runtime} disabled={!!other} /><Button variant="outline" disabled={runtime.busy || !!other || !model.can_install} onClick={() => void runtime.install('fun-asr-nano')}><Download />下载或修复语音模型</Button></div>}
@@ -116,7 +116,7 @@ export function VideoTranscriptDialog({client, tasks, runtime}: {client: ReturnT
           setCopied(false); clearTimeout(copyResetTimer.current);
           await api.copyTranscript(task!.id);
           if (!scope.active) return;
-          setCopied(true); setNotice('文案已复制');
+          setCopied(true);
           copyResetTimer.current = setTimeout(() => setCopied(false), 1800);
         })}>
           <span aria-hidden="true" className="grid">

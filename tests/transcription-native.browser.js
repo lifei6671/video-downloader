@@ -10,7 +10,8 @@ async page => {
  const text=dialog.getByLabel('识别文案',{exact:true});await text.waitFor({timeout:60000});
  if(!/开放时间早上(?:9|九)点/.test(await text.inputValue()))throw Error('unexpected native ASR output');
  await dialog.getByRole('button',{name:'复制全文',exact:true}).click();
- await page.getByText('文案已复制',{exact:true}).waitFor();
+ await dialog.getByRole('button',{name:'已复制',exact:true}).waitFor();
+ if(await dialog.getByText('文案已复制',{exact:true}).count())throw Error('redundant copy notice');
  await page.screenshot({path:'.local/transcription-delivery/native-dialog.png'});
  const snapshot=await page.evaluate(()=>window.__TAURI_INTERNALS__.invoke('get_video_transcript',{taskId:'asr-native-test'}));
  const tasks=await page.evaluate(()=>window.__TAURI_INTERNALS__.invoke('list_tasks'));

@@ -48,7 +48,8 @@ async page => {
     check(await body.inputValue()===originalText,'transcript became editable');
     await page.keyboard.press('Tab');
     check(await dialog.getByRole('button',{name:'复制全文',exact:true}).evaluate(el=>el===document.activeElement),'Tab does not reach copy action');
-    await dialog.getByRole('button',{name:'复制全文',exact:true}).click();await page.getByText('文案已复制',{exact:true}).waitFor();
+    await dialog.getByRole('button',{name:'复制全文',exact:true}).click();await dialog.getByRole('button',{name:'已复制',exact:true}).waitFor();
+    check(await dialog.getByText('文案已复制',{exact:true}).count()===0,'copy added a redundant notice above the transcript');
     await dialog.getByRole('button',{name:'导出 TXT',exact:true}).click();await page.getByText(/已导出：/).waitFor();
     const output=(await calls()).filter(v=>['copy-transcript','export-transcript'].includes(v.type));
     check(output.length===2 && output[0].text===output[1].text,'copy/export text differs');

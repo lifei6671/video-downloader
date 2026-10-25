@@ -36,7 +36,7 @@ Rust 根据已完成任务路径启动独立 sidecar；FFmpeg 只读取原视频
 
 CPU 新结果保存名称 `Fun-ASR-Nano`、上述模型 revision、pipeline `fun-asr-nano-cpu-fbbfe018-v1`、backend `cpu`；CUDA 保存其实际模型 revision、pipeline 和 backend。SQLite 结构不变，旧结果缺少 `model_name` 时按 SenseVoiceSmall 展示，保留原 CPU/CUDA 标识。旧文案在源视频缺失后仍可复制/导出；失败、无语音或取消保留旧正文。重新提取成功后才替换正文与模型身份。
 
-TXT 继续输出 UTF-8 BOM 与平台换行，保留全文，原子写入且禁止覆盖原视频或其别名。界面保留长文案独立滚动、固定标题/底部操作、连续长串换行和键盘路径。
+TXT 继续输出 UTF-8 BOM 与平台换行，保留全文，原子写入且禁止覆盖原视频或其别名。长文案在只读文本框内部滚动，文本框四边和内置焦点线保持完整可见；标题、提取时间和底部操作保持位置稳定，连续长串换行及键盘路径保留。
 
 正文使用只读 shadcn Textarea，可聚焦、鼠标选取，支持系统全选和复制快捷键（Windows Ctrl+A / Ctrl+C，macOS Cmd+A / Cmd+C）；不能修改已保存文案。运行中的进度快照不反复读取或清空正文，保留“复制全文”和“导出 TXT”操作。
 

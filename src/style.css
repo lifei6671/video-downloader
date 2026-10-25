@@ -301,6 +301,7 @@
 }
 [data-slot="alert-dialog-content"] { width: 480px; max-height: 85dvh; overflow-y: auto; }
 .transcript-dialog[data-slot="dialog-content"] { width: min(720px, calc(100vw - 32px)); }
+.transcript-dialog[data-slot="dialog-content"] [data-slot="textarea"]:focus-visible { outline-offset: -2px; }
 .update-dialog[data-slot="dialog-content"] { width: min(640px, calc(100vw - 32px)); }
 .album-dialog[data-slot="dialog-content"] { width: min(680px, calc(100vw - 32px)); max-height: 90dvh; }
 .cover-preview-dialog[data-slot="dialog-content"] { width: fit-content; max-width: 90vw; max-height: 90dvh; }

@@ -309,13 +309,13 @@ function App() {
   const viewedAlbum = tasks.find(task => task.id === viewAlbum);
   const [selected, setSelected] = useState<string | null>(null);
   const [previewReset, setPreviewReset] = useState(false);
-  // UI handoff only: keep acknowledged background tasks out of preview selection,
-  // even when their authoritative queued/downloading event has not arrived yet.
-  const [backgroundedIds, setBackgroundedIds] = useState(() => new Set<string>());
+  // Hide previews after acknowledged handoff/cancellation, even before the
+  // corresponding task event arrives. Rust still owns their task state.
+  const [dismissedPreviewIds, setDismissedPreviewIds] = useState(() => new Set<string>());
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [confirm, setConfirm] = useState<Task | null>(null);
+  const [confirm, setConfirm] = useState<{task: Task; resetPreview: boolean; input: string} | null>(null);
   const [duplicate, setDuplicate] = useState<{task: Task; previous: Task; background?: boolean} | null>(null);
   const duplicateTrigger = useRef<{id: string; background: boolean} | null>(null);
   useEffect(() => { if (duplicate) duplicateTrigger.current = {id: duplicate.task.id, background: !!duplicate.background}; }, [duplicate]);
@@ -335,11 +335,11 @@ function App() {
   const removedIds = useRef(new Set<string>());
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const cancelTrigger = useRef<HTMLButtonElement | null>(null);
-  const preview = tasks.find(t => !backgroundedIds.has(t.id) && (t.status === 'ready' || (t.status === 'parsing' && !t.download_requested)));
+  const preview = tasks.find(t => !dismissedPreviewIds.has(t.id) && (t.status === 'ready' || (t.status === 'parsing' && !t.download_requested)));
   const runningCount = tasks.filter(t => t.status === 'downloading').length;
   const queued = tasks.filter(t => t.status === 'queued').sort((a, b) => (a.queue_order ?? 0) - (b.queue_order ?? 0));
   const activeCount = runningCount + queued.length + tasks.filter(t => t.download_requested && t.status === 'parsing').length;
-  const selectedTask = tasks.find(t => t.id === selected && !backgroundedIds.has(t.id));
+  const selectedTask = tasks.find(t => t.id === selected && !dismissedPreviewIds.has(t.id));
   const current = previewReset ? undefined : selectedTask?.status === 'completed' ? preview : selectedTask ?? preview;
   const resolution = resolutionLabel(current?.video?.width, current?.video?.height);
   const previewBytes = current?.status === 'completed' ? current.bytes : current?.total_bytes ?? current?.video?.filesize;
@@ -375,7 +375,7 @@ function App() {
     try {
       await api.download(task.id, confirmDuplicate);
       if (background) {
-        setBackgroundedIds(old => new Set(old).add(task.id));
+        setDismissedPreviewIds(old => new Set(old).add(task.id));
         setSelected(null); setPreviewReset(true); setInput(''); submittedInput.current = '';
         requestAnimationFrame(() => inputRef.current?.focus());
         toast.success('已加入下载任务');
@@ -391,6 +391,16 @@ function App() {
       if (previous) promptedDuplicates.current.add(duplicatePromptKey(task));
       setTasks(old => mergeTasks(old, snapshot, removedIds.current));
       if (previous) setDuplicate({task, previous, background}); else throw error;
+    }
+  }
+  async function cancelTask(intent: NonNullable<typeof confirm>) {
+    await api.cancel(intent.task.id);
+    if (intent.resetPreview) {
+      setDismissedPreviewIds(old => new Set(old).add(intent.task.id));
+      setSelected(null); setPreviewReset(true); setError('');
+      setInput(value => value === intent.input ? '' : value);
+      submittedInput.current = '';
+      requestAnimationFrame(() => inputRef.current?.focus());
     }
   }
   useEffect(() => {
@@ -508,11 +518,11 @@ function App() {
       {page === 'download' && task.status === 'ready' && <Button size="sm" variant="outline" data-background-download-task={task.id} disabled={busy} onClick={() => run(() => download(task, true))}><ListVideo data-icon="inline-start" />后台下载</Button>}
       {task.status === 'failed' && task.error === 'TDL_CHANNEL_ID_REQUIRED' && task.telegram_link && <Button disabled={busy} onClick={() => run(() => download(task, true))}><ListVideo data-icon="inline-start" />加入待下载队列</Button>}
       {task.status === 'ready' && <Button data-download-task={task.id} disabled={busy} onClick={() => run(() => download(task))}><Download data-icon="inline-start" />{task.video?.kind === 'image_album' ? '下载图集' : '下载视频'}</Button>}
-      {['parsing','ready','queued','downloading'].includes(task.status) && <Button size="sm" variant="outline" disabled={busy || task.canceling} onClick={event => { cancelTrigger.current = event.currentTarget; setConfirm(task); }}>{task.canceling ? '正在取消…' : '取消'}</Button>}
+      {['parsing','ready','queued','downloading'].includes(task.status) && <Button size="sm" variant="outline" disabled={busy || task.canceling} onClick={event => { cancelTrigger.current = event.currentTarget; setConfirm({task, resetPreview: page === 'download' && !task.download_requested, input}); }}>{task.canceling ? '正在取消…' : '取消'}</Button>}
       {task.status === 'completed' && task.video?.kind === 'image_album' && !task.file_missing && <Button size="sm" variant="outline" onClick={() => setViewAlbum(task.id)}><Eye />查看图集</Button>}
       {canPlayTask(task) && <Tooltip><TooltipTrigger asChild><Button size={taskListPage ? "icon" : "sm"} variant={taskListPage ? "ghost" : "outline"} className="task-play" aria-label="播放视频" disabled={busy} onClick={() => run(() => api.play(task.id))}><Play aria-hidden="true" />{!taskListPage && "播放"}</Button></TooltipTrigger><TooltipContent>使用系统默认播放器播放</TooltipContent></Tooltip>}
 
-      {['failed', 'canceled'].includes(task.status) && <Button size="sm" variant="outline" disabled={busy} onClick={() => task.video || (task.telegram_link && task.download_requested) ? run(async () => { const next = await api.retry(task.id); toast.dismiss(task.id); promptedDuplicates.current.delete(next.id); setBackgroundedIds(old => { const updated = new Set(old); updated.delete(next.id); return updated; }); setTasks(old => mergeTasks(old, [next], removedIds.current)); setSelected(next.id); setPreviewReset(false); }) : (setPage('download'), setSelected(null), setInput(''), requestAnimationFrame(() => inputRef.current?.focus()))}><RotateCcw />{task.video || (task.telegram_link && task.download_requested) ? '重试' : '重新解析'}</Button>}
+      {['failed', 'canceled'].includes(task.status) && <Button size="sm" variant="outline" disabled={busy} onClick={() => task.video || (task.telegram_link && task.download_requested) ? run(async () => { const next = await api.retry(task.id); toast.dismiss(task.id); promptedDuplicates.current.delete(next.id); setDismissedPreviewIds(old => { const updated = new Set(old); updated.delete(next.id); return updated; }); setTasks(old => mergeTasks(old, [next], removedIds.current)); setSelected(next.id); setPreviewReset(false); }) : (setPage('download'), setSelected(null), setInput(''), requestAnimationFrame(() => inputRef.current?.focus()))}><RotateCcw />{task.video || (task.telegram_link && task.download_requested) ? '重试' : '重新解析'}</Button>}
       {page === 'download' && taskMenu(task)}
     </div>;
   }
@@ -557,7 +567,7 @@ function App() {
       setClearHistoryPlatform(null);
       if (ids.length) toast.success(`已清理 ${ids.length} 条下载历史`); else toast.info('暂无可清理的下载历史');
     }); }}>{busy ? '清理中…' : '清理历史'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
-    <AlertDialog open={!!confirm} onOpenChange={open => { if (!open) setConfirm(null); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); cancelTrigger.current?.focus(); }}><AlertDialogHeader><AlertDialogTitle>取消当前任务？</AlertDialogTitle><AlertDialogDescription>将取消等待，或停止当前解析 / 下载并清理暂存文件。其他任务不受影响，记录会保留。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel size="sm">返回</AlertDialogCancel><AlertDialogAction size="sm" onClick={() => { const pending = confirm; setConfirm(null); if (pending) void run(() => api.cancel(pending.id)); }}>确认取消</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    <AlertDialog open={!!confirm} onOpenChange={open => { if (!open) setConfirm(null); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); cancelTrigger.current?.focus(); }}><AlertDialogHeader><AlertDialogTitle>取消当前任务？</AlertDialogTitle><AlertDialogDescription>将取消等待，或停止当前解析 / 下载并清理暂存文件。其他任务不受影响，记录会保留。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel size="sm">返回</AlertDialogCancel><AlertDialogAction size="sm" onClick={() => { const pending = confirm; setConfirm(null); if (pending) void run(() => cancelTask(pending)); }}>确认取消</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </SidebarProvider></TooltipProvider>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
