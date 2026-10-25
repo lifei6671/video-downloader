@@ -13,10 +13,10 @@ async page => {
     await page.getByRole('menuitem',{name:'提取文案',exact:true}).click();
       const dialog=page.getByRole('dialog',{name:'视频文案'});
       await dialog.getByRole('button',{name:'开始提取',exact:true}).click();
-      await page.getByText(/正在加载模型并识别/).waitFor();
+      await page.getByText(/正在加载语音模型/).waitFor();
       await page.evaluate(()=>window.backgroundTest.finishTranscription());
       const text=dialog.getByLabel('识别文案',{exact:true}); await text.waitFor();
-      const content=await text.innerText();
+      const content=await text.inputValue();
       check(content.length>15000,'fixture is not long enough');
       const scroll=text.locator('..');
       const time=dialog.getByText(/^提取时间：/);

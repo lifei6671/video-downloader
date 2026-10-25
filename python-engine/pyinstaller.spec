@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 from importlib.metadata import distribution
 import sys
 import sysconfig
@@ -6,6 +7,8 @@ import sysconfig
 root = Path(SPECPATH).parent
 if not (root / 'python-engine/asr' / ('llama-funasr-cli.exe' if sys.platform == 'win32' else 'llama-funasr-cli')).is_file():
     raise RuntimeError('Build the pinned ASR helper first: python scripts/build_asr.py')
+if json.loads((root / 'python-engine/asr/SOURCE.json').read_text('utf-8')).get('progress_version') != 1:
+    raise RuntimeError('Rebuild the ASR helper with segment progress: python scripts/build_asr.py')
 pyinstaller = distribution('pyinstaller')
 bootloader_license = next(pyinstaller.locate_file(p) for p in pyinstaller.files
                           if str(p).endswith('licenses/COPYING.txt'))

@@ -2,6 +2,7 @@
 import json
 import ctypes
 import math
+import re
 import subprocess
 import sys
 import time
@@ -45,9 +46,58 @@ def model_available(directory):
         return False
 
 
-def run_process(command, output, log, timeout, emit, phase, duration=None, env=None):
+class RecognitionProgress:
+    """Read only native completion signals; never publish native logs or text."""
+    def __init__(self, log, total=None, outputs=None):
+        self.log, self.outputs = log, outputs
+        self.position, self.pending = 0, b''
+        self.phase, self.completed, self.total = 'loading_model', 0, total
+
+    def __call__(self):
+        if self.log.exists():
+            if self.log.stat().st_size > MAX_TEXT:
+                raise TranscriptionError('TRANSCRIPTION_OUTPUT_TOO_LARGE')
+            with self.log.open('rb') as stream:
+                stream.seek(self.position)
+                data = stream.read(MAX_TEXT + 1)
+                self.position = stream.tell()
+            lines = (self.pending + data).split(b'\n')
+            self.pending = lines.pop()
+            for line in lines:
+                if self.outputs is not None:
+                    if b' fun_asr_nano.prepare_ms ' in line:
+                        self.phase = 'recognizing'
+                elif line.startswith(b'YINGQU_ASR_PROGRESS '):
+                    match = re.fullmatch(rb'YINGQU_ASR_PROGRESS (segmenting|recognizing) (\d+) (\d+)\r?', line)
+                    if not match:
+                        raise TranscriptionError('TRANSCRIPTION_FAILED')
+                    phase, completed, total = match[1].decode('ascii'), int(match[2]), int(match[3])
+                    if phase == 'segmenting':
+                        if self.phase != 'loading_model' or completed or total:
+                            raise TranscriptionError('TRANSCRIPTION_FAILED')
+                    else:
+                        if completed > total or completed < self.completed or self.total is not None and total != self.total:
+                            raise TranscriptionError('TRANSCRIPTION_FAILED')
+                        self.completed, self.total = completed, total
+                    self.phase = phase
+        if self.outputs is not None:
+            while self.completed < self.total:
+                result = self.outputs / f'transcript_s{self.completed + 1:06d}.txt'
+                if not result.is_file() or result.stat().st_size == 0:
+                    break
+                # audio.cpp creates this file only after that clip's inference returns.
+                self.completed += 1
+                self.phase = 'recognizing'
+        fields = dict(phase=self.phase)
+        if self.total is not None:
+            fields.update(completed_segments=self.completed, total_segments=self.total)
+        return fields
+
+
+def run_process(command, output, log, timeout, emit, phase, duration=None, env=None, observe=None):
     started = last = time.monotonic()
-    emit('transcription_progress', phase=phase, duration_seconds=duration)
+    state = dict(phase=phase)
+    emit('transcription_progress', **state, duration_seconds=duration)
     with output.open('wb') as out, log.open('wb') as err:
         foreign_dlls = sys.platform == 'win32' and hasattr(sys, '_MEIPASS') and Path(command[0]).name == 'audiocpp_cli.exe'
         if foreign_dlls:
@@ -64,10 +114,16 @@ def run_process(command, output, log, timeout, emit, phase, duration=None, env=N
                     raise TranscriptionError('TRANSCRIPTION_TIMEOUT')
                 if output.stat().st_size > MAX_TEXT or log.stat().st_size > MAX_TEXT:
                     raise TranscriptionError('TRANSCRIPTION_OUTPUT_TOO_LARGE')
-                if time.monotonic() - last >= 5:
-                    emit('transcription_progress', phase=phase, duration_seconds=duration)
+                current = observe() if observe else state
+                if current != state or time.monotonic() - last >= 5:
+                    state = current
+                    emit('transcription_progress', **state, duration_seconds=duration)
                     last = time.monotonic()
                 time.sleep(0.1)
+            if observe:
+                current = observe()
+                if current != state:
+                    emit('transcription_progress', **current, duration_seconds=duration)
             return child.returncode
         finally:
             if child.poll() is None:
@@ -85,12 +141,15 @@ def recognize(audio, directory, stage, emit, backend='cpu', device=None):
     if backend == 'cuda':
         return recognize_cuda(audio, directory, stage, emit, duration, device)
     output, log = stage / 'transcript.txt', stage / 'recognition.log'
+    progress = RecognitionProgress(log)
     code = run_process([str(native_program()), '--enc', str(directory / FILES[0][0]),
                         '-m', str(directory / FILES[1][0]),
                         '--vad', str(directory / FILES[2][0]), '--vad-maxseg', '30000', '-a', str(audio)],
-                       output, log, max(600, 3 * duration + 120), emit, 'recognizing', duration)
+                       output, log, max(600, 3 * duration + 120), emit, 'loading_model', duration, observe=progress)
     if code:
         raise TranscriptionError('TRANSCRIPTION_FAILED')
+    if progress.total is None or progress.completed != progress.total:
+        raise TranscriptionError('TRANSCRIPTION_ENGINE_UNAVAILABLE')
     if output.stat().st_size > MAX_TEXT:
         raise TranscriptionError('TRANSCRIPTION_OUTPUT_TOO_LARGE')
     try:
@@ -134,13 +193,15 @@ def recognize_cuda(audio, directory, stage, emit, duration, device):
                 out.writeframes(source.readframes(last - first))
     text = ''
     if count:
+        framework_log = stage / 'recognition.framework.log'
+        progress = RecognitionProgress(framework_log, count, outputs)
         command = [str(directory / 'audiocpp_cli.exe'), '--task', 'asr', '--family', 'fun_asr_nano',
                    '--model', str(directory / nano_cuda.MODEL_FILE), '--backend', 'cuda', '--device', '0',
                    '--threads', '4', '--language', 'auto', '--max-tokens', '512',
                    '--batch-audio-dir', str(clips), '--audio-chunk-mode', 'none',
-                   '--text-out', str(outputs / 'transcript.txt')]
+                   '--text-out', str(outputs / 'transcript.txt'), '--log-file', str(framework_log)]
         if run_process(command, stage / 'recognition.stdout', stage / 'recognition.log',
-                       max(1, deadline - time.monotonic()), emit, 'recognizing', duration, env):
+                       max(1, deadline - time.monotonic()), emit, 'loading_model', duration, env, observe=progress):
             raise TranscriptionError('TRANSCRIPTION_CUDA_FAILED')
         parts, size = [], 0
         for index in range(1, count + 1):

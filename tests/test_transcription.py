@@ -19,28 +19,34 @@ def audio(path):
 def test_normalizes_real_result_and_does_not_put_text_on_bridge(monkeypatch, tmp_path):
     wav = tmp_path / 'audio.wav'; audio(wav)
     seen = []
-    def process(command, output, log, timeout, emit, phase, duration=None):
+    def process(command, output, log, timeout, emit, phase, duration=None, observe=None):
         assert '--backend' not in command and '--enc' in command and '--vad' in command
         assert command[command.index('--enc')+1].endswith('funasr-encoder-f16.gguf')
         assert command[command.index('-m')+1].endswith('qwen3-0.6b-q8_0.gguf')
         assert command[command.index('--vad')+1].endswith('fsmn-vad.gguf')
         assert timeout == 600
         output.write_bytes('\ufeff欢迎体验。\r\n第二行\r\n'.encode())
-        emit('transcription_progress', phase=phase, duration_seconds=duration)
+        assert phase == 'loading_model'
+        log.write_bytes(b'YINGQU_ASR_PROGRESS recognizing 0 2\nYINGQU_ASR_PROGRESS recognizing 2 2\n')
+        emit('transcription_progress', **observe(), duration_seconds=duration)
         return 0
     monkeypatch.setattr(asr, 'run_process', process)
     result = asr.recognize(wav, tmp_path, tmp_path, lambda kind, **fields: seen.append((kind, fields)))
     assert (tmp_path / result['filename']).read_text('utf-8') == '欢迎体验。\n第二行'
     assert result['bytes'] == len('欢迎体验。\n第二行'.encode())
     assert not result['no_speech'] and 'text' not in result
-    assert seen == [('transcription_progress', {'phase':'recognizing', 'duration_seconds':1.0})]
+    assert seen == [('transcription_progress', {'phase':'recognizing', 'duration_seconds':1.0,
+                                             'completed_segments':2, 'total_segments':2})]
 
 
 @pytest.mark.parametrize('body,code,error', [(b'',0,None), (b'partial',1,'TRANSCRIPTION_FAILED'), (b'\xff',0,'TRANSCRIPTION_FAILED')])
 def test_empty_failure_and_invalid_utf8_are_distinct(monkeypatch, tmp_path, body, code, error):
     wav = tmp_path / 'audio.wav'; audio(wav)
-    def process(command, output, *args):
-        output.write_bytes(body); return code
+    def process(command, output, log, *args, observe=None):
+        output.write_bytes(body)
+        log.write_bytes(b'YINGQU_ASR_PROGRESS recognizing 0 0\n')
+        observe()
+        return code
     monkeypatch.setattr(asr, 'run_process', process)
     if error:
         with pytest.raises(asr.TranscriptionError, match=error): asr.recognize(wav,tmp_path,tmp_path,lambda *_a,**_k:None)
@@ -116,3 +122,62 @@ def test_pinned_nano_assets_are_a_complete_independent_model(platform):
     assert sum(row[3] for row in items)==1275804800
     assert all(len(row[4])==64 for row in items)
     assert runtime_assets.assets('sensevoice',platform)==[]
+
+
+def test_cpu_progress_observes_only_complete_native_records_and_rejects_regression(tmp_path):
+    log = tmp_path / 'native.log'
+    progress = asr.RecognitionProgress(log)
+    assert progress() == {'phase': 'loading_model'}
+    log.write_bytes(b'model loaded\nYINGQU_ASR_PROGRESS segmenting 0 0\nYINGQU_ASR_PROGRESS recognizing 0 2\nYINGQU_ASR_PROGRESS recognizing 1')
+    assert progress() == {'phase': 'recognizing', 'completed_segments': 0, 'total_segments': 2}
+    with log.open('ab') as out: out.write(b' 2\n')
+    assert progress()['completed_segments'] == 1
+    with log.open('ab') as out: out.write(b'YINGQU_ASR_PROGRESS recognizing 0 2\n')
+    with pytest.raises(asr.TranscriptionError, match='TRANSCRIPTION_FAILED'): progress()
+
+
+def test_process_reports_native_segment_completions_before_exit_and_keeps_text_private(tmp_path):
+    script = '''import sys,time
+for line in ['segmenting 0 0', 'recognizing 0 2', 'recognizing 1 2', 'recognizing 2 2']:
+ print('YINGQU_ASR_PROGRESS ' + line, file=sys.stderr, flush=True)
+ time.sleep(.2)
+print('private transcript')
+'''
+    events = []
+    log = tmp_path / 'native.log'
+    code = asr.run_process([sys.executable, '-c', script], tmp_path / 'out', log, 5,
+        lambda kind, **fields: events.append(fields), 'loading_model', 1,
+        observe=asr.RecognitionProgress(log))
+    assert code == 0
+    assert events[0]['phase'] == 'loading_model'
+    assert [e['completed_segments'] for e in events if e['phase'] == 'recognizing'] == [0, 1, 2]
+    assert 'private' not in json.dumps(events)
+
+
+def test_cuda_progress_uses_preparation_and_completed_result_files(tmp_path):
+    log, outputs = tmp_path / 'framework.log', tmp_path / 'recognized'
+    outputs.mkdir()
+    progress = asr.RecognitionProgress(log, 2, outputs)
+    assert progress() == {'phase': 'loading_model', 'completed_segments': 0, 'total_segments': 2}
+    log.write_bytes(b'[TIMING ts=test] fun_asr_nano.prepare_ms 1\n')
+    assert progress()['phase'] == 'recognizing'
+    (outputs / 'transcript_s000001.txt').write_text('one')
+    assert progress()['completed_segments'] == 1
+    (outputs / 'transcript_s000002.txt').write_text('')
+    assert progress()['completed_segments'] == 1
+    (outputs / 'transcript_s000002.txt').write_text('two')
+    assert progress()['completed_segments'] == 2
+
+
+def test_cpu_helper_progress_instrumentation_is_idempotent_and_covers_only_processed_windows(tmp_path):
+    from build_asr import instrument_progress
+    target = tmp_path / 'fun-asr-nano/funasr-cli/funasr-cli.cpp'
+    target.parent.mkdir(parents=True)
+    target.write_text('        std::vector<std::pair<int,int>> segs; // ms\n    int srt_idx = 0;\n        fflush(stdout);\n')
+    instrument_progress(tmp_path)
+    first = target.read_text()
+    instrument_progress(tmp_path)
+    assert target.read_text() == first
+    assert 'w.second >= WINLEN' in first and '++progress_done,progress_total' in first
+    target.write_text('upstream changed')
+    with pytest.raises(RuntimeError, match='no longer applies'): instrument_progress(tmp_path)

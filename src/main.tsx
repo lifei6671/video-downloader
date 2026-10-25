@@ -189,10 +189,11 @@ function VideoCover({ task, small = false }: { task: Task; small?: boolean }) {
 }
 
 function DownloadProgress({ task }: { task: Task }) {
+  if (task.merging) return <div className="download-progress flex flex-wrap items-center gap-4 text-xs tabular-nums text-muted-foreground" role="status"><span className="flex items-center gap-2"><Spinner aria-hidden="true" />正在合并音视频…</span><span>已下载 {bytes(task.bytes)}</span></div>;
   const total = task.total_bytes ?? task.total_bytes_estimate;
   const percent = total ? Math.max(0, Math.min(99, Math.floor(task.bytes / total * 100))) : null;
   return <div className="download-progress flex flex-col gap-2"><Progress aria-label="下载进度" value={percent} /><div className="flex flex-wrap items-center gap-4 text-xs tabular-nums text-muted-foreground">
-    {task.merging || percent == null ? <span className="flex items-center gap-2"><Spinner />{task.merging ? '正在合并音视频…' : '正在下载'}</span> : <span>{percent}%</span>}{task.total_items != null && <span>{task.completed_items ?? 0} / {task.total_items} 张</span>}<span>{bytes(task.bytes)} / {task.total_bytes == null && task.total_bytes_estimate != null ? '约 ' : ''}{bytes(total ?? null)}</span><span>{task.speed_bps == null ? '速度 —' : bytes(task.speed_bps) + '/s'}</span>{task.eta_seconds != null && <span>预计剩余 {Math.ceil(task.eta_seconds)} 秒</span>}
+    {percent == null ? <span className="flex items-center gap-2"><Spinner />正在下载</span> : <span>{percent}%</span>}{task.total_items != null && <span>{task.completed_items ?? 0} / {task.total_items} 张</span>}<span>{bytes(task.bytes)} / {task.total_bytes == null && task.total_bytes_estimate != null ? '约 ' : ''}{bytes(total ?? null)}</span><span>{task.speed_bps == null ? '速度 —' : bytes(task.speed_bps) + '/s'}</span>{task.eta_seconds != null && <span>预计剩余 {Math.ceil(task.eta_seconds)} 秒</span>}
   </div></div>;
 }
 type SettingsSection = 'download' | 'accounts' | 'dependencies';

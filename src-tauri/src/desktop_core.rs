@@ -79,6 +79,37 @@ pub struct Task {
     pub telegram_link: Option<String>,
 }
 
+#[derive(Default)]
+struct YoutubeTransferRate {
+    sample: Option<(Instant, u64)>,
+    speed: Option<f64>,
+}
+
+impl YoutubeTransferRate {
+    fn update(&mut self, event: &mut Value, at: Instant) {
+        let count = event["bytes"].as_u64().unwrap_or(0);
+        if event["phase"] == "merging" {
+            *self = Self::default();
+        } else if let Some((started, bytes)) = self.sample {
+            let elapsed = at.duration_since(started);
+            if elapsed >= Duration::from_secs(1) {
+                // Aggregate counters stay monotonic across HTTP chunks and audio/video streams.
+                self.speed = Some((count - bytes) as f64 / elapsed.as_secs_f64());
+                self.sample = Some((at, count));
+            }
+        } else {
+            self.sample = Some((at, count));
+        }
+        let eta = self.speed.filter(|speed| *speed > 0.0).and_then(|speed| {
+            event["total_bytes"].as_u64().or_else(|| event["total_bytes_estimate"].as_u64())
+                .map(|total| total.saturating_sub(count) as f64 / speed)
+                .filter(|eta| *eta <= 604800.0)
+        });
+        event["speed_bps"] = self.speed.into();
+        event["eta_seconds"] = eta.into();
+    }
+}
+
 fn file_missing(task: &Task) -> bool {
     task.path.as_ref().is_none_or(|path| {
         if task.files.is_empty() {
@@ -1704,7 +1735,10 @@ impl Core {
                 core.inner.lock().unwrap().db.execute("INSERT OR REPLACE INTO task_staging VALUES(?1,?2)",
                     params![id,stage.path().to_string_lossy()]).context("DATABASE_ERROR")?;
                 let mut last = Instant::now() - Duration::from_secs(1);
-                let progress = |event: Value| {
+                let mut transfer_rate = YoutubeTransferRate::default();
+                let youtube = video["platform"] == "youtube";
+                let progress = |mut event: Value| {
+                        if youtube { transfer_rate.update(&mut event, Instant::now()); }
                         if last.elapsed() < Duration::from_millis(250) && event["phase"] != "merging" { return; }
                         last = Instant::now();
                         let mut inner = core.inner.lock().unwrap();
@@ -1944,6 +1978,58 @@ impl Core {
 mod tests {
     use super::*;
 
+    #[test]
+    fn youtube_speed_samples_aggregate_bytes_instead_of_resetting_hook_rates() {
+        let mut rate = YoutubeTransferRate::default();
+        let start = Instant::now();
+        let update = |rate: &mut YoutubeTransferRate, millis, count, speed| {
+            let mut event = json!({"bytes":count,"total_bytes":10000,"speed_bps":speed,"eta_seconds":1});
+            rate.update(&mut event, start + Duration::from_millis(millis));
+            event
+        };
+        assert!(update(&mut rate, 0, 100, json!(1000000))["speed_bps"].is_null());
+        assert!(update(&mut rate, 999, 1099, Value::Null)["speed_bps"].is_null());
+        let sampled = update(&mut rate, 1000, 1100, Value::Null);
+        assert_eq!(sampled["speed_bps"], 1000.0);
+        assert_eq!(sampled["eta_seconds"], 8.9);
+        // Finished/chunk/next-stream hooks may omit or reset their speed while
+        // the operation's aggregate byte count continues increasing.
+        assert_eq!(update(&mut rate, 1100, 1100, Value::Null)["speed_bps"], 1000.0);
+        assert_eq!(update(&mut rate, 1250, 1350, json!(999999999))["speed_bps"], 1000.0);
+        assert_eq!(update(&mut rate, 1500, 1600, Value::Null)["speed_bps"], 1000.0);
+        assert_eq!(update(&mut rate, 2000, 2100, json!(1))["speed_bps"], 1000.0);
+        assert_eq!(update(&mut rate, 3500, 2850, Value::Null)["speed_bps"], 500.0);
+        let stalled = update(&mut rate, 4500, 2850, Value::Null);
+        assert_eq!(stalled["speed_bps"], 0.0);
+        assert!(stalled["eta_seconds"].is_null());
+    }
+
+    #[test]
+    fn youtube_speed_clears_for_merging_and_new_attempts() {
+        let start = Instant::now();
+        let mut rate = YoutubeTransferRate::default();
+        let mut event = json!({"bytes":0,"total_bytes":null,"total_bytes_estimate":5000});
+        rate.update(&mut event, start);
+        event["bytes"] = 1000.into();
+        rate.update(&mut event, start + Duration::from_secs(1));
+        assert_eq!(event["speed_bps"], 1000.0);
+        assert_eq!(event["eta_seconds"], 4.0);
+        event["total_bytes_estimate"] = Value::Null;
+        rate.update(&mut event, start + Duration::from_millis(1250));
+        assert_eq!(event["speed_bps"], 1000.0);
+        assert!(event["eta_seconds"].is_null());
+        event["phase"] = "merging".into();
+        rate.update(&mut event, start + Duration::from_millis(1500));
+        assert!(event["speed_bps"].is_null());
+        assert!(event["eta_seconds"].is_null());
+        let mut retry = json!({"bytes":0,"total_bytes":5000});
+        rate.update(&mut retry, start + Duration::from_secs(2));
+        assert!(retry["speed_bps"].is_null());
+        let mut fresh = YoutubeTransferRate::default();
+        fresh.update(&mut retry, start + Duration::from_secs(3));
+        assert!(retry["speed_bps"].is_null());
+    }
+
     #[cfg(windows)]
     #[test]
     fn staging_cleanup_waits_for_transient_exclusive_handles_and_preserves_persistent_errors() {
@@ -2089,6 +2175,37 @@ mod tests {
         drop(app);
         let app = core(root.path());
         assert_eq!(app.transcript(&task.id).unwrap().unwrap().result.unwrap().backend.as_deref(), Some("cuda"));
+        app.shutdown().await;
+    }
+    #[tokio::test]
+    async fn transcription_segment_progress_is_queryable_and_protocol_regressions_fail() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = transcript_video(&app, "hold.mp4").await;
+        let started = app.start_transcription(&task.id, false).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let progress = app.transcript(&task.id).unwrap().unwrap();
+                if progress.completed_segments == Some(1) {
+                    assert_eq!(progress.total_segments, Some(2));
+                    assert_eq!(progress.phase.as_deref(), Some("recognizing"));
+                    assert_eq!(app.transcripts().unwrap()[0].completed_segments, Some(1));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        app.cancel_transcription(&task.id, &started.operation_id).await.unwrap();
+        let canceled = transcript_done(&app, &task.id).await;
+        assert!(canceled.completed_segments.is_none() && canceled.total_segments.is_none());
+        for mode in ["backwards", "total", "overflow", "missing", "type"] {
+            let task = transcript_video(&app, &format!("bad-progress-{mode}.mp4")).await;
+            app.start_transcription(&task.id, false).unwrap();
+            let result = transcript_done(&app, &task.id).await;
+            assert_eq!(result.state, "failed", "{mode}");
+            assert_eq!(result.error_code.as_deref(), Some("ENGINE_PROTOCOL_ERROR"));
+            assert!(!result.has_result && result.completed_segments.is_none());
+        }
         app.shutdown().await;
     }
     #[tokio::test]

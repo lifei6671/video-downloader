@@ -8,7 +8,7 @@ async page => {
  const dialog=page.getByRole('dialog',{name:'视频文案'});
  await dialog.getByRole('button',{name:/^(开始提取|重新提取)$/}).click();
  const text=dialog.getByLabel('识别文案',{exact:true});await text.waitFor({timeout:60000});
- if(!/开放时间早上(?:9|九)点/.test(await text.innerText()))throw Error('unexpected native ASR output');
+ if(!/开放时间早上(?:9|九)点/.test(await text.inputValue()))throw Error('unexpected native ASR output');
  await dialog.getByRole('button',{name:'复制全文',exact:true}).click();
  await page.getByText('文案已复制',{exact:true}).waitFor();
  await page.screenshot({path:'.local/transcription-delivery/native-dialog.png'});

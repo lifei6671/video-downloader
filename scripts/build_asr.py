@@ -15,6 +15,32 @@ FUNASR = 'fbbfe01800a8c4c9103cb2150fb1a5d06cc64758'
 LLAMA = '803b7fcae893e9caaee3921779628fef83ac0965'
 
 
+def instrument_progress(runtime):
+    """Add flushed counters to the pinned CLI, without changing inference or stdout."""
+    source = runtime / 'fun-asr-nano/funasr-cli/funasr-cli.cpp'
+    text = source.read_text('utf-8')
+    edits = [
+        ('        std::vector<std::pair<int,int>> segs; // ms',
+         '        fprintf(stderr,"YINGQU_ASR_PROGRESS segmenting 0 0\\n"); fflush(stderr);\n'
+         '        std::vector<std::pair<int,int>> segs; // ms'),
+        ('    int srt_idx = 0;',
+         '    int progress_total = 0, progress_done = 0;\n'
+         '    for (const auto& w : wins) if (w.second >= WINLEN) ++progress_total;\n'
+         '    fprintf(stderr,"YINGQU_ASR_PROGRESS recognizing 0 %d\\n",progress_total); fflush(stderr);\n'
+         '    int srt_idx = 0;'),
+        ('        fflush(stdout);',
+         '        fflush(stdout);\n'
+         '        fprintf(stderr,"YINGQU_ASR_PROGRESS recognizing %d %d\\n",++progress_done,progress_total); fflush(stderr);'),
+    ]
+    for before, after in edits:
+        if text.count(after) == 1:
+            continue
+        if text.count(before) != 1:
+            raise RuntimeError('Pinned Fun-ASR progress instrumentation no longer applies')
+        text = text.replace(before, after, 1)
+    source.write_text(text, encoding='utf-8', newline='\n')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cmake', default='cmake')
@@ -41,6 +67,7 @@ def main():
         sources[name] = source
         print(f'{repo} {revision} sha256={digest}', flush=True)
     runtime = sources['FunASR'] / 'runtime/llama.cpp'
+    instrument_progress(runtime)
     build = work / 'build'
     command = [args.cmake, '-S', str(runtime), '-B', str(build),
                '-DCMAKE_BUILD_TYPE=Release', '-DGGML_NATIVE=OFF', '-DGGML_AVX=OFF',
@@ -88,7 +115,7 @@ def main():
     shutil.copy2(ROOT / 'python-engine/assets/sensevoice-smoke.wav', output / 'smoke.wav')
     shutil.copy2(ROOT / 'vendor/sensevoice-model-LICENSE', output / 'models-LICENSE')
     shutil.copy2(ROOT / 'vendor/nvidia-cuda-12.4-EULA.html', output / 'NVIDIA-CUDA-LICENSE')
-    (output / 'SOURCE.json').write_text(json.dumps(dict(funasr=FUNASR, llama=LLAMA, backend='cpu', model='Fun-ASR-Nano'), indent=2) + '\n')
+    (output / 'SOURCE.json').write_text(json.dumps(dict(funasr=FUNASR, llama=LLAMA, backend='cpu', model='Fun-ASR-Nano', progress_version=1), indent=2) + '\n')
     if sys.platform == 'darwin':
         for executable in (name, vad_name):
             subprocess.run(['codesign', '--force', '--sign', '-', str(output / executable)], check=True)

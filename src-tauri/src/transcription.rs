@@ -61,6 +61,10 @@ pub struct Snapshot {
     pub phase: Option<String>,
     #[serde(default)]
     pub backend: Option<String>,
+    #[serde(default)]
+    pub completed_segments: Option<u64>,
+    #[serde(default)]
+    pub total_segments: Option<u64>,
     pub error_code: Option<String>,
     pub updated_at: u64,
     pub result: Option<TranscriptResult>,
@@ -108,6 +112,8 @@ pub(super) fn init(db: &Connection) -> Result<()> {
             if value.state == "running" {
                 value.state = "interrupted".into();
                 value.phase = None;
+                value.completed_segments = None;
+                value.total_segments = None;
                 value.error_code = Some("TRANSCRIPTION_INTERRUPTED".into());
                 value.sequence += 1;
                 store(db, &value)?;
@@ -206,6 +212,8 @@ impl Core {
             state: "running".into(),
             phase: Some("extracting_audio".into()),
             backend: None,
+            completed_segments: None,
+            total_segments: None,
             error_code: None,
             updated_at: now(),
             has_result: result.is_some(),
@@ -241,6 +249,8 @@ impl Core {
                         if let Some(active) = inner.transcription.as_mut().filter(|a| a.snapshot.operation_id == progress_op) {
                             active.snapshot.phase = event["phase"].as_str().map(str::to_owned);
                             active.snapshot.backend = event["backend"].as_str().map(str::to_owned);
+                            active.snapshot.completed_segments = event["completed_segments"].as_u64();
+                            active.snapshot.total_segments = event["total_segments"].as_u64();
                             active.snapshot.sequence += 1;
                             (progress_core.emit)(TaskEvent::Transcription(Box::new(active.snapshot.summary())));
                         }
@@ -266,6 +276,7 @@ impl Core {
                 let mut value = active.snapshot.clone();
                 let previous_result = value.result.clone();
                 value.phase = None; value.sequence += 1; value.updated_at = now();
+                value.completed_segments = None; value.total_segments = None;
                 match outcome {
                     Ok((text, empty, backend)) => {
                         value.state = if empty { "no_speech" } else { "completed" }.into();

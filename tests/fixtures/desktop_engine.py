@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.13.1", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
@@ -48,11 +48,17 @@ if request['method'] == 'transcribe_video':
     mode = Path(params['source']).stem
     backend = 'cuda' if mode.startswith('cuda') else 'cpu'
     if backend == 'cuda': emit('transcription_progress', phase='segmenting', duration_seconds=3, backend=backend)
-    emit('transcription_progress', phase='recognizing', duration_seconds=3, backend=backend)
+    emit('transcription_progress', phase='loading_model', duration_seconds=3, backend=backend)
+    emit('transcription_progress', phase='recognizing', duration_seconds=3, backend=backend, completed_segments=1, total_segments=2)
+    if mode.startswith('bad-progress-'):
+        bad = {'backwards': (0, 2), 'total': (1, 3), 'overflow': (3, 2), 'missing': (None, 2), 'type': (True, 2)}[mode.removeprefix('bad-progress-')]
+        emit('transcription_progress', phase='recognizing', duration_seconds=3, backend=backend,
+             completed_segments=bad[0], total_segments=bad[1])
     if mode.startswith('hold'):
         time.sleep(120)
     if mode.startswith('fail'):
         emit('error', error={'code':'TRANSCRIPTION_FAILED'}); sys.exit(1)
+    emit('transcription_progress', phase='recognizing', duration_seconds=3, backend=backend, completed_segments=2, total_segments=2)
     text = '' if mode.startswith('silent') else '欢迎体验。\nEnglish text.'
     (stage / 'transcript.txt').write_text(text, encoding='utf-8', newline='\n')
     emit('transcribed', filename='transcript.txt', bytes=len(text.encode()), no_speech=not text, duration_seconds=3, backend=backend)

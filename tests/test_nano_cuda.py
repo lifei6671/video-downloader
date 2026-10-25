@@ -73,7 +73,7 @@ def test_independent_vad_slices_original_pcm_and_uses_one_cuda_session(monkeypat
     with wave.open(str(wav), 'wb') as out:
         out.setparams((1, 2, 16000, 0, 'NONE', 'not compressed')); out.writeframes(pcm)
     calls = []
-    def run(command, output, log, timeout, emit, phase, duration, env):
+    def run(command, output, log, timeout, emit, phase, duration, env, observe=None):
         calls.append(command)
         assert env['CUDA_VISIBLE_DEVICES'] == 'GPU-test' and env['VAD_MAXSEG'] == '30000'
         if phase == 'segmenting':
@@ -105,7 +105,7 @@ def test_independent_vad_slices_original_pcm_and_uses_one_cuda_session(monkeypat
 @pytest.mark.parametrize('mode', ['empty', 'missing', 'invalid', 'exit'])
 def test_positive_vad_without_valid_gpu_result_never_silently_omits_segment(monkeypatch, tmp_path, mode):
     wav = tmp_path / 'audio.wav'; audio(wav)
-    def run(command, output, log, timeout, emit, phase, duration, env):
+    def run(command, output, log, timeout, emit, phase, duration, env, observe=None):
         if phase == 'segmenting': output.write_text('0 1000\n')
         elif mode == 'exit': return 1
         elif mode != 'missing':

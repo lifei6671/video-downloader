@@ -143,6 +143,7 @@ if (scenario.startsWith('transcript')) {
   api.transcripts = async () => value ? [summary()] : [];
   api.subscribeTranscripts = async callback => {transcriptListener=callback;return ()=>{if(transcriptListener===callback)transcriptListener=()=>{}}};
   api.transcript = async () => {
+    control.calls.push({type:'read-transcript'});
     if (scenario==='transcript-loading' && !control.finishTranscriptRead) await new Promise(resolve=>control.finishTranscriptRead=resolve);
     return structuredClone(value);
   };
@@ -152,7 +153,8 @@ if (scenario.startsWith('transcript')) {
   tools.find(t=>t.id==='fun-asr-nano').variants=['cpu','cuda'];
   if(scenario==='transcript-cuda')tools.find(t=>t.id==='fun-asr-nano').provider='cuda';
   api.installRuntimeDependency=async(tool,progress,variant)=>{control.calls.push({type:'install',tool,variant});progress({tool,phase:'downloading',downloaded_bytes:1024,total_bytes:1275804800});await new Promise(resolve=>control.finishInstall=resolve);Object.assign(tools.find(t=>t.id===tool),{available:true,provider:variant??'cpu'});return api.checkRuntimeDependencies()};
-  api.startTranscription=async(id,force)=>{control.calls.push({type:'transcribe',id,force});value={task_id:id,operation_id:'current',sequence:++sequence,state:'running',phase:scenario==='transcript-cuda'?'segmenting':'recognizing',backend:tools.find(t=>t.id==='fun-asr-nano').provider,error_code:null,updated_at:100,result:value?.result??null,has_result:!!value?.result,source_changed:false};publish();return summary()};
+  api.startTranscription=async(id,force)=>{control.calls.push({type:'transcribe',id,force});value={task_id:id,operation_id:'current',sequence:++sequence,state:'running',phase:scenario==='transcript-cuda'?'segmenting':'loading_model',backend:tools.find(t=>t.id==='fun-asr-nano').provider,error_code:null,updated_at:100,result:value?.result??null,has_result:!!value?.result,source_changed:false};publish();return summary()};
+  control.progressTranscription=(completed,total,phase='recognizing')=>{Object.assign(value,{phase,completed_segments:completed,total_segments:total,sequence:++sequence});publish()};
   control.finishTranscription=(state='completed')=>{value={...value,state,sequence:++sequence,phase:null,error_code:state==='failed'?'TRANSCRIPTION_FAILED':state==='canceled'?'CANCELED':null,result:state==='completed'?{...saved,model_name:'Fun-ASR-Nano',model_revision:'46e849502a86',backend:value.backend}:value?.result};value.has_result=!!value.result;publish()};
   control.staleTranscription=()=>transcriptListener({task_id:'speech',operation_id:'stale',sequence:0,state:'running',phase:'extracting_audio',has_result:false,result:null});
   api.cancelTranscription=async(id,operation)=>{control.calls.push({type:'cancel-transcription',id,operation});control.finishTranscription('canceled')};

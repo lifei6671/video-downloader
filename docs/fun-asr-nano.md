@@ -30,9 +30,15 @@ Rust 根据已完成任务路径启动独立 sidecar；FFmpeg 只读取原视频
 
 保留转换最多 1800 秒、识别最多 `max(600, 3×音频时长+120)` 秒、每 5 秒心跳、最多 16 MiB 文本/日志、取消和退出清理。模型下载最多 30 分钟，Rust 整次安装最多 45 分钟；FFmpeg/Deno 原超时保持。
 
+引擎 0.14.0、协议仍为 v3，`transcription_progress` 增加 `loading_model` 阶段和可选 `completed_segments` / `total_segments`。CPU helper 在模型加载后、VAD 分段及每个实际识别窗口完成时输出并刷新专用 `YINGQU_ASR_PROGRESS` 记录；短于原生最小帧长而跳过的窗口不计入分母。`scripts/build_asr.py` 对固定源码仅添加此通知，不改推理、分段算法或正文输出；SOURCE.json 记录 `progress_version=1`，打包要求重建该 helper。CUDA 使用固定 audio.cpp 的准备完成记录及逐段结果文件，整个批次仍只加载一次模型，不按用时估算进度。原生日志和正文不进入进度事件。
+
+界面在模型加载时仅显示加载状态，识别时显示“已识别 X / Y 段”和完成片段比例；这是识别片段的完成比例，不是耗时百分比或剩余时间预测。Rust 校验计数有序、总量稳定，再广播任务快照。关闭再打开弹窗保留当前进度，开始新操作、取消或重启中断时清空临时计数；仍以结果校验和 SQLite 提交后为成功。
+
 CPU 新结果保存名称 `Fun-ASR-Nano`、上述模型 revision、pipeline `fun-asr-nano-cpu-fbbfe018-v1`、backend `cpu`；CUDA 保存其实际模型 revision、pipeline 和 backend。SQLite 结构不变，旧结果缺少 `model_name` 时按 SenseVoiceSmall 展示，保留原 CPU/CUDA 标识。旧文案在源视频缺失后仍可复制/导出；失败、无语音或取消保留旧正文。重新提取成功后才替换正文与模型身份。
 
 TXT 继续输出 UTF-8 BOM 与平台换行，保留全文，原子写入且禁止覆盖原视频或其别名。界面保留长文案独立滚动、固定标题/底部操作、连续长串换行和键盘路径。
+
+正文使用只读 shadcn Textarea，可聚焦、鼠标选取，支持系统全选和复制快捷键（Windows Ctrl+A / Ctrl+C，macOS Cmd+A / Cmd+C）；不能修改已保存文案。运行中的进度快照不反复读取或清空正文，保留“复制全文”和“导出 TXT”操作。
 
 加载提示行使用 `overflow-clip` 限制旋转图标的几何溢出，避免读取文案、提取过程中出现短暂滚动条；正文容器仍按内容高度自动滚动。
 

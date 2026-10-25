@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.13.1";
+pub const ENGINE_VERSION: &str = "0.14.0";
 pub const YTDLP_VERSION: &str = "2026.08.19";
 
 async fn cancellation() -> Result<()> {
@@ -235,6 +235,7 @@ impl PythonBridge {
         let youtube = params["expected"]["platform"] == "youtube";
         let mut merging = false;
         let mut recognizing = false;
+        let mut transcription_segments: Option<(u64, u64)> = None;
         let mut phase_deadline = tokio::time::Instant::now() + Duration::from_secs(1800);
         loop {
             let wait = if method == "transcribe_video" {
@@ -254,7 +255,7 @@ impl PythonBridge {
             if method == "transcribe_video" && value["type"] == "transcription_progress" {
                 match value["phase"].as_str() {
                     Some("extracting_audio") if !recognizing => {}
-                    Some("segmenting" | "recognizing") => {
+                    Some("segmenting" | "loading_model" | "recognizing") => {
                         let duration = value["duration_seconds"]
                             .as_f64()
                             .filter(|n| n.is_finite() && *n > 0.0 && *n <= 604800.0)
@@ -270,7 +271,24 @@ impl PythonBridge {
                 if !matches!(value["backend"].as_str(), Some("cpu" | "cuda")) {
                     bail!("ENGINE_PROTOCOL_ERROR");
                 }
-                progress(json!({"phase":value["phase"], "backend":value["backend"]}));
+                let completed = &value["completed_segments"];
+                let total = &value["total_segments"];
+                if !completed.is_null() || !total.is_null() {
+                    let completed = completed.as_u64().context("ENGINE_PROTOCOL_ERROR")?;
+                    let total = total.as_u64().context("ENGINE_PROTOCOL_ERROR")?;
+                    if completed > total || total > u32::MAX as u64
+                        || !matches!(value["phase"].as_str(), Some("loading_model" | "recognizing"))
+                        || (value["phase"] == "loading_model" && completed != 0)
+                        || transcription_segments.is_some_and(|(old, size)| completed < old || total != size)
+                    {
+                        bail!("ENGINE_PROTOCOL_ERROR");
+                    }
+                    transcription_segments = Some((completed, total));
+                } else if value["phase"] == "recognizing" || transcription_segments.is_some() {
+                    bail!("ENGINE_PROTOCOL_ERROR");
+                }
+                progress(json!({"phase":value["phase"], "backend":value["backend"],
+                    "completed_segments":completed,"total_segments":total}));
                 continue;
             }
             if value["type"] == "dependency_progress" && method == "install_dependency" {

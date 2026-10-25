@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Spinner } from '@/components/ui/spinner';
 import { Progress } from '@/components/ui/progress';
+import { Textarea } from '@/components/ui/textarea';
 import { ModelVersionSelect, type useRuntimeDependencies } from '@/components/runtime-dependencies';
 
 export function useVideoTranscripts() {
@@ -63,7 +64,7 @@ export function VideoTranscriptDialog({client, tasks, runtime}: {client: ReturnT
         .catch(e => { if (!disposed) client.setError(String(e)); }).finally(() => { if (!disposed) setReading(false); });
     }
     return () => { disposed = true; };
-  }, [client.selected, summary?.sequence]);
+  }, [client.selected, summary?.state === 'running' ? null : summary?.sequence]);
   const state = summary ?? detail;
   const running = state?.state === 'running';
   const other = Object.values(client.values).find(v => v.state === 'running' && v.task_id !== task?.id);
@@ -80,6 +81,8 @@ export function VideoTranscriptDialog({client, tasks, runtime}: {client: ReturnT
   const text = detail?.result?.text;
   const backend = running ? state.backend : detail?.result ? detail.result.backend ?? 'cpu' : model?.provider;
   const modelName = running || !detail?.result ? 'Fun-ASR-Nano' : detail.result.model_name ?? 'SenseVoiceSmall';
+  const recognized = state?.phase === 'recognizing' && state.total_segments != null && state.total_segments > 0;
+  const recognitionPercent = recognized ? Math.floor((state.completed_segments ?? 0) / state.total_segments! * 100) : null;
   return <Dialog open={!!task} onOpenChange={open => { if (!open) client.setSelected(null); }}>
     <DialogContent className="transcript-dialog flex max-h-[85dvh] max-w-[calc(100vw-32px)] flex-col sm:max-w-[720px]" onCloseAutoFocus={event => {
       event.preventDefault(); const target = client.trigger.current;
@@ -94,9 +97,9 @@ export function VideoTranscriptDialog({client, tasks, runtime}: {client: ReturnT
         {state?.state === 'no_speech' && <Alert><AlertCircle /><AlertDescription>本次未识别到可用语音{state.has_result ? '，以下为上次保存的文案' : ''}。</AlertDescription></Alert>}
         {detail?.source_changed && <Alert><AlertCircle /><AlertDescription>这是上次提取的文案，本地视频已变化或缺失。</AlertDescription></Alert>}
         {/* Keep the rotating spinner's bounds out of the surrounding scroll area. */}
-        {running && <div className="flex flex-col gap-2" role="status"><Progress aria-label="文案提取进度" value={null} /><p className="flex items-center gap-2 overflow-clip text-xs text-muted-foreground"><Spinner />{state.phase === 'extracting_audio' ? '正在提取音频…' : state.phase === 'segmenting' ? '正在检测语音片段…' : '正在加载模型并识别…'}关闭此窗口后仍会继续处理。</p></div>}
+        {running && <div className="flex flex-col gap-2" role="status">{recognized && <Progress aria-label="文案识别进度" value={recognitionPercent} />}<p className="flex flex-wrap items-center gap-2 overflow-clip text-xs text-muted-foreground"><Spinner aria-hidden="true" />{state.phase === 'extracting_audio' ? '正在提取音频…' : state.phase === 'segmenting' ? '正在检测语音片段…' : state.phase === 'loading_model' ? '正在加载语音模型…' : recognized ? `已识别 ${state.completed_segments ?? 0} / ${state.total_segments} 段，${recognitionPercent}%` : '正在完成文案提取…'}关闭此窗口后仍会继续处理。</p></div>}
         {reading && <p role="status" className="flex items-center gap-2 overflow-clip text-xs text-muted-foreground"><Spinner />正在读取文案…</p>}
-        {text && <><div tabIndex={0} aria-label="识别文案" className="min-h-40 min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border-[0.5px] bg-background p-4 text-sm leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{text}</div><p className="text-xs text-muted-foreground">提取时间：{new Date(detail!.result!.completed_at * 1000).toLocaleString('zh-CN')}{state?.state !== 'completed' ? '，上次成功保存的文案' : ''}</p></>}
+        {text && <><Textarea readOnly aria-label="识别文案" value={text} className="min-h-40 min-w-0 resize-none [overflow-wrap:anywhere] rounded-md border-[0.5px] bg-background p-4 text-sm leading-relaxed" /><p className="text-xs text-muted-foreground">提取时间：{new Date(detail!.result!.completed_at * 1000).toLocaleString('zh-CN')}{state?.state !== 'completed' ? '，上次成功保存的文案' : ''}</p></>}
         {!running && !ready && !task?.file_missing && <div className="flex flex-col gap-3"><p className="text-xs text-muted-foreground">首次使用需要下载所选模型及缺失的 FFmpeg；下载后可离线提取文案。</p>
           {!runtime.status && <Button variant="outline" disabled={runtime.busy} onClick={() => void runtime.check()}>检测运行依赖</Button>}
           {model && !model.available && <div className="flex flex-wrap items-center gap-2"><ModelVersionSelect runtime={runtime} disabled={!!other} /><Button variant="outline" disabled={runtime.busy || !!other || !model.can_install} onClick={() => void runtime.install('fun-asr-nano')}><Download />下载或修复语音模型</Button></div>}

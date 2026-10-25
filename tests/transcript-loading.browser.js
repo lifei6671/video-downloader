@@ -34,7 +34,7 @@ async page => {
     const dialog=page.getByRole('dialog',{name:'视频文案'});
     const start=dialog.getByRole('button',{name:'开始提取',exact:true});
     await start.click();
-    await page.getByText(/正在加载模型并识别/).waitFor();
+    await page.getByText(/正在加载语音模型/).waitFor();
     await sample('recognizing',width);
     await page.screenshot({path:'.local/transcript-scrollbar-flicker/loading-'+width+'.png'});
     const cancel=dialog.getByRole('button',{name:'取消提取',exact:true});

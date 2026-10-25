@@ -275,7 +275,6 @@
 [data-slot="badge"][data-variant="secondary"], [data-slot="badge"][data-variant="muted"] { background: var(--surface-control); color: var(--muted-foreground); }
 [data-slot="progress"] { height: 4px; background: var(--progress-track); }
 [data-slot="progress-indicator"] { background: var(--progress-value); transition: none; }
-[data-slot="progress"]:not([aria-valuenow]) [data-slot="progress-indicator"] { width: 32%; flex: none; transform: none !important; background: var(--indigo-8); }
 [data-slot="alert"] { border-width: 0.5px; border-radius: 8px; font-size: 12px; }
 [data-slot="alert"].border-0 { border: 0; }
 [data-slot="alert-description"] { font-size: 12px; line-height: 18px; }
