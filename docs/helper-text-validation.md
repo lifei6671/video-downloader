@@ -1,6 +1,6 @@
 # 说明文字层级统一（2026-10-22）
 
-按用户要求，解释性、辅助性文字统一为 **12px / 400、`text-muted-foreground`**；正文仍为 14px。颜色复用 `DESIGN.md` 的 `on-surface-muted` / 现有主题 `#64748B`，不增加调色板、不通过透明度淡化。规则已写入根目录 `AGENTS.md` 的 UI 规范。
+按用户要求，解释性、辅助性文字统一为 **12px / 400、`text-muted-foreground`**；正文仍为 14px。颜色复用 `DESIGN.md` 的 `on-surface-muted` / 当时主题 `#64748B`，不增加调色板、不通过透明度淡化。当前视觉规则统一以 [DESIGN.md](../DESIGN.md) 为准；本文保留该次变更的验证记录。
 
 ## 审查与修复
 
