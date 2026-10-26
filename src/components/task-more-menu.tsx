@@ -1,16 +1,25 @@
 import { useRef, type ReactNode } from 'react';
-import { Copy, FileText, FolderOpen, ListX, MoreHorizontal, Trash2, X } from 'lucide-react';
+import { Copy, Download, FileText, FolderOpen, ListX, MoreHorizontal, Trash2, X } from 'lucide-react';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import type { Task } from '@/api';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 
-export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, deleteFile, cancel, transcript, children, onOpenChange }: {
+export type CoverMenuActions = {
+  available: boolean;
+  saving: boolean;
+  copying: boolean;
+  save: () => void;
+  copy: () => void;
+};
+
+export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, deleteFile, cancel, transcript, coverActions, children, onOpenChange }: {
   task: Task;
   children?: ReactNode;
   onOpenChange?: (open: boolean) => void;
   transcript?: { label: string; open: (returnFocus: HTMLElement | null) => void };
   cancel?: (returnFocus: HTMLElement | null) => void;
+  coverActions?: CoverMenuActions;
   busy: boolean;
   reveal: () => void;
   copy: () => void;
@@ -28,14 +37,19 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
   const hasFile = task.status === 'completed' && !task.file_missing;
   const hasLink = !!(task.video || task.telegram_link);
   const removable = ['completed', 'failed', 'canceled'].includes(task.status);
-  const available = hasFile || hasLink || removable || !!cancel;
+  const available = hasFile || hasLink || removable || !!cancel || !!coverActions;
   const items = <>
       {hasFile && <Item disabled={busy} onSelect={reveal}><FolderOpen />打开文件夹</Item>}
       {transcript && <Item disabled={busy} onSelect={() => transcript.open(context ? row.current : trigger.current)}><FileText />{transcript.label}</Item>}
       {hasLink && <Item disabled={busy} onSelect={copy}><Copy />复制原链接</Item>}
       {task.status === 'completed' && task.path && task.video?.kind !== 'image_album' && <Item disabled={busy} onSelect={copyPath}><Copy />复制本地地址</Item>}
+      {coverActions && <>
+        {(hasFile || hasLink || transcript) && <Separator />}
+        <Item disabled={coverActions.saving || coverActions.copying || !coverActions.available} onSelect={coverActions.save}><Download />{coverActions.saving ? '保存中…' : '保存封面'}</Item>
+        <Item disabled={coverActions.saving || coverActions.copying || !coverActions.available} onSelect={coverActions.copy}><Copy />{coverActions.copying ? '复制中…' : '复制封面'}</Item>
+      </>}
       {cancel && <Item disabled={busy || task.canceling} onSelect={() => cancel(context ? row.current : trigger.current)}><X />{task.canceling ? '正在取消…' : '取消下载'}</Item>}
-      {removable && (hasFile || hasLink || transcript) && <Separator />}
+      {removable && (hasFile || hasLink || transcript || coverActions) && <Separator />}
       {removable && <Item disabled={busy} onSelect={remove}><ListX />从列表移除</Item>}
       {hasFile && <Item variant="destructive" disabled={busy} onSelect={deleteFile}>
         <Trash2 />{task.video?.kind === 'image_album' ? '删除本地图集' : '删除本地视频'}
@@ -52,7 +66,8 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
   }}>
     <ContextMenuTrigger asChild disabled={!available}>
       <div ref={row} className="task-context-target" tabIndex={0} aria-label="任务操作" onContextMenu={event => { if (!available) event.preventDefault(); }} onKeyDown={event => {
-        if (event.target !== event.currentTarget || !available || !(event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey)) return;
+        const coverTarget = coverActions && event.target instanceof Element && event.target.closest('[data-media-cover]');
+        if (event.target !== event.currentTarget && !coverTarget || !available || !(event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey)) return;
         event.preventDefault();
         const bounds = event.currentTarget.getBoundingClientRect();
         event.currentTarget.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: bounds.right - 24, clientY: bounds.top + bounds.height / 2}));

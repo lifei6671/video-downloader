@@ -16,11 +16,13 @@ async page => {
     await list().waitFor();
   };
   const results=[];
+  const checkDownloadHeight=async stage=>check(Math.abs((await row('visual-1').boundingBox()).height-(await row('visual-3').boundingBox()).height)<1,stage+' card height differs from completed card');
   for(const [width,height,columns] of [[1440,900,4],[1280,800,4],[1024,680,3]]) {
     await page.setViewportSize({width,height});await load('visual-list');
     const original=await ids();
     check(await list().getAttribute('data-view')==='list','default is not list');
     check(Math.abs((await row('visual-3').boundingBox()).height-80)<1,'default list density changed');
+    check(await row('visual-1').getByRole('group',{name:'下载信息',exact:true}).isVisible(),'list download metadata missing');
     const snapshot=await page.evaluate(()=>JSON.stringify(window.backgroundTest.snapshot()));
     await page.evaluate(()=>window.firstTaskNode=document.querySelector('[data-task-id]'));
     const tabBox=await tabs().boundingBox(),buttonBox=await toggle(true).boundingBox();
@@ -62,6 +64,13 @@ async page => {
     check(await play.evaluate(node=>!node.closest('[data-media-cover]')),'play button is nested inside cover trigger');
     check(await row('visual-5').getByRole('button',{name:'播放视频',exact:true}).count()===0 && await row('visual-6').getByRole('button',{name:'播放视频',exact:true}).count()===0,'missing files or albums gained play');
     const ring=row('visual-1').getByRole('progressbar',{name:'下载进度',exact:true});
+    check(await row('visual-1').getByRole('group',{name:'下载信息',exact:true}).count()===0,'feed download still adds a metadata row');
+    check(await row('visual-3').getByRole('group',{name:'下载信息',exact:true}).isVisible(),'completed feed metadata missing');
+    check(await row('visual-1').locator('.download-progress').evaluate(node=>{
+      const byline=node.previousElementSibling.getBoundingClientRect();
+      return Math.abs(node.getBoundingClientRect().top-byline.bottom-6)<1 && getComputedStyle(node).paddingTop==='0px';
+    }),'feed progress does not occupy the metadata row');
+    await checkDownloadHeight('downloading');
     check(await ring.getAttribute('data-variant')==='circular' && await ring.getAttribute('aria-valuenow')==='49' && await ring.textContent()==='49%','circle did not show real initial percentage');
     const ringBox=await ring.boundingBox();
     check(Math.abs(ringBox.width-ringBox.height)<1 && ringBox.width===64,'progress is not a 64px circle');
@@ -75,6 +84,23 @@ async page => {
     check(await image.evaluate(node=>new DOMMatrixReadOnly(getComputedStyle(node).transform).a>1),'feed item has no hover feedback');
     const afterHover=await row('visual-3').boundingBox();
     check(Math.abs(beforeHover.width-afterHover.width)<1 && Math.abs(beforeHover.height-afterHover.height)<1,'hover resized the card');
+    const previewTrigger=row('visual-3').getByRole('button',{name:'查看封面',exact:true});
+    for(const closeMethod of ['button','escape','backdrop']) {
+      await previewTrigger.click();
+      const preview=page.getByRole('dialog',{name:'任务详情',exact:true});await preview.waitFor();
+      if(closeMethod==='button')await preview.getByRole('button',{name:'关闭',exact:true}).click();
+      else if(closeMethod==='escape')await page.keyboard.press('Escape');
+      else await page.locator('[data-slot="dialog-overlay"]').click({position:{x:5,y:5}});
+      await preview.waitFor({state:'detached'});
+      await page.waitForFunction(()=>document.activeElement?.closest('[data-task-id]')?.dataset.taskId==='visual-3' && document.activeElement?.hasAttribute('data-media-cover'));
+      await page.mouse.move(20,20);
+      await page.waitForFunction(()=>getComputedStyle(document.querySelector('[data-task-id="visual-3"] .media-cover-image')).transform==='none');
+      await previewTrigger.hover();
+      await image.evaluate(node=>Promise.all(node.getAnimations().map(animation=>animation.finished)));
+      check(await image.evaluate(node=>new DOMMatrixReadOnly(getComputedStyle(node).transform).a>1),'hover failed after '+closeMethod+' close');
+      await page.mouse.move(20,20);
+      await page.waitForFunction(()=>getComputedStyle(document.querySelector('[data-task-id="visual-3"] .media-cover-image')).transform==='none');
+    }
     check(await ring.evaluate(node=>{
       const color=getComputedStyle(node).backgroundColor;
       const alpha=color.includes('/')?parseFloat(color.split('/').pop()):color.startsWith('rgba')?parseFloat(color.split(',').pop()):1;
@@ -120,6 +146,8 @@ async page => {
     const merging=row('visual-1').getByRole('progressbar',{name:'合并进度',exact:true});
     await merging.waitFor();
     check(await merging.textContent()==='合并' && await merging.getAttribute('aria-valuenow')===null && (await row('visual-1').innerText()).includes('正在合并音视频'),'merging became a percentage');
+    check(await row('visual-1').getByRole('group',{name:'下载信息',exact:true}).count()===0,'merging restored metadata too early');
+    await checkDownloadHeight('merging');
     await page.evaluate(()=>window.backgroundTest.progress({merging:false,bytes:167772160,total_bytes:167772160}));
     await page.waitForFunction(()=>document.querySelector('[data-task-id="visual-1"] [data-variant="circular"]')?.textContent==='99%');
     await page.evaluate(()=>window.backgroundTest.progress({bytes:104857600}));
@@ -149,6 +177,10 @@ async page => {
     await page.mouse.move(20,20);
     await page.screenshot({path:'.local/feed-portrait/feed-'+width+'.png',animations:'disabled'});
     check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'page horizontal overflow');
+    await page.evaluate(()=>window.backgroundTest.complete('visual-1'));
+    await row('visual-1').getByRole('group',{name:'下载信息',exact:true}).waitFor();
+    check(await row('visual-1').locator('.download-progress').count()===0,'completion retained download progress');
+    check(await row('visual-1').getByLabel('清晰度：1080P',{exact:true}).isVisible() && await row('visual-1').getByLabel('文件大小：64.0 KB',{exact:true}).isVisible(),'completion did not restore resolution and actual size');
     await page.getByRole('radiogroup',{name:'按状态筛选下载任务'}).getByRole('radio',{name:'已完成',exact:true}).click();
     await tabs().getByRole('tab',{name:'YouTube',exact:true}).click();
     const search=page.getByRole('textbox',{name:'搜索作品标题或作者',exact:true});
