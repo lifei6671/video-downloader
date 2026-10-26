@@ -19,7 +19,14 @@ async page => {
     await page.evaluate(()=>sessionStorage.clear());
     await page.reload();await accounts();
   };
-  const saved=()=>page.getByRole('status').filter({hasText:'平台配置已保存，仅影响新任务'}).waitFor();
+  const notice=async(type,text)=>{
+    const notification=page.locator('[data-sonner-toast][data-type="'+type+'"]').filter({hasText:text});
+    await notification.waitFor();
+    check(await page.locator('form').getByText(text,{exact:true}).count()===0,'save result rendered inline');
+    await notification.getByRole('button',{name:'关闭通知',exact:true}).click();
+    await notification.waitFor({state:'hidden'});
+  };
+  const saved=()=>notice('success','平台配置已保存，仅影响新任务');
   const cases=[];
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
     await page.setViewportSize({width,height});await fresh();
@@ -72,7 +79,7 @@ async page => {
     await page.waitForFunction(id=>!document.querySelector('#'+id+'-clear')?.disabled, platform, {timeout:10000});
     check(await cookie().inputValue()===expected && !await browser().isChecked(),'normalized Cookie did not survive reload');
     await cookie().fill('session=one\nother=two');await save().click();
-    await page.getByRole('alert').filter({hasText:'配置格式有误'}).waitFor();
+    await notice('error','配置格式有误');
     check((await snapshot()).cookies[platform]===expected,'internal newline corrupted saved Cookie');
     await cookie().fill('\n \t\n');await save().click();await saved();
     check(await browser().isChecked() && await cookie().inputValue()==='' && await save().isDisabled(),'whitespace-only Cookie did not restore browser mode');
@@ -81,14 +88,14 @@ async page => {
   }
   await fresh();await browser().click();
   await page.evaluate(()=>window.platformSettingsTest.failSave=true);
-  await save().click();await page.getByRole('alert').filter({hasText:'无法保存任务记录'}).waitFor();
+  await save().click();await notice('error','无法保存任务记录');
   check((await snapshot()).cookies.youtube==='session=fixture','failed save changed persisted Cookie');
   check(await browser().isChecked() && !await save().isDisabled(),'failed save lost draft');
   await page.evaluate(()=>window.platformSettingsTest.failSave=false);
   await save().click();await saved();cases.push('failed save preserves stored Cookie and retryable draft');
   await fresh();await page.getByRole('radio',{name:'自定义代理',exact:true}).click();
   await proxy().fill('7890');await browser().click();await save().click();
-  await page.getByRole('alert').filter({hasText:'配置格式有误'}).waitFor();
+  await notice('error','配置格式有误');
   check((await snapshot()).cookies.youtube==='session=fixture','invalid proxy cleared Cookie');
   await proxy().fill('http://127.0.0.1:7890');await save().click();await saved();
   cases.push('invalid proxy save preserves Cookie; corrected address saves browser mode');

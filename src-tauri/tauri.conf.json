@@ -16,7 +16,8 @@
       "theme": "Light", "backgroundColor": "#f9f9fb"
     }],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' https: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' https: data: blob:; media-src 'self' asset: http://asset.localhost https://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "assetProtocol": { "enable": true, "scope": [] }
     }
   },
   "bundle": {

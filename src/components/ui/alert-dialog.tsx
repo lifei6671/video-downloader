@@ -3,6 +3,7 @@ import { cn } from "cn"
 import { AlertDialog as AlertDialogPrimitive } from "radix-ui"
 
 import { Button } from "@/components/ui/button"
+import { blockClosedDialogEvent } from "@/components/ui/dialog"
 
 function AlertDialog({
   ...props
@@ -45,6 +46,9 @@ function AlertDialogOverlay({
 function AlertDialogContent({
   className,
   size = "default",
+  onClickCapture,
+  onKeyDownCapture,
+  onKeyUpCapture,
   ...props
 }: React.ComponentProps<typeof AlertDialogPrimitive.Content> & {
   size?: "default" | "sm"
@@ -60,6 +64,9 @@ function AlertDialogContent({
           className
         )}
         {...props}
+        onClickCapture={event => { if (!blockClosedDialogEvent(event)) onClickCapture?.(event) }}
+        onKeyDownCapture={event => { if (!blockClosedDialogEvent(event)) onKeyDownCapture?.(event) }}
+        onKeyUpCapture={event => { if (!blockClosedDialogEvent(event)) onKeyUpCapture?.(event) }}
       />
     </AlertDialogPortal>
   )

@@ -22,6 +22,7 @@ pub struct Profile {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub download_directory: PathBuf,
+    pub filename_template: String,
     pub max_downloads: u8,
     pub profiles: Vec<Profile>,
     #[serde(default)]
@@ -94,6 +95,18 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         db.execute_batch("ALTER TABLE app_settings ADD COLUMN max_downloads INTEGER NOT NULL DEFAULT 2 CHECK(max_downloads BETWEEN 1 AND 3);")
             .context("DATABASE_ERROR")?;
     }
+    let has_template = db.prepare("PRAGMA table_info(app_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|name| name == "filename_template");
+    if !has_template {
+        db.execute_batch("ALTER TABLE app_settings ADD COLUMN filename_template TEXT NOT NULL DEFAULT '{platform}/{user_name}-{content}'")
+            .context("DATABASE_ERROR")?;
+    }
+    let filename_template = match db.query_row("SELECT filename_template FROM app_settings WHERE id=1", [], |r| r.get::<_, String>(0)) {
+        Ok(value) => { crate::naming::validate(&value).context("DATABASE_ERROR")?; value },
+        Err(rusqlite::Error::QueryReturnedNoRows) => crate::naming::DEFAULT_TEMPLATE.into(),
+        Err(_) => bail!("DATABASE_ERROR"),
+    };
     let max_downloads = match db.query_row(
         "SELECT max_downloads FROM app_settings WHERE id=1",
         [],
@@ -158,6 +171,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
     };
     Ok(Settings {
         download_directory,
+        filename_template,
         max_downloads,
         profiles,
         tdl,
@@ -637,6 +651,7 @@ mod tests {
         let restored = load(&db, PathBuf::from("default")).unwrap();
         assert_eq!(restored.download_directory, PathBuf::from("old-downloads"));
         assert_eq!(restored.max_downloads, 2);
+        assert_eq!(restored.filename_template, crate::naming::DEFAULT_TEMPLATE);
         assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 2);
     }
 }

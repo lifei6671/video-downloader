@@ -1,0 +1,40 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+import {api} from '/src/api';
+const initial={download_directory:'C:\\TestVideos',filename_template:'{platform}/{user_name}-{content}',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'test-only',proxy:null,cookie_configured:false})),tdl:{enabled:false,path:null}};
+let settings=JSON.parse(sessionStorage.getItem('filename-settings')||'null')||initial;
+const values={platform:'youtube',user_name:'creator',link_id:'sample-id',content:'sample-video',current_time:'20261026_120000',quality:'1080P'};
+const state={failSave:false,holdSave:false,release:()=>{},calls:[],previewCalls:[],holdPreview:false,pendingPreviews:[],releasePreview:index=>state.pendingPreviews[index].resolve(),snapshot:()=>structuredClone(settings)};
+window.filenameSettingsTest=state;
+api.settings=async()=>structuredClone(settings);
+api.tasks=async()=>[];
+api.subscribe=async()=>()=>{};
+api.tdlLoginStatus=async()=>null;
+api.previewFilename=async template=>{
+  state.previewCalls.push(template);
+  if(!template || new TextEncoder().encode(template).length>512 || template.includes('\\') || template.split('/').length>4 || template.split('/').some(part=>!part.trim()||['.','..'].includes(part.trim())))throw 'NAMING_INVALID';
+  const segments=[];
+  let cursor=0;
+  for(const match of template.matchAll(/\{([^{}]*)\}/g)) {
+    if(!Object.hasOwn(values,match[1]))continue;
+    if(match.index>cursor)segments.push({text:template.slice(cursor,match.index),variable:null});
+    segments.push({text:values[match[1]],variable:match[1]});
+    cursor=match.index+match[0].length;
+  }
+  if(cursor<template.length)segments.push({text:template.slice(cursor),variable:null});
+  const output=segments.map(segment=>segment.text).join('');
+  segments.push({text:'.mp4',variable:null});
+  if(state.holdPreview)await new Promise(resolve=>state.pendingPreviews.push({template,resolve}));
+  return {path:output+'.mp4',segments};
+};
+api.filenameTemplate=async template=>{
+  state.calls.push(template);
+  if(state.holdSave)await new Promise(resolve=>state.release=resolve);
+  if(state.failSave)throw 'DATABASE_ERROR';
+  await api.previewFilename(template);
+  settings.filename_template=template;
+  sessionStorage.setItem('filename-settings',JSON.stringify(settings));
+  return structuredClone(settings);
+};
+await import('/src/main');
+</script></body></html>

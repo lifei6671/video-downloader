@@ -301,6 +301,14 @@ async fn set_max_downloads(core: State<'_, AppCore>, value: u8) -> Result<Settin
     core.set_max_downloads(value).map_err(error)
 }
 #[tauri::command]
+fn set_filename_template(core: State<AppCore>, template: String) -> Result<Settings, String> {
+    core.set_filename_template(template).map_err(error)
+}
+#[tauri::command]
+fn preview_filename(template: String) -> Result<yingqu_core::naming::FilenamePreview, String> {
+    yingqu_core::naming::preview(&template).map_err(error)
+}
+#[tauri::command]
 async fn resolve_video(
     core: State<'_, AppCore>,
     input: String,
@@ -384,6 +392,18 @@ fn reveal_download(
     app.opener()
         .reveal_item_in_dir(path)
         .map_err(|_| "IO_ERROR".into())
+}
+#[tauri::command]
+fn prepare_video_playback(
+    app: tauri::AppHandle,
+    core: State<AppCore>,
+    task_id: String,
+) -> Result<String, String> {
+    let path = core.playback_path(&task_id).map_err(error)?;
+    app.asset_protocol_scope()
+        .allow_file(&path)
+        .map_err(|_| "PLAYBACK_SOURCE_FAILED".to_string())?;
+    Ok(path.to_string_lossy().into_owned())
 }
 #[tauri::command]
 fn play_download(
@@ -649,6 +669,8 @@ fn main() {
             get_task_image,
             save_profile,
             set_max_downloads,
+            set_filename_template,
+            preview_filename,
             resolve_video,
             start_download,
             choose_video_format,
@@ -659,6 +681,7 @@ fn main() {
             delete_local_file,
             select_download_directory,
             reveal_download,
+            prepare_video_playback,
             play_download,
             open_project_page,
             check_for_updates,

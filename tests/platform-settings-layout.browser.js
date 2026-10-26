@@ -6,7 +6,14 @@ async page => {
   const save=()=>page.getByRole('button',{name:'保存平台配置',exact:true});
   const mode=name=>page.getByRole('radio',{name,exact:true});
   const snapshot=()=>page.evaluate(()=>window.platformSettingsTest.snapshot());
-  const saved=()=>page.getByRole('status').filter({hasText:'平台配置已保存，仅影响新任务'}).waitFor();
+  const notice=async(type,text)=>{
+    const notification=page.locator('[data-sonner-toast][data-type="'+type+'"]').filter({hasText:text});
+    await notification.waitFor();
+    check(await page.locator('form').getByText(text,{exact:true}).count()===0,'save result rendered inline');
+    await notification.getByRole('button',{name:'关闭通知',exact:true}).click();
+    await notification.waitFor({state:'hidden'});
+  };
+  const saved=()=>notice('success','平台配置已保存，仅影响新任务');
   const accounts=async(loaded=true)=>{
     await page.getByRole('button',{name:'系统设置',exact:true}).click();
     await page.getByRole('button',{name:'平台账号',exact:true}).click();
@@ -83,7 +90,7 @@ async page => {
   cases.push('delayed read safely restores credentials after another field is saved');
   await address().fill('socks5://127.0.0.1:1080');
   await page.evaluate(()=>window.platformSettingsTest.failSave=true);await save().click();
-  await page.getByRole('alert').filter({hasText:'无法保存任务记录'}).waitFor();
+  await notice('error','无法保存任务记录');
   check(await address().inputValue()==='socks5://127.0.0.1:1080' && (await snapshot()).proxies.youtube===credential,'failed save lost draft or changed stored credentials');
   await page.evaluate(()=>window.platformSettingsTest.failSave=false);await save().click();await saved();
   check(await address().inputValue()==='socks5://127.0.0.1:1080' && await save().isDisabled(),'corrected proxy save not reflected in editor');

@@ -82,7 +82,7 @@ async page => {
     await menu.waitFor();
     const menuBox = await menu.boundingBox();
     check(menuBox.x>=0 && menuBox.x+menuBox.width<=width && menuBox.y>=0 && menuBox.y+menuBox.height<=height, 'context menu escaped viewport');
-    check((await menu.getByRole('menuitem').allTextContents()).map(t=>t.trim()).join(',')==='打开文件夹,提取文案,复制原链接,从列表移除,删除本地视频', 'secondary actions changed');
+    check((await menu.getByRole('menuitem').allTextContents()).map(t=>t.trim()).join(',')==='打开文件夹,提取文案,复制原链接,复制本地地址,从列表移除,删除本地视频', 'secondary actions changed');
     await page.keyboard.press('End');
     // Radix roving focus moves to the last item on the next timer turn.
     await page.waitForFunction(() => document.activeElement?.getAttribute('data-variant') === 'destructive' && document.activeElement?.textContent === '删除本地视频');

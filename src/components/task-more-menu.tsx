@@ -1,18 +1,20 @@
 import { useRef, type ReactNode } from 'react';
-import { Copy, FileText, FolderOpen, ListX, MoreHorizontal, Trash2 } from 'lucide-react';
+import { Copy, FileText, FolderOpen, ListX, MoreHorizontal, Trash2, X } from 'lucide-react';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import type { Task } from '@/api';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 
-export function TaskMoreMenu({ task, busy, reveal, copy, remove, deleteFile, transcript, children, onOpenChange }: {
+export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, deleteFile, cancel, transcript, children, onOpenChange }: {
   task: Task;
   children?: ReactNode;
   onOpenChange?: (open: boolean) => void;
   transcript?: { label: string; open: (returnFocus: HTMLElement | null) => void };
+  cancel?: (returnFocus: HTMLElement | null) => void;
   busy: boolean;
   reveal: () => void;
   copy: () => void;
+  copyPath: () => void;
   remove: () => void;
   deleteFile: () => void;
 }) {
@@ -26,11 +28,13 @@ export function TaskMoreMenu({ task, busy, reveal, copy, remove, deleteFile, tra
   const hasFile = task.status === 'completed' && !task.file_missing;
   const hasLink = !!(task.video || task.telegram_link);
   const removable = ['completed', 'failed', 'canceled'].includes(task.status);
-  const available = hasFile || hasLink || removable;
+  const available = hasFile || hasLink || removable || !!cancel;
   const items = <>
       {hasFile && <Item disabled={busy} onSelect={reveal}><FolderOpen />打开文件夹</Item>}
       {transcript && <Item disabled={busy} onSelect={() => transcript.open(context ? row.current : trigger.current)}><FileText />{transcript.label}</Item>}
       {hasLink && <Item disabled={busy} onSelect={copy}><Copy />复制原链接</Item>}
+      {task.status === 'completed' && task.path && task.video?.kind !== 'image_album' && <Item disabled={busy} onSelect={copyPath}><Copy />复制本地地址</Item>}
+      {cancel && <Item disabled={busy || task.canceling} onSelect={() => cancel(context ? row.current : trigger.current)}><X />{task.canceling ? '正在取消…' : '取消下载'}</Item>}
       {removable && (hasFile || hasLink || transcript) && <Separator />}
       {removable && <Item disabled={busy} onSelect={remove}><ListX />从列表移除</Item>}
       {hasFile && <Item variant="destructive" disabled={busy} onSelect={deleteFile}>

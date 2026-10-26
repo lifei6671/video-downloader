@@ -14,6 +14,7 @@ async page => {
   const cancel=async()=>{
     await page.getByRole('button',{name:'取消',exact:true}).click();
     await dialog.getByRole('button',{name:'确认取消',exact:true}).click();
+    await page.locator('[data-slot="alert-dialog-content"]').waitFor({state:'detached'});
   };
   const empty=async(expected='',focus=true)=>{
     await page.getByText('粘贴链接开始解析',{exact:true}).waitFor();
@@ -26,6 +27,7 @@ async page => {
     const original=await input.inputValue();
     await page.getByRole('button',{name:'取消',exact:true}).click();
     await dialog.getByRole('button',{name:'返回',exact:true}).click();
+    await page.locator('[data-slot="alert-dialog-content"]').waitFor({state:'detached'});
     check(await input.inputValue()===original,'return from confirmation cleared input');
     check(await page.getByRole('button',{name:'后台下载',exact:true}).isVisible(),'return discarded preview');
     await page.getByRole('button',{name:'取消',exact:true}).focus();await page.keyboard.press('Enter');
@@ -54,14 +56,14 @@ async page => {
   await page.getByText('新作品 1',{exact:true}).waitFor();
   check(await page.evaluate(()=>window.backgroundTest.calls.filter(c=>c.type==='cancel').length)===1,'next parse canceled the acknowledged preview again');
   cases.push('acknowledgement resets without an event and stale events stay hidden');
-  for(const changed of [false,true]) {
+  {
     await load('cancel-preview-pending');const before=await input.inputValue();await cancel();
     await page.waitForFunction(()=>window.backgroundTest.calls.some(c=>c.type==='cancel'));
     check(await input.inputValue()===before,'input reset before cancellation acknowledgement');
     check(await page.getByText('原作品',{exact:true}).isVisible(),'preview reset before acknowledgement');
-    if(changed)await input.fill(next);
-    await page.evaluate(()=>window.backgroundTest.release());await empty(changed?next:'');
-    cases.push('pending acknowledgement preserves '+(changed?'new input':'original state until success'));
+    check(await input.isDisabled(),'input enabled during cancellation acknowledgement');
+    await page.evaluate(()=>window.backgroundTest.release());await empty();
+    cases.push('pending acknowledgement locks input and preserves original state until success');
   }
   await load('cancel-preview-error');const before=await input.inputValue();await cancel();
   await page.getByRole('alert').filter({hasText:'网络连接失败'}).waitFor();
@@ -77,7 +79,7 @@ async page => {
   cases.push('task-list cancellation keeps unrelated home preview');
   await load('normal');await input.fill(next);await input.press('Enter');
   await page.getByText('新作品 1',{exact:true}).waitFor();
-  await page.getByRole('button',{name:'下载视频',exact:true}).click();await cancel();
+  await page.getByRole('button',{name:'立即下载',exact:true}).click();await cancel();
   await page.getByRole('button',{name:'重试',exact:true}).waitFor();
   check(await input.inputValue()===next && await page.getByText('新作品 1',{exact:true}).isVisible(),'submitted download cancellation lost retry preview');
   cases.push('submitted download cancellation keeps retry behavior');

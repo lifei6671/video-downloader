@@ -1,5 +1,6 @@
 pub mod desktop_core;
 pub mod files;
+pub mod naming;
 pub mod parse_cache;
 pub mod python_bridge;
 pub mod runtime_dependencies;

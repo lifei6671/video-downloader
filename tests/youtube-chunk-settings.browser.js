@@ -18,7 +18,14 @@ async page => {
     await page.evaluate(()=>sessionStorage.clear());
     await page.reload();await accounts();
   };
-  const saved=()=>page.getByRole('status').filter({hasText:'平台配置已保存，仅影响新任务'}).waitFor();
+  const notice=async(type,text)=>{
+    const notification=page.locator('[data-sonner-toast][data-type="'+type+'"]').filter({hasText:text});
+    await notification.waitFor();
+    check(await page.locator('form').getByText(text,{exact:true}).count()===0,'save result rendered inline');
+    await notification.getByRole('button',{name:'关闭通知',exact:true}).click();
+    await notification.waitFor({state:'hidden'});
+  };
+  const saved=()=>notice('success','平台配置已保存，仅影响新任务');
   const cases=[];
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
     await page.setViewportSize({width,height});await fresh();
@@ -55,7 +62,7 @@ async page => {
   }
   await fresh();await mode('自定义').click();await size().fill('32');
   await page.evaluate(()=>window.platformSettingsTest.failSave=true);
-  await save().click();await page.getByRole('alert').filter({hasText:'无法保存任务记录'}).waitFor();
+  await save().click();await notice('error','无法保存任务记录');
   check(await stored()===null && await size().inputValue()==='32' && !await save().isDisabled(),'failed save changed mode or lost draft');
   await page.evaluate(()=>window.platformSettingsTest.failSave=false);
   await save().click();await saved();

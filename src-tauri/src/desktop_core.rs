@@ -164,6 +164,7 @@ struct Active {
     download_after_resolve: bool,
     profiles: Value,
     directory: PathBuf,
+    filename_template: String,
     cancel: watch::Sender<bool>,
     done: watch::Receiver<bool>,
 }
@@ -842,6 +843,16 @@ impl Core {
         Ok(inner.settings.clone())
     }
 
+    pub fn set_filename_template(&self, template: String) -> Result<Settings> {
+        crate::naming::validate(&template)?;
+        let mut inner = self.inner.lock().unwrap();
+        inner.db.execute("INSERT INTO app_settings(id,directory,filename_template) VALUES(1,?1,?2)
+            ON CONFLICT(id) DO UPDATE SET filename_template=excluded.filename_template",
+            params![inner.settings.download_directory.to_string_lossy(), template]).context("DATABASE_ERROR")?;
+        inner.settings.filename_template = template;
+        Ok(inner.settings.clone())
+    }
+
     pub fn resolve(self: &Arc<Self>, input: String) -> Result<Task> {
         self.resolve_task(input, None, "auto".into(), None)
     }
@@ -1253,6 +1264,7 @@ impl Core {
             publish(&mut inner, task.clone(), &*self.emit)?;
         }
         let directory = inner.settings.download_directory.clone();
+        let filename_template = inner.settings.filename_template.clone();
         inner.active.insert(
             task.id.clone(),
             Active {
@@ -1260,6 +1272,7 @@ impl Core {
                 download_after_resolve,
                 profiles: profiles.clone(),
                 directory: directory.clone(),
+                filename_template,
                 cancel,
                 done: done_rx,
             },
@@ -1546,6 +1559,7 @@ impl Core {
             let (cancel, _) = watch::channel(false);
             let (_, done) = watch::channel(true);
             let directory = inner.settings.download_directory.clone();
+            let filename_template = inner.settings.filename_template.clone();
             inner.active.insert(
                 id.to_owned(),
                 Active {
@@ -1553,11 +1567,14 @@ impl Core {
                     download_after_resolve: deferred,
                     profiles,
                     directory,
+                    filename_template,
                     cancel,
                     done,
                 },
             );
         }
+        let filename_template = inner.settings.filename_template.clone();
+        inner.active.get_mut(id).context("INVALID_STATE")?.filename_template = filename_template;
         task.status = Status::Queued;
         task.error = None;
         task.download_requested = true;
@@ -1707,6 +1724,8 @@ impl Core {
         let profiles = active.profiles.clone();
         let tdl = active.tdl.clone();
         let directory = active.directory.clone();
+        let filename_template = active.filename_template.clone();
+        let naming_time = crate::naming::current_time();
         let video = task.video.clone().context("INVALID_STATE")?;
         let tdl_input = if tdl.is_some() {
             Some(parse_cache::tdl_source(&inner.db, &video)?)
@@ -1803,12 +1822,10 @@ impl Core {
                     if video["selected_format_id"].is_string() && result["format_id"] != video["selected_format_id"] {
                         bail!("INVALID_ENGINE_RESULT");
                     }
+                    let relative = crate::naming::render(&filename_template, &video, &naming_time)?;
                     let identity: Video = serde_json::from_value(video).context("INVALID_ENGINE_RESULT")?;
-                    // A retry keeps the task ID but must not collide with files
-                    // committed by an earlier attempt whose database write failed.
-                    let attempt_id = Uuid::new_v4();
                     let file = if identity.kind == "image_album" {
-                        let target = directory.join(format!("{}_{}_{}", identity.platform, identity.video_id, attempt_id));
+                        let target = crate::naming::destination(&directory, &relative, None)?;
                         let file = finalize_album(&identity, &result, &media, &target, |source,size,files| {
                             inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size,manifest) VALUES(?1,?2,?3,?4,?5)", params![
                                 id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?,serde_json::to_string(files)?]).context("DATABASE_ERROR")?;
@@ -1822,7 +1839,7 @@ impl Core {
                     } else {
                     let extension = result["container"].as_str().context("INVALID_ENGINE_RESULT")?;
                     if !matches!(extension, "mp4" | "webm") && !(identity.platform == "telegram" && matches!(extension, "mov" | "mkv")) { bail!("INVALID_MEDIA_CONTENT"); }
-                    let target = directory.join(format!("{}_{}_{}.{}",identity.platform,identity.video_id,attempt_id,extension));
+                    let target = crate::naming::destination(&directory, &relative, Some(extension))?;
                     let file = finalize_to(&identity, &result, &media, &target, |source,size| {
                         inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,?4)", params![
                             id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?]).context("DATABASE_ERROR")?;
@@ -3348,6 +3365,78 @@ mod tests {
         app.download(&task.id, false).unwrap();
         task
     }
+    #[tokio::test]
+    async fn filename_rules_persist_snapshot_queue_and_suffix_collisions() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        assert_eq!(app.settings().filename_template, crate::naming::DEFAULT_TEMPLATE);
+        app.set_max_downloads(1).unwrap();
+        app.set_filename_template("old/{link_id}-{quality}".into()).unwrap();
+        let a = enqueue(&app, "9101").await;
+        let b = enqueue(&app, "9102").await;
+        app.set_filename_template("new/{link_id}".into()).unwrap();
+        assert!(app.set_filename_template("../escape".into()).is_err());
+        release(root.path(), "9101");
+        let a = wait(&app, &a.id, Status::Completed).await;
+        assert!(a.path.as_ref().unwrap().ends_with("old/9101-1080P.mp4"));
+        release(root.path(), "9102");
+        let b = wait(&app, &b.id, Status::Completed).await;
+        assert!(b.path.as_ref().unwrap().ends_with("old/9102-1080P.mp4"));
+        let c = enqueue(&app, "9103").await;
+        release(root.path(), "9103");
+        let c = wait(&app, &c.id, Status::Completed).await;
+        assert!(c.path.as_ref().unwrap().ends_with("new/9103.mp4"));
+        let original = std::fs::read(c.path.as_ref().unwrap()).unwrap();
+        let repeat = app.resolve("hold:9103".into()).unwrap();
+        wait(&app, &repeat.id, Status::Ready).await;
+        app.download(&repeat.id, true).unwrap();
+        let repeat = wait(&app, &repeat.id, Status::Completed).await;
+        assert!(repeat.path.unwrap().ends_with("new/9103 (1).mp4"));
+        assert_eq!(std::fs::read(c.path.unwrap()).unwrap(), original);
+        app.set_directory(root.path().to_owned()).unwrap();
+        app.set_max_downloads(3).unwrap();
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(app.settings().filename_template, "new/{link_id}");
+        assert_eq!(app.settings().max_downloads, 3);
+        assert_eq!(app.settings().download_directory, root.path().canonicalize().unwrap());
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn filename_rules_preserve_literal_braces_in_settings_and_downloads() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let rule = "literal{unknown}/{link_id}-{quality";
+        app.set_filename_template(rule.into()).unwrap();
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(app.settings().filename_template, rule);
+        let task = enqueue(&app, "9120").await;
+        release(root.path(), "9120");
+        let completed = wait(&app, &task.id, Status::Completed).await;
+        let path = completed.path.unwrap();
+        assert!(path.ends_with("literal{unknown}/9120-{quality.mp4"));
+        assert!(path.is_file());
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn filename_rules_name_album_directories_and_preserve_internal_filenames() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        app.set_filename_template("{platform}/{content}-{quality}".into()).unwrap();
+        let task = app.resolve("album".into()).unwrap();
+        wait(&app, &task.id, Status::Ready).await;
+        app.download(&task.id, false).unwrap();
+        let completed = wait(&app, &task.id, Status::Completed).await;
+        let path = completed.path.unwrap();
+        assert!(path.ends_with("douyin/离线图集-图集"));
+        assert!(path.join("001.jpeg").is_file() && path.join("002.webp").is_file());
+        app.shutdown().await;
+    }
     async fn started(root: &Path, video_id: &str) {
         tokio::time::timeout(Duration::from_secs(5), async {
             while !root.join(format!("started-{video_id}")).exists() {
@@ -3422,7 +3511,7 @@ mod tests {
         wait(&app, &e.id, Status::Completed).await;
         app.shutdown().await;
         assert_eq!(
-            std::fs::read_dir(root.path().join("downloads"))
+            std::fs::read_dir(root.path().join("downloads/douyin"))
                 .unwrap()
                 .count(),
             2

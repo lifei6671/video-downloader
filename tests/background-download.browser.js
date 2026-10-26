@@ -25,7 +25,9 @@ async page => {
   for(const platform of ['telegram','douyin','tiktok','youtube','album']) {
     await load(platform);
     const order=await page.locator('[data-background-download-task], [data-download-task]').evaluateAll(nodes=>nodes.map(n=>n.textContent.trim()));
-    check(order[0]==='后台下载' && /下载视频|下载图集/.test(order[1]),'button order');
+    check(order.join(',')==='后台下载,立即下载','button order and labels');
+    check(await background.getAttribute('data-variant')==='default','background action is not primary');
+    check(await page.locator('[data-download-task]').getAttribute('data-variant')==='outline','immediate action is highlighted');
     await background.click();await empty();
     check((await calls()).filter(c=>c.type==='download').length===1,'unexpected submission count');
     await page.getByRole('button',{name:'下载任务',exact:true}).click();
@@ -45,7 +47,8 @@ async page => {
   await page.waitForFunction(()=>window.backgroundTest.calls.some(c=>c.type==='download'));
   check(!await background.isEnabled(),'pending submit not disabled');
   check(await input.inputValue()!=='','reset before acknowledgement');
-  await input.fill('https://t.me/c/100/99');await input.press('Enter');
+  check(await input.isDisabled(),'input enabled during acknowledgement');
+  await input.evaluate(node=>node.form.requestSubmit());
   check(!(await calls()).some(c=>c.type==='resolve'||c.type==='cancel'),'Enter bypassed busy guard during background acknowledgement');
   check(await page.getByText('原作品',{exact:true}).count()===1,'pending Enter replaced original preview');
   await page.evaluate(()=>window.backgroundTest.release());await empty();
@@ -73,7 +76,7 @@ async page => {
   check((await calls()).filter(c=>c.type==='download').map(c=>c.confirm).join(',')==='false,true','race intent lost');results.push('completion-record race');
   await load('normal');await input.fill('https://t.me/c/100/10');await parse.click();
   await page.getByText('新作品 1',{exact:true}).waitFor();
-  await page.getByRole('button',{name:'下载视频',exact:true}).click();
+  await page.getByRole('button',{name:'立即下载',exact:true}).click();
   await page.getByText('新作品 1',{exact:true}).waitFor();
   check(await input.inputValue()!=='','normal download reset too soon');
   await page.evaluate(()=>window.backgroundTest.complete('next-1'));await empty(false);results.push('normal download unchanged');

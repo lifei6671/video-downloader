@@ -953,7 +953,7 @@ async fn telegram_sqlite_cover_cleanup_is_atomic_shared_and_channel_specific() {
     };
     assert_eq!(covers(), 2);
     assert_eq!(
-        std::fs::read_dir(root.path().join("downloads"))
+        std::fs::read_dir(root.path().join("downloads/telegram"))
             .unwrap()
             .count(),
         3

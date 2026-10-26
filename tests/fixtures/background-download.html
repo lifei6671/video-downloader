@@ -18,6 +18,14 @@ let tasks = [structuredClone(original), ...(scenario === 'duplicate' ? [complete
 let listener = () => {}; let removedListener = () => {}; let next = 0; const pendingUpdates = [], pendingSnapshots = [];
 const control = {loaded:false,calls:[],holdEvents:scenario === 'delayed',holdRefresh:scenario === 'delayed',race:scenario === 'race',release:()=>{},snapshot:()=>structuredClone(tasks),flush:()=>{control.holdEvents=false;control.holdRefresh=false;for(const task of pendingUpdates.splice(0))listener(task);for(const [resolve,snapshot] of pendingSnapshots.splice(0))resolve(snapshot)},complete:id=>{const task=tasks.find(t=>t.id===id);Object.assign(task,{revision:task.revision+1,status:'completed',bytes:65536,path:'C:\\TestVideos\\'+id+'.mp4',completed_at:20});listener(structuredClone(task))},stale:()=>listener(structuredClone(original))};
 window.backgroundTest = control;
+if (scenario === 'parse-controls') {
+  api.readClipboardText = () => new Promise(resolve => control.releaseClipboard = resolve);
+  control.finishParsing = status => {
+    const task = tasks.find(task => task.id === 'next-1');
+    Object.assign(task, {status,revision:task.revision + 1,video:status === 'ready' ? {...structuredClone(video),title:'解析完成的作品'} : null,error:status === 'failed' ? 'NETWORK_ERROR' : null});
+    listener(structuredClone(task));
+  };
+}
 if (scenario.startsWith('author-')) {
   tasks[0].download_requested = true;
   tasks[0].video.author_profile = {id:platform === 'telegram' ? '100' : 'MS4w.'+'author-id-'.repeat(6),nickname:platform === 'telegram' ? null : '作者昵称',handle:platform === 'telegram' ? 'channel_name' : 'account_handle',kind:platform === 'telegram' ? 'channel' : 'user',avatar_cached:platform !== 'telegram' && scenario !== 'author-missing'};
@@ -85,9 +93,9 @@ api.subscribe = async (callback,removed=()=>{}) => {listener=callback;removedLis
 api.tasks = async () => {control.loaded=true;const snapshot=structuredClone(tasks);if(control.holdRefresh && control.calls.some(c=>c.type==='download'))return new Promise(resolve=>pendingSnapshots.push([resolve,snapshot]));if(scenario==='refresh-error' && control.calls.some(c=>c.type==='download'))throw 'NETWORK_ERROR';return snapshot};
 api.settings = async () => ({download_directory:'C:\\TestVideos',max_downloads:1,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'test-only',proxy:null,cookie_configured:false})),tdl:{enabled:true,path:null}});
 api.checkTdl = async () => ({path:'C:\\TestTools\\tdl.exe',version:'0.20.4'});
-api.resolve = async input => {control.calls.push({type:'resolve',input});const task={...structuredClone(original),id:'next-'+(++next),created_at:10+next,video:{...structuredClone(video),video_id:['duplicate','race'].includes(scenario)||scenario.startsWith('variant')?video.video_id:'100_'+(9+next),canonical_url:input,title:'新作品 '+next}};if(scenario==='cancel-preview-parsing')Object.assign(task,{status:'parsing',video:null});tasks.unshift(task);return structuredClone(task)};
+api.resolve = async input => {control.calls.push({type:'resolve',input});if(scenario==='parse-controls')await new Promise(resolve=>control.releaseResolve=resolve);const task={...structuredClone(original),id:'next-'+(++next),created_at:10+next,video:{...structuredClone(video),video_id:['duplicate','race'].includes(scenario)||scenario.startsWith('variant')?video.video_id:'100_'+(9+next),canonical_url:input,title:'新作品 '+next}};if(['cancel-preview-parsing','parse-controls'].includes(scenario))Object.assign(task,{status:'parsing',video:null});tasks.unshift(task);return structuredClone(task)};
 api.cancel = async id => {control.calls.push({type:'cancel',id});if(scenario==='cancel-preview-pending')await new Promise(resolve=>control.release=resolve);if(scenario==='cancel-preview-error')throw 'NETWORK_ERROR';const task=tasks.find(t=>t.id===id);Object.assign(task,{status:'canceled',revision:task.revision+1});if(scenario!=='cancel-preview-no-event')listener(structuredClone(task))};
-api.retry = async id => {control.calls.push({type:'retry',id});const task=tasks.find(t=>t.id===id);Object.assign(task,{status:'downloading',error:null,bytes:0,revision:task.revision+1});listener(structuredClone(task));return structuredClone(task)};
+api.retry = async id => {control.calls.push({type:'retry',id});const task=tasks.find(t=>t.id===id);Object.assign(task,{status:scenario==='parse-controls'?'parsing':'downloading',download_requested:scenario==='parse-controls'?true:task.download_requested,error:null,bytes:0,revision:task.revision+1});listener(structuredClone(task));return structuredClone(task)};
 api.clearHistory = async (platform=null) => {
   control.calls.push({type:'clear-history',platform});
   if(scenario==='clear-pending')await new Promise(resolve=>control.release=resolve);
@@ -107,6 +115,7 @@ api.deleteFile = async id => {
 };
 api.reveal = async id => {control.calls.push({type:'reveal',id})};
 api.play = async id => {control.calls.push({type:'play',id});if(scenario==='actions-error')throw 'PLAYBACK_OPEN_FAILED'};
+api.playbackSource = async id => {control.calls.push({type:'prepare-playback',id});if(scenario==='actions-error')throw 'PLAYBACK_SOURCE_FAILED';return '/tests/fixtures/media/player.webm'};
 api.remove = async id => {
   control.calls.push({type:'remove',id});
   if(scenario==='actions-remove-pending')await new Promise(resolve=>control.release=resolve);
@@ -196,7 +205,7 @@ if (scenario.startsWith('visual')) {
       cover_url:photo,width:1080,height:1920,duration_ms:48000,filesize:167772160,
       author_profile:{id:'local-author-'+i,nickname:i%2?'光影日记':'沿途记录',kind:'user',avatar_cached:false},
       selected_format_id:'hd',formats:[{format_id:'hd',width:1080,height:1920,container:'mp4',codec:'h264',filesize:167772160},{format_id:'sd',width:720,height:1280,container:'mp4',codec:'h264',filesize_approx:67108864}]}});
-  tasks=['ready','downloading','queued','completed','failed','completed','canceled',...Array(28).fill('completed')].map((status,i)=>row(i,status));
+  tasks=['ready','downloading','queued','completed','failed','completed','canceled',...Array(scenario==='visual-list-paging'?68:28).fill('completed')].map((status,i)=>row(i,status));
   if (scenario.startsWith('visual-list')) {
     tasks[3].video.title='镜头里的城市漫游：从清晨的街角走到暮色中的河岸，记录沿途遇见的人与风景，保留这一段完整的周末时光，穿过旧城区与沿江步道，慢慢发现日常生活中值得珍藏的瞬间';
     tasks[3].video.author_profile.nickname='周末影像记录者与城市漫游摄影档案';

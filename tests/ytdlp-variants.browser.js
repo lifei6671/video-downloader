@@ -4,6 +4,10 @@ async page => {
   const check = (value, message) => { if (!value) throw Error(message); };
   const input = page.locator('#video-input');
   const dialog = page.getByRole('alertdialog');
+  const dismissDuplicate = async () => {
+    await dialog.getByRole('button',{name:'暂不下载',exact:true}).click();
+    await page.waitForFunction(()=>document.activeElement?.hasAttribute('data-download-task'));
+  };
   const parse = async scenario => {
     await page.goto(fixture + '?scenario=' + scenario);
     await page.waitForFunction(() => window.backgroundTest?.loaded);
@@ -17,9 +21,9 @@ async page => {
     await page.waitForFunction(value=>window.backgroundTest.snapshot().find(t=>t.id==='next-1').video.selected_format_id===value,
       resolution.startsWith('3840')?'2'.repeat(24):'1'.repeat(24));
   };
-  const download = () => page.getByRole('button',{name:'下载视频',exact:true}).click();
+  const download = () => page.getByRole('button',{name:'立即下载',exact:true}).click();
   await parse('variant');
-  await dialog.waitFor(); await dialog.getByRole('button',{name:'暂不下载',exact:true}).click();
+  await dialog.waitFor(); await dismissDuplicate();
   await choose('3840');
   check(!await dialog.isVisible(),'4K matched the previous 1080P record');
   await download();
@@ -35,14 +39,14 @@ async page => {
   await page.evaluate(()=>window.backgroundTest.progress({merging:true,speed_bps:null,eta_seconds:null}));
   await page.getByText('正在合并音视频…',{exact:true}).waitFor();
   await parse('variant');
-  await dialog.waitFor(); await dialog.getByRole('button',{name:'暂不下载',exact:true}).click();
+  await dialog.waitFor(); await dismissDuplicate();
   await choose('3840'); await choose('1920'); await download();
   await dialog.waitFor();
   check((await page.evaluate(()=>window.backgroundTest.calls)).every(c=>c.type!=='download'),'same variant bypassed confirmation');
   await parse('variant-missing'); await download();
   check(!await dialog.isVisible(),'missing file blocked redownload');
   await parse('variant-legacy');
-  await dialog.waitFor(); await dialog.getByRole('button',{name:'暂不下载',exact:true}).click();
+  await dialog.waitFor(); await dismissDuplicate();
   await choose('3840'); await dialog.waitFor();
   await parse('variant-race'); await download(); await dialog.waitFor();
   await dialog.getByRole('button',{name:'重新下载',exact:true}).click();

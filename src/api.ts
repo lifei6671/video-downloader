@@ -1,4 +1,4 @@
-import { invoke, Channel } from '@tauri-apps/api/core';
+import { invoke, Channel, convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 export type Status = 'parsing' | 'ready' | 'queued' | 'downloading' | 'completed' | 'failed' | 'canceled';
 export type Resolver = 'auto' | 'yt-dlp' | 'dtk' | 'tdl';
@@ -19,7 +19,8 @@ export interface Profile { http_chunk_size?: number | null; platform: string; us
 export interface TdlSettings { enabled: boolean; path: string | null; session_directory?: string | null }
 export interface TdlStatus { path: string; version: string }
 export interface TdlLoginStatus { id: string; phase: 'starting' | 'qr' | 'password' | 'verifying'; qr: boolean[][] | null }
-export interface Settings { download_directory: string; max_downloads: number; profiles: Profile[]; tdl: TdlSettings }
+export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[]; tdl: TdlSettings }
+export interface FilenamePreview { path: string; segments: { text: string; variable: string | null }[] }
 export const api = {
   transcripts: () => invoke<VideoTranscript[]>('list_video_transcripts'),
   transcript: (taskId: string) => invoke<VideoTranscript | null>('get_video_transcript', {taskId}),
@@ -69,9 +70,12 @@ export const api = {
   clearHistory: (platform: string | null = null) => invoke<string[]>('clear_download_history', { platform }),
   deleteFile: (taskId: string) => invoke<void>('delete_local_file', { taskId }),
   concurrency: (value: number) => invoke<Settings>('set_max_downloads', { value }),
+  filenameTemplate: (template: string) => invoke<Settings>('set_filename_template', { template }),
+  previewFilename: (template: string) => invoke<FilenamePreview>('preview_filename', { template }),
   directory: () => invoke<Settings>('select_download_directory'),
   reveal: (taskId: string) => invoke<void>('reveal_download', { taskId }),
   play: (taskId: string) => invoke<void>('play_download', { taskId }),
+  playbackSource: async (taskId: string) => convertFileSrc(await invoke<string>('prepare_video_playback', { taskId })),
   save: (update: { http_chunk_size?: number | null; platform: string; user_agent: string; cookie: string | null; proxy: string | null }) => invoke<Settings>('save_profile', { update }),
   subscribe: async (callback: (task: Task) => void, removed: (id: string) => void) => {
     const stopUpdates = await listen<Task>('task_updated', event => callback(event.payload));
@@ -90,6 +94,7 @@ export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlyS
   return [...map.values()].sort((a, b) => b.created_at - a.created_at);
 }
 const errors: Record<string, string> = {
+  NAMING_INVALID: '请使用相对路径，路径最多 4 段，不含空目录、反斜杠或上级目录',
   TRANSCRIPTION_BUSY: '已有视频正在提取文案，请完成或取消后再开始',
   TRANSCRIPTION_ENGINE_UNAVAILABLE: '语音转录程序不可用，请检查应用安装是否完整',
   TRANSCRIPTION_MODEL_UNAVAILABLE: '语音模型未安装或已损坏，请下载或修复模型',
@@ -137,6 +142,7 @@ const errors: Record<string, string> = {
   UPDATE_SIZE_MISMATCH: '安装包大小不完整，未保存，请重新下载',
   UPDATE_CHECKSUM_MISMATCH: '安装包校验失败，请重新下载',
   UPDATE_INSTALLER_NOT_READY: '安装包尚未准备好，请重新下载',
+  UPDATE_NEWER_INSTALLER_CACHED: '本地已缓存更高版本安装包，请重新检查更新',
   UPDATE_INSTALLER_MISSING: '安装包已移动或删除，请重新下载',
   UPDATE_INSTALLER_OPEN_FAILED: '无法打开安装包，请稍后重试',
   INVALID_INPUT: '请粘贴抖音、TikTok 或 YouTube 的视频分享链接',
@@ -170,6 +176,7 @@ const errors: Record<string, string> = {
   ALREADY_DOWNLOADED: '该作品已有成功下载记录，请确认是否重新下载',
   FILE_MISSING: '文件已移动或删除',
   PLAYBACK_OPEN_FAILED: '无法启动系统默认播放器，请检查视频文件关联或播放器安装',
+  PLAYBACK_SOURCE_FAILED: '无法读取本地视频，正在尝试系统播放器',
   TDL_UNAVAILABLE: '未找到可用 tdl，请自行安装或在运行依赖中设置可执行路径。',
   TDL_UNSUPPORTED: 'tdl 无法正常返回版本信息，或当前操作所需命令不可用。请检查安装与命令能力。',
   TDL_EXPERIMENTAL_DISABLED: 'Telegram 实验模式尚未启用，请先在系统设置 → 平台账号 → Telegram 中阅读风险说明并启用。',

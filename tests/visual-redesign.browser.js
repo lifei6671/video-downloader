@@ -29,7 +29,7 @@ async page => {
     check(await cover.evaluate(node => node === document.activeElement), 'cover focus restore');
     await nav('下载任务').click();
     const rows = page.locator('.task-row');
-    check(await rows.count() === 34, 'preview leaked into download list');
+    check(await rows.count() === 30 && await page.locator('[data-task-id="visual-0"]').count() === 0, 'initial page or preview exclusion changed');
     const ordinary = page.locator('[data-task-id="visual-3"]');
     check(Math.abs((await ordinary.boundingBox()).height - 80) < 1, 'media row height');
     check(await ordinary.getByRole('button').count() >= 3, 'media row actions');
@@ -80,7 +80,7 @@ async page => {
     results.push(ratio+' natural cover');
   }
   await load('visual-album');
-  await page.getByRole('button',{name:'下载图集',exact:true}).waitFor();
+  await page.getByRole('button',{name:'立即下载',exact:true}).waitFor();
   check(await page.locator('.album-stage').isVisible(), 'album stage');
   check(await page.locator('.album-thumbnail[aria-pressed="true"] .album-selection').count()===1, 'album selection indicator missing');
   await page.getByRole('button',{name:'查看第 2 张图片',exact:true}).click();

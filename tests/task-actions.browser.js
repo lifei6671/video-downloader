@@ -24,7 +24,7 @@ async page => {
     for(const label of ['打开文件夹','从列表移除','复制原链接','删除本地视频'])
       check(await video.getByRole('button',{name:label,exact:true}).count()===0,'secondary action remains inline');
     let menu=await open(video);
-    check((await menu.getByRole('menuitem').allTextContents()).map(text=>text.trim()).join(',')==='打开文件夹,提取文案,复制原链接,从列表移除,删除本地视频','menu order or missing operation');
+    check((await menu.getByRole('menuitem').allTextContents()).map(text=>text.trim()).join(',')==='打开文件夹,提取文案,复制原链接,复制本地地址,从列表移除,删除本地视频','menu order or missing operation');
     const danger=menu.getByRole('menuitem',{name:'删除本地视频',exact:true});
     check(await danger.getAttribute('data-variant')==='destructive','dangerous action loses semantics');
     await page.keyboard.press('Escape');
@@ -44,11 +44,12 @@ async page => {
       await page.keyboard.press('Escape');
     }
     await video.getByRole('button',{name:'播放视频',exact:true}).click();
-    await page.waitForFunction(()=>window.backgroundTest.calls.some(c=>c.type==='play'));
+    await page.waitForFunction(()=>window.backgroundTest.calls.some(c=>c.type==='prepare-playback'));
+    await page.locator('.video-player-dialog').waitFor();await page.keyboard.press('Escape');await page.locator('.video-player-dialog').waitFor({state:'detached'});
     await act(video,'打开文件夹');await act(video,'复制原链接');
     await page.waitForFunction(()=>window.backgroundTest.calls.some(c=>c.type==='copy'));
     const recorded=await calls();
-    check(recorded.find(c=>c.type==='play').id==='done' && recorded.find(c=>c.type==='reveal').id==='done','wrong task targeted');
+    check(recorded.find(c=>c.type==='prepare-playback').id==='done' && recorded.find(c=>c.type==='reveal').id==='done','wrong task targeted');
     check(recorded.find(c=>c.type==='copy').text==='https://t.me/c/100/9','wrong copied canonical URL');
     check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'viewport overflow');
     await act(video,'从列表移除');await video.waitFor({state:'hidden'});
@@ -94,6 +95,7 @@ async page => {
   }
   await load('actions-error');await row('可播放视频').getByRole('button',{name:'播放视频',exact:true}).click();
   await page.locator('[data-sonner-toast][data-type="error"]').filter({hasText:'无法启动系统默认播放器'}).waitFor();
+  await page.keyboard.press('Escape');await page.locator('.video-player-dialog').waitFor({state:'detached'});
   check(await row('可播放视频').isVisible(),'player error removed record');
   await load();await row('下载中视频').getByRole('button',{name:'取消',exact:true}).click();
   const dialog=page.getByRole('alertdialog');await dialog.getByRole('heading',{name:'取消当前任务？',exact:true}).waitFor();

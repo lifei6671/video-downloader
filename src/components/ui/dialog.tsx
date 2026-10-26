@@ -5,6 +5,13 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
 
+export function blockClosedDialogEvent(event: React.SyntheticEvent<HTMLElement>) {
+  if (event.currentTarget.dataset.state !== "closed") return false
+  event.preventDefault()
+  event.stopPropagation()
+  return true
+}
+
 function Dialog({
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Root>) {
@@ -49,6 +56,9 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  onClickCapture,
+  onKeyDownCapture,
+  onKeyUpCapture,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
@@ -63,6 +73,9 @@ function DialogContent({
           className
         )}
         {...props}
+        onClickCapture={event => { if (!blockClosedDialogEvent(event)) onClickCapture?.(event) }}
+        onKeyDownCapture={event => { if (!blockClosedDialogEvent(event)) onKeyDownCapture?.(event) }}
+        onKeyUpCapture={event => { if (!blockClosedDialogEvent(event)) onKeyUpCapture?.(event) }}
       >
         {children}
         {showCloseButton && (
