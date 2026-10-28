@@ -4,7 +4,9 @@
     "resources": {
       "../python-engine/dist/video-engine/": "video-engine/",
       "../vendor/tdl-ui-licenses.txt": "licenses/tdl-ui-licenses.txt",
-      "../vendor/transcription-licenses.txt": "licenses/transcription-licenses.txt"
+      "../vendor/transcription-licenses.txt": "licenses/transcription-licenses.txt",
+      "../vendor/mcp-licenses.txt": "licenses/mcp-licenses.txt",
+      "../vendor/keyframes-licenses.txt": "licenses/keyframes-licenses.txt"
     }
   }
 }

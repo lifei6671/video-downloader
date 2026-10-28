@@ -1,6 +1,6 @@
 # Fun-ASR-Nano 单视频文案提取
 
-2026-10-23 用户要求以 Fun-ASR-Nano 替换 SenseVoiceSmall。当前协议 v3、内置引擎 0.12.0。Windows 新增可选 [audio.cpp CUDA 与独立 VAD](cuda-acceleration.md)，macOS 保留 CPU。首次提取或系统设置 → 运行依赖提供一项“语音转录模型 Fun-ASR-Nano”，按需下载，查看、复制和 TXT 导出沿用现有流程。
+2026-10-23 用户要求以 Fun-ASR-Nano 替换 SenseVoiceSmall。当前源码协议 v3、引擎 0.16.0；发布前需重建 sidecar，已有安装包验收不能替代当前源码验证。Windows 提供可选 [audio.cpp CUDA 与独立 VAD](cuda-acceleration.md)，macOS 保留 CPU。首次提取或系统设置 → 运行依赖提供一项“语音转录模型 Fun-ASR-Nano”，按需下载，查看、复制和 TXT 导出沿用现有流程。
 
 ## 运行与安装
 
@@ -26,7 +26,9 @@
 
 ## 转录与旧结果
 
-Rust 根据已完成任务路径启动独立 sidecar；FFmpeg 只读取原视频，生成临时 16 kHz 单声道 PCM16 音频。CPU 固定 CLI 参数为 `--enc <encoder> -m <decoder> --vad <vad> --vad-maxseg 30000 -a <wav>`；CUDA 使用 [独立 VAD 与 audio.cpp 批处理](cuda-acceleration.md)。不接受任意前端程序或模型路径。Python 负责进程和结果文件，stdout 保留 JSONL 协议，全文由 Rust 校验后入库。
+Rust 根据已完成任务路径启动独立 sidecar；FFmpeg 只读取原视频，生成临时 16 kHz 单声道 PCM16 音频。CPU 固定 CLI 参数为 `--enc <encoder> -m <decoder> --vad <vad> --vad-maxseg 30000 -a <wav> --srt`；CUDA 使用 [独立 VAD 与 audio.cpp 批处理](cuda-acceleration.md)。不接受任意前端程序或模型路径。Python 负责进程和结果文件，stdout 保留 JSONL 协议，全文由 Rust 校验后入库。
+
+WB-302 已保留 CPU SRT / CUDA VAD 的语音段级范围，提取以 `-copyts` 与 `aresample=async=1:first_pts=0` 对齐媒体 PTS 零点，Rust 校验后事务保存文档与段落。整数毫秒不是逐字精度，旧结果和整理稿不自动补时间。实际产物、处理修订及失败边界见 [可追溯段落](transcript-segments.md)；不修改原媒体，不增加模型或播放器依赖。
 
 保留转换最多 1800 秒、识别最多 `max(600, 3×音频时长+120)` 秒、每 5 秒心跳、最多 16 MiB 文本/日志、取消和退出清理。模型下载最多 30 分钟，Rust 整次安装最多 45 分钟；FFmpeg/Deno 原超时保持。
 
@@ -34,7 +36,7 @@ Rust 根据已完成任务路径启动独立 sidecar；FFmpeg 只读取原视频
 
 界面在模型加载时仅显示加载状态，识别时显示“已识别 X / Y 段”和完成片段比例；这是识别片段的完成比例，不是耗时百分比或剩余时间预测。Rust 校验计数有序、总量稳定，再广播任务快照。关闭再打开弹窗保留当前进度，开始新操作、取消或重启中断时清空临时计数；仍以结果校验和 SQLite 提交后为成功。
 
-CPU 新结果保存名称 `Fun-ASR-Nano`、上述模型 revision、pipeline `fun-asr-nano-cpu-fbbfe018-v1`、backend `cpu`；CUDA 保存其实际模型 revision、pipeline 和 backend。SQLite 结构不变，旧结果缺少 `model_name` 时按 SenseVoiceSmall 展示，保留原 CPU/CUDA 标识。旧文案在源视频缺失后仍可复制/导出；失败、无语音或取消保留旧正文。重新提取成功后才替换正文与模型身份。
+CPU 新结果保存名称 `Fun-ASR-Nano`、上述模型 revision、pipeline `fun-asr-nano-cpu-fbbfe018-v1`、backend `cpu`；CUDA 保存其实际模型 revision、pipeline 和 backend。知识库 schema v2 中，成功正文唯一保存在 `asset_documents`，`asset_transcriptions` 只保存按文件关联的操作摘要；旧 `video_transcripts` 行在事务迁移后删除，不再双写。旧任务命令继续适配到资产 / 文件入口，旧结果缺少 `model_name` 时仍按 SenseVoiceSmall 展示并保留原 CPU/CUDA 标识。旧文案在文件缺失或重新关联后仍可读取；来源变化按当前关联文件与文案原始指纹比较。失败、无语音或取消保留成功正文，重新提取成功后新增识别版本并更新当前展示，不覆盖整理稿。迁移与验证见 [知识库实施记录](workbench-knowledge-base-validation.md)。
 
 TXT 继续输出 UTF-8 BOM 与平台换行，保留全文，原子写入且禁止覆盖原视频或其别名。长文案在只读文本框内部滚动，文本框四边和内置焦点线保持完整可见；标题、提取时间和底部操作保持位置稳定，连续长串换行及键盘路径保留。
 

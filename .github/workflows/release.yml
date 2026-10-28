@@ -73,7 +73,7 @@ jobs:
         run: |
           cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q
       - name: Build CPU speech helper
@@ -88,7 +88,20 @@ jobs:
         env:
           # Windows is unsigned; macOS uses ad-hoc signing per the product decision.
           APPLE_SIGNING_IDENTITY: '-'
-        run: npm run tauri -- build --features desktop --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundles }} -- --locked
+        run: |
+          npm run tauri -- build --features desktop,mcp --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundles }} -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/update_mcp_licenses.py --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($IsWindows) {
+            $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+            ./scripts/check_windows_installer.ps1 -Installer $installer.FullName -RunId release
+          } else {
+            $app = 'src-tauri/target/release/bundle/macos/映取.app'
+            python scripts/check_packaged_mcp.py $app
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            codesign --verify --deep --strict $app
+          }
       - name: Upload installer
         uses: actions/upload-artifact@v7
         with:

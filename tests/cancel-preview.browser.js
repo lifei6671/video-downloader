@@ -48,7 +48,7 @@ async page => {
   }
   await load('multiple');await cancel();await empty();
   await page.getByRole('button',{name:'下载任务',exact:true}).click();
-  await page.getByRole('button',{name:'下载作品',exact:true}).click();await empty('',false);
+  await page.getByRole('button',{name:'下载中心',exact:true}).click();await empty('',false);
   cases.push('older restored previews stay hidden after navigation');
   await load('cancel-preview-no-event');await cancel();await empty();
   await page.evaluate(()=>window.backgroundTest.stale());await empty();
@@ -74,7 +74,7 @@ async page => {
   cases.push('unsubmitted parsing cancellation resets');
   await load('queued');const home=await input.inputValue();
   await page.getByRole('button',{name:'下载任务',exact:true}).click();await cancel();
-  await page.getByRole('button',{name:'下载作品',exact:true}).click();
+  await page.getByRole('button',{name:'下载中心',exact:true}).click();
   check(await input.inputValue()===home && await page.getByRole('button',{name:'后台下载',exact:true}).isVisible(),'task-list cancellation reset an unrelated home preview');
   cases.push('task-list cancellation keeps unrelated home preview');
   await load('normal');await input.fill(next);await input.press('Enter');

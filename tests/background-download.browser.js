@@ -19,7 +19,7 @@ async page => {
     await page.getByText('粘贴链接开始解析',{exact:true}).waitFor();
     check(await input.inputValue()==='', 'input was not reset');
     if(focus)await page.waitForFunction(()=>document.activeElement?.id==='video-input');
-    await page.getByRole('heading',{name:'下载作品',exact:true}).waitFor();
+    await page.getByRole('heading',{name:'下载中心',exact:true}).waitFor();
   };
   const results=[];
   for(const platform of ['telegram','douyin','tiktok','youtube','album']) {

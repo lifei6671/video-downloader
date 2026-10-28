@@ -1,5 +1,13 @@
+pub mod core_ipc;
 pub mod desktop_core;
 pub mod files;
+pub mod library;
+#[cfg(feature = "mcp")]
+pub mod mcp_adapter;
+pub mod mcp_read;
+pub mod mcp_write;
+pub mod mcp_operations;
+pub mod mcp_connection;
 pub mod naming;
 pub mod parse_cache;
 pub mod python_bridge;

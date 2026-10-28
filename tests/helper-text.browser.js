@@ -63,7 +63,7 @@ async page => {
     check(await releaseBody.evaluate(el=>getComputedStyle(el).fontSize)==='14px','release notes body was shrunk');
     check(await releaseBody.evaluate(el=>getComputedStyle(el).color)===foreground,'release notes body was recolored');
     await page.keyboard.press('Escape');
-    await page.getByRole('button',{name:'下载作品',exact:true}).click();
+    await page.getByRole('button',{name:'下载中心',exact:true}).click();
     await page.getByRole('textbox').first().fill('https://youtu.be/BaW_jenozKc');
     await page.getByRole('button',{name:'解析链接',exact:true}).click();
     const error=page.getByRole('alert').filter({hasText:'网络连接失败'});

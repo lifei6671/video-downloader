@@ -1,0 +1,86 @@
+async page => {
+  page.setDefaultTimeout(12000);
+  const check = (value, reason) => { if (!value) throw Error(reason); }, results = [];
+  const topic = () => page.getByRole('region', { name: '研究专题', exact: true });
+  const load = async () => {
+    await page.goto('http://127.0.0.1:1420/tests/fixtures/knowledge-library.html?detail=1&writing=1&topics=1');
+    await page.getByRole('button', { name: '知识库', exact: true }).click();
+    await page.getByRole('button', { name: '研究专题', exact: true }).click();
+  };
+  const create = async title => { await topic().getByRole('textbox', { name: '专题标题', exact: true }).fill(title); await topic().getByRole('textbox', { name: '专题研究内容', exact: true }).fill('研究开头与画面😀'); await topic().getByRole('button', { name: '保存专题', exact: true }).click(); await topic().getByRole('button', { name: '添加资料', exact: true }).waitFor(); };
+  const choose = async (name, option) => { await page.getByRole('dialog').getByRole('combobox', { name, exact: true }).click(); await page.getByRole('option', { name: option, exact: true }).click(); };
+  const add = async (kind, index = 0) => {
+    await topic().getByRole('button', { name: '添加资料', exact: true }).click();
+    await page.getByRole('dialog').getByRole('combobox', { name: '专题来源视频', exact: true }).click(); await page.getByRole('option').first().click();
+    if (kind !== '视频') { await choose('专题资料类型', kind); await page.getByRole('dialog').getByRole('combobox', { name: '专题来源资料', exact: true }).click(); await page.getByRole('option').nth(index).click(); }
+    await page.getByRole('dialog').getByRole('button', { name: '添加资料', exact: true }).click(); await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  };
+  await load(); await create('开场研究😀');
+  const clipId = await page.evaluate(() => window.topicsTest.seedClip());
+  await add('视频'); await add('片段'); await add('笔记');
+  check((await page.evaluate(() => window.topicsTest.snapshot().members)).length === 3, 'missing member kind');
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
+    await page.setViewportSize({ width, height }); check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'viewport overflow');
+    await page.screenshot({ path: `output/playwright/wb308-${width}.png` });
+  }
+  await topic().locator('[data-topic-member]').first().getByRole('button', { name: '打开资料', exact: true }).click();
+  await page.getByRole('region', { name: '视频资料详情', exact: true }).waitFor();
+  check(!await page.locator('.library-topics').isVisible(), 'inactive topic workspace still visible alongside detail');
+  await page.getByRole('button', { name: '返回专题', exact: true }).click();
+  await topic().waitFor();
+  await page.waitForFunction(() => document.querySelectorAll('.library-topics [data-topic-member]').length === 3 && document.querySelector('.topic-detail')?.getAttribute('aria-busy') === 'false');
+  check(await topic().getByRole('textbox', { name: '专题标题', exact: true }).inputValue() === '开场研究😀', 'return lost selected topic');
+  const before = await page.evaluate(() => window.topicsTest.snapshot().members.map(m => m.id));
+  await topic().getByRole('button', { name: '上移资料 3', exact: true }).focus(); await page.keyboard.press('Enter');
+  await page.waitForFunction(first => window.topicsTest.snapshot().members.find(m => m.id === first).position === 2, before[1]);
+  const ordered = await page.evaluate(() => window.topicsTest.snapshot().members.sort((a, b) => a.position - b.position).map(m => m.kind));
+  check(JSON.stringify(ordered) === JSON.stringify(['video', 'note', 'clip']), 'wrong member moved');
+  const rows = () => topic().locator('[data-topic-member]');
+  await rows().nth(1).getByRole('button', { name: '打开资料', exact: true }).click(); await page.getByRole('dialog').locator('pre').filter({ hasText: '已保存学习笔记' }).waitFor(); await page.keyboard.press('Escape');
+  await rows().nth(2).getByRole('button', { name: '打开资料', exact: true }).click(); await page.getByRole('dialog').locator('video').waitFor(); await page.waitForFunction(() => document.querySelector('[role="dialog"] video')?.readyState >= 2); await page.keyboard.press('Escape'); check(await page.locator('video').count() === 0, 'topic source player leak');
+  results.push('create topic and combine video/clip/note; three viewports; keyboard reorder persists correct IDs; source note and actual range player release');
+  await topic().getByRole('button', { name: '添加资料', exact: true }).click();
+  await page.getByRole('dialog').getByRole('combobox', { name: '专题来源视频', exact: true }).click(); await page.getByRole('option').first().click();
+  await page.getByRole('dialog').getByRole('button', { name: '添加资料', exact: true }).click();
+  await page.getByRole('dialog').getByRole('alert').filter({ hasText: '该资料已在专题中' }).waitFor();
+  check((await page.evaluate(() => window.topicsTest.snapshot().members)).length === 3, 'duplicate member inserted');
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click();
+  await rows().nth(2).getByRole('button', { name: '移除成员', exact: true }).click();
+  await page.waitForFunction(() => window.topicsTest.snapshot().members.length === 2);
+  check(await page.evaluate(id => window.libraryDetailTest.clips().some(c => c.id === id) && window.writingTest.snapshot('a0').notes.length > 0, clipId), 'remove member deleted original');
+  await add('片段');
+  await page.evaluate(async clip => { window.topicsTest.deleteNote('n-a0'); await window.libraryDetailTest.changeFile('a0', 'f-a0', { missing: true }); await window.libraryDetailTest.clips(); await window.libraryTest.emit('assets', ['a0']); }, clipId);
+  await page.evaluate(() => window.topicsTest.archive('a0'));
+  await topic().getByText('引用缺失', { exact: true }).waitFor();
+  check(await topic().getByText('已移出知识库', { exact: true }).count() === 3 && await topic().getByText('文件缺失', { exact: true }).count() >= 1, 'archive or missing media not shown');
+  await page.evaluate(id => window.topicsTest.deleteClip('a0', id), clipId);
+  await page.waitForFunction(() => document.querySelectorAll('.topic-member-states').length === 3 && [...document.querySelectorAll('.topic-member-states')].filter(e => e.textContent.includes('引用缺失')).length === 2);
+  results.push('removing a member preserves original clip/note; archived sources and missing media remain visible; deleted clip/note keep historical reference rows');
+  await topic().getByRole('textbox', { name: '专题标题', exact: true }).fill('本地研究草稿');
+  await topic().getByRole('button', { name: '返回视频列表', exact: true }).click(); await page.getByRole('alertdialog').waitFor(); await page.getByRole('button', { name: '继续编辑', exact: true }).click();
+  await page.evaluate(() => window.topicsTest.failNext('editTopic')); await topic().getByRole('button', { name: '保存专题', exact: true }).click(); await topic().getByRole('alert').waitFor();
+  check(await topic().getByRole('textbox', { name: '专题标题', exact: true }).inputValue() === '本地研究草稿', 'failed write lost draft');
+  await topic().getByRole('button', { name: '保存专题', exact: true }).click();
+  await page.waitForFunction(() => window.topicsTest.snapshot().topics[0].title === '本地研究草稿');
+  results.push('dirty navigation guard and failed save keep local topic fields; retry commits once');
+  await load(); await create('回读失败研究');
+  await page.evaluate(() => window.topicsTest.failReads(true));
+  await topic().getByRole('button', { name: '添加资料', exact: true }).click(); await page.getByRole('dialog').getByRole('combobox', { name: '专题来源视频', exact: true }).click(); await page.getByRole('option').first().click(); await page.getByRole('dialog').getByRole('button', { name: '添加资料', exact: true }).click(); await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  await topic().getByRole('alert').waitFor(); check((await page.evaluate(() => window.topicsTest.snapshot().members)).length === 1, 'commit/read failure changed member count'); check(await topic().getByRole('button', { name: '添加资料', exact: true }).isDisabled(), 'commit/read failure permits duplicate retry');
+  await page.evaluate(() => window.topicsTest.failReads(false)); await topic().getByRole('button', { name: '重新读取专题', exact: true }).click(); await rows().first().waitFor();
+  results.push('successful member commit followed by failed read blocks duplicate retry and recovers exact relationship');
+  await load(); await create('过期添加研究');
+  await topic().getByRole('button', { name: '添加资料', exact: true }).click();
+  await page.getByRole('dialog').getByRole('combobox', { name: '专题来源视频', exact: true }).click(); await page.getByRole('option').first().click();
+  await page.evaluate(() => window.topicsTest.remoteEdit(window.topicsTest.snapshot().topics[0].id, false));
+  await page.getByRole('dialog').getByRole('button', { name: '添加资料', exact: true }).click();
+  await page.getByRole('dialog').getByRole('alert').filter({ hasText: '专题已更新' }).waitFor();
+  check(await page.getByRole('dialog').getByRole('button', { name: '添加资料', exact: true }).isDisabled(), 'stale add permits retry');
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click();
+  await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  check((await page.evaluate(() => window.topicsTest.snapshot().members)).length === 0, 'stale add wrote a member');
+  await topic().getByRole('button', { name: '重新读取专题', exact: true }).click(); await add('视频');
+  check((await page.evaluate(() => window.topicsTest.snapshot().members)).length === 1, 'stale-add recovery did not add once');
+  results.push('stale add shows conflict inside picker, blocks writes while allowing close, rereads current topic and adds exactly one member');
+  return { status: 'PASSED', cases: results };
+}

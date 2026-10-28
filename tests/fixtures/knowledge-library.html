@@ -1,0 +1,65 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+// Isolated UI contract fixture. Only synthetic data in this page's localStorage key.
+import {api} from '/src/api';
+import {libraryApi} from '/src/lib/library-api';
+const clone=value=>structuredClone(value);
+const storageKey='yingqu.test.wb113';
+const options=new URLSearchParams(location.search);
+const seed=()=>({categories:[{id:'c1',parent_id:null,name:'文案学习',position:0},{id:'c2',parent_id:'c1',name:'开场钩子',position:0},{id:'c3',parent_id:null,name:'拍摄手法',position:1}],tags:[{id:'t1',name:'节奏'},{id:'t2',name:'反差'}],assets:options.has('empty')?[]:Array.from({length:46},(_,i)=>({id:'a'+i,title:i===0?'中文灵感：'+('这是一个很长的视频标题'.repeat(8)):i===1?'含有100%_字面的文案':'灵感视频 '+i,author:i%3?'创作者 '+i:null,platform:['douyin','youtube',null,'tiktok'][i%4],video_id:'v'+i,canonical_url:null,created_at:100-i,updated_at:100-i,archived_at:i===45?100:null,category_ids:i%4===0?['c2']:i%4===1?['c3']:[],tag_ids:i%3===0?['t1','t2']:i%3===1?['t1']:[],file_state:i===2?'missing':i===3?'changed':'available'}))});
+let state=options.has('persist')&&localStorage.getItem(storageKey)?JSON.parse(localStorage.getItem(storageKey)):seed();
+const listeners=new Set();
+const calls=[];let failNext=null;let importMode='success';let sequence=100;let searchHold=null;let assetHold=null;let failMethod=null;
+const emit=(scope='assets',asset_ids=[])=>listeners.forEach(callback=>callback({scope,asset_ids}));
+const saved=(scope='assets',asset_ids=[])=>{localStorage.setItem(storageKey,JSON.stringify(state));emit(scope,asset_ids)};
+const fail=()=>{if(failNext){const reason=failNext;failNext=null;throw reason}};
+const asset=id=>{const item=state.assets.find(item=>item.id===id);if(!item)throw 'ASSET_NOT_FOUND';return item};
+window.libraryTest={calls,failMethodOnce:method=>{failMethod=method},snapshot:()=>clone(state),subscriptions:()=>listeners.size,failNext:reason=>{failNext=reason},importMode:mode=>{importMode=mode},emit,addVideo:()=>{state.assets.unshift({...clone(state.assets[0]),id:'event-video',title:'事件新增视频',created_at:300});saved()},holdSearch:query=>{searchHold={query,resolve:null}},releaseSearch:()=>{searchHold?.resolve?.();searchHold=null},holdAsset:()=>{assetHold={resolve:null}},releaseAsset:()=>{assetHold?.resolve?.();assetHold=null}};
+api.tasks=async()=>[];
+libraryApi.clips=async()=>[];
+libraryApi.keyframes=async()=>[];libraryApi.keyframeOperation=async()=>null;libraryApi.subscribeKeyframes=async()=>()=>{};
+libraryApi.transfer=async()=>null;libraryApi.subscribeTransfer=async()=>()=>{};
+libraryApi.visit=async id=>{calls.push({method:'visit',assetId:id});fail();state.visits??=[];state.visits=[id,...state.visits.filter(value=>value!==id)];saved('visits',[id])};
+api.settings=async()=>({download_directory:'C:\\SyntheticVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'fixture',proxy:null,cookie_configured:false})),tdl:{enabled:false,path:null}});
+api.subscribe=async()=>()=>{};api.tdlLoginStatus=async()=>null;
+api.importLibraryVideo=async()=>{calls.push({method:'import'});fail();if(importMode==='cancel')return null;if(importMode==='hold'){await new Promise(resolve=>{window.libraryTest.cancelImport=resolve});throw'CANCELED'}const id='import-'+sequence++;state.assets.unshift({id,title:'本地导入视频',author:null,platform:null,created_at:400,updated_at:400,archived_at:null,category_ids:[],tag_ids:[],file_state:'available'});saved();return{asset_id:id,file_id:'f'+id,already_present:false}};
+api.cancelLibraryImport=async()=>{calls.push({method:'cancelImport'});window.libraryTest.cancelImport?.()};
+libraryApi.subscribe=async callback=>{listeners.add(callback);return()=>listeners.delete(callback)};
+libraryApi.categories=async()=>clone(state.categories);libraryApi.tags=async()=>clone(state.tags);
+libraryApi.cover=async id=>{if(id!=='a0')throw'COVER_UNAVAILABLE';return new TextEncoder().encode('<svg/>')};
+libraryApi.search=async(request={})=>{
+ calls.push({method:'search',request:clone(request)});fail();
+ for(const id of request.category_ids??[])if(!state.categories.some(c=>c.id===id))throw'CATEGORY_NOT_FOUND';
+ for(const id of request.tag_ids??[])if(!state.tags.some(t=>t.id===id))throw'TAG_NOT_FOUND';
+ const allCategories=new Set(request.category_ids??[]);let count=-1;while(count!==allCategories.size){count=allCategories.size;state.categories.filter(c=>allCategories.has(c.parent_id)).forEach(c=>allCategories.add(c.id))}
+ let rows=state.assets.filter(a=>!!a.archived_at===!!request.archived && (!request.query||a.title.includes(request.query)||a.author?.includes(request.query))&&(!allCategories.size||a.category_ids.some(c=>allCategories.has(c)))&&(!request.uncategorized||!a.category_ids.length)&&(!request.unorganized||!window.writingTest?.snapshot(a.id).documents.some(d=>d.summary.kind==='edited')&&!window.writingTest?.snapshot(a.id).notes.length)&&(request.tag_ids??[]).every(id=>a.tag_ids.includes(id))&&(!request.platform||a.platform===(request.platform==='local'?null:request.platform))&&(!request.file_state||request.file_state==='all'||a.file_state===request.file_state||(request.file_state==='available'&&a.file_state==='changed'))).sort((a,b)=>b.created_at-a.created_at||b.id.localeCompare(a.id));
+ if(request.cursor)rows=rows.filter(a=>a.created_at<request.cursor.created_at||(a.created_at===request.cursor.created_at&&a.id<request.cursor.id));
+ const page=rows.slice(0,request.limit??20);const last=page.at(-1);
+ const result={items:page.map(a=>({asset:clone(a),hit:request.query?{field:'title',excerpt:a.title.slice(0,120),document_id:null,document_version:null,note_id:null}:null,files:{total:1,available:a.file_state==='missing'?0:1,changed:a.file_state==='changed'?1:0}})),next_cursor:rows.length>page.length?{created_at:last.created_at,id:last.id}:null};
+ if(searchHold?.query===request.query)await new Promise(resolve=>searchHold.resolve=resolve);
+ return result;
+};
+libraryApi.asset=async id=>{fail();const a=clone(asset(id));if(assetHold)await new Promise(resolve=>assetHold.resolve=resolve);return{asset:a,files:[],documents:[],notes:[],category_ids:a.category_ids,tag_ids:a.tag_ids}};
+libraryApi.createCategory=async(name,parent_id)=>{fail();if(state.categories.some(c=>c.name===name&&c.parent_id===parent_id))throw'CATEGORY_EXISTS';const id='c'+sequence++;state.categories.push({id,name,parent_id,position:0});saved('categories');return id};
+libraryApi.updateCategory=async(id,name,parent_id,position)=>{fail();if(state.categories.some(c=>c.id!==id&&c.name===name&&c.parent_id===parent_id))throw'CATEGORY_EXISTS';Object.assign(state.categories.find(c=>c.id===id),{name,parent_id,position});saved('categories')};
+libraryApi.deleteCategory=async id=>{fail();if(state.categories.some(c=>c.parent_id===id))throw'CATEGORY_HAS_CHILDREN';state.categories=state.categories.filter(c=>c.id!==id);state.assets.forEach(a=>a.category_ids=a.category_ids.filter(c=>c!==id));saved('categories')};
+libraryApi.createTag=async name=>{fail();const exists=state.tags.find(t=>t.name===name);if(exists)return exists.id;const id='t'+sequence++;state.tags.push({id,name});saved('tags');return id};
+libraryApi.renameTag=async(id,name)=>{fail();if(state.tags.some(t=>t.id!==id&&t.name===name))throw'TAG_EXISTS';state.tags.find(t=>t.id===id).name=name;saved('tags')};
+libraryApi.deleteTag=async id=>{fail();state.tags=state.tags.filter(t=>t.id!==id);state.assets.forEach(a=>a.tag_ids=a.tag_ids.filter(t=>t!==id));saved('tags')};
+for(const [method,field,scope] of [['setCategories','category_ids','categories'],['setTags','tag_ids','tags']])libraryApi[method]=async(ids,id,add)=>{calls.push({method,ids:clone(ids),id,add});if(failMethod===method){failMethod=null;throw'DATABASE_ERROR'}fail();ids.forEach(item=>{const row=asset(item);row[field]=add?[...new Set([...row[field],id])]:row[field].filter(value=>value!==id)});saved(scope,ids)};
+libraryApi.archive=async(id,archived)=>{calls.push({method:'archive',id,archived});fail();asset(id).archived_at=archived?500:null;saved('assets',[id])};
+if(options.has('detail')) {
+ const {installLibraryDetailFixture}=await import('./library-detail-fixture.js');
+ installLibraryDetailFixture({api,libraryApi,state,calls,clone,saved,asset});
+ const {installLibraryWritingFixture}=await import('./library-writing-fixture.js');
+ installLibraryWritingFixture({api,libraryApi,state,calls,clone,saved,asset},options.has('writing'),options.has('workbench'));
+ const {installKeyframeFixture}=await import('./library-keyframes-fixture.js');
+ installKeyframeFixture({libraryApi,clone,saved});
+}
+if(options.has('topics')||options.has('ideas')) { const {installTopicsFixture}=await import('./library-topics-fixture.js'); installTopicsFixture({libraryApi,state,saved,asset,clone}); }
+if(options.has('workbench')) { const {installWorkbenchFixture}=await import('./workbench-fixture.js'); installWorkbenchFixture({api,libraryApi,state,calls,clone,saved,asset,options}); }
+if(options.has('ideas')) { const {installIdeasFixture}=await import('./library-ideas-fixture.js'); installIdeasFixture({libraryApi,state,saved,clone}); }
+if(options.has('backup')) { const {installBackupFixture}=await import('./library-backup-fixture.js'); installBackupFixture({libraryApi,state,calls,clone,saved,options}); }
+if(options.has('mcp')) { const {mcpApi}=await import('/src/lib/mcp-api'); const {installMcpSettingsFixture}=await import('./mcp-settings-fixture.js'); installMcpSettingsFixture(mcpApi,options); }
+await import('/src/main');
+</script></body></html>

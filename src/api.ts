@@ -1,5 +1,6 @@
 import { invoke, Channel, convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+export { libraryApi } from './lib/library-api';
 export type Status = 'parsing' | 'ready' | 'queued' | 'downloading' | 'completed' | 'failed' | 'canceled';
 export type Resolver = 'auto' | 'yt-dlp' | 'dtk' | 'tdl';
 export type ProjectPage = 'source' | 'issues' | 'releases' | 'license' | 'credits' | 'credit-ytdlp' | 'credit-dtk' | 'credit-tauri' | 'credit-react' | 'credit-shadcn' | 'credit-lucide';
@@ -7,7 +8,7 @@ export interface UpdateCheck { current_version: string; latest_version: string; 
 export interface UpdateDownload { id: string; revision: number; release: UpdateCheck; phase: 'preparing' | 'downloading' | 'verifying' | 'canceling' | 'completed' | 'canceled' | 'failed'; downloaded_bytes: number; total_bytes: number | null; filename: string | null; error: string | null }
 export type ModelVariant = 'cpu' | 'cuda';
 export interface RuntimeTool { id: 'ffmpeg' | 'javascript' | 'fun-asr-nano'; available: boolean; provider: string | null; version: string | null; path: string | null; source: 'system' | 'managed' | null; can_install: boolean; download_bytes?: number | null; variants?: ModelVariant[]; variant_download_bytes?: Partial<Record<ModelVariant, number>>; variant_model_bytes?: Partial<Record<ModelVariant, number>> }
-export interface VideoTranscript { task_id: string; operation_id: string; sequence: number; state: 'running' | 'completed' | 'no_speech' | 'failed' | 'canceled' | 'interrupted'; phase: string | null; backend?: 'cpu' | 'cuda' | null; completed_segments?: number | null; total_segments?: number | null; error_code: string | null; updated_at: number; has_result: boolean; source_changed: boolean; result: {text: string; source: {path: string; size: number; mtime_ns: string}; model_revision: string; model_name?: string | null; pipeline_revision: string; backend?: 'cpu' | 'cuda' | null; completed_at: number} | null }
+export interface VideoTranscript { asset_id?: string | null; file_id?: string | null; task_id: string; operation_id: string; sequence: number; state: 'running' | 'completed' | 'no_speech' | 'failed' | 'canceled' | 'interrupted'; phase: string | null; backend?: 'cpu' | 'cuda' | null; completed_segments?: number | null; total_segments?: number | null; error_code: string | null; updated_at: number; has_result: boolean; source_changed: boolean; result: {timing?: import('./lib/library-api').TranscriptTiming | null; text: string; source: {path: string; size: number; mtime_ns: string}; model_revision: string; model_name?: string | null; pipeline_revision: string; backend?: 'cpu' | 'cuda' | null; completed_at: number} | null }
 export interface RuntimeStatus { platform: string; directory: string; tools: RuntimeTool[] }
 export interface RuntimeProgress { tool: RuntimeTool['id']; phase: 'downloading' | 'verifying' | 'installing'; downloaded_bytes: number; total_bytes: number }
 export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string }
@@ -22,6 +23,13 @@ export interface TdlLoginStatus { id: string; phase: 'starting' | 'qr' | 'passwo
 export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[]; tdl: TdlSettings }
 export interface FilenamePreview { path: string; segments: { text: string; variable: string | null }[] }
 export const api = {
+  importLibraryVideo: () => invoke<{asset_id: string; file_id: string; already_present: boolean} | null>('import_library_video'),
+  cancelLibraryImport: () => invoke<void>('cancel_library_import'),
+  relinkLibraryFile: (assetId: string, fileId: string) => invoke<{asset_id: string; file_id: string; already_present: boolean} | null>('relink_library_file', {assetId, fileId}),
+  assetTranscript: (assetId: string, fileId: string) => invoke<VideoTranscript | null>('get_asset_transcript', {assetId, fileId}),
+  startAssetTranscription: (assetId: string, fileId: string, force = false) => invoke<VideoTranscript>('start_asset_transcription', {assetId, fileId, force}),
+  cancelAssetTranscription: (fileId: string, operationId: string) => invoke<void>('cancel_asset_transcription', {fileId, operationId}),
+  subscribeAssetTranscripts: (callback: (snapshot: VideoTranscript) => void) => listen<VideoTranscript>('asset_transcription_updated', event => callback(event.payload)),
   transcripts: () => invoke<VideoTranscript[]>('list_video_transcripts'),
   transcript: (taskId: string) => invoke<VideoTranscript | null>('get_video_transcript', {taskId}),
   startTranscription: (taskId: string, force = false) => invoke<VideoTranscript>('start_video_transcription', {taskId, force}),
@@ -94,9 +102,75 @@ export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlyS
   return [...map.values()].sort((a, b) => b.created_at - a.created_at);
 }
 const errors: Record<string, string> = {
+  LIBRARY_NOT_EMPTY: '知识库已有资料，请在空知识库中恢复',
+  LIBRARY_BUSY: '请先结束下载、导入或文案提取，再恢复知识库',
+  LIBRARY_TRANSFER_BUSY: '已有备份或恢复操作，请等待完成',
+  LIBRARY_TRANSFER_NOT_FOUND: '该备份或恢复操作已不存在',
+  LIBRARY_TRANSFER_COMMITTING: '正在完成保存，请等待结果',
+  LIBRARY_TARGET_EXISTS: '目标目录已存在，请重新选择保存位置',
+  LIBRARY_PACKAGE_VERSION: '备份包版本不受支持',
+  LIBRARY_PACKAGE_INVALID: '备份包内容或引用无效',
+  LIBRARY_PACKAGE_PATH: '备份包文件路径无效或指向包外',
+  LIBRARY_PACKAGE_CHECKSUM: '备份包校验失败，文件可能已损坏',
+  LIBRARY_PACKAGE_TOO_LARGE: '备份清单或封面超过支持的大小',
+  LIBRARY_BACKUP_SOURCE_CHANGED: '视频在备份过程中发生变化，请重试',
+  LIBRARY_RESTORE_CLEANUP_FAILED: '恢复失败且无法清理新建目录，请检查目录权限',
+  WORKBENCH_TASK_REMOVED: '该任务已移除',
   NAMING_INVALID: '请使用相对路径，路径最多 4 段，不含空目录、反斜杠或上级目录',
   TRANSCRIPTION_BUSY: '已有视频正在提取文案，请完成或取消后再开始',
   TRANSCRIPTION_ENGINE_UNAVAILABLE: '语音转录程序不可用，请检查应用安装是否完整',
+  LIBRARY_SAVE_FAILED: '视频已下载，知识资料保存失败，请保留下载记录并重新启动应用',
+  LOCAL_VIDEO_INVALID: '无法读取有效视频，请选择 MP4、MOV、MKV 或 WebM 文件',
+  LIBRARY_IMPORT_BUSY: '正在导入视频，请稍后再试',
+  LIBRARY_SOURCE_CHANGED: '视频在导入期间发生变化，请重新导入',
+  ASSET_NOT_FOUND: '视频资料不存在',
+  FILE_NOT_FOUND: '视频文件记录不存在',
+  FILE_ALREADY_LINKED: '该视频已关联到当前资料的其他文件版本',
+  CATEGORY_NOT_FOUND: '分类不存在，请刷新后重试',
+  CATEGORY_EXISTS: '同级分类中已存在此名称',
+  CATEGORY_CYCLE: '不能将分类移动到自身或其子分类中',
+  CATEGORY_HAS_CHILDREN: '请先移动或删除子分类',
+  TAG_NOT_FOUND: '标签不存在，请刷新后重试',
+  TAG_EXISTS: '已存在此名称的标签',
+  DOCUMENT_NOT_FOUND: '文案版本不存在',
+  DOCUMENT_CONFLICT: '文案已更新，请重新读取后再保存',
+  NOTE_NOT_FOUND: '笔记不存在',
+  IDEA_INVALID: '观点或草稿超出长度限制',
+  IDEA_NOT_FOUND: '选题不存在',
+  IDEA_REFERENCE_INVALID: '参考资料无效，请重新选择',
+  IDEA_REFERENCE_EXISTS: '该资料已在参考列表中',
+  IDEA_CONFLICT: '草稿已更新，请重新读取并保留当前内容',
+  TOPIC_INVALID: '专题内容或成员顺序无效',
+  TOPIC_NOT_FOUND: '专题不存在',
+  TOPIC_REFERENCE_INVALID: '专题来源无效，请重新选择',
+  TOPIC_MEMBER_NOT_FOUND: '专题成员不存在',
+  TOPIC_MEMBER_EXISTS: '该资料已在专题中',
+  TOPIC_CONFLICT: '专题已更新，请重新读取后再操作',
+  COMPARISON_INVALID: '比较内容或来源无效',
+  COMPARISON_SOURCE_CHANGED: '来源拆解已更新，请重新选择来源后保存',
+  COMPARISON_REQUIRED: '请使用比较笔记编辑器',
+  ANALYSIS_REQUIRED: '请使用拆解表单修改这篇笔记',
+  ANALYSIS_INVALID: '请填写有效拆解内容，并检查引用时间范围',
+  ANALYSIS_MODEL_REQUIRED: '记录 AI 结果时需要填写模型名称',
+  ANALYSIS_REFERENCE_INVALID: '引用的片段或关键帧与原来源不一致',
+  ANALYSIS_EVIDENCE_INVALID: '声音观察不能仅依据关键帧',
+  NOTE_CONFLICT: '笔记已更新，请重新读取后再保存',
+  KEYFRAME_NOT_FOUND: '关键帧不存在，请刷新后重试',
+  KEYFRAME_BUSY: '已有关键帧提取正在运行',
+  KEYFRAME_OPERATION_NOT_FOUND: '本次关键帧提取已不存在',
+  KEYFRAME_SOURCE_CHANGED: '源文件已变化，请重新关联后再提取',
+  KEYFRAME_RANGE_INVALID: '采样范围或数量无效，请重新选择',
+  KEYFRAME_RANGE_UNAVAILABLE: '采样位置没有可用画面，请调整范围或减少采样数量',
+  KEYFRAME_FAILED: '无法解码视频画面，请检查文件和 FFmpeg',
+  KEYFRAME_INVALID_RESULT: '关键帧校验失败，本次结果未保存',
+  CLIP_NOT_FOUND: '片段收藏不存在，请刷新后重试',
+  CLIP_RANGE_INVALID: '结束时间必须晚于开始时间',
+  CLIP_RANGE_UNAVAILABLE: '片段超出可播放范围',
+  CLIP_REASON_TOO_LONG: '收藏理由不能超过 16 KiB',
+  CLIP_SOURCE_CHANGED: '源文件已变化，无法按原范围播放',
+  CLIP_SOURCE_MISMATCH: '引用文案与当前文件版本不一致',
+  INVALID_CITATION: '引用与原文不匹配，请重新选择原文',
+  COVER_UNAVAILABLE: '此视频暂无可用封面',
   TRANSCRIPTION_MODEL_UNAVAILABLE: '语音模型未安装或已损坏，请下载或修复模型',
   TRANSCRIPTION_NO_AUDIO: '视频没有可识别的音轨',
   TRANSCRIPTION_AUDIO_FAILED: '无法提取音频，请检查视频格式、文件完整性和磁盘空间',
@@ -164,7 +238,7 @@ const errors: Record<string, string> = {
   UPSTREAM_CHANGED: '平台响应已变化，暂时无法解析此作品',
   CREDENTIAL_ERROR: '系统凭据存储不可用，配置未能读取或保存',
   CREDENTIAL_CLEANUP_ERROR: '新配置已保存，但旧凭据清理失败',
-  DATABASE_ERROR: '无法保存任务记录，请检查磁盘空间并重启应用',
+  DATABASE_ERROR: '无法读写本地数据，请检查磁盘空间并重启应用',
   INTERRUPTED: '上次任务已中断，请重新解析并从头下载',
   IO_ERROR: '文件操作失败，请检查目录权限、文件占用和磁盘空间',
   INCOMPLETE_MEDIA: '作品文件不完整，请重新解析并下载',

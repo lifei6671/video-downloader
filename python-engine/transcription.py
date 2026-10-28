@@ -11,6 +11,7 @@ from pathlib import Path
 
 import local_tools
 import nano_cuda
+import transcript_segments
 
 MODEL_ID = 'fun-asr-nano'
 MODEL_REVISION = '46e849502a867080d66d351b8dfb1018b607e509'
@@ -23,6 +24,15 @@ MANIFEST = dict(model_revision=MODEL_REVISION, vad_revision=VAD_REVISION, pipeli
 
 class TranscriptionError(Exception):
     pass
+
+
+def audio_command(ffmpeg, source, audio):
+    # HTML media time starts at PTS zero, not necessarily the first packet's PTS.
+    return [ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
+            '-copyts', '-protocol_whitelist', 'file',
+            '-format_whitelist', 'mov,matroska,webm', '-i', str(source),
+            '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000',
+            '-af', 'aresample=async=1:first_pts=0', '-c:a', 'pcm_s16le', '-f', 'wav', str(audio)]
 
 
 def resources():
@@ -136,15 +146,16 @@ def recognize(audio, directory, stage, emit, backend='cpu', device=None):
         if wav.getframerate() != 16000 or wav.getnchannels() != 1 or wav.getsampwidth() != 2:
             raise TranscriptionError('TRANSCRIPTION_AUDIO_FAILED')
         duration = wav.getnframes() / 16000
+        frames = wav.getnframes()
     if not math.isfinite(duration) or duration <= 0:
         raise TranscriptionError('TRANSCRIPTION_AUDIO_FAILED')
     if backend == 'cuda':
         return recognize_cuda(audio, directory, stage, emit, duration, device)
-    output, log = stage / 'transcript.txt', stage / 'recognition.log'
+    output, log = stage / 'transcript.srt', stage / 'recognition.log'
     progress = RecognitionProgress(log)
     code = run_process([str(native_program()), '--enc', str(directory / FILES[0][0]),
                         '-m', str(directory / FILES[1][0]),
-                        '--vad', str(directory / FILES[2][0]), '--vad-maxseg', '30000', '-a', str(audio)],
+                        '--vad', str(directory / FILES[2][0]), '--vad-maxseg', '30000', '-a', str(audio), '--srt'],
                        output, log, max(600, 3 * duration + 120), emit, 'loading_model', duration, observe=progress)
     if code:
         raise TranscriptionError('TRANSCRIPTION_FAILED')
@@ -153,12 +164,16 @@ def recognize(audio, directory, stage, emit, backend='cpu', device=None):
     if output.stat().st_size > MAX_TEXT:
         raise TranscriptionError('TRANSCRIPTION_OUTPUT_TOO_LARGE')
     try:
-        text = output.read_text('utf-8-sig').replace('\r\n', '\n').replace('\r', '\n').strip()
-    except UnicodeError:
+        raw = output.read_text('utf-8-sig').replace('\r\n', '\n').replace('\r', '\n').strip()
+        rows = transcript_segments.parse_srt(raw, frames)
+        text = '\n'.join(row['text'] for row in rows)
+        timing = transcript_segments.write(stage, rows, frames, VAD_REVISION)
+    except (UnicodeError, ValueError):
         raise TranscriptionError('TRANSCRIPTION_FAILED') from None
+    output = stage / 'transcript.txt'
     output.write_text(text, encoding='utf-8', newline='\n')
     return dict(filename='transcript.txt', bytes=output.stat().st_size, no_speech=not bool(text),
-                duration_seconds=duration, backend='cpu')
+                duration_seconds=duration, backend='cpu', timing=timing)
 
 
 def recognize_cuda(audio, directory, stage, emit, duration, device):
@@ -173,7 +188,7 @@ def recognize_cuda(audio, directory, stage, emit, duration, device):
         raise TranscriptionError('TRANSCRIPTION_OUTPUT_TOO_LARGE')
     clips, outputs = stage / 'clips', stage / 'recognized'
     clips.mkdir(); outputs.mkdir()
-    count, previous_end = 0, 0
+    count, previous_end, windows = 0, 0, []
     with wave.open(str(audio), 'rb') as source:
         for line in intervals.read_text('utf-8').splitlines():
             try:
@@ -186,12 +201,13 @@ def recognize_cuda(audio, directory, stage, emit, duration, device):
             if last <= first:
                 raise TranscriptionError('TRANSCRIPTION_VAD_FAILED')
             previous_end = end
+            windows.append((start, min(end, source.getnframes() // 16)))
             count += 1
             source.setpos(first)
             with wave.open(str(clips / f's{count:06d}.wav'), 'wb') as out:
                 out.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
                 out.writeframes(source.readframes(last - first))
-    text = ''
+    text, rows = '', []
     if count:
         framework_log = stage / 'recognition.framework.log'
         progress = RecognitionProgress(framework_log, count, outputs)
@@ -216,12 +232,22 @@ def recognize_cuda(audio, directory, stage, emit, duration, device):
             # A positive VAD clip without a result must not silently disappear.
             if not part:
                 raise TranscriptionError('TRANSCRIPTION_CUDA_FAILED')
+            if part == '/sil':
+                continue
             parts.append(part)
+            start, end = windows[index - 1]
+            rows.append(dict(start_ms=start, end_ms=end, text=part))
         text = '\n'.join(parts)
+    with wave.open(str(audio), 'rb') as source:
+        frames = source.getnframes()
+    try:
+        timing = transcript_segments.write(stage, rows, frames, VAD_REVISION)
+    except ValueError:
+        raise TranscriptionError('TRANSCRIPTION_CUDA_FAILED') from None
     output = stage / 'transcript.txt'
     output.write_text(text, encoding='utf-8', newline='\n')
     return dict(filename=output.name, bytes=output.stat().st_size, no_speech=not bool(text),
-                duration_seconds=duration, backend='cuda')
+                duration_seconds=duration, backend='cuda', timing=timing)
 
 
 def smoke(directory, stage, emit, backend='cpu', device=None):
@@ -254,10 +280,7 @@ def transcribe(params, emit):
     if not ffmpeg:
         raise TranscriptionError('FFMPEG_UNAVAILABLE')
     audio = stage / 'audio.wav'
-    code = run_process([ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
-                        '-protocol_whitelist', 'file', '-format_whitelist', 'mov,matroska,webm',
-                        '-i', str(source), '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000',
-                        '-c:a', 'pcm_s16le', '-f', 'wav', str(audio)],
+    code = run_process(audio_command(ffmpeg, source, audio),
                        stage / 'conversion.stdout', stage / 'conversion.log', 1800, emit, 'extracting_audio')
     if code:
         error = (stage / 'conversion.log').read_bytes()[:65536]

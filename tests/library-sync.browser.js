@@ -1,0 +1,113 @@
+// Synthetic persisted transcripts; real HTML media decoding, seeks and clock events.
+async page => {
+  page.setDefaultTimeout(10000);
+  const check = (ok, message) => { if (!ok) throw Error(message); }, results = [];
+  const detail = () => page.getByRole('region', { name: '视频资料详情', exact: true });
+  const reader = () => page.getByRole('region', { name: '同步阅读', exact: true });
+  const paragraphs = () => reader().locator('[data-segment]');
+  const video = () => detail().locator('video');
+  const load = async (segments, mode = 'valid') => {
+    await page.goto('http://127.0.0.1:1420/tests/fixtures/knowledge-library.html?detail=1&writing=1');
+    await page.waitForFunction(() => !!window.writingTest?.seedTiming);
+    await page.evaluate(({ segments, mode }) => { window.libraryDetailTest.mode(mode); window.writingTest.seedTiming('a0', segments); }, { segments, mode });
+    await page.getByRole('button', { name: '知识库', exact: true }).click();
+    await page.locator('[data-library-asset="a0"]').getByRole('button', { name: /^查看视频资料/ }).click();
+    await reader().waitFor();
+  };
+  const seekPaused = async seconds => {
+    await video().evaluate((v, seconds) => { v.pause(); v.currentTime = seconds; }, seconds);
+    await page.waitForFunction(() => !document.querySelector('video').seeking);
+  };
+  const short = [{ start_ms: 200, end_ms: 500, text: '第一段中文😀' }, { start_ms: 800, end_ms: 1400, text: '第二段学习方法' }, { start_ms: 1800, end_ms: 2600, text: '第三段总结' }];
+  await load(short);
+  await reader().getByRole('button', { name: '选取片段', exact: true }).click();
+  await reader().getByRole('button', { name: '播放', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('video')?.paused && document.querySelector('video')?.readyState >= 2);
+  check(await reader().locator('[data-selected]').count() === 0, 'play action selected text instead');
+  check(await paragraphs().first().getAttribute('aria-label').then(name => name.includes('第一段中文😀')), 'paragraph accessible name omitted text');
+  await seekPaused(.3); await reader().getByLabel('文案段落', { exact: true }).focus(); await page.keyboard.press('Space');
+  await page.waitForFunction(() => !document.querySelector('video').paused);
+  results.push('play in selection mode loads video without changing selection; accessible paragraph names include text');
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
+    await page.setViewportSize({ width, height }); await load(short);
+    await paragraphs().nth(1).click();
+    await page.waitForFunction(() => document.querySelector('video')?.readyState >= 2 && !document.querySelector('video').paused);
+    await seekPaused(1);
+    await paragraphs().nth(1).filter({ has: page.locator('span') }).waitFor();
+    check(await paragraphs().nth(1).getAttribute('aria-current') === 'true', 'seek did not highlight second segment');
+    await seekPaused(.5);
+    check(await reader().locator('[aria-current="true"]').count() === 0, 'half-open segment end / silence retained highlight');
+    await paragraphs().nth(0).focus(); await page.keyboard.press('Space');
+    await page.waitForFunction(() => !document.querySelector('video').paused);
+    await page.keyboard.press('Space'); await page.waitForFunction(() => document.querySelector('video').paused);
+    await page.keyboard.press('ArrowDown');
+    check(await paragraphs().nth(1).evaluate(el => el === document.activeElement), 'arrow focus');
+    await page.keyboard.press('Enter'); await page.waitForFunction(() => !document.querySelector('video').paused);
+    await seekPaused(1.1);
+    await reader().scrollIntoViewIfNeeded(); check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'horizontal overflow');
+    await page.screenshot({ path: `output/playwright/wb305-${width}.png`, animations: 'disabled' });
+    results.push(width + ': real paragraph jump/highlight, half-open gap, scoped Space/arrow/Enter, viewport');
+  }
+  await load(short); await paragraphs().first().click();
+  await page.waitForFunction(() => !document.querySelector('video')?.paused);
+  await reader().getByRole('button', { name: '选取片段', exact: true }).click();
+  await paragraphs().nth(2).click(); await paragraphs().nth(0).click();
+  check(await reader().locator('[data-selected]').count() === 3, 'reverse selection not contiguous');
+  await reader().getByRole('button', { name: '收藏所选片段', exact: true }).click();
+  const clips = page.getByRole('region', { name: '片段收藏', exact: true });
+  check(await clips.getByRole('textbox', { name: '片段开始时间', exact: true }).inputValue() === '0.200', 'selection start');
+  check(await clips.getByRole('textbox', { name: '片段结束时间', exact: true }).inputValue() === '2.600', 'selection end');
+  await clips.getByRole('textbox', { name: '片段标题', exact: true }).fill('同步阅读片段');
+  await clips.getByRole('button', { name: '保存片段', exact: true }).click(); await clips.locator('form').waitFor({ state: 'hidden' });
+  check(await page.evaluate(() => { const c = window.libraryDetailTest.clips()[0]; const d = window.writingTest.snapshot('a0').documents.find(d => d.summary.id === c.document_id); return c.start_ms === 200 && c.end_ms === 2600 && c.document_version === 2 && c.quote === d.text && c.file_id === d.summary.file_id; }), 'saved range/version/source quote');
+  await reader().getByRole('button', { name: '选取片段', exact: true }).click(); await paragraphs().first().click(); await reader().getByRole('button', { name: '取消选取', exact: true }).click();
+  check(await reader().locator('[data-selected]').count() === 0, 'selection cancel');
+  results.push('reverse contiguous segment selection fills exact range and immutable original quote; cancel clears selection');
+  await load(short); await paragraphs().first().click();
+  await page.waitForFunction(() => document.querySelector('video')?.readyState >= 2 && !document.querySelector('video').paused);
+  await reader().evaluate(region => { const rows = region.querySelectorAll('[data-segment]'); rows[1].click(); rows[0].click(); });
+  await page.waitForFunction(() => { const v = document.querySelector('video'); return v && !v.seeking && !v.paused && v.currentTime >= .2 && v.currentTime < .5; });
+  await seekPaused(.3);
+  check(await paragraphs().first().getAttribute('aria-current') === 'true', 'latest seek lost to canceled request');
+  results.push('rapid paragraph requests cancel old seek; latest target and playback win');
+
+  const long = Array.from({ length: 120 }, (_, i) => ({ start_ms: i * 500, end_ms: i * 500 + 400, text: `第${i + 1}段：长文阅读和字幕上下文，用于验证自动滚动不改变键盘焦点。😀` }));
+  await load(long, 'sync-long'); await paragraphs().first().click();
+  await page.waitForFunction(() => document.querySelector('video')?.readyState >= 2);
+  await reader().getByRole('switch', { name: '自动滚动', exact: true }).click();
+  await reader().getByLabel('文案段落', { exact: true }).evaluate(el => { el.scrollTop = 0; });
+  await seekPaused(50.1);
+  check(await paragraphs().nth(100).getAttribute('aria-current') === 'true', 'long sample current segment');
+  check(await reader().getByLabel('文案段落', { exact: true }).evaluate(el => el.scrollTop) === 0, 'disabled scroll moved reader');
+  await reader().getByRole('switch', { name: '自动滚动', exact: true }).click();
+  check(await reader().getByLabel('文案段落', { exact: true }).evaluate(el => el.scrollTop) > 0, 'enabled scroll did not follow');
+  await paragraphs().nth(101).focus(); await seekPaused(52.1);
+  check(await paragraphs().nth(101).evaluate(el => el === document.activeElement), 'follow stole focus');
+  await detail().getByRole('button', { name: '阅读全文', exact: true }).click();
+  const text = detail().getByRole('textbox', { name: '识别原文全文', exact: true }); await text.focus(); await page.keyboard.press('Space');
+  check(await video().evaluate(v => v.paused), 'text editing key toggled playback');
+  await detail().getByRole('tab', { name: '整理稿', exact: true }).click();
+  await detail().getByRole('textbox', { name: '整理稿内容', exact: true }).fill('编辑空格不得播放'); await page.keyboard.press('Space');
+  check(await video().evaluate(v => v.paused), 'edited textarea key toggled playback');
+  await page.getByRole('button', { name: '下载中心', exact: true }).click(); await page.getByRole('alertdialog').getByRole('button', { name: '放弃修改', exact: true }).click();
+  results.push('60s / 120 segments: highlight, scroll off free reading, scroll on follows without focus theft, text input Space isolation');
+
+  await load(short); await detail().getByRole('combobox', { name: '文件版本', exact: true }).click(); await page.getByRole('option', { name: '版本 2：竖屏样本.mp4', exact: true }).click();
+  await reader().getByText('请选择文案对应的文件版本', { exact: true }).waitFor(); check(await paragraphs().first().isDisabled(), 'wrong file permitted jump');
+  await detail().getByRole('combobox', { name: '文件版本', exact: true }).click(); await page.getByRole('option').filter({ hasText: '版本 1' }).click();
+  await page.evaluate(() => window.libraryDetailTest.changeFile('a0', 'f-a0', { changed: true }));
+  await reader().getByText('来源文件已变化或缺失，无法同步播放', { exact: true }).waitFor(); check(await paragraphs().first().isDisabled(), 'changed source permitted jump');
+  await detail().getByRole('button', { name: '阅读全文', exact: true }).click(); check(await detail().getByRole('textbox', { name: '识别原文全文', exact: true }).inputValue() === short.map(s => s.text).join('\n'), 'changed source lost text');
+  results.push('wrong file and changed source block sync while retaining original text');
+
+  await load([{ start_ms: 200, end_ms: 400, text: '头部不可播放' }, { start_ms: 5300, end_ms: 5700, text: '正起点第一段' }, { start_ms: 6100, end_ms: 6500, text: '正起点第二段' }, { start_ms: 12000, end_ms: 12500, text: '尾部不可播放' }], 'positive-pts');
+  await paragraphs().nth(1).click(); await page.waitForFunction(() => document.querySelector('video')?.currentTime >= 5.3 && !document.querySelector('video').paused);
+  await seekPaused(5.4); check(await paragraphs().nth(1).getAttribute('aria-current') === 'true', 'positive PTS not preserved');
+  await paragraphs().nth(0).click(); await reader().getByRole('alert').filter({ hasText: '不在可播放范围' }).waitFor();
+  await paragraphs().nth(3).click(); await reader().getByRole('alert').filter({ hasText: '不在可播放范围' }).waitFor();
+  await video().evaluate(v => { window.oldSyncVideo = v; });
+  await page.getByRole('button', { name: '下载中心', exact: true }).click();
+  check(await page.evaluate(() => window.oldSyncVideo.paused && !window.oldSyncVideo.hasAttribute('src')), 'navigation retained media');
+  results.push('positive PTS 5s origin retained; head/tail rejected without truncation; navigation releases media');
+  return { status: 'PASSED', passed: results.length, nativeTauri: false, cases: results };
+}

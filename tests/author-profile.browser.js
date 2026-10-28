@@ -20,7 +20,7 @@ async page => {
     } else {
       check(await group.getByRole('img').count() === 0, 'fallback should not load remote image');
     }
-    for (const pageName of ['下载作品', '下载任务']) {
+    for (const pageName of ['下载中心', '下载任务']) {
       await page.getByRole('button', {name: pageName, exact: true}).click();
       if (pageName === '下载任务') {
         check((await group.innerText()).trim() === (platform === 'telegram' ? '100' : '作者昵称'), `task name must prefer nickname then ID: ${platform}`);
@@ -31,7 +31,7 @@ async page => {
         check(!await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), `${platform}: page overflow at ${width}`);
         const bounds = await group.boundingBox();
         check(bounds.x >= 0 && bounds.x + bounds.width <= width, `${platform}: author overflow at ${width}`);
-        if (platform === 'douyin') await page.screenshot({path: `.local/author-${pageName === '下载作品' ? 'preview' : 'tasks'}-${width}.png`});
+        if (platform === 'douyin') await page.screenshot({path: `.local/author-${pageName === '下载中心' ? 'preview' : 'tasks'}-${width}.png`});
       }
       if (pageName === '下载任务' && platform !== 'telegram') {
         const search = page.getByPlaceholder('搜索作品标题或作者');

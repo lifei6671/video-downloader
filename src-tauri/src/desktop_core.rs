@@ -1,6 +1,6 @@
 use crate::{
     files::{finalize_album, finalize_to, validate_album, AlbumFile, Video},
-    parse_cache,
+    library, parse_cache,
     python_bridge::PythonBridge,
     settings::{self, Settings},
     tdl_bridge::{self, TdlSettings},
@@ -19,6 +19,22 @@ use tokio::sync::watch;
 use uuid::Uuid;
 #[path = "transcription.rs"]
 pub mod transcription;
+#[path = "keyframes.rs"]
+pub mod keyframes;
+#[path = "library_import.rs"]
+mod library_import;
+#[path = "library_api.rs"]
+pub mod library_api;
+#[path = "library_transfer.rs"]
+mod library_transfer;
+#[path = "library_transfer_operation.rs"]
+pub mod library_transfer_operation;
+#[path = "workbench.rs"]
+pub mod workbench;
+#[path = "mcp_ipc_api.rs"]
+mod mcp_ipc_api;
+#[path = "mcp_operations_api.rs"]
+mod mcp_operations_api;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -157,6 +173,10 @@ pub enum TaskEvent {
     Updated(Box<Task>),
     Removed(String),
     Transcription(Box<transcription::Snapshot>),
+    AssetTranscription(Box<transcription::Snapshot>),
+    LibraryChanged(library_api::LibraryChange),
+    LibraryTransfer(library_transfer_operation::TransferSnapshot),
+    Keyframes(Box<keyframes::KeyframeSnapshot>),
 }
 
 struct Active {
@@ -176,14 +196,21 @@ struct Inner {
     downloads: HashSet<String>,
     workers: Vec<tokio::task::JoinHandle<()>>,
     closing: bool,
+    mcp_write_enabled: bool,
     dependency_cancel: Option<watch::Sender<bool>>,
     transcription: Option<transcription::ActiveTranscription>,
+    video_import: Option<library_import::ActiveImport>,
+    keyframe_run: Option<keyframes::KeyframeRun>,
+    last_import_failure: Option<workbench::WorkbenchOperation>,
+    library_transfer: Option<library_transfer_operation::LibraryTransfer>,
     transcription_unsaved: HashMap<String, transcription::Snapshot>,
     tdl_login_cancel: Option<watch::Sender<bool>>,
     tdl_login_control: Option<tdl_bridge::LoginControl>,
 }
 pub struct Core {
     _instance_lock: std::fs::File,
+    ipc_profile: PathBuf,
+    mcp_ipc: tokio::sync::Mutex<Option<crate::core_ipc::Server>>,
     inner: Mutex<Inner>,
     program: String,
     args: Vec<String>,
@@ -258,13 +285,46 @@ fn persist(db: &Connection, task: &Task) -> Result<()> {
     .context("DATABASE_ERROR")?;
     Ok(())
 }
-fn publish(inner: &mut Inner, task: Task, emit: &dyn Fn(TaskEvent)) -> Result<()> {
+fn publish(inner: &mut Inner, mut task: Task, emit: &dyn Fn(TaskEvent)) -> Result<()> {
     persist(&inner.db, &task)?;
+    let mut library_changed=None;
+    if task.status == Status::Completed {
+        // A library failure must not undo an already committed media download.
+        let saved = (|| -> Result<Option<String>> {
+            let tx = inner.db.transaction()?;
+            library::preserve_task(&tx, &task)?;
+            let asset_id=library::asset_for_task(&tx,&task.id)?;
+            tx.commit()?;
+            Ok(asset_id)
+        })();
+        if let Ok(asset_id)=&saved {library_changed=asset_id.clone();}
+        if let Err(error) = saved {
+            // Keep actionable error classes without logging media metadata,
+            // file paths or SQL parameters from the user's library.
+            let sqlite = error.downcast_ref::<rusqlite::Error>()
+                .and_then(|error| error.sqlite_error())
+                .map(|error| (error.code, error.extended_code));
+            let io = error.downcast_ref::<std::io::Error>().map(|error| error.kind());
+            let json = error.downcast_ref::<serde_json::Error>().map(|error| error.classify());
+            eprintln!("library registration failed: sqlite={sqlite:?}, io={io:?}, json={json:?}");
+            task.error = Some("LIBRARY_SAVE_FAILED".into());
+            // The completed task is already durable. Failure to save an extra
+            // warning (for example SQLITE_FULL) must not turn it into a failed
+            // download or leave the in-memory task running.
+            if let Err(warning_error) = persist(&inner.db, &task) {
+                let sqlite = warning_error.downcast_ref::<rusqlite::Error>()
+                    .and_then(|error| error.sqlite_error())
+                    .map(|error| (error.code, error.extended_code));
+                eprintln!("library warning persistence failed: sqlite={sqlite:?}; completed download retained");
+            }
+        }
+    }
     if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
         *old = task.clone();
     } else {
         inner.tasks.insert(0, task.clone());
     }
+    if let Some(asset_id)=library_changed {emit(TaskEvent::LibraryChanged(library_api::LibraryChange{scope:library_api::LibraryScope::Assets,asset_ids:vec![asset_id]}));}
     emit(TaskEvent::Updated(Box::new(task)));
     Ok(())
 }
@@ -301,6 +361,7 @@ impl Core {
             .context("IO_ERROR")?;
         instance_lock.try_lock().context("APP_ALREADY_RUNNING")?;
         let mut db = Connection::open(db_path).context("DATABASE_ERROR")?;
+        library::initialize(&mut db, db_path)?;
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);
@@ -507,6 +568,14 @@ impl Core {
                 }
             }
         }
+        library::backfill(&mut db, &tasks)?;
+        for task in &mut tasks {
+            if task.error.as_deref() == Some("LIBRARY_SAVE_FAILED") {
+                task.error = None;
+                task.revision += 1;
+                persist(&db, task)?;
+            }
+        }
         // Clean only recorded task-owned directories; never sweep downloads.
         let staging = {
             let mut query = db.prepare("SELECT task_id,path FROM task_staging")?;
@@ -519,6 +588,8 @@ impl Core {
         }
         Ok(Arc::new(Self {
             _instance_lock: instance_lock,
+            ipc_profile: db_path.canonicalize().context("IO_ERROR")?,
+            mcp_ipc: tokio::sync::Mutex::new(None),
             inner: Mutex::new(Inner {
                 db,
                 tasks,
@@ -527,8 +598,13 @@ impl Core {
                 downloads: HashSet::new(),
                 workers: Vec::new(),
                 closing: false,
+                mcp_write_enabled: false,
                 dependency_cancel: None,
                 transcription: None,
+                video_import: None,
+                keyframe_run: None,
+                last_import_failure: None,
+                library_transfer: None,
                 transcription_unsaved: HashMap::new(),
                 tdl_login_cancel: None,
                 tdl_login_control: None,
@@ -714,7 +790,7 @@ impl Core {
             if inner.dependency_cancel.is_some() {
                 bail!("DEPENDENCY_BUSY");
             }
-            if tool.is_some() && inner.transcription.is_some() {
+            if tool.is_some() && (inner.transcription.is_some() || inner.video_import.is_some() || inner.keyframe_run.as_ref().is_some_and(|run|run.snapshot.state=="running")) {
                 bail!("TRANSCRIPTION_BUSY");
             }
             inner.dependency_cancel = Some(cancel);
@@ -948,7 +1024,7 @@ impl Core {
         ) || inner
             .transcription
             .as_ref()
-            .is_some_and(|a| a.snapshot.task_id == id)
+            .is_some_and(|a| a.uses_task(task))
             || inner.active.contains_key(id)
             || inner.downloads.contains(id)
         {
@@ -984,7 +1060,7 @@ impl Core {
                     && !inner
                         .transcription
                         .as_ref()
-                        .is_some_and(|a| a.snapshot.task_id == task.id)
+                        .is_some_and(|a| a.uses_task(task))
             })
             .map(|task| task.id.clone())
             .collect();
@@ -1026,7 +1102,14 @@ impl Core {
             .cloned()
             .collect();
         let tx = inner.db.transaction().context("DATABASE_ERROR")?;
+        let mut changed_assets=HashSet::new();
         for id in &ids {
+            if let Some(task) = inner.tasks.iter().find(|task| task.id == *id) {
+                // Refuse record removal if its only durable learning material
+                // cannot be retained. This transaction also detaches task links.
+                library::preserve_task(&tx, task).context("LIBRARY_SAVE_FAILED")?;
+                if let Some(asset_id)=library::asset_for_task(&tx,id).context("DATABASE_ERROR")? {changed_assets.insert(asset_id);}
+            }
             tx.execute("DELETE FROM video_transcripts WHERE task_id=?", [id])
                 .context("DATABASE_ERROR")?;
             tx.execute("DELETE FROM commit_intents WHERE task_id=?", [id])
@@ -1041,11 +1124,12 @@ impl Core {
         // Staging records, if cleanup previously failed, remain available for
         // startup cleanup. Removing history never touches a completed video.
         inner.tasks.retain(|t| !removing.contains(t.id.as_str()));
-        inner
-            .transcription_unsaved
-            .retain(|id, _| !removing.contains(id.as_str()));
         for id in &ids {
             (self.emit)(TaskEvent::Removed(id.clone()));
+        }
+        if !changed_assets.is_empty() {
+            let mut asset_ids:Vec<_>=changed_assets.into_iter().collect();asset_ids.sort();
+            (self.emit)(TaskEvent::LibraryChanged(library_api::LibraryChange{scope:library_api::LibraryScope::Assets,asset_ids}));
         }
         Ok(ids)
     }
@@ -1079,7 +1163,7 @@ impl Core {
             || inner
                 .transcription
                 .as_ref()
-                .is_some_and(|a| a.snapshot.task_id == id)
+                .is_some_and(|a| inner.tasks.iter().find(|task| task.id == id).is_some_and(|task| a.uses_task(task)))
         {
             bail!("TASK_BUSY");
         }
@@ -1945,9 +2029,14 @@ impl Core {
         let (active, workers) = {
             let mut inner = self.inner.lock().unwrap();
             inner.closing = true;
+            if let Some(active) = &inner.library_transfer { let _ = active.cancel.send(true); }
             if let Some(active) = &inner.transcription {
                 let _ = active.cancel.send(true);
             }
+            if let Some(active) = &inner.video_import {
+                let _ = active.cancel.send(true);
+            }
+            if let Some(active) = &inner.keyframe_run { let _ = active.cancel.send(true); }
             if let Some(cancel) = &inner.dependency_cancel {
                 let _ = cancel.send(true);
             }
@@ -1967,6 +2056,9 @@ impl Core {
                 .collect::<Vec<_>>();
             (active, std::mem::take(&mut inner.workers))
         };
+        if let Err(error) = self.set_mcp_ipc_enabled(false).await {
+            eprintln!("MCP IPC shutdown failed: {}", error.root_cause());
+        }
         let cancellations = active
             .iter()
             .map(|(id, _)| {
@@ -1994,6 +2086,69 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn library_fixture(app: &Core, id: &str, path: &Path) -> Task {
+        let task: Task = serde_json::from_value(json!({
+            "id":id,"revision":1,"status":"completed",
+            "video":{"platform":"douyin","video_id":id,"kind":"video","resolver":"yt-dlp","title":"知识库测试","canonical_url":format!("https://www.douyin.com/video/{id}")},
+            "bytes":4,"total_bytes":4,"speed_bps":null,"error":null,"path":path,
+            "created_at":1,"completed_at":2,"canceling":false,"download_requested":true
+        })).unwrap();
+        publish(&mut app.inner.lock().unwrap(), task.clone(), &*app.emit).unwrap();
+        task
+    }
+
+    #[test]
+    fn library_completed_task_is_registered_and_history_clear_preserves_material() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let file = root.path().join("video.mp4");
+        std::fs::write(&file,b"1234").unwrap();
+        let task = library_fixture(&app,"100",&file);
+        let asset_id = library::asset_for_task(&app.inner.lock().unwrap().db,&task.id).unwrap().unwrap();
+        {
+            let inner = app.inner.lock().unwrap();
+            let category = library::create_category(&inner.db,None,"职场").unwrap();
+            library::set_category_membership(&inner.db,std::slice::from_ref(&asset_id),&category,true).unwrap();
+            library::create_note(&inner.db,&asset_id,library::NewNote{kind:"note",body:"我的学习笔记",origin:library::NoteOrigin::Human,model_name:None,citations:&[]}).unwrap();
+        }
+        assert_eq!(app.clear_history(None).unwrap(),[task.id]);
+        assert!(app.list().is_empty());
+        assert!(file.is_file());
+        drop(app);
+        let app = core(root.path());
+        let inner = app.inner.lock().unwrap();
+        assert_eq!(library::list_assets(&inner.db,false,0,20).unwrap()[0].id,asset_id);
+        assert_eq!(library::notes(&inner.db,&asset_id).unwrap()[0].body,"我的学习笔记");
+        assert_eq!(library::categories(&inner.db).unwrap().len(),1);
+    }
+
+    #[test]
+    fn library_failure_keeps_download_completed_and_restart_reconciles_it() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let file = root.path().join("video.mp4");
+        std::fs::write(&file,b"1234").unwrap();
+        app.inner.lock().unwrap().db.execute_batch("CREATE TRIGGER reject_library BEFORE INSERT ON library_assets BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;
+            CREATE TRIGGER reject_library_warning BEFORE UPDATE ON download_tasks WHEN instr(NEW.snapshot,'LIBRARY_SAVE_FAILED')>0 BEGIN SELECT RAISE(ABORT,'warning write failed'); END;").unwrap();
+        let task = library_fixture(&app,"100",&file);
+        let completed = &app.list()[0];
+        assert_eq!(completed.status,Status::Completed);
+        assert_eq!(completed.error.as_deref(),Some("LIBRARY_SAVE_FAILED"));
+        assert_eq!(app.remove_history(&task.id).unwrap_err().to_string(),"LIBRARY_SAVE_FAILED");
+        assert_eq!(app.list().len(),1);
+        app.inner.lock().unwrap().db.execute_batch("DROP TRIGGER reject_library; DROP TRIGGER reject_library_warning;").unwrap();
+        drop(app);
+        let app = core(root.path());
+        assert!(app.list()[0].error.is_none());
+        assert!(library::asset_for_task(&app.inner.lock().unwrap().db,&task.id).unwrap().is_some());
+        app.delete_local_file(&task.id).unwrap();
+        assert!(!file.exists());
+        let inner = app.inner.lock().unwrap();
+        let assets = library::list_assets(&inner.db,false,0,20).unwrap();
+        assert_eq!(assets.len(),1);
+        assert!(library::asset_files(&inner.db,&assets[0].id).unwrap()[0].missing);
+    }
 
     #[test]
     fn youtube_speed_samples_aggregate_bytes_instead_of_resetting_hook_rates() {
@@ -2098,6 +2253,8 @@ mod tests {
         std::fs::rename(task.path.as_ref().unwrap(), &path).unwrap();
         task.path = Some(path);
         let mut inner = app.inner.lock().unwrap();
+        let file_id: String = inner.db.query_row("SELECT file_id FROM asset_task_links WHERE task_id=?1", [&task.id], |r| r.get(0)).unwrap();
+        library::relink_file(&inner.db,&file_id,task.path.as_ref().unwrap()).unwrap();
         persist(&inner.db, &task).unwrap();
         *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
         task
@@ -2145,6 +2302,12 @@ mod tests {
             .await
             .unwrap();
         assert!(app.transcripts().unwrap().is_empty());
+        {
+            let inner = app.inner.lock().unwrap();
+            let assets = library::list_assets(&inner.db,false,0,20).unwrap();
+            assert_eq!(assets.len(),1);
+            assert!(!library::documents(&inner.db,&assets[0].id).unwrap().is_empty());
+        }
         assert!(exported.is_file() && task.path.unwrap().is_file());
         app.shutdown().await;
     }
@@ -2152,7 +2315,7 @@ mod tests {
     fn transcription_export_cannot_recreate_a_missing_video_as_text() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().canonicalize().unwrap().join("video.mp4");
-        let result = transcription::TranscriptResult {
+        let result = transcription::TranscriptResult { timing: None,
             text: "文案".into(),
             source: transcription::Source {
                 path: source.clone(),
@@ -2187,7 +2350,7 @@ mod tests {
         let result = value.result.unwrap();
         assert_eq!(result.backend.as_deref(), Some("cuda"));
         assert_eq!(result.model_revision, "ce72677f84900f0dc57f498ace253bfb3c9155b6");
-        assert_eq!(result.pipeline_revision, "fun-asr-nano-audiocpp-50749561-fsmn-v1");
+        assert_eq!(result.pipeline_revision, "fun-asr-nano-audiocpp-50749561-media-zero-v2");
         app.shutdown().await;
         drop(app);
         let app = core(root.path());
@@ -2238,7 +2401,7 @@ mod tests {
         assert_eq!(result.backend.as_deref(), Some("cpu"));
         assert_eq!(result.model_name.as_deref(), Some("Fun-ASR-Nano"));
         assert_eq!(result.model_revision, "46e849502a867080d66d351b8dfb1018b607e509");
-        assert_eq!(result.pipeline_revision, "fun-asr-nano-cpu-fbbfe018-v1");
+        assert_eq!(result.pipeline_revision, "fun-asr-nano-cpu-fbbfe018-media-zero-v2");
         app.shutdown().await;
         drop(app);
         let app = core(root.path());
@@ -2250,8 +2413,13 @@ mod tests {
         old["result"]["model_revision"] = json!("90c1c61912018b70ada0fcc024ea24aca62f2e63");
         old["result"]["pipeline_revision"] = json!("sensevoice-cuda-fbbfe018-v1");
         old["result"].as_object_mut().unwrap().remove("model_name");
-        app.inner.lock().unwrap().db.execute("UPDATE video_transcripts SET snapshot=? WHERE task_id=?",
-            params![serde_json::to_string(&old).unwrap(), task.id]).unwrap();
+        {
+            let inner = app.inner.lock().unwrap();
+            inner.db.execute("INSERT INTO video_transcripts(task_id,snapshot) VALUES(?1,?2)", params![task.id,serde_json::to_string(&old).unwrap()]).unwrap();
+            let tx=inner.db.unchecked_transaction().unwrap();
+            library::preserve_task(&tx,&task).unwrap();
+            tx.commit().unwrap();
+        }
         let legacy = app.transcript(&task.id).unwrap().unwrap().result.unwrap();
         assert_eq!(legacy.backend.as_deref(), Some("cuda"));
         assert!(legacy.model_name.is_none());
@@ -2271,6 +2439,12 @@ mod tests {
         transcript_done(&app, &task.id).await;
         for (name, expected) in [
             ("fail.mp4", "failed"),
+            ("timing-overlap.mp4", "failed"),
+            ("timing-version.mp4", "failed"),
+            ("timing-text.mp4", "failed"),
+            ("timing-duration.mp4", "failed"),
+            ("timing-path.mp4", "failed"),
+            ("timing-size.mp4", "failed"),
             ("silent.mp4", "no_speech"),
             ("hold.mp4", "canceled"),
         ] {
@@ -2279,6 +2453,8 @@ mod tests {
             task.path = Some(path);
             {
                 let mut inner = app.inner.lock().unwrap();
+                let file_id: String = inner.db.query_row("SELECT file_id FROM asset_task_links WHERE task_id=?1", [&task.id], |r|r.get(0)).unwrap();
+                library::relink_file(&inner.db,&file_id,task.path.as_ref().unwrap()).unwrap();
                 *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
             }
             let started = app.start_transcription(&task.id, true).unwrap();
@@ -2293,6 +2469,7 @@ mod tests {
                 app.transcript_text(&task.id).unwrap().text,
                 "欢迎体验。\nEnglish text."
             );
+            assert_eq!(app.transcript_text(&task.id).unwrap().timing.unwrap().segments.len(), 2);
         }
         assert!(
             app.inner
@@ -2343,7 +2520,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         let task = transcript_video(&app, "speech.mp4").await;
-        app.inner.lock().unwrap().db.execute_batch("CREATE TRIGGER reject_transcript_end BEFORE UPDATE ON video_transcripts WHEN json_extract(NEW.snapshot,'$.state') != 'running' BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        app.inner.lock().unwrap().db.execute_batch("CREATE TRIGGER reject_transcript_end BEFORE UPDATE ON asset_transcriptions WHEN json_extract(NEW.snapshot,'$.state') != 'running' BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
         app.start_transcription(&task.id, false).unwrap();
         let result = transcript_done(&app, &task.id).await;
         assert_eq!(result.state, "failed");
@@ -2359,7 +2536,7 @@ mod tests {
             .unwrap();
         app.start_transcription(&task.id, true).unwrap();
         assert_eq!(transcript_done(&app, &task.id).await.state, "completed");
-        app.inner.lock().unwrap().db.execute_batch("CREATE TRIGGER reject_transcript_end BEFORE UPDATE ON video_transcripts WHEN json_extract(NEW.snapshot,'$.state') != 'running' BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        app.inner.lock().unwrap().db.execute_batch("CREATE TRIGGER reject_transcript_end BEFORE UPDATE ON asset_transcriptions WHEN json_extract(NEW.snapshot,'$.state') != 'running' BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
         app.start_transcription(&task.id, true).unwrap();
         let result = transcript_done(&app, &task.id).await;
         assert_eq!(result.state, "failed");

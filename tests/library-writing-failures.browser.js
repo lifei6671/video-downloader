@@ -1,0 +1,111 @@
+async page => {
+  page.setDefaultTimeout(8000);
+  const check = (ok, message) => { if (!ok) throw Error(message); };
+  const results = [];
+  const panel = () => page.getByRole('region', { name: '文案与笔记', exact: true });
+  const ready = () => page.waitForFunction(() => document.querySelector('.library-writing')?.getAttribute('aria-busy') === 'false');
+  const load = async () => { const current = page.getByRole('region', { name: '视频资料详情', exact: true }); if (await current.isVisible()) { await current.getByRole('button', { name: '返回列表', exact: true }).click(); const prompt = page.getByRole('alertdialog'); if (await prompt.isVisible()) await prompt.getByRole('button', { name: '放弃修改', exact: true }).click(); await current.waitFor({ state: 'hidden' }); } await page.goto('http://127.0.0.1:1420/tests/fixtures/knowledge-library.html?detail=1&writing=1'); await page.getByRole('button', { name: '知识库', exact: true }).click(); await page.locator('[data-library-asset=a0]').getByRole('button', { name: /^查看视频资料/ }).click(); await ready(); };
+  const tab = async name => { await panel().getByRole('tab', { name, exact: true }).click(); await ready(); };
+  const text = name => panel().getByRole('textbox', { name, exact: true });
+  const save = () => panel().getByRole('button', { name: '保存', exact: true }).click();
+  const saved = () => panel().getByRole('button', { name: '保存', exact: true, disabled: true }).waitFor();
+  await load(); await tab('整理稿'); await text('整理稿内容').fill('失败后仍需保留的输入');
+  await page.evaluate(() => window.writingTest.failNext('saveDocument')); await save();
+  await panel().getByRole('alert').waitFor(); check(await text('整理稿内容').inputValue() === '失败后仍需保留的输入', 'failed write cleared input');
+  await save(); await saved();
+  check(await page.evaluate(() => window.writingTest.snapshot('a0').documents.some(d => d.text === '失败后仍需保留的输入')), 'retry did not save');
+  await text('整理稿内容').fill('离开时保存失败的输入'); await page.evaluate(() => window.writingTest.failNext('saveDocument'));
+  await page.getByRole('button', { name: '下载中心', exact: true }).click(); await page.getByRole('alertdialog').getByRole('button', { name: '保存后离开', exact: true }).click();
+  await page.getByRole('alertdialog').waitFor({ state: 'hidden' });
+  check(await text('整理稿内容').inputValue() === '离开时保存失败的输入', 'failed save-and-leave navigated or cleared input');
+  results.push('write failure/retry and failed save-and-leave preserve draft and page');
+
+  await load(); await tab('整理稿'); await text('整理稿内容').fill('自己的冲突稿😀');
+  await page.evaluate(() => window.writingTest.remoteEdit('a0')); await save();
+  await panel().getByRole('alert').filter({ hasText: '内容已更新，请重新读取后再保存' }).waitFor();
+  check(await text('整理稿内容').inputValue() === '自己的冲突稿😀', 'conflict auto-overwrote draft');
+  await panel().getByRole('button', { name: '复制全文', exact: true }).click();
+  check(await page.evaluate(() => window.writingTest.calls.filter(c => c.method === 'copy').at(-1).text) === '自己的冲突稿😀', 'conflicting draft cannot be copied');
+  await page.evaluate(() => window.writingTest.failNext('document'));
+  await panel().getByRole('button', { name: '重新读取', exact: true }).click(); await ready();
+  check(await text('整理稿内容').inputValue() === '自己的冲突稿😀', 'failed conflict reload cleared the draft');
+  await panel().getByRole('button', { name: '重新读取', exact: true }).click(); await ready();
+  check(await text('整理稿内容').inputValue() === '另一个窗口保存的整理稿', 'latest edition not read');
+  await panel().locator('.library-recovered-drafts > summary').click();
+  check(await panel().getByRole('textbox', { name: '保留内容 1' }).inputValue() === '自己的冲突稿😀', 'reloading lost recovery copy');
+  await page.getByRole('button', { name: '下载中心', exact: true }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: '继续编辑', exact: true }).click();
+  check(await panel().getByRole('textbox', { name: '保留内容 1' }).inputValue() === '自己的冲突稿😀', 'navigation lost recovery text');
+  results.push('document conflict retains copy; explicit latest read preserves original draft and guards recovery');
+
+  await load(); await tab('笔记'); await text('笔记内容').fill('笔记更新一次');
+  await page.evaluate(() => window.writingTest.failNext('note')); await save();
+  await panel().getByRole('alert').filter({ hasText: '内容已保存，重新读取失败' }).waitFor();
+  await text('笔记内容').fill('笔记继续更新二次'); await save(); await saved();
+  check(await page.evaluate(() => window.writingTest.snapshot('a0').notes.find(n => n.id === 'n-a0').revision) === 3, 'post-commit read failure retained stale expected revision');
+  check(await panel().getByRole('button', { name: '重新读取已保存内容', exact: true }).count() === 0, 'successful read kept a stale retry action');
+  await panel().getByRole('button', { name: '新建笔记', exact: true }).click(); await text('笔记内容').fill('新笔记回读失败');
+  await page.evaluate(() => window.writingTest.failNext('note')); await save();
+  await panel().getByRole('button', { name: '重新读取已保存内容', exact: true }).click(); await ready();
+  check(await text('笔记内容').isEnabled() && await text('笔记内容').inputValue() === '新笔记回读失败', 'new note read retry failed');
+  check(await page.evaluate(() => window.writingTest.snapshot('a0').notes.length) === 2, 'read retry duplicated new note');
+  results.push('committed note read failure advances revision; new note read retry preserves one saved note');
+
+  await load(); await tab('整理稿'); await text('整理稿内容').fill('整理稿已经保存但回读失败');
+  await page.evaluate(() => window.writingTest.failNext('document')); await save();
+  await panel().getByRole('alert').filter({ hasText: '内容已保存，重新读取失败' }).waitFor();
+  await panel().getByRole('button', { name: '重新读取已保存内容', exact: true }).click(); await ready();
+  check(await text('整理稿内容').isEnabled() && await text('整理稿内容').inputValue() === '整理稿已经保存但回读失败', 'saved document read retry failed');
+  check(await page.evaluate(() => window.writingTest.snapshot('a0').documents.filter(d => d.summary.kind === 'edited').length) === 2, 'read retry duplicated document edition');
+  results.push('committed document read failure has an explicit retry without duplicate editions');
+
+  await load(); await tab('笔记'); await text('笔记内容').fill('自己的笔记冲突'); await page.evaluate(() => window.writingTest.remoteNote('a0')); await save();
+  await panel().getByRole('alert').filter({ hasText: '内容已更新，请重新读取后再保存' }).waitFor();
+  check(await text('笔记内容').inputValue() === '自己的笔记冲突', 'note conflict lost input');
+  await panel().getByRole('button', { name: '重新读取', exact: true }).click(); await ready();
+  check(await text('笔记内容').inputValue() === '另一个窗口保存的笔记', 'new note revision unreadable');
+  results.push('note revision conflict follows same preserve/read-latest policy');
+
+  await load(); await page.evaluate(() => window.writingTest.failNext('note')); await tab('笔记');
+  await panel().getByRole('alert').waitFor();
+  await panel().getByRole('button', { name: '重新读取已保存内容', exact: true }).click(); await ready();
+  check(await text('笔记内容').inputValue() === '已保存学习笔记' && await text('笔记内容').isEnabled(), 'initial note read failure has no direct recovery');
+  check(await page.evaluate(() => window.writingTest.calls.every(c => c.method !== 'editNote' && c.method !== 'createNote')), 'read retry made a write');
+  results.push('initial note read failure can be retried directly without writes');
+
+  await load(); await panel().getByRole('button', { name: '重新提取原文', exact: true }).click();
+  await page.evaluate(() => window.writingTest.progress('f-a0')); await panel().getByText('已识别 3 / 10 段', { exact: true }).waitFor();
+  await panel().getByRole('button', { name: '创建整理稿', exact: true }).click(); await text('整理稿内容').fill('转录期间的人工编辑');
+  await page.evaluate(() => window.writingTest.complete('a0', 'f-a0'));
+  check(await text('整理稿内容').inputValue() === '转录期间的人工编辑', 'recognition replaced human draft');
+  await save(); await saved();
+  await tab('识别原文');
+  await panel().getByRole('combobox', { name: '文案版本' }).click(); await page.getByRole('option', { name: 'v3', exact: true }).click(); await ready();
+  check(await text('识别原文全文').inputValue() === '新提取的识别原文', 'new recognition edition missing');
+  check(await page.evaluate(() => window.writingTest.snapshot('a0').documents.some(d => d.text === '转录期间的人工编辑') && window.writingTest.snapshot('a0').notes.some(n => n.id === 'n-a0')), 'retranscription removed edited/note data');
+  await page.evaluate(() => window.libraryDetailTest.changeFile('a0', 'f-a0', { missing: true }));
+  await panel().getByText('来源文件已变化或缺失，以下为已保存版本。', { exact: true }).waitFor();
+  check(await text('识别原文全文').inputValue() === '新提取的识别原文', 'missing file removed saved text');
+  results.push('ASR progress/new edition preserve manual work; missing source still readable');
+
+  await load();
+  await page.evaluate(() => window.writingTest.holdReads());
+  await panel().getByRole('combobox', { name: '文案版本' }).click(); await page.getByRole('option', { name: 'v1 SenseVoiceSmall', exact: true }).click();
+  await page.getByRole('region', { name: '视频资料详情', exact: true }).getByRole('button', { name: '重新关联文件', exact: true }).click();
+  await page.waitForFunction(() => window.libraryDetailTest.snapshot('a0').files[0].path.includes('重新关联'));
+  await page.evaluate(() => window.writingTest.releaseReads()); await ready();
+  await panel().getByText('来源文件已变化或缺失，以下为已保存版本。', { exact: true }).waitFor();
+  check(await text('识别原文全文').inputValue() === '旧版本识别原文😀', 'relink during read replaced immutable document body');
+  results.push('relink during a pending document read compares current fingerprint with original source');
+
+  await load(); await page.evaluate(() => window.writingTest.exportMode('cancel')); await panel().getByRole('button', { name: '导出 TXT', exact: true }).click();
+  await page.evaluate(() => window.writingTest.failNext('export')); await panel().getByRole('button', { name: '导出 TXT', exact: true }).click();
+  await panel().getByRole('alert').filter({ hasText: '文件操作失败' }).waitFor();
+  await tab('整理稿'); await text('整理稿内容').fill('保存等待中'); await page.evaluate(() => window.writingTest.holdSaves()); await save();
+  await page.getByRole('button', { name: '下载中心', exact: true }).click();
+  check(await page.getByRole('alertdialog').getByRole('button', { name: '放弃修改', exact: true }).isDisabled(), 'navigation allowed discarding during commit');
+  await page.evaluate(() => window.writingTest.releaseSaves()); await page.getByRole('heading', { name: '下载中心', exact: true }).waitFor();
+  check(await page.evaluate(() => window.writingTest.snapshot('a0').documents.some(d => d.text === '保存等待中')), 'navigation before save acknowledgement lost write');
+  results.push('TXT cancel/error and navigation during pending commit');
+  return { passed: results.length, cases: results };
+}

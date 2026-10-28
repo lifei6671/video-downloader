@@ -23,6 +23,8 @@ from browser_cookies import load_default_cookies
 from local_tools import installed_tool, javascript_runtime
 import runtime_dependencies
 import local_cover
+import local_video
+import keyframes
 import transcription
 import author_profile
 import douyin_cover
@@ -32,7 +34,7 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.14.0'
+ENGINE_VERSION = '0.17.0'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.08.19'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -352,6 +354,12 @@ def operate(method, params, emit):
         raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
     try:
         runtime_dependencies.configure(params.get('runtime_directory'))
+        if method == 'extract_keyframes':
+            emit('keyframes_extracted', **keyframes.extract(params, emit))
+            return
+        if method == 'probe_local_video':
+            emit('local_video_probed', **local_video.probe(params))
+            return
         if method == 'transcribe_video':
             emit('transcribed', **transcription.transcribe(params, emit))
             return
@@ -365,6 +373,10 @@ def operate(method, params, emit):
             return
     except transcription.TranscriptionError as error:
         raise EngineError(str(error), 'transcription') from None
+    except keyframes.KeyframeError as error:
+        raise EngineError(str(error), 'keyframes') from None
+    except local_video.ProbeError as error:
+        raise EngineError(str(error), 'local_video') from None
     except runtime_dependencies.DependencyError as error:
         raise EngineError(str(error), 'dependencies') from None
     platform, url, short = parse_input(params.get('input'))

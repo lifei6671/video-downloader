@@ -25,7 +25,8 @@ def test_normalizes_real_result_and_does_not_put_text_on_bridge(monkeypatch, tmp
         assert command[command.index('-m')+1].endswith('qwen3-0.6b-q8_0.gguf')
         assert command[command.index('--vad')+1].endswith('fsmn-vad.gguf')
         assert timeout == 600
-        output.write_bytes('\ufeff欢迎体验。\r\n第二行\r\n'.encode())
+        assert '--srt' in command
+        output.write_bytes('\ufeff1\r\n00:00:00,000 --> 00:00:00,400\r\n欢迎体验。\r\n\r\n2\r\n00:00:00,600 --> 00:00:01,000\r\n第二行\r\n\r\n'.encode())
         assert phase == 'loading_model'
         log.write_bytes(b'YINGQU_ASR_PROGRESS recognizing 0 2\nYINGQU_ASR_PROGRESS recognizing 2 2\n')
         emit('transcription_progress', **observe(), duration_seconds=duration)
@@ -90,6 +91,8 @@ def test_conversion_is_local_only_and_reports_missing_audio(monkeypatch,tmp_path
         assert command[command.index('-protocol_whitelist')+1]=='file'
         assert command[command.index('-i')+1]==str(source)
         assert '0:a:0' in command and 'pcm_s16le' in command
+        assert '-copyts' in command and '-start_at_zero' not in command
+        assert command[command.index('-af') + 1] == 'aresample=async=1:first_pts=0'
         log.write_bytes(b"Stream map '0:a:0' matches no streams.")
         return 1
     monkeypatch.setattr(asr,'run_process',process)

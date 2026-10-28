@@ -7,8 +7,11 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.17.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
@@ -42,6 +45,42 @@ if request['method'] in ('check_dependencies', 'install_dependency'):
             time.sleep(120)
     emit('dependencies', result=dict(platform='fixture', directory=params['runtime_directory'], tools=[]))
     sys.exit(0)
+if request['method'] == 'extract_keyframes':
+    import base64
+    import subprocess
+    stage = Path(params['staging_dir'])
+    mode = Path(params['source']).stem
+    png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC')
+    if mode.startswith('hold'):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'python-engine'))
+        from local_tools import installed_tool
+        ffmpeg = installed_tool('ffmpeg')
+        command = ([ffmpeg, '-nostdin', '-v', 'error', '-re', '-f', 'lavfi', '-i', 'color=c=black:s=16x16:r=1', '-t', '120', '-f', 'null', '-'] if ffmpeg else [sys.executable, '-c', 'import time;time.sleep(120)'])
+        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000 if sys.platform == 'win32' else 0)
+        (stage / 'partial').write_bytes(b'partial')
+        (Path(params['runtime_directory']).parent / 'keyframes-started.json').write_text(json.dumps(dict(engine=os.getpid(), child=child.pid, ffmpeg=bool(ffmpeg), stage=str(stage))))
+        time.sleep(120)
+    if mode.startswith('changed'): Path(params['source']).write_bytes(b'changed source')
+    frames=[]
+    for i, position in enumerate(params['positions_ms']):
+        name=f'frame-{i:03}.png';(stage/name).write_bytes(png)
+        frames.append(dict(filename=name,requested_ms=position,pts=position,time_base_num=1,time_base_den=1000,width=1,height=1,black=False,bytes=len(png)))
+        emit('keyframe_progress', completed=i+1, total=len(params['positions_ms']))
+    if mode.startswith('bad-frame'): frames[-1]['time_base_den']=0
+    if mode.startswith('fail-frame'): emit('error',error=dict(code='KEYFRAME_FAILED'));sys.exit(1)
+    emit('keyframes_extracted',frames=frames);sys.exit(0)
+if request['method'] == 'probe_local_video':
+    assert set(params) == {'source', 'staging_dir', 'runtime_directory'}
+    mode = Path(params['source']).stem
+    if mode.startswith('hold'):
+        (Path(params['runtime_directory']).parent / 'probe-started').write_text(str(os.getpid()))
+        time.sleep(120)
+    if mode.startswith('invalid'):
+        emit('error', error={'code': 'LOCAL_VIDEO_INVALID'}); sys.exit(1)
+    if mode.startswith('changed'):
+        Path(params['source']).write_bytes(b'changed file')
+    emit('local_video_probed', width=1280, height=720, duration_ms=3000)
+    sys.exit(0)
 if request['method'] == 'transcribe_video':
     assert set(params) == {'source', 'staging_dir', 'runtime_directory'}
     stage = Path(params['staging_dir'])
@@ -55,13 +94,35 @@ if request['method'] == 'transcribe_video':
         emit('transcription_progress', phase='recognizing', duration_seconds=3, backend=backend,
              completed_segments=bad[0], total_segments=bad[1])
     if mode.startswith('hold'):
+        if mode.startswith('hold-mcp'):
+            import subprocess
+            child = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(120)'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000 if sys.platform == 'win32' else 0)
+            (stage / 'partial').write_bytes(b'partial')
+            marker = Path(params['runtime_directory']).parent / 'mcp-transcription-started.json'
+            temporary = marker.with_suffix('.tmp')
+            temporary.write_text(json.dumps(dict(engine=os.getpid(), child=child.pid, stage=str(stage))), encoding='utf-8')
+            temporary.replace(marker)
         time.sleep(120)
     if mode.startswith('fail'):
         emit('error', error={'code':'TRANSCRIPTION_FAILED'}); sys.exit(1)
     emit('transcription_progress', phase='recognizing', duration_seconds=3, backend=backend, completed_segments=2, total_segments=2)
     text = '' if mode.startswith('silent') else '欢迎体验。\nEnglish text.'
     (stage / 'transcript.txt').write_text(text, encoding='utf-8', newline='\n')
-    emit('transcribed', filename='transcript.txt', bytes=len(text.encode()), no_speech=not text, duration_seconds=3, backend=backend)
+    timing = dict(schema_version=1, time_base='media_zero', timing_source='fsmn_vad', precision='vad_segment',
+                  sample_rate=16000, frames=48000, vad_revision='6840bae4c5c92ee8c04faaf4db23dd0105098d7f',
+                  segments=[] if not text else [dict(start_ms=0,end_ms=400,text='欢迎体验。'),dict(start_ms=600,end_ms=1000,text='English text.')])
+    if mode.startswith('timing-'):
+        flaw = mode.removeprefix('timing-')
+        if flaw == 'overlap': timing['segments'][1]['start_ms'] = 300
+        if flaw == 'version': timing['schema_version'] = 99
+        if flaw == 'text': timing['segments'][0]['text'] = 'wrong'
+        if flaw == 'duration': timing['frames'] = 1
+    body = json.dumps(timing,ensure_ascii=False).encode()
+    (stage / 'transcript-segments.json').write_bytes(body)
+    descriptor = dict(filename='transcript-segments.json', bytes=len(body))
+    if mode == 'timing-path': descriptor['filename'] = '../transcript-segments.json'
+    if mode == 'timing-size': descriptor['bytes'] += 1
+    emit('transcribed', filename='transcript.txt', bytes=len(text.encode()), no_speech=not text, duration_seconds=3, backend=backend, timing=descriptor)
     sys.exit(0)
 if request['method'] == 'extract_cover':
     assert set(params) == {'runtime_directory', 'staging_dir', 'filename'}

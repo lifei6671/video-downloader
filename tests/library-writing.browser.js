@@ -1,0 +1,65 @@
+async page => {
+  page.setDefaultTimeout(8000);
+  const check = (ok, message) => { if (!ok) throw Error(message); };
+  const results = [];
+  const writing = () => page.getByRole('region', { name: '文案与笔记', exact: true });
+  const ready = () => page.waitForFunction(() => document.querySelector('.library-writing')?.getAttribute('aria-busy') === 'false');
+  const load = async () => { const current = page.getByRole('region', { name: '视频资料详情', exact: true }); if (await current.isVisible()) { await current.getByRole('button', { name: '返回列表', exact: true }).click(); const prompt = page.getByRole('alertdialog'); if (await prompt.isVisible()) await prompt.getByRole('button', { name: '放弃修改', exact: true }).click(); await current.waitFor({ state: 'hidden' }); } await page.goto('http://127.0.0.1:1420/tests/fixtures/knowledge-library.html?detail=1&writing=1'); await page.getByRole('button', { name: '知识库', exact: true }).click(); await page.locator('[data-library-asset=a0]').getByRole('button', { name: /^查看视频资料/ }).click(); await ready(); };
+  const tab = async name => { await writing().getByRole('tab', { name, exact: true }).click(); await ready(); };
+  const text = name => writing().getByRole('textbox', { name, exact: true });
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
+    await page.setViewportSize({ width, height }); await load();
+    const original = await text('识别原文全文').inputValue();
+    check(original.length > 10000 && original.startsWith('中文原文😀'), 'long original missing or truncated');
+    check(await text('识别原文全文').getAttribute('readonly') !== null, 'recognition is editable');
+    check(await writing().getByRole('tabpanel').getAttribute('aria-labelledby') === await writing().getByRole('tab', { name: '识别原文', exact: true }).getAttribute('id'), 'tab/panel linkage');
+    await text('识别原文全文').focus(); await page.keyboard.press('Control+End');
+    check(await text('识别原文全文').evaluate(el => el.scrollTop > 1000), 'long text did not scroll internally');
+    await writing().getByRole('button', { name: '复制全文', exact: true }).click();
+    check(await page.evaluate(() => window.writingTest.calls.filter(c => c.method === 'copy').at(-1).text) === original, 'full copy lost text');
+    await writing().getByRole('button', { name: '导出 TXT', exact: true }).click();
+    check(await page.evaluate(() => window.writingTest.calls.some(c => c.method === 'export' && c.documentId === 'd-a0' && c.assetId === 'a0')), 'export targets wrong edition');
+    await writing().getByRole('combobox', { name: '文案版本' }).click(); await page.getByRole('option', { name: 'v1 SenseVoiceSmall', exact: true }).click(); await ready();
+    check(await text('识别原文全文').inputValue() === '旧版本识别原文😀', 'old version unreadable');
+    await writing().getByText('SenseVoiceSmall / cpu', { exact: true }).waitFor();
+    await writing().getByRole('button', { name: '创建整理稿', exact: true }).click();
+    await text('整理稿内容').fill('人工整理稿😀\n保留自己的改写');
+    await page.screenshot({ path: '.local/wb115-editor-' + width + '.png', animations: 'disabled' });
+    check(!await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), 'editor horizontal overflow');
+    await writing().getByRole('button', { name: '保存', exact: true }).click();
+    await writing().getByRole('button', { name: '保存', exact: true, disabled: true }).waitFor();
+    check(await page.evaluate(() => window.writingTest.snapshot('a0').documents.some(d => d.summary.kind === 'edited' && d.summary.version === 2 && d.summary.source_document_id === 'old-a0' && d.text === '人工整理稿😀\n保留自己的改写')), 'new edition/source not saved');
+    check(await page.evaluate(() => window.writingTest.snapshot('a0').documents.find(d => d.summary.id === 'd-a0').text) === original, 'saving edited overwrote recognition');
+    results.push(width + ': readonly/long scroll/full copy/TXT/old model/source/new immutable edition/layout');
+  }
+  await load(); await tab('整理稿'); await text('整理稿内容').fill('离开前必须保存的修改');
+  await page.getByRole('button', { name: '下载中心', exact: true }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: '继续编辑', exact: true }).click();
+  check(await text('整理稿内容').inputValue() === '离开前必须保存的修改', 'continue editing lost input');
+  await page.getByRole('region', { name: '视频资料详情', exact: true }).getByRole('button', { name: '返回列表', exact: true }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: '保存后离开', exact: true }).click();
+  await page.locator('.library-list-view').waitFor({ state: 'visible' });
+  check(await page.evaluate(() => window.writingTest.snapshot('a0').documents.some(d => d.text === '离开前必须保存的修改')), 'save and leave did not persist');
+  await page.locator('[data-library-asset=a0]').getByRole('button', { name: /^查看视频资料/ }).click(); await ready(); await tab('整理稿');
+  await text('整理稿内容').fill('应该被放弃的内容'); await writing().getByRole('tab', { name: '识别原文', exact: true }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: '放弃修改', exact: true }).click(); await ready();
+  check(await page.evaluate(() => !window.writingTest.snapshot('a0').documents.some(d => d.text === '应该被放弃的内容')), 'discard unexpectedly wrote data');
+  results.push('global navigation continue/back save-and-leave/tab discard preserve correct data');
+
+  await text('识别原文全文').evaluate(el => { el.focus(); el.setSelectionRange(0, 6); el.dispatchEvent(new Event('select', { bubbles: true })); document.dispatchEvent(new Event('selectionchange')); });
+  const quote = await text('识别原文全文').evaluate(el => el.value.slice(el.selectionStart, el.selectionEnd));
+  await writing().getByRole('button', { name: '引用所选文字写笔记', exact: true }).click();
+  await text('笔记内容').fill('学习这句开场，保留原文引用');
+  await writing().getByRole('button', { name: '保存', exact: true }).click();
+  await writing().getByRole('button', { name: '保存', exact: true, disabled: true }).waitFor();
+  check(await page.evaluate(quote => window.writingTest.snapshot('a0').notes.some(n => n.origin === 'human' && n.citations.some(c => c.quote === quote && c.document_id === 'd-a0')), quote), 'note lost immutable quote or origin');
+  await writing().getByRole('button', { name: '查看引用原文', exact: true }).click();
+  await page.getByRole('dialog').getByRole('textbox', { name: '引用文案全文' }).waitFor();
+  check(await page.getByRole('dialog').getByRole('textbox', { name: '引用文案全文' }).inputValue().then(t => t.startsWith(quote)), 'citation read wrong edition');
+  await page.keyboard.press('Escape');
+  await text('笔记内容').fill('修改后的学习笔记'); await writing().getByRole('button', { name: '保存', exact: true }).click();
+  await writing().getByRole('button', { name: '保存', exact: true, disabled: true }).waitFor();
+  check(await page.evaluate(() => window.writingTest.snapshot('a0').notes.some(n => n.body === '修改后的学习笔记' && n.revision === 2)), 'note revision not advanced');
+  results.push('Unicode quote/new human note/citation source reader/note edit revision');
+  return { passed: results.length, cases: results };
+}

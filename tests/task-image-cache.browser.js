@@ -26,7 +26,7 @@ async page => {
   });
   await page.goto(base + '/tests/fixtures/cover-save.html');
   const tasks = () => page.getByRole('button', { name: '下载任务', exact: true }).click();
-  const away = () => page.getByRole('button', { name: '下载作品', exact: true }).click();
+  const away = () => page.getByRole('button', { name: '下载中心', exact: true }).click();
   const cover = id => page.locator(`[data-task-id="${id}"] [data-media-cover] img`);
   const readCount = id => page.evaluate(id => window.coverSaveTest.reads.filter(value => value === 'cover:' + id).length, id);
   await tasks();

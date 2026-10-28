@@ -63,11 +63,11 @@ jobs:
         run: |
           cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q
       - name: Rust lint
-        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop,mcp --all-targets -- -D warnings
       - name: Build CPU speech helper
         run: python scripts/build_asr.py
       - name: Package engine
@@ -81,9 +81,18 @@ jobs:
           APPLE_SIGNING_IDENTITY: '-'
         run: |
           if ($IsMacOS) {
-            npm run tauri -- build --features desktop --config src-tauri/tauri.release.conf.json --bundles app -- --locked
+            npm run tauri -- build --features desktop,mcp --config src-tauri/tauri.release.conf.json --bundles app -- --locked
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             codesign --verify --deep --strict 'src-tauri/target/release/bundle/macos/映取.app'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
-            npm run desktop:build -- -- --locked
+            npm run tauri -- build --features desktop,mcp --config src-tauri/tauri.release.conf.json --bundles nsis -- --locked
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+          python scripts/update_mcp_licenses.py --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($IsWindows) {
+            $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+            ./scripts/check_windows_installer.ps1 -Installer $installer.FullName -RunId ci
+          }
+          if ($IsMacOS) { python scripts/check_packaged_mcp.py 'src-tauri/target/release/bundle/macos/映取.app' }

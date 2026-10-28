@@ -108,7 +108,7 @@ async page => {
   const last=await page.evaluate(()=>window.platformSettingsTest.calls.at(-1));
   check(last.cookie===null && (await snapshot()).cookies.youtube==='session=fixture','Cookie read failure overwrote credentials');
   cases.push('Cookie read failure preserves stored credentials while saving other settings');
-  await page.getByRole('button',{name:'下载作品',exact:true}).click();
+  await page.getByRole('button',{name:'下载中心',exact:true}).click();
   await page.getByRole('textbox').first().fill('https://www.youtube.com/watch?v=a6cnYFcd7JQ');
   await page.getByRole('button',{name:'解析链接',exact:true}).click();
   await page.getByRole('alert').filter({hasText:'切换 TUN/代理出口'}).waitFor();

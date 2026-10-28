@@ -3,7 +3,7 @@
 async page => {
   const check=(ok,message)=>{if(!ok)throw Error(message)};
   const nav=name=>page.getByRole('button',{name,exact:true});
-  await nav('下载作品').waitFor();
+  await nav('下载中心').waitFor();
   const native=await page.evaluate(async()=>({
     tauri:!!window.__TAURI_INTERNALS__,scale:devicePixelRatio,viewport:[innerWidth,innerHeight],
     tasks:await window.__TAURI_INTERNALS__.invoke('list_tasks'),
@@ -21,6 +21,6 @@ async page => {
   await nav('关于软件').click();
   await nav('检查更新').waitFor();
   await page.screenshot({path:'output/playwright/visual-redesign/native-about.png'});
-  await nav('下载作品').click();
+  await nav('下载中心').click();
   return {nativeTauri:'PASS',realIPC:'PASS',pages:'4 PASS',scale:native.scale,viewport:native.viewport,emptyDatabase:true,platformRequests:0};
 }

@@ -1,0 +1,83 @@
+async page => {
+  page.setDefaultTimeout(8000);
+  const check = (ok, message) => { if (!ok) throw Error(message); };
+  const results = [];
+  const settings = async () => { await page.getByRole('button', { name: '系统设置', exact: true }).click(); await page.getByRole('navigation', { name: '设置分类' }).getByRole('button', { name: '知识库', exact: true }).click(); await page.getByRole('button', { name: '选择位置并备份', exact: true }).waitFor(); };
+  const panel = () => page.locator('.library-backup-settings');
+  const operation = () => page.getByRole('region', { name: '备份恢复操作', exact: true });
+  const load = async (empty = false) => { await page.goto('http://127.0.0.1:1420/tests/fixtures/knowledge-library.html?detail=1&writing=1&backup=1' + (empty ? '&empty=1' : '')); await settings(); };
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
+    await page.setViewportSize({ width, height }); await load();
+    check(await panel().getByRole('radio', { name: '仅资料备份', exact: true }).getAttribute('aria-checked') === 'true', 'backup must default to material');
+    check(await panel().getByRole('button', { name: '选择备份包并恢复' }).isDisabled(), 'nonempty restore enabled');
+    await panel().getByRole('radio', { name: '仅资料备份', exact: true }).focus(); await page.keyboard.press('ArrowRight'); await page.waitForFunction(() => document.activeElement?.textContent === '包含视频'); await page.keyboard.press('Enter');
+    await panel().getByText('可用视频 44/46 个，约 2.00 GB', { exact: true }).waitFor();
+    await page.evaluate(() => window.backupTest.mode('cancel')); await panel().getByRole('button', { name: '选择位置并备份' }).click();
+    await panel().getByText('已取消选择', { exact: true }).waitFor(); check(await operation().count() === 0, 'selector cancel started a worker');
+    await page.evaluate(() => window.backupTest.mode('start')); await panel().getByRole('button', { name: '选择位置并备份' }).click();
+    await operation().getByRole('heading', { name: '备份进行中', exact: true }).waitFor();
+    await page.evaluate(() => window.backupTest.progress('copying'));
+    await operation().getByText('2/5 个文件，已处理 1.2 MB', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '工作台', exact: true }).click();
+    await page.getByRole('region', { name: '运行中操作', exact: true }).getByRole('button', { name: /^备份知识库/ }).click();
+    await panel().getByRole('button', { name: '选择位置并备份' }).waitFor();
+    check(await operation().getByRole('heading', { name: '备份进行中', exact: true }).isVisible(), 'operation lost on navigation');
+    check(await panel().getByRole('radio', { name: '包含视频', exact: true }).getAttribute('aria-checked') === 'true', 'running scope reset after navigation');
+    await page.evaluate(() => window.backupTest.progress('committing')); await operation().getByText('完成保存', { exact: true }).waitFor(); check(await operation().getByRole('button', { name: '取消操作' }).isDisabled(), 'commit is cancelable');
+    await page.evaluate(() => window.backupTest.finish()); await operation().getByRole('heading', { name: '备份完成', exact: true }).waitFor();
+    check(await operation().textContent().then(t => t.includes('SyntheticBackup')), 'result path missing');
+    check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'horizontal overflow');
+    await page.screenshot({ path: '.local/workbench-batch9-' + width + '.png', fullPage: true });
+    results.push({ viewport: width, scope: 'PASS', selectorCancel: 'PASS', progressAndReturn: 'PASS', layout: 'PASS' });
+  }
+  await load(true);
+  await page.evaluate(() => window.backupTest.mode('hold'));
+  await panel().getByRole('button', { name: '选择备份包并恢复' }).click();
+  check(await panel().getByRole('button', {name:'选择备份包并恢复'}).locator('svg.animate-spin').count() === 1, 'restore picker feedback is on the wrong action');
+  check(await operation().count() === 0, 'picker wait started Core operation');
+  await page.evaluate(() => { window.backupTest.releasePicker(); window.backupTest.mode('start'); });
+  await panel().getByText('已取消选择', {exact:true}).waitFor();
+  await panel().getByRole('button', { name: '选择备份包并恢复' }).click(); await operation().getByRole('heading', { name: '恢复进行中' }).waitFor();
+  await page.evaluate(() => window.backupTest.finish('LIBRARY_PACKAGE_CHECKSUM')); await operation().getByText('备份包校验失败，文件可能已损坏', { exact: true }).waitFor();
+  check((await operation().textContent()).includes('SyntheticBackup'), 'failed operation target is unreachable');
+  await panel().getByRole('button', { name: '选择备份包并恢复' }).click(); await operation().getByRole('heading', { name: '恢复进行中' }).waitFor();
+  await page.evaluate(() => window.backupTest.finish()); await operation().getByRole('heading', { name: '恢复完成' }).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll('.library-backup-settings button')].find(el => el.textContent.includes('选择备份包并恢复'))?.disabled);
+  await page.getByRole('button', { name: '知识库', exact: true }).first().click(); await page.getByRole('button', { name: '查看视频资料 恢复后的中文资料', exact: true }).waitFor();
+  await settings(); await panel().getByRole('button', { name: '选择位置并备份' }).click(); await operation().getByRole('button', { name: '取消操作' }).click();
+  await operation().getByRole('heading', { name: '备份已取消' }).waitFor();
+  const old = await page.evaluate(() => window.backupTest.snapshot());
+  await panel().getByRole('button', { name: '选择位置并备份' }).click(); await operation().getByRole('heading', { name: '备份进行中' }).waitFor();
+  await page.evaluate(old => window.backupTest.emitOld({ ...old, sequence: 999 }), old);
+  check(await operation().getByRole('heading', { name: '备份进行中' }).isVisible(), 'late old operation overwrote current');
+  await operation().getByRole('button', { name: '取消操作' }).click();
+  await page.evaluate(() => window.backupTest.failInfo()); await panel().getByRole('button', { name: '刷新备份范围' }).click(); await panel().getByRole('button', { name: '重新读取备份状态' }).waitFor();
+  await page.evaluate(() => window.backupTest.failTransferSubscription());
+  await panel().getByRole('button', { name: '重新读取备份状态' }).click();
+  await page.waitForFunction(() => window.backupTest.listeners() === 0);
+  await panel().getByRole('button', { name: '重新读取备份状态' }).waitFor();
+  await panel().getByRole('button', { name: '重新读取备份状态' }).click(); await panel().getByRole('button', { name: '重新读取备份状态' }).waitFor({ state: 'hidden' });
+  await load(); await page.getByRole('button', { name: '知识库', exact: true }).first().click(); await page.locator('[data-library-asset=a0]').getByRole('button', { name: /^查看视频资料/ }).click();
+  const writing = () => page.getByRole('region', { name: '文案与笔记', exact: true });
+  const original = writing().getByRole('textbox', { name: '识别原文全文', exact: true });
+  await original.waitFor(); await page.waitForFunction(() => document.querySelector('.library-writing')?.getAttribute('aria-busy') === 'false');
+  await original.focus(); await original.evaluate(el => { el.setSelectionRange(0, 4); el.dispatchEvent(new Event('select', {bubbles:true})); }); await page.keyboard.press('Shift+ArrowRight');
+  const quote = writing().getByRole('button', {name:'引用所选文字写笔记',exact:true}); await quote.waitFor();
+  await page.evaluate(() => window.writingTest.exportMode('hold')); await writing().getByRole('button', {name:'导出 TXT',exact:true}).click();
+  check(await quote.isDisabled(), 'quote action changes editor during export picker');
+  await page.evaluate(() => { window.writingTest.releaseExports(); window.writingTest.exportMode('success'); });
+  await writing().getByRole('button', {name:'导出 TXT',exact:true}).waitFor();
+  await page.waitForFunction(() => ![...document.querySelectorAll('.library-writing button')].find(el=>el.textContent.includes('导出 TXT'))?.disabled);
+  for (const [tab, format, label] of [['识别原文', 'markdown', 'Markdown'], ['整理稿', 'json', 'JSON'], ['笔记', 'txt', 'TXT']]) {
+    await writing().getByRole('tab', { name: tab, exact: true }).click(); await page.waitForFunction(() => document.querySelector('.library-writing')?.getAttribute('aria-busy') === 'false');
+    await writing().getByRole('combobox', { name: '导出格式' }).click(); await page.getByRole('option', { name: label, exact: true }).click();
+    await writing().getByRole('button', { name: '导出 ' + label, exact: true }).click();
+    await page.waitForFunction(([format, kind]) => window.libraryTest.calls.some(c => c.method === 'exportContent' && c.format === format && c.selection.kind === kind), [format, tab === '笔记' ? 'note' : 'document']);
+  }
+  await writing().getByRole('textbox', { name: '笔记内容', exact: true }).fill('未保存的笔记');
+  check(await writing().getByRole('button', { name: '导出 TXT', exact: true }).isDisabled(), 'dirty note exported');
+  results.push({ restoreAndRefresh: 'PASS', failureRetry: 'PASS', cancel: 'PASS', lateState: 'PASS', threeFormatsAndNotes: 'PASS', dirtyGuard: 'PASS' });
+  await detailCleanup();
+  async function detailCleanup() { await page.getByRole('button', { name: '返回列表', exact: true }).click(); const prompt = page.getByRole('alertdialog'); if (await prompt.isVisible()) await prompt.getByRole('button', { name: '放弃修改', exact: true }).click(); }
+  return results;
+}

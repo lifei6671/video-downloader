@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.14.0";
+pub const ENGINE_VERSION: &str = "0.17.0";
 pub const YTDLP_VERSION: &str = "2026.08.19";
 
 async fn cancellation() -> Result<()> {
@@ -122,7 +122,7 @@ async fn read_message(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Result<Opt
     ))
 }
 
-fn error_code(value: &Value) -> &'static str {
+pub(crate) fn error_code(value: &Value) -> &'static str {
     match value["error"]["code"].as_str() {
         Some("INVALID_INPUT") => "INVALID_INPUT",
         Some("UNSUPPORTED_PLATFORM") => "UNSUPPORTED_PLATFORM",
@@ -137,6 +137,11 @@ fn error_code(value: &Value) -> &'static str {
         Some("TIMEOUT") => "TIMEOUT",
         Some("IO_ERROR") => "IO_ERROR",
         Some("INVALID_MEDIA_CONTENT") => "INVALID_MEDIA_CONTENT",
+        Some("LOCAL_VIDEO_INVALID") => "LOCAL_VIDEO_INVALID",
+        Some("FILE_MISSING") => "FILE_MISSING",
+        Some("KEYFRAME_RANGE_INVALID") => "KEYFRAME_RANGE_INVALID",
+        Some("KEYFRAME_RANGE_UNAVAILABLE") => "KEYFRAME_RANGE_UNAVAILABLE",
+        Some("KEYFRAME_FAILED") => "KEYFRAME_FAILED",
         Some("FORMAT_UNAVAILABLE") => "FORMAT_UNAVAILABLE",
         Some("FFMPEG_UNAVAILABLE") => "FFMPEG_UNAVAILABLE",
         Some("JS_RUNTIME_UNAVAILABLE") => "JS_RUNTIME_UNAVAILABLE",
@@ -251,6 +256,12 @@ impl PythonBridge {
                 .context("ENGINE_PROTOCOL_ERROR")?;
             if value["id"] != id || value["protocol_version"] != 3 {
                 bail!("ENGINE_PROTOCOL_ERROR");
+            }
+            if method == "extract_keyframes" && value["type"] == "keyframe_progress" {
+                let completed = value["completed"].as_u64().context("ENGINE_PROTOCOL_ERROR")?;
+                let total = value["total"].as_u64().context("ENGINE_PROTOCOL_ERROR")?;
+                if total != params["positions_ms"].as_array().map(|p|p.len() as u64).unwrap_or(0) || total > 9 || completed != downloaded + 1 || completed > total { bail!("ENGINE_PROTOCOL_ERROR"); }
+                downloaded = completed; progress(json!({"completed":completed,"total":total})); continue;
             }
             if method == "transcribe_video" && value["type"] == "transcription_progress" {
                 match value["phase"].as_str() {
@@ -383,6 +394,8 @@ impl PythonBridge {
                         "resolve_video" => "resolved",
                         "check_dependencies" | "install_dependency" => "dependencies",
                         "extract_cover" => "cover_extracted",
+                        "probe_local_video" => "local_video_probed",
+                        "extract_keyframes" => "keyframes_extracted",
                         "transcribe_video" => "transcribed",
                         _ => "download_finished",
                     }
@@ -405,6 +418,7 @@ impl PythonBridge {
             if !status.success() {
                 bail!("ENGINE_PROTOCOL_ERROR");
             }
+            if method == "extract_keyframes" && downloaded != params["positions_ms"].as_array().map(|p|p.len() as u64).unwrap_or(0) { bail!("ENGINE_PROTOCOL_ERROR"); }
             if method == "download_video" {
                 let size = value["bytes"].as_u64().context("ENGINE_PROTOCOL_ERROR")?;
                 let transferred = if youtube {
@@ -453,7 +467,7 @@ impl PythonBridge {
         let result = tokio::select! {
             result = async {
                 if !matches!(method, "download_video" | "transcribe_video") {
-                    let limit = match method { "install_dependency" if params["tool"] == "fun-asr-nano" => 2700, "install_dependency" => 600, "extract_cover" => 20, _ => 80 };
+                    let limit = match method { "install_dependency" if params["tool"] == "fun-asr-nano" => 2700, "install_dependency" => 600, "extract_cover" => 20, "probe_local_video" => 40, "extract_keyframes" => 240, _ => 80 };
                     timeout(Duration::from_secs(limit), bridge.execute(id, method, params, progress))
                         .await.context("TIMEOUT")?
                 } else {

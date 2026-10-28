@@ -18,7 +18,7 @@ async page => {
     check(await empty.evaluate(n => ['Top', 'Right', 'Bottom', 'Left'].every(side => getComputedStyle(n)['border' + side + 'Width'] === '0px') && getComputedStyle(n).boxShadow === 'none'), 'empty state has card border or shadow');
     check(!await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), 'horizontal overflow');
     await page.screenshot({ path: `output/task-ui-v5/empty-${width}.png` });
-    await page.getByRole('button', { name: '下载作品', exact: true }).click();
+    await page.getByRole('button', { name: '下载中心', exact: true }).click();
     await page.evaluate(async () => {
       const { api } = await import('/src/api');
       api.resolve = async () => { window.unexpectedResolve = true; throw Error('empty input reached IPC'); };

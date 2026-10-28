@@ -21,9 +21,11 @@
 4. audio.cpp 使用 `--backend cuda --device 0 --batch-audio-dir ... --audio-chunk-mode none`，只加载一次模型，按顺序识别全部片段，关闭内部再次切块；子进程仅看到选定 GPU UUID。
 5. 每个正 VAD 区间必须有非空 UTF-8 输出；缺失、空输出、超限或进程失败均明确报错，不把漏段拼成成功结果。这不保证每段内部没有错字或漏词。
    引擎 0.14.0 使用 `--log-file` 中的 `fun_asr_nano.prepare_ms` 通知退出模型加载状态，并按批次顺序产生的非空 `transcript_sXXXXXX.txt` 计数识别完成片段；这些文件只在对应推理返回后创建。保留最终全部结果的 UTF-8、非空和总大小校验，计数达到总量不等于任务已经保存成功。
-6. 合并后由 Rust 校验原视频身份并保存。CUDA 结果绑定 revision `ce72677f84900f0dc57f498ace253bfb3c9155b6`、pipeline `fun-asr-nano-audiocpp-50749561-fsmn-v1`、backend `cuda`。旧文案保持原模型/后端，复制和 TXT 导出不变。
+6. 合并后由 Rust 校验原视频身份并保存。CUDA 结果绑定 revision `ce72677f84900f0dc57f498ace253bfb3c9155b6`、pipeline `fun-asr-nano-audiocpp-50749561-media-zero-v2`、backend `cuda`。旧文案保持原模型/后端，复制和 TXT 导出不变。
 
 转换最多 1800 秒，分段和识别共用 `max(600, 3×音频秒数+120)` 秒预算、每 5 秒心跳。安装/转录互斥；取消、超时、退出由既有 Windows Job / 进程组回收全部辅助进程，再清理暂存。Windows 显式终止 Job 并最多等待 5 秒至全部进程退出；已校验的自有暂存目录仅对共享/锁定错误 32/33 重试最多 310ms，持续失败保留登记并报错，不用取消状态掩盖清理错误。PyInstaller 启动 audio.cpp 时临时清除自身 DLL 搜索目录，启动后恢复。
+
+WB-302 已将 `vad.txt` 和裁剪片段正文保存为受校验时间产物，提取对齐 PTS 零点，并随不可变文档保存；当前模型仍不输出逐字 timestamps。进度计数不能反推时间。权重就绪 manifest 沿用原修订，不重下载同一模型；新处理 pipeline 见 [可追溯段落](transcript-segments.md)，原实测见 [时间来源验证](transcript-timing-validation.md)。
 
 ## 固定来源与兼容边界
 

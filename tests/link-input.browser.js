@@ -45,7 +45,7 @@ async page => {
   await range(0,4);await item('粘贴').click();await page.waitForFunction(()=>window.linkInputTest.pendingRead!==null);
   await page.getByRole('button',{name:'下载任务',exact:true}).click();
   await page.evaluate(()=>window.linkInputTest.pendingRead('迟到的内容'));
-  await page.getByRole('button',{name:'下载作品',exact:true}).click();await value('保留原文');
+  await page.getByRole('button',{name:'下载中心',exact:true}).click();await value('保留原文');
   results.push('late clipboard result cannot overwrite another page');
   await page.goto(base+'/tests/fixtures/link-input.html');await field.fill('abcd');
   await page.evaluate(()=>window.linkInputTest.text='插入');await range(2,2);await item('粘贴').click();await value('ab插入cd');

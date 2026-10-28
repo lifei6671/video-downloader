@@ -8,6 +8,8 @@
 
 目标技术栈：**Tauri 2 + React + TypeScript + Rust 应用核心 + Python/yt-dlp + DTK sidecar + SQLite**。界面名称“映取”，视觉与交互以 `DESIGN.md` 为准。
 
+后续产品目标扩展为自媒体工作台与视频知识库，并通过 MCP 向 AI 客户端提供资料检索和受控写回能力。独立资产、分类文案、历史迁移、连接边界和阶段验收以 [升级技术方案](workbench-knowledge-base-plan.md) 为准；已实现知识库列表、详情、文案笔记及基础工作台，导出备份恢复核心已实现，备份恢复界面与原生命令已接入，阶段原生验收与 MCP 尚未完成，进度见 [任务清单](workbench-knowledge-base-tasks.md)。以下下载器契约继续作为现有功能基线。
+
 默认视频由 yt-dlp 解析、图集由 DTK 底层切片解析，表单允许明确选择引擎；自动选择按作品类型决定，失败不切换引擎。yt-dlp 承担共用详情/媒体请求及 HTTP 下载；Rust 只管理任务与文件最终提交，不接收签名媒体 URL 发起另一条 HTTP 链路。DTK 不包含上游 UI、服务端、身份池或浏览器服务。
 
 | 能力 | 首版行为 |
@@ -22,7 +24,7 @@
 | 持久化 | 重启恢复任务记录与已完成列表，不恢复网络下载 |
 | 分发 | Windows 11 x64 优先，随后 macOS Intel / Apple Silicon；用户无需安装 Python |
 
-不做作者批量采集、评论、平台内容搜索、直播、身份池、自动游客身份、内置登录浏览器、云同步、开放 API 或 MCP。不提供暂停、断点续传、退出后后台下载、自动重试或转码。历史列表搜索不等于平台内容搜索。
+不做作者批量采集、评论、平台内容搜索、直播、身份池、自动游客身份、内置登录浏览器、云同步或通用开放 API。MCP 纳入上述后续升级方案，现有下载器尚未提供。下载不提供暂停、断点续传、退出后后台下载、自动重试或转码。历史列表搜索不等于平台内容搜索。
 
 图集每张优先平台明确提供的原图，缺原图或原图 HTTP 404/410 时使用高清；其他网络、身份、风控错误不降级。保留原响应格式，不转码，实际来源逐张展示。抖音/TikTok 仍选择单文件直接 HTTP(S) 格式。YouTube 由 yt-dlp 解析单视频，支持兼容容器的分离音视频 HTTP(S) 规格，使用本机 FFmpeg stream copy 合并，不转码。仅分段流且无直接下载规格时返回 `UNSUPPORTED_CONTENT`。YouTube 使用本机 Node.js 22+ / Deno 2.3+ 及锁定的 yt-dlp-ejs；FFmpeg 与 JS runtime 不随安装包分发；用户可在系统设置的运行依赖中按需下载到应用专属目录。手动 Cookie 优先；未填写时通过 yt-dlp 读取系统 HTTPS 默认浏览器并按平台过滤，不回写 SQLite。读取失败可匿名尝试公开作品并提示限制；不尝试其他浏览器。工具检测和验收见 [YouTube 说明](youtube-validation.md)。
 
@@ -104,7 +106,7 @@ flowchart TD
 
 ## 5. 协议与进程生命周期
 
-当前为 **协议 v3**，引擎 0.5.0。Rust 与 sidecar 同步升级，不兼容旧 v1/v2，不增加旧协议 fallback。DTK 版本及 commit 以 vendor manifest 为准。
+当前为 **协议 v3**，引擎 0.16.0。Rust 与 sidecar 同步升级，不兼容旧 v1/v2，不增加旧协议 fallback。DTK 版本及 commit 以 vendor manifest 为准。
 
 ### 5.1 进程模型
 
@@ -423,3 +425,41 @@ Rust 使用 reqwest（系统 TLS 与系统代理支持）请求固定 GitHub 公
 保留原单任务转录、关闭弹窗继续、取消、失败/空语音保留旧文案、原视频不变、完整 TXT 导出与数据库恢复契约。新结果保存 `model_name=Fun-ASR-Nano`、固定模型修订和 pipeline；旧记录缺少 model_name 时显示 SenseVoiceSmall 与其原后端，不自动重算，不删除旧模型或结果。新模型来源、资源、超时及验收见[集成说明](fun-asr-nano.md)。
 
 2026-10-25：引擎 0.14.0、协议 v3，转录进度增加 `loading_model`、`completed_segments` / `total_segments`。加载阶段仅显示加载状态；识别阶段按真实完成片段比例展示进度，计数经 Rust 校验后存于当前操作快照。CPU helper 与 sidecar 必须重建，模型和推理算法不变。正文改为只读 Textarea，支持全选和复制快捷键；运行中进度更新不反复读取正文。细节见 [Nano 集成说明](fun-asr-nano.md)。
+
+
+### 可追溯文案时间（WB-302）
+
+转录输入按媒体 PTS 零点生成 PCM16：保留 copyts，使用 aresample 的 first_pts=0 填补延迟 / 裁去负时间，不减掉容器起点。引擎 0.16.0 / 协议 v3 增加固定时间文件描述符，CPU SRT 和 CUDA VAD 提供语音段范围；Rust 校验后绑定文档 / 文件 / Source / 操作并事务保存。schema v4 和备份 writer v2、reader v1/v2 已接入，旧文案无时间，未增加同步 UI 或逐字对齐。Windows 与两种 macOS 边界见 [段落契约](transcript-segments.md)及对应实施记录。
+
+
+### 片段收藏与范围播放（WB-303）
+
+schema v5 的收藏固定文件 ID / Source 及可选文案 ID / version / 原句，不产生裁剪文件。四项 Tauri 命令复用 Core，HTML 视频播放器根据实际 seek 落点和动态 duration / seekable 检查完整范围，不能用转录长度替代可播放范围。备份 writer v3 / reader v1、v2、v3 保留绑定；历史源在恢复及再次备份时保持共同身份。Windows / macOS 边界、界面和错误语义见[片段契约](asset-clips.md)。同步阅读、关键帧及 MCP 片段能力仍按后续任务交付。
+
+## WB-304 关键帧资源
+
+当前 engine 0.17.0 / JSONL v3，Core 使用现有 worker / PythonBridge 管理 `extract_keyframes`，Tauri 启动命令异步执行，退出和取消等待实际进程树回收。schema v6 保存 Source 绑定的 PNG BLOB 和可追溯采样时间；逻辑包 v4 保留图片，兼容读取 v1～v4。界面提供当前位置取帧、片段 3 / 5 / 9 帧采样、预览 / 删除及来源状态。细节见[关键帧契约](asset-keyframes.md)，Windows 证据见[第二十二批记录](workbench-knowledge-base-validation.md#第二十二批wb-304-关键帧提取与资源管理)；两种 macOS 继续待验收。
+
+## WB-305 视频与文案同步阅读
+
+前端通过现有文档 timing 与播放器本地事件实现段落跳转、当前段跟随、自动滚动开关、局部键盘和连续段落选取；片段预填后调用现有 Core 服务保存。文件 ID / Source 不匹配时禁用同步但保留全文，语音段精度不变。没有后端、协议、模型、schema 或备份格式变化。细节见[同步阅读契约](transcript-sync-reading.md)，Windows 验证见[第二十三批](workbench-knowledge-base-validation.md#第二十三批wb-305-视频与文案同步阅读)；两种 macOS 继续待办。
+
+## WB-306 结构化文案与制作观察
+
+schema v7 以 `note_analyses` 关联原笔记，保留六字段文案拆解、四维度制作观察、原片段 / 图片引用及人工修订标识；正文投影与结构在同一事务提交。创建来源 / 模型不可改，AI 手动录入有明确界面，声音不能仅据图片。逻辑包 writer v5、reader v1～v5，迁移前一致性备份及恢复图校验沿用现有服务。两个 Tauri 命令通过 Core notes 事件接入，MCP 仍只读，engine / JSONL 不变。Windows 验收和 macOS 待办见[拆解契约](structured-analysis.md)及[第二十四批](workbench-knowledge-base-validation.md#第二十四批wb-306-结构化文案和制作手法拆解)。
+
+### 跨视频对比工作区（WB-307）
+
+知识库多选 2～4 个资产进入对照，原文首段 / 六字段结构 / 片段 / 制作拆解按资产隔离，空维度显示未知。比较笔记的每条结论固定来源 pin 和内容快照，保存时 Rust 校验身份与修订，旧记录仅修订结论而不改变来源。schema v8 / 逻辑包 v6 的兼容、恢复和 MCP 只读投影见[比较契约](video-comparison.md)，实际验证见工作台实施记录。
+
+### 研究专题（WB-308）
+
+研究专题在现有知识库组合视频 / 片段 / 笔记的引用，不复制或接管来源；成员增删 / 全排列排序和修订在单一 SQLite 事务保存。缺失 / 归档仍可见，移除仅解除关系。WB-308 交付时 schema v9 / writer v7 / reader v1～v7 的领域、桌面命令、迁移和恢复边界见[专题契约](research-topics.md)，此前各批 schema / 包版本属于历史交付时契约。
+
+### 自己的选题与草稿（WB-309）
+
+自己的标题、观点和正文独立存储，参考仅关联视频 / 片段 / 研究专题，不改写或复制来源；保存与引用同事务 CAS 提交。工作台、三类灵感入口和来源返回沿用现有导航保护及播放器。当前 schema v11 / writer v9 / reader v1～v9，详见[选题契约](ideas-and-drafts.md)。WB-310 已接入[六项受控 MCP 写入](mcp-write-tools.md)，独立授权默认关闭，保留 AI 来源及精确引用；引擎与 JSONL 协议不变。
+
+### WB-311 MCP 转录控制
+
+已接入 start_transcription / get_operation / cancel_operation，复用单转录 worker、当前文件操作摘要和实际进程回收；开始 / 取消受独立写权限控制，get只读。启动立即返回ID、取消running+cancel_requested表示仍在回收，断连 / 请求超时不取消后台工作。当前schema11 / writer9 / engine0.17.0 / JSONL v3不变，范围及Windows与macOS边界见[转录长操作](mcp-transcription-operations.md)。

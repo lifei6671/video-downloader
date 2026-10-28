@@ -9,7 +9,7 @@ async page => {
       const target=await context.newPage();
       await target.goto(base+'/tests/fixtures/background-download.html?scenario=visual');
       await target.getByRole('button',{name:'后台下载',exact:true}).waitFor();
-      for(const name of ['下载作品','下载任务','系统设置','关于软件']) {
+      for(const name of ['下载中心','下载任务','系统设置','关于软件']) {
         await target.getByRole('button',{name,exact:true}).click();
         if(name==='系统设置')await target.getByRole('button',{name:'平台账号',exact:true}).click();
         const fonts=await target.evaluate(()=>[...new Set([...document.querySelectorAll('h1,h2,h3,p,button,input,textarea,[data-slot="card-title"]')].filter(n=>n.getClientRects().length).map(n=>getComputedStyle(n).fontSize))]);

@@ -20,6 +20,60 @@ use yingqu_core::{
 };
 
 type AppCore = Arc<Core>;
+#[tauri::command]
+async fn get_mcp_connection(
+    core: State<'_, AppCore>,
+) -> Result<yingqu_core::mcp_connection::ConnectionInfo, String> {
+    let mut info = yingqu_core::mcp_connection::connection_info(
+        core.mcp_ipc_status().await,
+        &std::env::current_exe().map_err(|_| "IO_ERROR")?,
+    )
+    .map_err(error)?;
+    info.write_enabled = info.status.enabled && core.mcp_write_enabled();
+    Ok(info)
+}
+#[tauri::command]
+async fn set_mcp_write_enabled(core: State<'_, AppCore>, enabled: bool) -> Result<yingqu_core::mcp_connection::ConnectionInfo, String> {
+    core.set_mcp_write_enabled(enabled).await.map_err(error)?;
+    get_mcp_connection(core).await
+}
+#[tauri::command]
+async fn set_mcp_service_enabled(
+    core: State<'_, AppCore>,
+    enabled: bool,
+) -> Result<yingqu_core::mcp_connection::ConnectionInfo, String> {
+    let executable = std::env::current_exe().map_err(|_| "IO_ERROR")?;
+    if enabled {
+        yingqu_core::mcp_connection::adapter_path(&executable).map_err(error)?;
+    }
+    core
+        .inner()
+        .set_mcp_ipc_enabled(enabled)
+        .await
+        .map_err(error)?;
+    get_mcp_connection(core).await
+}
+#[tauri::command]
+async fn copy_mcp_client_config(
+    app: tauri::AppHandle,
+    core: State<'_, AppCore>,
+    format: yingqu_core::mcp_connection::ConfigFormat,
+) -> Result<(), String> {
+    let info = get_mcp_connection(core).await?;
+    app.clipboard()
+        .write_text(info.config(format).map_err(error)?)
+        .map_err(|_| "CLIPBOARD_WRITE_FAILED".into())
+}
+#[tauri::command]
+async fn get_mcp_ipc_status(core: State<'_, AppCore>) -> Result<yingqu_core::core_ipc::IpcStatus, String> {
+    Ok(core.mcp_ipc_status().await)
+}
+#[tauri::command]
+async fn set_mcp_ipc_enabled(core: State<'_, AppCore>, enabled: bool) -> Result<yingqu_core::core_ipc::IpcStatus, String> {
+    core.inner().set_mcp_ipc_enabled(enabled).await.map_err(error)
+}
+mod library_commands;
+mod library_transfer_commands;
 fn error(error: anyhow::Error) -> String {
     error
         .to_string()
@@ -117,6 +171,38 @@ async fn export_video_transcript(
 #[tauri::command]
 fn get_settings(core: State<AppCore>) -> Settings {
     core.settings()
+}
+#[tauri::command]
+async fn import_library_video(app: tauri::AppHandle, core: State<'_, AppCore>) -> Result<Option<yingqu_core::library::ImportedVideo>, String> {
+    let (tx,rx)=tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("导入视频").add_filter("视频文件", &["mp4","mov","mkv","webm"]).pick_file(move |file| { let _=tx.send(file); });
+    let Some(file)=rx.await.map_err(|_|"IO_ERROR")? else { return Ok(None); };
+    let path=file.into_path().map_err(|_|"IO_ERROR")?;
+    core.import_local_video(path).await.map(Some).map_err(error)
+}
+#[tauri::command]
+async fn cancel_library_import(core: State<'_, AppCore>) -> Result<(), String> {
+    core.cancel_local_import().await;
+    Ok(())
+}
+#[tauri::command]
+async fn relink_library_file(app: tauri::AppHandle,core:State<'_,AppCore>,asset_id:String,file_id:String)->Result<Option<yingqu_core::library::ImportedVideo>,String> {
+    let (tx,rx)=tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("重新关联视频").add_filter("视频文件", &["mp4","mov","mkv","webm"]).pick_file(move |file| {let _=tx.send(file);});
+    let Some(file)=rx.await.map_err(|_|"IO_ERROR")? else {return Ok(None);};
+    core.relink_local_video(asset_id,file_id,file.into_path().map_err(|_|"IO_ERROR")?).await.map(Some).map_err(error)
+}
+#[tauri::command]
+fn get_asset_transcript(core: State<AppCore>, asset_id: String, file_id: String) -> Result<Option<yingqu_core::desktop_core::transcription::Snapshot>,String> {
+    core.asset_transcript(&asset_id,&file_id).map_err(error)
+}
+#[tauri::command]
+async fn start_asset_transcription(core: State<'_, AppCore>, asset_id: String, file_id: String, force: Option<bool>) -> Result<yingqu_core::desktop_core::transcription::Snapshot,String> {
+    core.start_asset_transcription(&asset_id,&file_id,force.unwrap_or(false)).map_err(error)
+}
+#[tauri::command]
+async fn cancel_asset_transcription(core: State<'_, AppCore>, file_id: String, operation_id: String) -> Result<(),String> {
+    core.cancel_asset_transcription(&file_id,&operation_id).await.map_err(error)
 }
 #[tauri::command]
 fn save_tdl_settings(
@@ -557,7 +643,11 @@ fn request_exit(app: &tauri::AppHandle) {
 }
 
 fn main() {
-    tauri::Builder::default()
+    run(tauri::Builder::default(), tauri::generate_context!());
+}
+
+pub(crate) fn run(builder: tauri::Builder<tauri::Wry>, context: tauri::Context<tauri::Wry>) {
+    builder
         .manage(AtomicBool::new(false))
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
@@ -610,6 +700,14 @@ fn main() {
                     TaskEvent::Transcription(snapshot) => {
                         let _ = handle.emit("transcription_updated", snapshot);
                     }
+                    TaskEvent::AssetTranscription(snapshot) => {
+                        let _ = handle.emit("asset_transcription_updated", snapshot);
+                    }
+                    TaskEvent::Keyframes(snapshot) => { let _=handle.emit("library_keyframes_updated",snapshot); }
+                    TaskEvent::LibraryTransfer(snapshot) => { let _ = handle.emit("library_transfer_updated", snapshot); }
+                    TaskEvent::LibraryChanged(change) => {
+                        let _=handle.emit("library_changed",change);
+                    }
                 },
             )?;
             app.manage(core);
@@ -644,6 +742,78 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_mcp_ipc_status,
+            get_mcp_connection,
+            set_mcp_service_enabled,
+            set_mcp_write_enabled,
+            copy_mcp_client_config,
+            set_mcp_ipc_enabled,
+            library_commands::search_library_assets,
+            library_commands::get_workbench,
+            library_transfer_commands::get_library_backup_info,
+            library_transfer_commands::get_library_transfer,
+            library_transfer_commands::start_library_backup,
+            library_transfer_commands::start_library_restore,
+            library_transfer_commands::cancel_library_transfer,
+            library_transfer_commands::export_library_content,
+            library_commands::record_library_visit,
+            library_commands::get_library_asset,
+            library_commands::archive_library_asset,
+            library_commands::list_library_categories,
+            library_commands::create_library_category,
+            library_commands::update_library_category,
+            library_commands::delete_library_category,
+            library_commands::set_library_categories,
+            library_commands::list_library_tags,
+            library_commands::create_library_tag,
+            library_commands::rename_library_tag,
+            library_commands::delete_library_tag,
+            library_commands::set_library_tags,
+            library_commands::list_library_documents,
+            library_commands::list_library_keyframes,
+            library_commands::get_library_keyframe_image,
+            library_commands::delete_library_keyframe,
+            library_commands::get_library_keyframe_operation,
+            library_commands::start_library_keyframes,
+            library_commands::cancel_library_keyframes,
+            library_commands::list_library_clips,
+            library_commands::create_library_clip,
+            library_commands::delete_library_clip,
+            library_commands::prepare_library_clip,
+            library_commands::get_library_document,
+            library_commands::save_library_document,
+            library_commands::list_library_ideas,
+            library_commands::get_library_idea,
+            library_commands::prepare_library_idea_reference,
+            library_commands::create_library_idea,
+            library_commands::edit_library_idea,
+            library_commands::list_library_topics,
+            library_commands::get_library_topic,
+            library_commands::create_library_topic,
+            library_commands::edit_library_topic,
+            library_commands::add_library_topic_member,
+            library_commands::remove_library_topic_member,
+            library_commands::reorder_library_topic_members,
+            library_commands::list_library_notes,
+            library_commands::get_library_note,
+            library_commands::create_library_note,
+            library_commands::get_library_comparison_source,
+            library_commands::create_library_comparison,
+            library_commands::edit_library_comparison,
+            library_commands::create_library_analysis,
+            library_commands::edit_library_analysis,
+            library_commands::edit_library_note,
+            library_commands::get_library_cover,
+            library_commands::prepare_library_playback,
+            library_commands::reveal_library_file,
+            library_commands::open_library_file,
+            library_commands::export_library_document,
+            import_library_video,
+            cancel_library_import,
+            relink_library_file,
+            get_asset_transcript,
+            start_asset_transcription,
+            cancel_asset_transcription,
             list_video_transcripts,
             get_video_transcript,
             start_video_transcription,
@@ -693,7 +863,7 @@ fn main() {
             install_runtime_dependency,
             cancel_runtime_dependency
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("无法启动映取")
         .run(|app, event| match event {
             tauri::RunEvent::WindowEvent {

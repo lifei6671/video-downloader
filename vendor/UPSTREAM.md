@@ -128,3 +128,8 @@ Rust 增加 `same-file 1.0.6` 直接依赖（原锁文件已有），通过原�
 2026-10-25 补充：`scripts/build_asr.py` 为固定 FunASR CPU CLI 添加专用 `YINGQU_ASR_PROGRESS` stderr 通知并逐次刷新，仅报告分段阶段、实际窗口总数和完成数，不改推理、VAD、正文输出或许可。源码替换需精确匹配，重复构建幂等，SOURCE.json 标记 `progress_version=1`；上游提供等价完成回调后可移除。CUDA 继续复用固定 audio.cpp 的 `--log-file` 准备记录和批次结果文件，无原生修改。详见[真实分段进度](../docs/fun-asr-nano.md)。
 
 复用 [0xShug0/audio.cpp v0.9.2-drama3-base-small](https://github.com/0xShug0/audio.cpp/releases/tag/v0.9.2-drama3-base-small)，固定模型、程序 ZIP 和 CUDA 12.4 DLL ZIP 的 URL、大小、SHA-256 见 [CUDA 集成](../docs/cuda-acceleration.md) 与 `python-engine/nano_cuda.py`。只提取 CLI、所需 DLL、LICENSE，不运行 server/下载管理器。模型 Apache-2.0，原生库许可随包保留；CUDA EULA 本地副本 `vendor/nvidia-cuda-12.4-EULA.html` 随 native 资源和 CUDA 安装保存。VAD 复用已固定的 FunASR `llama-funasr-vad` 目标，不改写检测算法。无新增 Python ML 依赖。
+
+
+## 关键帧 PNG 校验
+
+WB-304 直接复用锁文件已有的 [image-rs/png 0.18.1](https://github.com/image-rs/image-png)，在现有 8 MiB / 1280 像素边界内验证 PNG 能实际解码并读至文件结束，避免只凭签名接收截断图片。`png = "0.18"` 沿用现有解析版本，不升级其他依赖；PNG 及其依赖许可全文见 `keyframes-licenses.txt`，随安装包放入 `licenses/keyframes-licenses.txt`。源码未复制，上游 Apache-2.0 / MIT 许可适配本项目。抽帧仍调用已有 FFmpeg，不分发新的媒体工具。
