@@ -2,7 +2,7 @@
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
-fn page_limit() -> u32 {
+pub(super) fn page_limit() -> u32 {
     20
 }
 fn text_length() -> u32 {
@@ -395,7 +395,7 @@ pub struct Note {
 }
 
 #[cfg(feature = "mcp")]
-fn json_integer(schema: &mut schemars::Schema) {
+pub(super) fn json_integer(schema: &mut schemars::Schema) {
     // JSON Schema integer/minimum carry the contract. The TS SDK's default
     // validator ignores the nonstandard unsigned integer formats and logs every occurrence.
     if let Some(object) = schema.as_object_mut() {

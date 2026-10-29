@@ -12,7 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 
-function FrameImage({ frame, open }: { frame: LibraryKeyframe; open: (frame: LibraryKeyframe, url: string) => void }) {
+function FrameImage({ frame, open }: { frame: LibraryKeyframe; open: (frame: LibraryKeyframe, url: string, trigger: HTMLButtonElement) => void }) {
   const [source, setSource] = useState('');
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
@@ -24,13 +24,13 @@ function FrameImage({ frame, open }: { frame: LibraryKeyframe; open: (frame: Lib
     }).catch(reason => { if (!disposed) setError(errorText(reason)); });
     return () => { disposed = true; if (url) URL.revokeObjectURL(url); };
   }, [frame.asset_id, frame.id, attempt]);
-  return <>{source && !error ? <button className="library-frame-image" type="button" aria-label={`查看关键帧 ${clipTime(frame.actual_ms)}`} onClick={() => open(frame, source)}><img src={source} alt={`关键帧 ${clipTime(frame.actual_ms)}`} loading="lazy" onError={() => setError('图片无法显示，请重新读取')} /></button> : error ? <div><LibraryError message={error} /><Button size="sm" variant="ghost" onClick={() => { setSource(''); setAttempt(value => value + 1); }}><RotateCcw />重新读取图片</Button></div> : <Spinner aria-label="正在读取关键帧" />}</>;
+  return <>{source && !error ? <button className="library-frame-image" type="button" aria-label={`查看关键帧 ${clipTime(frame.actual_ms)}`} onClick={event => open(frame, source, event.currentTarget)}><img src={source} alt={`关键帧 ${clipTime(frame.actual_ms)}`} loading="lazy" onError={() => setError('图片无法显示，请重新读取')} /></button> : error ? <div><LibraryError message={error} /><Button size="sm" variant="ghost" onClick={() => { setSource(''); setAttempt(value => value + 1); }}><RotateCcw />重新读取图片</Button></div> : <Spinner aria-label="正在读取关键帧" />}</>;
 }
 
 export function LibraryKeyframes({ assetId, files, file, player, state }: {
   assetId: string; files: LibraryFile[]; file?: LibraryFile; player: React.RefObject<LibraryVideoHandle | null>; state: ReturnType<typeof useLibraryKeyframes>;
 }) {
-  const [selected, setSelected] = useState<{ frame: LibraryKeyframe; url: string } | null>(null);
+  const [selected, setSelected] = useState<{ frame: LibraryKeyframe; url: string; trigger: HTMLButtonElement } | null>(null);
   const [deleting, setDeleting] = useState('');
   const [limit, setLimit] = useState(12);
   const section = useRef<HTMLElement>(null);
@@ -59,13 +59,13 @@ export function LibraryKeyframes({ assetId, files, file, player, state }: {
     {state.operation?.state === 'running' && !operation && <p role="status" className="text-xs text-muted-foreground">其他视频正在提取关键帧</p>}
     {!state.loading && !state.frames.length && <p className="text-xs text-muted-foreground">暂无关键帧</p>}
     <ul className="library-keyframe-grid">{state.frames.slice(0, limit).map(frame => <li key={frame.id} data-keyframe={frame.id}>
-      <FrameImage frame={frame} open={(value, url) => setSelected({ frame: value, url })} />
+      <FrameImage frame={frame} open={(value, url, trigger) => setSelected({ frame: value, url, trigger })} />
       <div className="library-frame-caption"><span>{clipTime(frame.actual_ms)}</span>{frame.black && <Badge variant="outline">黑帧</Badge>}<Button variant="ghost" size="icon-sm" aria-label={`删除关键帧 ${clipTime(frame.actual_ms)}`} disabled={!!deleting} onClick={() => void remove(frame)}>{deleting === frame.id ? <Spinner /> : <Trash2 />}</Button></div>
       <p className="text-xs text-muted-foreground">请求 {clipTime(frame.requested_ms)}，文件版本 {files.findIndex(file => file.id === frame.file_id) + 1}</p>
       {frame.clip_id && <p className="text-xs text-muted-foreground">{clipTime(frame.sample_start_ms)}–{clipTime(frame.sample_end_ms!)}，采样 {frame.sample_index + 1} / {frame.sample_count}</p>}
       {(frame.missing || frame.source_changed) && <p className="text-xs text-muted-foreground">{frame.missing ? '源文件缺失' : '源文件已变化'}</p>}
     </li>)}</ul>
     {limit < state.frames.length && <Button size="sm" variant="outline" onClick={() => setLimit(value => value + 12)}>加载更多关键帧</Button>}
-    {selected && <Dialog open onOpenChange={open => { if (!open) setSelected(null); }}><DialogContent className="library-frame-dialog"><DialogHeader><DialogTitle>关键帧 {clipTime(selected.frame.actual_ms)}</DialogTitle><DialogDescription>请求 {clipTime(selected.frame.requested_ms)}，{selected.frame.width} × {selected.frame.height}</DialogDescription></DialogHeader><img src={selected.url} alt={`关键帧 ${clipTime(selected.frame.actual_ms)}`} /></DialogContent></Dialog>}
+    {selected && <Dialog open onOpenChange={open => { if (!open) setSelected(null); }}><DialogContent className="library-frame-dialog" onCloseAutoFocus={event => { event.preventDefault(); if (selected.trigger.isConnected) selected.trigger.focus({ preventScroll: true }); }}><DialogHeader><DialogTitle>关键帧 {clipTime(selected.frame.actual_ms)}</DialogTitle><DialogDescription>请求 {clipTime(selected.frame.requested_ms)}，{selected.frame.width} × {selected.frame.height}</DialogDescription></DialogHeader><img src={selected.url} alt={`关键帧 ${clipTime(selected.frame.actual_ms)}`} /></DialogContent></Dialog>}
   </section>;
 }

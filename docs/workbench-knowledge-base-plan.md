@@ -176,7 +176,7 @@ WB-201 已选定 [官方 Rust SDK](https://github.com/modelcontextprotocol/rust-
 
 ### 8.2 分阶段工具契约
 
-P1B 七项工具已使用 JSON Schema 固化并通过 Windows 契约测试，具体字段与边界以 [只读工具契约](mcp-read-tools.md)为准；WB-310 的六项新增写工具及 WB-311 的三项转录控制 / 查询已实现，默认只读且需桌面授权，准确字段以[受控写入](mcp-write-tools.md)为准。长操作准确字段及生命周期以[转录长操作](mcp-transcription-operations.md)为准；下表片段 / 多模态等其余 P2 工具仍为拟定范围。
+P1B 七项工具已使用 JSON Schema 固化并通过 Windows 契约测试，具体字段与边界以 [只读工具契约](mcp-read-tools.md)为准；WB-310 的六项新增写工具及 WB-311 的三项转录控制 / 查询已实现，默认只读且需桌面授权，准确字段以[受控写入](mcp-write-tools.md)为准。长操作准确字段及生命周期以[转录长操作](mcp-transcription-operations.md)为准；WB-312 的片段、已有 PNG 与可选模板已实现，字段和真实客户端支持范围见[媒体契约](mcp-media-tools.md)。大图交付使用有明确标记和实际尺寸的临时缩小预览，保存的原 PNG、原尺寸、PTS 和采样绑定不变。写授权不影响这些只读工具，且不自动授予模型或上传权限。
 
 | 工具 | 主要输入 | 输出 / 行为 | 阶段 |
 | --- | --- | --- | --- |
@@ -188,7 +188,7 @@ P1B 七项工具已使用 JSON Schema 固化并通过 Windows 契约测试，具
 | `create_note` | `asset_id`、正文、模型名称与来源引用 | 新笔记 ID 与 AI 来源，不覆盖已有笔记 | P2 |
 | `create_category` / `add_asset_categories` / `add_asset_tags` | 明确的名称或稳定 ID | 创建分类或增加关系；重复关联无副作用 | P2 |
 | `start_transcription` / `get_operation` / `cancel_operation` | 资产 / 文件 ID，或操作 ID | 复用现有长操作，报告真实状态与取消结果 | P2 |
-| `get_clip` / `get_keyframes` | 片段 ID 或文件 ID、时间范围 | 文案范围、关键帧及其时间和采样说明 | P2 |
+| `get_clip` / `get_keyframes` | asset_id、可选片段 / 文件 ID、范围及分页 | 固定片段引用、已有 PNG、原始 PTS 和采样说明；不提供视频 / 音频字节 | P2 |
 | `create_topic` / `create_idea` | 标题、正文、参考资产 / 片段 | 新专题或选题 ID | P2 |
 
 首期检索和列表 `limit` 默认 20、上限 100；全文每次默认读取 4,000 个 Unicode 字符、上限 16,000 个字符，返回实际范围及是否结束。跨端字符位置统一按 Unicode 标量计数，不混用字节和 JavaScript UTF-16 索引。
@@ -199,7 +199,7 @@ P1B 七项工具已使用 JSON Schema 固化并通过 Windows 契约测试，具
 
 - WB-205 已用稳定 URI 表达资产摘要、文案版本和笔记，例如 `yingqu://assets/{asset_id}/documents/{document_id}`，提供三个静态模板与 JSON 文本读取；不枚举全库或开启订阅。读取直接复用工具的类型化适配及 Core，保留分页、归属、版本 / 修订和 Unicode 范围，见 [资源契约](mcp-resources.md)。
 - 以 Tools 检索和读取为兼容基线；客户端不支持 Resources 或 Prompts 时核心流程仍可完成。
-- 后续 Prompts 提供“文案结构拆解”“同题视频对比”“制作手法观察”等模板，要求引用来源，区分资料事实、观察及建议。模板不固化模型或供应商。
+- WB-312 Prompts 已提供“文案结构拆解”“同题视频对比”“制作手法观察”三个可选模板，要求引用来源、记录实际采样，区分资料事实、观察及建议。模板不固化模型或供应商，也不自动读取 / 上传资料；Tools 流程独立可用。
 - AI 总结以新笔记保存；默认不覆盖识别原文、整理稿或人工笔记。写操作单独开启，桌面界面能看到 AI 来源、生成时间和引用。
 - 结构化拆解先覆盖开头、观点、论据、转折、结尾和可借鉴点；视觉拆解另含画面、转场、字幕、声音及对应时间范围。
 - 长操作返回操作 ID 后查询状态，取消复用现有机制；模型请求超时不等于底层转录已停止，不自动重复启动相同操作。

@@ -68,3 +68,26 @@ pub fn seed_resource_boundary(db: &Connection) -> Result<()> {
     db.execute("INSERT INTO platform_settings(platform,user_agent,proxy,cookie,credential_ref) VALUES('youtube','WB205_SYNTHETIC_USER_AGENT','http://fixture:WB205_SYNTHETIC_PROXY_PASSWORD@127.0.0.1:9','WB205_SYNTHETIC_COOKIE_DO_NOT_EXPOSE',NULL)",[])?;
     Ok(())
 }
+
+/// Saved synthetic references; this shared fixture is also compiled by older checks.
+pub fn seed_media(db: &Connection, _root: &Path) -> Result<()> {
+    let source: String = db.query_row("SELECT source_json FROM asset_documents WHERE id='doc-rec'", [], |r| r.get(0))?;
+    db.execute("INSERT INTO asset_clips(id,asset_id,file_id,title,reason,start_ms,end_ms,source_json,document_id,document_version,quote,created_at) VALUES('media-clip','asset-a','file-a','合成采样片段😀','只验证读取',100,900,?1,'doc-a1',1,?2,1)", params![source,TEXT])?;
+    for (index, rgb) in [[255u8,0,0], [0,255,0]].into_iter().enumerate() {
+        let mut body = Vec::new();
+        { let mut encoder = png::Encoder::new(&mut body, 16, 16); encoder.set_color(png::ColorType::Rgb);
+          encoder.write_header()?.write_image_data(&rgb.repeat(256))?; }
+        let bound = index == 0;
+        let id = format!("media-frame-{index}");
+        let metadata = serde_json::json!({
+            "id":id,"asset_id":"asset-a","file_id":"file-a","clip_id":if bound {Some("media-clip")} else {None},
+            "batch_id":format!("media-batch-{index}"),"sample_start_ms":if bound {100} else {750},
+            "sample_end_ms":bound.then_some(900),"sample_index":0,"sample_count":1,
+            "requested_ms":if bound {500} else {750},"pts":if bound {500} else {750},
+            "time_base_num":1,"time_base_den":1000,"width":16,"height":16,"black":false,"created_at":1
+        });
+        db.execute("INSERT INTO asset_keyframes(id,asset_id,file_id,clip_id,metadata,source_json,body) VALUES(?1,'asset-a','file-a',?2,?3,?4,?5)",
+            params![id,bound.then_some("media-clip"),metadata.to_string(),source,body])?;
+    }
+    Ok(())
+}

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { auditComparison, assertPublic, unavailable, validateModelItem } from '../scripts/mcp-client-checks.mjs';
+import { auditMediaModel } from '../scripts/mcp-media-checks.mjs';
+import { auditP2 } from '../scripts/mcp-p2-checks.mjs';
 
 function sample() {
   const expected = { assets: ['a', 'b'], category_id: 'cat', tag_id: 'tag', documents: [
@@ -60,4 +62,43 @@ test('unrelated RPC failures cannot count as disconnection or startup failure', 
   unavailable('call', { code: -32603, message: 'Transport closed' });
   unavailable('start', { code: -32603, message: 'required MCP server yingqu failed to start' });
   for (const kind of ['call', 'start']) assert.throws(() => unavailable(kind, { code: -32602, message: 'Invalid params' }));
+});
+
+test('media audit rejects guessed metadata, missing image delivery and unobserved video claims', () => {
+  const frames = [
+    {id:'media-frame-0',color:'red',pts:500,time_base_num:1,time_base_den:1000,sample_start_ms:100,sample_end_ms:900,batch_id:'media-batch-0'},
+    {id:'media-frame-1',color:'green',pts:750,time_base_num:1,time_base_den:1000,sample_start_ms:750,sample_end_ms:null,batch_id:'media-batch-1'},
+  ];
+  const report = {frames,video_observed:false,audio_observed:false,limitations:'仅观察静态采样，没有连续视频或声音'};
+  const calls = [{tool:'get_clip',status:'completed'}, {tool:'get_keyframes',status:'completed',result:{content:[{type:'image'},{type:'image'}]}}];
+  assert.equal(auditMediaModel(report,calls).status,'PASSED');
+  for (const mutate of [r => r.frames[0].color='green', r => r.frames[0].pts=501, r => r.frames[1].sample_end_ms=900, r => r.video_observed=true, r => r.audio_observed=true]) {
+    const invalid = structuredClone(report); mutate(invalid); assert.throws(() => auditMediaModel(invalid,calls));
+  }
+  assert.throws(() => auditMediaModel(report,[]));
+  const missing = structuredClone(calls); missing[1].result.content=[]; assert.throws(() => auditMediaModel(report,missing));
+  validateModelItem({type:'mcpToolCall',server:'yingqu',tool:'get_keyframes'},['get_keyframes']);
+  assert.throws(() => validateModelItem({type:'mcpToolCall',server:'yingqu',tool:'create_note'},['get_keyframes']));
+});
+
+test('P2 audit requires delivered samples, exact source versions and observed clip references', () => {
+  const expected={assets:['a','b'].map(id=>({id,frames:[{id:`f-${id}`,clip_id:`c-${id}`,pts:100,time_base_num:1,time_base_den:1000,sample_start_ms:0,sample_end_ms:200,batch_id:`batch-${id}`,file_id:`file-${id}`}],document:id==='a'?{id:'doc-a',version:1,text:'真实原句😀'}:null}))};
+  const ok=(tool,args,data,images=[])=>({tool,arguments:args,status:'completed',result:{structuredContent:data,content:images}});
+  const calls=expected.assets.flatMap(a=>[
+    ok('get_asset',{asset_id:a.id},{}),
+    ok('get_clip',{asset_id:a.id},{clips:{items:[{id:`c-${a.id}`}]}}),
+    ok('get_keyframes',{asset_id:a.id},{frames:{items:a.frames.map(f=>({...f,image_status:'included'}))}},[{type:'image'}]),
+  ]);
+  calls.push(ok('read_transcript',{asset_id:'a',document_id:'doc-a'},{reference:{asset_id:'a',document_id:'doc-a',document_version:1},content:{text:'真实原句😀'}}));
+  const report={videos:expected.assets.map(a=>({asset_id:a.id,text_analysis:'只解释来源资料，不虚构对白',frames:[{id:`f-${a.id}`,observation:'画面中所见内容与具体静帧绑定'}],limitations:'只看静态采样，音频与连续视频没有观察'})),comparison:'比较表达结构，不把无语音资料当作已识别文案。',idea:{title:'独立选题',viewpoint:'新观点',body:'独立创作内容与来源观察分开，未核验的事实不复用。'},citations:[{asset_id:'a',document_id:'doc-a',quote:'原句😀'}],continuous_video_observed:false,audio_observed:false};
+  assert.equal(auditP2(report,calls,expected).actualImages,2);
+  for(const mutate of [
+    s=>s.calls.find(c=>c.tool==='get_keyframes').result.content=[],
+    s=>s.calls.find(c=>c.tool==='get_keyframes').result.structuredContent.frames.items[0].pts++,
+    s=>s.calls.find(c=>c.tool==='get_clip').result.structuredContent.clips.items=[],
+    s=>s.calls.find(c=>c.tool==='read_transcript').result.structuredContent.reference.document_version=2,
+    s=>s.report.citations[0].asset_id='b',
+    s=>s.report.videos[0].frames[0].id='unseen',
+    s=>s.report.audio_observed=true,
+  ]) {const state=structuredClone({report,calls});mutate(state);assert.throws(()=>auditP2(state.report,state.calls,expected));}
 });

@@ -20,7 +20,7 @@ cargo build --locked --manifest-path src-tauri/Cargo.toml --features mcp --bin y
 ## SDK 与工具映射
 
 - MCP 生命周期、能力、Schema 和 JSON-RPC 错误均由 SDK 实现。已验证 `2025-11-25` 的 initialize / initialized，以及 `2026-07-28` 的 discovery / 请求 metadata；不自行实现另一套 MCP 协议。
-- 声明七项 Tools 与 WB-205 的受限 Resources；不启用订阅 / 变更通知、Prompts、HTTP、远程连接或模型推理能力。Resources 的 URI 与读取约束见 [资源契约](mcp-resources.md)。
+- 当前声明 P1B 七项 Tools、WB-310 六项写工具、WB-311 三项转录工具和 WB-312 两项媒体读取工具，共 18 项；保留 WB-205 受限 Resources，并提供三个可选 Prompts。不启用订阅 / 变更通知、HTTP、远程连接或服务端模型推理。Resources 的 URI 与读取约束见[资源契约](mcp-resources.md)，新增 PNG 与模板边界见[媒体契约](mcp-media-tools.md)。
 - WB-204 已实现七项只读工具。分页、参数、版本 / 修订引用及错误的完整契约见 [只读工具](mcp-read-tools.md)，Windows 完成验证，macOS 继续待验收。
 
 | MCP tool | Core IPC method | structuredContent |

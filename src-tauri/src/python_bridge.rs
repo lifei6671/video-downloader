@@ -477,8 +477,32 @@ impl PythonBridge {
             _ = cancel => Err(anyhow::anyhow!("CANCELED")),
         };
         // Also runs on protocol errors/timeouts/cancel, before caller cleans staging.
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-bridge.process_group, libc::SIGKILL);
+        }
         let _ = bridge.child.kill().await;
         let _ = bridge.child.wait().await;
+        #[cfg(unix)]
+        timeout(Duration::from_secs(5), async {
+            // Killing the group is asynchronous. Do not publish a terminal state
+            // while native ASR descendants can still hold audio/model files.
+            loop {
+                if unsafe { libc::kill(-bridge.process_group, 0) } == -1 {
+                    let errno = std::io::Error::last_os_error().raw_os_error();
+                    if errno == Some(libc::ESRCH) {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                    // EPERM still denotes an existing group, not completed cleanup.
+                    if errno != Some(libc::EPERM) {
+                        bail!("ENGINE_PROTOCOL_ERROR");
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("TIMEOUT")??;
         #[cfg(windows)]
         reap_job(&bridge._job).await?;
         result
@@ -488,6 +512,38 @@ impl PythonBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_waits_for_engine_and_native_descendant_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let stage = root.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        let marker = root.path().join("mcp-transcription-started.json");
+        let program = project.join(".venv/bin/python");
+        let result = PythonBridge::operation_cancellable(
+            program.to_str().unwrap(),
+            &[project.join("tests/fixtures/desktop_engine.py").to_string_lossy().into_owned()],
+            "cancel-descendants", "transcribe_video",
+            json!({"source":root.path().join("hold-mcp.mp4"), "staging_dir":stage,
+                   "runtime_directory":root.path().join("runtime")}),
+            |_| {},
+            async {
+                timeout(Duration::from_secs(5), async {
+                    while !marker.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }).await.unwrap();
+            },
+        ).await;
+        assert_eq!(result.unwrap_err().to_string(), "CANCELED");
+        let processes: Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+        for key in ["engine", "child"] {
+            assert_eq!(unsafe { libc::kill(processes[key].as_i64().unwrap() as i32, 0) }, -1, "{key} survived cancellation");
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+        }
+    }
+
     #[tokio::test]
     async fn frames_and_limits() {
         let mut reader = BufReader::new(&b"{\"id\":1}\n{\"id\":2}\n"[..]);

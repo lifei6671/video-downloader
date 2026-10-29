@@ -1241,3 +1241,693 @@ start_transcription / get_operation / cancel_operation 通过固定 IPC映射复
 ### 交付与平台边界
 
 Windows上述实现和验证完成，WB-311的Windows子项已勾选。macOS Intel / Apple Silicon编译、socket、原生控制与进程回收分别NOT_RUN，当前无环境，总项保持未勾选，主清单仍21 / 49。识别质量与真实模型、多模态、正常退出 / 活跃崩溃以及本批安装器未验收；此结果不替代WB-312 / WB-313。原生隔离profile和程序保留供复查，测试服务 / 子进程已停止，最终范围与证据哈希及独立分区 / 集成结果见本批target.json、evidence-inventory.json及review记录。
+
+## 第 30 批：macOS Apple Silicon 验收
+
+日期：2026-10-28。基线为 `master / a029b9816cbd9299ed92b549edb3e6efb0a71e39`，主机为 macOS 27.0.1（26A434）、arm64，仅安装 `aarch64-apple-darwin` 原生 Mac target。保留既有 `.DS_Store`、`src-tauri/.DS_Store`、`.codegraph/` 未跟踪内容；未提交、推送或发布。Intel、最低 macOS 13.3 实机、全新设备、跨版本在线更新及下载后 Gatekeeper 场景没有验收。
+
+### 修复与隔离
+
+- 新增 `scripts/p1a-acceptance-macos.py`，复用生产 Tauri 入口及既有合成资料构造器，以编译时 identifier 和匹配 marker 隔离 `upgrade` / `restore` / `empty`。本批实际运行 upgrade、restore；未标记 / 标记不符目录的两项拒绝测试通过。操作方法见[开发文档](development.md#macos-工作台与-mcp-隔离验收)。
+- 首次编译暴露 macOS `_EMBED_INFO_PLIST` 重复符号：生产 main 和 example 各展开一次 `generate_context!`。现由 `desktop::context()` 共享一次宏展开，生产 / 验收入口均编译通过；未增加替代 IPC 或页面。
+- 配置验收脚本中 Codex 工具发现仍断言旧七工具目录，实际产品已经注册 16 项。现与既有 `allTools` 清单逐名比较，SDK 和 Codex 使用同一预期，不放宽工具范围。
+- 收尾实测发现原生 ⌘Q 退出后残留 socket。核对已锁定的 Tao / Muda / Tauri 源码，原生菜单通过 Cocoa `terminate:` 直接发出 `Exit`，绕过 `ExitRequested`。macOS 的 `Exit` 现在等待既有更新管理器和 Core 关闭；既有托盘 / 受控退出已进入关闭流程时不重复启动。没有新增退出状态机或超时机制。
+- 按锁文件恢复缺失的前端 Markdown 依赖及 Python Pillow / yt-dlp-ejs。用户另行授权通过 Homebrew 安装 CMake、下载约 1.28 GB CPU 模型，以及只用两条合成文案 / 笔记调用本机 Codex 登录账号。没有读取或复制凭据，没有使用日常资料库。
+
+调试资料位于 `~/Library/Application Support/me.disign.yingqu.p1a-macos-20261028-upgrade/` 和 `...-restore/`；真实模型安装在 upgrade 的 `runtime/`。安装包另用 `me.disign.yingqu.wb207-macos-20261028`，避免启动日常 identifier。大模型文件在 Core 专项 profile 内使用同卷硬链接，未更改模型 manifest 或默认后端选择。
+
+### 构建、核心与真实协议
+
+除另行说明，证据根目录为 `.local/macos-workbench-20261028/`。
+
+| 检查 | 实际结果 / 证据 |
+| --- | --- |
+| 类型和前端构建 | `npm run build` 通过，`build-final.log`；保留既有大 chunk 提示，没有改 UI / 样式 |
+| Rust 核心 | `cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib -- --test-threads=1`：258 passed / 2 个既有在线 GitHub 测试 ignored，`core.log` |
+| Unix socket 跨进程 | `--features mcp --test core_ipc -- --test-threads=1`：1 passed；另 1 个 ignored 为被父测试显式调用的子进程夹具，`ipc.log`。库测试另验证 0700 目录 / 0600 socket、长中文路径、隔离、陈旧 socket 和关闭清理 |
+| 原生构建 / Clippy | `--features desktop,mcp` 三个 bin、MCP fixture、两个真实引擎 examples 和隔离 example 构建通过；`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop,mcp --all-targets -- -D warnings` 通过，`desktop-build.log` / `clippy-final.log` |
+| Python 专项 | 段落 / 时间 / 转录 / 关键帧 / MCP 辅助共 64 passed / 4 skipped，`python-final.log`；新增隔离保护 2 passed，`launcher-tests.log`。4 项 skip 是 Windows 安装器 / EXE 专项，不计作 macOS 通过 |
+| SDK 选型 | 独立 probe 构建、官方 TS SDK 1.32.1 的 2025-11-25 initialize 与 2026-07-28 discovery、Unicode / EOF，以及 Codex CLI 0.161.0 工具发现通过：`.local/wb201/run-CEGPZc/summary.json` |
+| 生产 MCP / Resources | `node scripts/verify-mcp-adapter.mjs --resources`：真实 stdio / Unix socket 的读取、版本 / 分页、资源 / 工具范围一致、非法 URI / 路径 / 合成凭据边界、断连 / 重开 / helper 退出通过，`.local/wb205/run-78Z8dL/summary.json` |
+| 受控写入协议 | `--writes`：六项工具、默认拒绝、授权 / 撤销、AI 来源与固定引用、幂等关系及批次原子性通过，`.local/wb310/run-0OwLbg/summary.json` |
+| 长操作协议 | `--operations`：操作 ID、复用 / 忙碌、超时 / 断连、取消 pending、实际夹具 PID / 子进程和暂存回收通过，`.local/wb311/run-nU4JXx/summary.json`。识别器为测试夹具，不冒充真实 ASR |
+
+### 原生设置、分发和真实模型客户端
+
+调试窗口中核对 MCP 默认关闭 / 只读、启停、原生 JSON 复制后粘贴内容，以及实际 TOML。`verify-mcp-config.mjs` 使用这份捕获配置，在 `/usr/bin:/bin` PATH 下通过 SDK 读取和 Codex 工具发现；关闭后同配置返回 `IPC_UNAVAILABLE`。见 `native-capture.json`、`native-clipboard.txt`、`config.log`、`config-off.log` 及对应截图。
+
+固定源码构建 CPU CLI / VAD 后重建 PyInstaller 引擎，`check_packaged_engine.py` 确认为 engine 0.17.0 / yt-dlp 2026.08.19。使用既有 release 配置、独立 identifier / productName 和 ad-hoc 签名，执行：
+
+```sh
+APPLE_SIGNING_IDENTITY=- npm run tauri -- build --features desktop,mcp --config src-tauri/tauri.release.conf.json --config .local/macos-workbench-20261028/bundle-config.json --bundles app,dmg -- --locked
+```
+
+生成 `src-tauri/target/release/bundle/macos/Yingqu macOS 验收.app` 与相邻 DMG。`codesign --verify --deep --strict`、`check_packaged_engine.py`、`check_packaged_mcp.py` 全部通过，包含 helper 签名及完整许可。只读挂载 DMG，复制到 `.local/macos-workbench-20261028/installed/中文 空格/` 后卸载磁盘映像；从复制出的 app 启动，页面来源为 `tauri://localhost`，不依赖 Vite。安装后复制出的实际 helper 路径含中文与空格，客户端在最小 PATH 下成功连接。见 `bundle.log`、`codesign.log`、`packaged-*.log`、`dmg-mount.log`、`installed-capture.json`。
+
+退出修复后重新生成 app / DMG 并通过 Clippy，更新隔离安装副本。保持官方 SDK 与 helper 的真实连接，原生按 ⌘Q 后确认 helper 断连、`IPC_DISCONNECTED`、socket 删除及本轮进程退出：`native-quit.json` 为 PASSED。最终 DMG 再次只读挂载，其主程序与实测安装副本逐字节相等，深层签名和内置 MCP / 引擎检查通过，见 `bundle-exit-fix.log`、`clippy-exit-fix.log`、`dmg-final.log`、`final-packaged-*.log`。模型组合验收发生在退出修复前；最终只复验受影响的退出 / 分发路径，没有重复账号模型调用。
+
+安装实例空库初始化并正常退出后，用 marker 保护的既有 WB-208 构造器加入两条目标合成资料、一个排除项和一个归档项。获授权的 `verify-mcp-client.mjs ... --allow-account` 使用 Codex CLI 0.161.0 / gpt-6.1-sol，禁用 3 个继承服务，仅暴露本轮 yingqu；真实模型使用全部七项读取工具，自行完成分类 / 标签发现、组合筛选 / 分页、多视频比较和四处引用。原生界面逐项核对 A 整理稿 v2、B 整理稿 v1 和两篇人工笔记 r1。
+
+`.local/wb208/client-SGw967/summary.json` 为 PASSED：服务关闭拒绝旧 / 新连接、重新开启后新会话读取、核验路径后强停本轮闲置主程序、重启默认关闭及再次重连全部通过；客户端自然退出 0，无强制清理。这里不将强停称为正常退出。`comparison.json` / `model-tools.json` 保留原始结果；自动审计的 `semanticQuality=REQUIRES_REVIEW` 未改写，独立的 `model-quality-review.json` 记录 Codex 内容审阅通过，不代表人工签字：引用一致，画面推论明确限于文案 / 笔记，未声称观看视频或比较实际效果。
+
+额外 SDK 读取前后的全表快照一致，见 `installed-acceptance/before-readonly.json` / `after-readonly.json` 与 `readonly.json`。这些快照在模型完成后采集，不宣称覆盖此前模型 turn；模型只读证据为实际七工具轨迹、原文核对和始终关闭的写授权。临时 SDK 调用最初未将官方 SDK 的预期错误转换为既有审计器形状，已在辅助调用中修正后完整通过，没有修改产品错误行为。模型结果审计回归 15 项通过，见 `client-tests.log`。
+
+### 真实 ASR、媒体时间与原生学习流程
+
+- 通过生产运行依赖界面下载并校验固定 CPU 模型。真实 SRT / 独立 VAD 运行短中文、含停顿中英文、66 秒连续语音和固定 FunASR 上游的 8 秒自然样本，时间范围 / 窗口匹配和源哈希均通过：`timing/summary.json`。英文输入与既有 Windows 固定样本哈希相同；自然样本来自本批已校验源码包，出处见 `timing-inputs/provenance.json`。本轮未复现 Windows 约 298 秒自然口播，WB-301 的 Apple Silicon 子项保持未勾选。
+- `verify_transcript_clock.py` 的 11 组 PCM / AAC / Opus、VFR 和正负 PTS 矩阵通过：`clock/summary.json`。精度是语音段级，采样 / codec 容差不等于逐字、逐帧或人工音画同步精度。
+- `timing_acceptance` 分别使用源码与打包 engine，真实 Core 导入延迟音轨视频，两次识别生成不同不可变版本，核对旧段落、文件绑定、源哈希和重开：`core-timing-source/report.json` / `core-timing-packaged/report.json`。两轮都 PASSED。
+- `keyframes_acceptance` 使用真实 Core / Python / FFmpeg，指定位置和片段三点采样共 4 张 PNG，重开、无视频备份恢复和源哈希通过：`keyframes/report.json`。它是实际 Core 专项，不是 GUI。
+- 原生 upgrade 窗口完成旧库升级、缺失 / 多文件展示、本地视频导入、整理稿和人工笔记保存、无时间文案保留全文、普通片段 0.4～1.2 秒到点暂停、从片段创建独立观点 / 草稿并打开 / 返回来源。
+- 原生导入 `mp4-delay.mp4`，真实 CPU 识别后手动选择 v1，段落跳转到 1.920 秒、自动滚动关闭、选段预填 1.920～4.490 秒与固定原句，保存后能播放。当前位置在结尾时抽帧明确失败；从段落起点暂停后提取为实际 PTS 2.000 秒 PNG，黑帧如实标识。源文件 `asset://localhost/` 由真实 WebKit 解码，未用 Chromium 代验。见 `native-clip.*`、`native-idea.*`、`native-sync-keyframe.*`。
+
+原生短样本文本质量存在独立限制：直接短 WAV 识别为“开放时间早上九点。”，延迟 AAC 样本识别为“开饭时间早上九点。”。没有以时间检查通过掩盖识别错字，也未改变模型或伪造正文。
+
+### 原生备份与恢复
+
+通过 macOS 原生目录选择器完成仅资料备份及包含视频备份。前者 3 个资产 / 0 个视频文件，后者 3 个资产 / 3 个实际视频文件；原本缺失文件均明确提示。新建独立 restore 空库，经两个原生目录选择器恢复含视频包，立即显示 3 个资产、4 篇文案、1 条笔记和 1 个选题，缺失项仍保留。
+
+`native-restore-check.json` 核对四篇文案、两条片段、一张关键帧 PNG、一条笔记、一条选题、其引用及真实段落逐字段相等，3 个媒体 SHA-256 一致，原缺失文件没有被伪造。仅排除按恢复契约重定位的 Source JSON / recognition_key；不把全行相等冒充恢复结论。恢复后原生 UI 显示文件可用、原段落 / 关键帧，并以恢复目录的媒体再次范围播放至 4.490 秒暂停，见 `native-restore.*` / `native-restored-playback.txt`。
+
+### 本批完成与剩余
+
+WB-201～WB-208、WB-302 的 Apple Silicon 平台子项完成，9 个子项已勾选；它们的跨平台总项仍因 Intel 未验收保持未勾选，主清单仍 21 / 49。P1B 为 Windows / Apple Silicon 限定验收通过。
+
+WB-119、WB-301、WB-303～WB-305、WB-309 为部分证据；完整原生分类 / 检索与键盘 / 三视口组合、长自然语音、动态范围 / 版本 / 文件变化矩阵、横竖 / SAR / 取消抽帧，以及长视频同步 / 编辑冲突等保留待办。WB-306～WB-308 原生结构化 / 比较 / 专题专项，以及 WB-310 / WB-311 原生授权写入 / 转录控制组合专项尚未完成。它们已有本机编译、核心或协议结果，但不能用这些结果替代尚未执行的原生专项。未推进 WB-312 / WB-313，也未作整项或全平台交付声明。
+
+## 第 31 批：macOS 原生组合验收与取消回收修复
+
+2026-10-28，在 `master` / `a029b9816cbd9299ed92b549edb3e6efb0a71e39` 的既有工作区上继续。保留第 30 批修改、`.DS_Store` 和 `.codegraph/`，没有提交、推送或发布。仅使用已有标记的合成资料库及新建空恢复库；本批没有调用登录账号或模型服务。证据根目录为 `.local/macos-workbench-20261028-b31/`，`summary.json` 与 `evidence-inventory.json` 汇总本批结果和哈希。
+
+### WB-119：原生分类、检索与键盘组合
+
+`p1a-acceptance-macos.py` 增加 `--viewport`，使用相同 run-id 保留资料库，在退出后分别重建 1440×900、1280×800、1024×680 的真实 Tauri 窗口。截图是 Retina 像素，不能把 2048×1360 截图误记为窗口逻辑尺寸。
+
+- 在原生界面创建分类“macOS 创作学习”和标签“macOS 节奏”，关联 `mp4-delay`。分类、标签与“开饭时间”组合检索只命中该资产；两次应用重启后关系保留。1440 / 1280 双栏、1024 紧凑导航及可折叠分类、纵向详情均实际打开并截图检查。
+- 从搜索输入框以 Tab / Enter 到达并打开资产。发现记录访问触发列表刷新后，旧标题 DOM 已失效，返回列表只能聚焦列表容器。`knowledge-library.tsx` 改为在原触发节点失效时按资产 ID 找到当前标题；资产确已离开列表时仍保留原容器回退。
+- 修复后在三个窗口均核对返回焦点落在 `查看视频资料 mp4-delay`，未降格为列表容器。最小窗口通过连续 Tab 到达版本、片段、关键帧、阅读器及播放 / 自动滚动 / 选段控件；聚焦会将阅读工具滚入视口，复制和导出保持可达。
+- 收紧既有 `library-asset-detail.browser.js` 的返回焦点断言，要求仍存在的资产标题获得焦点。该完整浏览器脚本本批为 `NOT_RUN`；对应回归通过真实 WKWebView 原生键盘执行，不将它记成 Chromium 自动回归通过。
+
+证据包括 `focus-regression.json`、`list-{1440,1280,1024}.*`、`detail-{1440,1280,1024}.*`、`back-{1280,1024}.txt`、`detail-1024-keyboard.json` 和 `detail-1024-bottom.jpg`。结合第 30 批的旧库升级、导入 / 播放、编辑、两种备份和空库恢复，WB-119 的 Apple Silicon 平台子项完成。
+
+### WB-310：原生授权、六工具写回与来源恢复
+
+由原生设置打开服务，官方 TypeScript SDK 1.32.1 经真实 helper / Unix socket 连接同一 Core。默认六项写工具全部返回 `WRITE_DISABLED`；仅在界面启用“允许 AI 写入”后执行六项操作。使用明确合成模型名 `b31-synthetic-model😀`，没有把脚本构造的文字冒充真实模型生成结果。
+
+新增 AI 笔记、分类、专题和选题，追加分类与标签。重复追加后每条关系只有一份；分类批次含有效 ID 与不存在 ID 时返回 `CATEGORY_NOT_FOUND`，有效关系也未落盘。跨资产文案引用返回 `INVALID_CITATION`，五条文件删除 / 设置修改 / 覆盖写入 / 自行授权的禁用方法均未开放。撤销授权后六项再次拒绝，同一连接仍能读取人工笔记。
+
+原生笔记显示 AI / 模型名、引用“以问题开场”，能打开对应整理稿 v1；专题和选题展示 AI 来源，选题观点 / 正文独立。`sdk-transcript.jsonl` 保留实际调用；`assert-evidence.py` 核对写前 / 写后人工笔记与整理稿读数相等，并以第 30 批写入前的真实备份核对原有四篇文案和人工笔记未改变。原生服务重启及应用重启均复位只读，应用重启还默认关闭服务。
+
+本批原生仅资料备份包含 5 个资产、5 篇文案、2 条笔记、1 个专题、2 个选题。独立 `macos-b31 / restore` 空库经原生备份包 / 目标目录选择器恢复成功，明确提示 6 个媒体文件未随包提供。`restore-comparison.json` 核对笔记、专题、选题及选题参考四张表逐行相等；文案 ID、正文、版本与模型 / 源元数据相等，仅按恢复契约重定位 `source_json.path` 并重算 `recognition_key`。没有声称源路径或全部文案行字节相等。恢复后的原生 AI 笔记仍能打开整理稿 v1，且如实标记来源文件变化或缺失。见 `native-backup.txt`、`native-restore-result.*`、`provenance-*.json`、`restored-ai-citation.*`。
+
+### WB-311：真实 ASR、服务重连与取消回收
+
+经原生选择器导入 66 秒合成连续语音视频及其循环至约 660.576 秒的取消验收视频。两者仅用于真实 CPU 处理和生命周期验证，循环样本不计为 WB-301 的长自然口播。
+
+真实 MCP 启动 66 秒视频并完成识别；同文件启动复用操作 ID，另一个文件返回 `TRANSCRIPTION_BUSY`。已完成结果在非 force 启动下复用精确 ID `3c7181a3-434d-462a-82e8-b5cab2e30ee0`，保留真实文案和时间结果。
+
+长样本运行中实际观察到打包 engine 与 `llama-funasr-cli` PID、暂存 WAV 路径和识别进度。发起客户端断开不取消 Core 工作；从原生界面关闭 / 重开服务后，同一操作仍在识别，写入复位只读且取消被拒绝；重新授权后才能请求取消。
+
+第一次验收发现返回 `canceled` 时一个后代 PID 仍存在。原 Unix 路径只等待直接子进程，整个进程组在 Drop 中才收到 SIGKILL，退出异步完成。`PythonBridge::operation_cancellable` 现在先终止私有进程组、等待直接子进程，再沿用现有五秒清理限额等待组消失，之后才允许调用者删暂存并发布终态；`EPERM` 仍表示组存在，继续等待，只有 `ESRCH` 才算消失。异常不会伪造取消完成。
+
+新增 `cancel_waits_for_engine_and_native_descendant_exit` 使用真实夹具进程及其真实后代，要求取消返回后两个 PID 均不存在。最终真实 ASR 复验先返回 `running + cancel_requested=true`，随后为 `canceled`；读取终态时 engine / ASR 两个 PID 均已消失，暂存目录已删除，再次取消保持同终态。原生详情显示“本次提取已取消”，工作台没有残留运行项。再次重启应用后，官方 SDK 以只读权限核对精确取消 ID 的完整 DTO 与保存前一致，66 秒完成 ID / 状态 / `has_result` 同样保留。
+
+最终证据为 `operations.json`、`operations-restart.json`、`cache-reuse.json`、`native-canceled-detail.txt`。失败证据保留为 `operations-first-failure.json`、`operations-second-failure.json`、`operations-diagnostic-failure.json`，没有用最终通过覆盖失败历史。已提交 Core 回执后的确定性客户端超时仍引用第 30 批官方 SDK / 真实 IPC 协议夹具；本批没有人为延迟真实 ASR 的 IPC 回执，也未声称该项是原生 ASR 超时实测。
+
+### 验证与边界
+
+| 验证 | 本批实际结果 |
+| --- | --- |
+| `npm run build` | PASSED；修复焦点后的 TypeScript / Vite 构建，既有 chunk 大小提示保留 |
+| launcher 隔离保护 Python 测试 | 2 passed；未标记 / 标记不符目录在子进程和数据库操作前拒绝 |
+| `cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib -- --test-threads=1` | 最终 259 passed、2 个既有在线测试 ignored；`core-tests-final.log` |
+| `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop,mcp --all-targets -- -D warnings` | PASSED；`clippy-final.log` |
+| 三逻辑窗口的真实 WKWebView / 键盘 / 组合筛选 | PASSED；截图与 AX 分别保存 |
+| 官方 SDK / 同一原生 Core 六工具及真实 CPU ASR | PASSED；独立记录权限、来源、生命周期与恢复 |
+| `python3 .local/macos-workbench-20261028-b31/assert-evidence.py` | PASSED；核对实际证据，不替代前述运行 |
+| 完整浏览器套件、Windows 和 Intel 原生重跑 | NOT_RUN / UNAVAILABLE；未用 Apple Silicon 代验 |
+
+本批完成 WB-119、WB-310、WB-311 三个 Apple Silicon 子项；累计 12 个平台子项。Intel 无可用机器，跨平台主项仍为 21 / 49。WB-301、WB-303～WB-309 的既有缺口继续保留，没有顺延勾选。
+
+本批使用 Vite 调试 `.app` 和实际打包的 Python / ASR 引擎，未重新构建 DMG。第 30 批已验收 DMG 不包含本批焦点与 Unix 回收修复；未将旧安装包描述为包含最新修改，也未作发布声明。
+
+## 第 32 批：macOS 结构化拆解原生验收
+
+2026-10-28，继续 `master` / `a029b9816cbd9299ed92b549edb3e6efb0a71e39` 的既有未提交工作区。未修改产品代码、安装工具、使用登录账号、提交、推送或打包 DMG。本批证据位于 `.local/macos-workbench-20261028-b32/`，平台为本机 macOS arm64，原生界面为 Vite 调试 Tauri / WKWebView。
+
+先核对 WB-301：约 297.586 秒自然口播只有旧 Windows 隔离缓存及哈希记录，本机现有自然语音为上游 8 秒样本；已连接的 Windows Workspace Registry 也未登记本仓库，未借用其他工作区越界读取。因此保留 WB-301 未勾选，没有用循环语音或其他短样本替代该验收。继续推进不依赖此样本的 WB-306。
+
+### 原生表单与来源
+
+使用第 30 / 31 批已标记的 `macos-20261028 / upgrade` 合成资料库，操作 `mp4-delay` 的真实识别原文 v1、片段 1.920～4.490 秒和实际 PTS 2.000 秒黑帧 PNG。全部保存经生产表单与 Tauri / Rust 领域服务完成；SQL 只读快照用于核对结果，未直接写库。
+
+- 人工文案拆解逐项填写开头、观点、论据、转折、结尾、可借鉴点，保存为独立 r1；类型保存后固定，原文和已有笔记没有被转换。
+- 从已保存原文全文选区创建带精确引用的新笔记，再切为文案拆解。显式选择“AI 结果（手动录入）”，使用 `b32-synthetic-model` 合成标识。正文已填但模型名为空时保存禁用；补齐后保存 r1，再人工补充观点为 r2，界面继续显示 AI / 原模型和“已人工修订，保留 AI 创建来源”。未填写字段保留空值，正文投影显示“未记录”。这只是来源与存储验收，未调用模型、未评价真实模型输出质量。
+- 原生引用弹窗打开精确识别原文 v1，正文为已有“开饭时间早上九点。”；保留第 30 批记录的识别错字，没有将其改成准确率通过。
+- 制作手法拆解保存画面、字幕、转场、声音四项观察，均引用同一已保存片段；画面和转场关联范围内 PNG，依据仅看关键帧，明确显示“未核验连续运动”。字幕和声音保持待核验，不声称已观看 / 聆听。
+- 将仅看关键帧的观察切为声音后，持续显示“声音观察不能仅依据关键帧”，保存禁用且已有输入保留；改回正确维度后才可保存。原生弹窗实际显示已保存黑帧。
+
+证据：`copywriting-human-save.txt`、`ai-no-model.txt`、`copywriting-ai-r{1,2}.txt`、`analysis-citation-v1.txt`、`sound-keyframe-rejected.txt`、`technique-four-dimensions.txt`、`analysis-frame-preview.*`。
+
+### 三窗口、播放与重启
+
+顺序退出 / 重建同一 profile 的 1280×800、1440×900、1024×680 窗口，资料不重种。实际截图核对宽窗口双栏、最小窗口纵向表单、中文换行和焦点。最小窗口从开头以连续 Tab 到观点、论据、转折、结尾、可借鉴点；各字段进入可见区域。1280 窗口另记录从导航经媒体控制、片段 / PNG 到笔记选择器及首字段的真实 Tab 路径。未把 AX 中存在但未滚入视口当作可见性截图。
+
+从观察记录“播放引用片段”实际调用已有播放器；开始时显示绑定片段及进度，结束后按钮为 Play，滑块为 0.748 / 六秒视频，约在 4.49 秒停止。该数字来自原生控件的舍入值，不宣称逐帧精度。见 `observation-play-{start,ended}.txt`。
+
+`source-before-restart.json` 与 `restart-comparison.json` 核对三份结构化笔记的完整 ID / kind / 正文投影 / origin / model / revision / citations / analysis 一致，包含 AI r2 和 human_revised；两条已有片段及 PNG 字节 / 元数据同样保留。截图与键盘路径分别见 `copywriting-ai-{1440,1024}*`、`technique-{1440,1024}*`、`analysis-keyboard-{1280,1024}.json`。
+
+### 两种原生备份恢复
+
+通过真实 macOS 目录选择器创建两种备份，再分别恢复到新建标记空库 `macos-b32 / restore`、`macos-b32-media / restore`。两库均先核对 0 资产，未覆盖已有资料。备份与恢复包含 5 个资产、5 篇文案、5 条笔记、1 个专题和 2 个选题。
+
+| 模式 | 实际结果 |
+| --- | --- |
+| 仅资料 | 0 视频文件，6 个文件未随包提供；三份结构化笔记逐行一致，片段快照保留，PNG 字节一致。原生观察播放禁用并标明源缺失；PNG 仍可预览，AI r2 来源及固定原文 v1 仍可打开 |
+| 包含视频 | 复制 / 恢复 5 个可用视频，原缺失的 1 个文件继续缺失；三份结构化笔记逐行一致，PNG 与五个媒体 SHA-256 一致。观察的播放入口实际使用恢复目录媒体，播放到范围结束暂停，PNG 预览正常 |
+
+恢复按既有契约重定位 Source：仅资料包变更路径并保留缺失源的原大小 / mtime；含媒体包的路径与 mtime 改绑到实际恢复文件。核对新的 Source.size / mtime_ns 与文件 stat 一致，片段及关键帧使用相同有效绑定；没有将恢复前后 Source JSON 全字节相等作为通过条件。除这些重定位字段，片段 / 关键帧快照相等；笔记和 analysis 不含这些绝对路径，保持完整相等。
+
+证据：`backup-{notes,media}.txt`、`restore-{notes,media}-{empty,result}.txt`、`restored-{notes,media}-snapshot.json`、`restore-{notes,media}-comparison.json`、`restore-notes-{technique,ai,citation,frame}.*`、`restore-media-{technique,play-start,play-ended,frame}.*`。两份备份的 manifest / 摘要与媒体文件保留于本批 `backup-notes/`、`backup-media/`。
+
+### 验证和完成范围
+
+`cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib analysis_tests -- --test-threads=1`：**10 passed**，覆盖模型 / 依据 / 空模板边界、固定文案来源与 AI 人工修订、外来 / 越界 / 变化资源拒绝、资源缺失后的引用、原始 PTS、事务 / CAS、v6 迁移备份与失败重试、双轮含 / 不含视频恢复及已有 MCP 读取。日志为 `analysis-tests.log`。这些边界是实际 arm64 Core 测试，未声称全部在原生界面重放。
+
+本批没有产品代码变更；未重复运行第 31 批已通过的全量 Rust、Clippy 或前端构建。完整浏览器脚本为 NOT_RUN，三窗口验证为真实 WKWebView；Intel 无可用设备，继续 UNAVAILABLE。文档检查链接与 `git diff --check`，新增证据附哈希清单。
+
+WB-306 的 Apple Silicon 子项完成，累计 13 个平台子项；主任务仍为 21 / 49。Apple Silicon 尚待 WB-301、WB-303～WB-305、WB-307～WB-309 七项。没有启动 WB-312 / WB-313 或 P3，也没有将本批表单验收扩大为声音、连续运动或自然视频内容质量通过。
+
+## 第 33 批：macOS 跨视频对比原生验收
+
+2026-10-28，继续 `master / a029b9816cbd9299ed92b549edb3e6efb0a71e39` 的既有未提交工作区。平台为本机 macOS arm64，使用 Vite / 原生 Tauri WKWebView 和带 marker 的合成资料库。证据在 `.local/macos-workbench-20261028-b33/`。本批仅修改对比区域聚焦滚动和对应文档；未安装工具、调用模型、使用登录凭据、提交、推送或发布安装包。
+
+### 对比、逐条来源与历史摘录
+
+- 两视频工作区读取 `mp4-delay` 和文件可用的旧视频资料：前者默认 AI 文案拆解 r2 / `b32-synthetic-model` / 已人工修订、制作手法 r1，后者没有结构化拆解，明确显示未知。没有把旧自由正文笔记猜测为结构化数据。
+- 空白草稿保存禁用；填标题与第一条结论、勾选来源 A 后才可保存。切换 A 栏到人工文案拆解 r1，第一条结论仍显示已捕获的 AI r2。新增空结论后保存重新禁用；第二条填写内容并仅勾选来源 B 后恢复可保存。返回知识库触发未保存保护，选择继续编辑保留草稿。
+- 原生保存 `macOS 原生逐来源对比`，只在 A 创建一条 comparison 笔记 `fd85be7a-c7c0-4eff-a15b-61854a875d16`，成员为 A / B，两条结论各保留自己的来源。SQL 只读核对 asset ID、文案不可变版本、拆解 ID / revision、模型 / origin / human_revised、片段文件 ID / 范围、正文与 citations；没有直接写库。
+- 从已保存比较逐项打开 A 的原文 v1、文案 r2、制作手法 r1、1.920～4.490 秒片段，以及 B 的另一篇原文 v1、0.400～1.200 秒片段。实际播放器 URL 分别属于自己的媒体。A 播放结束后显示“片段播放完成”、Play 和滑块 0.748 / 六秒，约为 4.49 秒；原生控件值经过舍入，不宣称逐帧精度。
+- 原生表单将 A 的 AI 拆解人工更新为 r3，旧比较显示“保存时 r2，当前 r3”，仍保留未含新增文字的 r2 摘录。再编辑第二条结论使比较笔记升为 r2，两条来源完整快照均不变。正常退出和重启后，笔记 / analysis / comparison 表逐行一致，界面仍可打开旧 r2 摘录。
+
+证据：`comparison-initial-1024.txt`、`column-switch-preserves-point.txt`、`draft-navigation.txt`、`two-points-draft.txt`、`saved-dialog.txt`、`source-{document-a,document-b,copywriting-r2,technique,range-stop,range-b-stop}.txt`、`historical-r2-current-r3.txt`、`comparison-edited-r2.txt`、`restarted-{comparison-r2,historical-r2}.txt`、`source-snapshot.json`、`all-row-comparison.json`。
+
+### 四栏、键盘与窄窗口修复
+
+四视频对比另加入没有文案 / 拆解 / 片段的取消转录资料，以及文件缺失的旧视频；空维度保持“未知 / 来源维度未知”，同名旧视频按资产 ID 分开。选择第五条后点击入口，持续提示“请选择 2 到 4 个视频进行对比”，没有进入非法工作区。两视频返回列表后仍保留原选择。
+
+实际重建并打开 1440×900、1280×800、1024×680 三种窗口。四栏的横向溢出位于对比区域，应用导航保持稳定。最小窗口初验发现 Tab 可进入最右栏，但 WebView 未完整滚入控件，焦点和文案部分裁切；保留失败截图 `four-columns-1024-right.jpg`。在 `comparison-scroll` 的 focus capture 中调用标准 `scrollIntoView({block:'nearest',inline:'nearest'})`，使聚焦控件完整可见，无新增依赖、状态或配置。
+
+修复后重新启动最小窗口，从首栏读取按钮连续 Tab 穿过四栏，最右栏原文入口完整可见；Return 打开正确来源，Escape 返回原触发按钮，Shift+Tab 回到该资产片段复选框。证据为 `four-columns-{1440,1280}.*`、`four-columns-1024-fixed-{keyboard.json,right.txt,right.jpg}`、`keyboard-source-{open,escape,next}.txt`。修复前后截图分开保留，不将 AX 中存在代替实际可见性。
+
+### 两种原生备份恢复
+
+经真实 macOS 目录选择器创建仅资料及含视频两包，分别恢复到新标记空库 `macos-b33 / restore`、`macos-b33-media / restore`。恢复前界面均确认空库；没有覆盖原库。
+
+| 模式 | 实际结果 |
+| --- | --- |
+| 仅资料 | 5 资产、5 文案、6 笔记、1 专题、2 选题；6 个文件未随包提供。全部笔记 / analysis / comparison 行与源库一致，历史 r2 和当前 r3 关系保留，固定原文可打开；来源播放显示“文件已移动或删除”，没有有效媒体 URL |
+| 含视频 | 同样的完整资料和历史快照；复制 / 恢复 5 个视频，原缺失的 1 个文件继续缺失。5 个媒体与 1 个 PNG 的 SHA-256 与源库一致；比较来源播放实际使用新恢复目录，在原范围终点暂停 |
+
+备份位于 `backup-notes/映取资料备份-20261028-201740-2a8497db`、`backup-media/映取资料备份-20261028-201753-3ff7a62f`。结构不含绝对媒体路径，恢复后逐行完整相等；媒体按既有机制重定位，没有要求文件路径与源库相同。证据：`backup-{notes,media}.txt`、`restore-{notes,media}-{empty,result}.txt`、`restored-{notes,media}-{comparison,historical-r2}.txt`、`restored-notes-{document,missing-media}.txt`、`restored-media-play-{start,ended}.txt`、`all-row-comparison.json`、`media-integrity.json`。
+
+### 检查与完成边界
+
+`cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib comparison_tests -- --test-threads=1`：**6 passed**，覆盖错资产 / 文案 / 拆解 / 片段、重复成员、过期修订、未知维度、历史快照合法性、事务 / CAS、v7 升级备份及恢复图校验。这些是 arm64 Core 边界测试，未声称每个错误都在原生界面重放。`npm run build` 通过；保留已有的大 JS chunk 提示。完整浏览器脚本和 Windows 重跑为 NOT_RUN，Intel 为 UNAVAILABLE。本批 Rust 未变，不重复全量 Rust / Clippy；文档链接和 `git diff --check` 通过。
+
+WB-307 的 Apple Silicon 子项完成，累计 **14 个平台子项**；主任务仍 **21 / 49**。Apple Silicon 剩余 WB-301、WB-303～WB-305、WB-308、WB-309 六项；WB-301 长自然口播样本缺口继续保留。未启动 WB-312 / WB-313 或 P3。本批不证明真实模型输出质量、连续运动 / 声音人工视听评价、Intel 或正式安装包验收。
+
+## 第 34 批：macOS 研究专题原生验收
+
+2026-10-28，继续 `master / a029b9816cbd9299ed92b549edb3e6efb0a71e39` 的既有未提交工作区。本批使用本机 macOS arm64、Vite / Tauri WKWebView 和已标记合成资料库，证据在 `.local/macos-workbench-20261028-b34/`。没有修改产品代码、安装工具、使用登录凭据、调用模型、提交、推送或发布安装包。
+
+### 专题与成员关系
+
+原生创建 `macOS 原生研究专题😀`（`1cfe19ec-637a-430c-8f4f-ecc99112780a`），填写中文多行研究内容；空标题保存禁用，未保存返回触发保护，继续编辑后原草稿保留。保存后依次添加视频、真实片段、比较笔记、AI 文案拆解及缺失文件的视频，三类成员均经生产选择器和 Tauri / Rust 领域服务保存。选择器搜索 `mp4-delay` 后可选择对应来源；重复添加该视频被明确拒绝，弹窗保留“该资料已在专题中”并可关闭。
+
+修改专题研究内容后，添加 / 移除 / 排序均禁用，正文先保存才恢复成员操作。以连续 Tab 到“上移资料 3”，空格完成上移；首项上移及末项下移禁用。随后移除 AI 笔记成员，只读 SQL 核对 `asset_notes`、`asset_clips`、`asset_keyframes`、`asset_files` 与移除前完整一致，剩余成员 position 连续。重新加入同一笔记后，最终专题 r10，五成员顺序为视频 A、比较笔记、片段、缺失文件的视频 C、AI 拆解笔记。成员只保存引用和名称快照，没有复制来源正文或媒体。
+
+证据：`initial-new-topic.txt`、`draft-navigation.txt`、`topic-created.txt`、`member-{video,clip,comparison}-added.txt`、`duplicate-rejected.txt`、`dirty-disables-members.txt`、`keyboard-to-reorder.json`、`keyboard-reorder-result.txt`、`before-member-mutations.json`、`member-removed.txt`、`remove-preserves-originals.json`。
+
+### 来源、键盘、三窗口和重启
+
+- 专题 AI 笔记入口读取当前 r3 / `b32-synthetic-model`，固定引用打开真实识别原文 v1。比较笔记入口保留其人工 r2 正文与各自来源，内部文案拆解仍显示“保存时 r2，当前 r3”。片段入口实际播放绑定文件的 1920～4490 ms 范围，结束后显示“片段播放完成”、Play 和滑块 0.748 / 六秒，约 4.49 秒；不以原生控件舍入值宣称逐帧精度。
+- 打开视频进入原资产详情，专题编辑区不在活动 AX 树中；“返回专题”恢复同一专题与触发按钮焦点。在详情中将原 AI 笔记编辑为 r4，再返回专题，成员显示当前 r4，来源弹窗出现新增文字；比较笔记仍引用旧 r2 摘录。文件缺失的视频 C 仍为正确原资产，详情明确缺失，播放 / 系统播放器 / 定位文件禁用，返回不丢失专题。
+- 顺序退出、重建同一 profile 的 1024×680、1440×900、1280×800 窗口，实拍核对专题列表、研究内容、成员按钮和选择器，中文换行与局部纵向滚动正常。最小窗口真实键盘排序通过；1280 窗口从标题以 Tab 到添加资料、Return 打开选择器、Escape 关闭后焦点返回添加资料。初次 AX 直接触发片段后关闭，焦点记录为 HTML 根，不能据此判断键盘恢复；保留该记录并补真实 Tab 到第三成员、Return 打开片段、Escape 关闭，焦点回到原打开按钮，再 Tab 到“上移资料 3”。
+- 正常退出和重启后，专题、成员、笔记、analysis 和 comparison 表逐行一致，包含专题 ID / r10、五成员身份 / 顺序 / 名称快照、AI 当前 r4 和比较历史 r2。只读 SQL 用于核对，未直接写库。
+
+证据：`source-{ai-note,ai-citation,comparison,comparison-historical,clip-playing,clip-ended,video-detail,current-r4,close-focus}.txt`、`returned-topic-current-r4.txt`、`missing-video-{detail,return}.txt`、`topic-{1024,1024-top,1440,1280}.*`、`picker-1440.jpg`、`keyboard-picker-{path.json,open.txt,escape.txt}`、`keyboard-clip-{path.json,open.txt,close.txt,next.txt,focus.jpg}`、`source-snapshot.json`、`restart-comparison.json`。
+
+### 两种原生备份恢复
+
+通过 macOS 原生目录选择器创建两包，分别恢复到新建标记空库 `macos-b34 / restore`、`macos-b34-media / restore`，恢复前均确认 0 资产。两包包含 5 资产、5 文案、6 笔记、2 专题、2 选题，新的专题五成员随包保留。
+
+| 模式 | 实际结果 |
+| --- | --- |
+| 仅资料 | 0 视频文件，6 个文件未随包提供；专题 / 成员 / 笔记 / analysis / comparison 与源库逐行一致。专题成员正确显示文件缺失，AI 当前 r4 与固定原文仍可打开；片段弹窗明确“文件已移动或删除”，没有有效媒体 URL |
+| 含视频 | 5 个可用视频恢复，原缺失的 1 个文件仍缺失；上述各表完整一致，5 个媒体与 1 张 PNG 的 SHA-256 一致。专题片段实际使用新恢复目录，在原范围终点暂停；比较内部仍显示“保存时 r2，当前 r4”及未被替换的旧摘录 |
+
+备份为 `backup-notes/映取资料备份-20261028-203219-191f4be3`、`backup-media/映取资料备份-20261028-203238-2b078b32`；媒体按已有机制重定位，不要求恢复路径等于原路径。证据：`backup-{notes,media}.txt`、`restore-{notes,media}-{empty,result}.txt`、`restored-{notes,media}-topic.txt`、`restored-notes-{ai,citation,missing-clip}.txt`、`restored-media-play-{start,ended}.txt`、`restored-media-historical.txt`、`all-row-comparison.json`、`media-integrity.json`。
+
+### 检查与完成范围
+
+`cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib topic_tests -- --test-threads=1`：**7 passed**，覆盖三类成员、归属 / 去重、全排列 / CAS 与原子失败、移除保留来源、归档 / 引用删除 / 重关联状态、schema8→9 迁移失败回滚与一致性备份、空专题非空语义、双轮恢复和非法包拒绝。归档、来源记录删除、重关联和并发冲突属于本批实际 arm64 Core 用例，未声称全部在原生界面重放；原生范围为上述实际记录。
+
+没有产品代码变更，不重复前批已通过的前端构建、全量 Rust 或 Clippy。完整浏览器脚本和 Windows 重跑为 NOT_RUN，Intel 为 UNAVAILABLE；文档链接、`git diff --check` 和证据断言通过，附哈希清单，验收应用及本轮 Vite 已停止。
+
+WB-308 的 Apple Silicon 子项完成，累计 **15 个平台子项**；主清单仍 **21 / 49**。Apple Silicon 剩余 WB-301、WB-303～WB-305、WB-309 五项，WB-301 长自然口播样本缺口不变。没有启动 WB-312 / WB-313 或 P3，也未将合成资料和原生表单验收扩大为模型输出、连续运动 / 声音人工评价或正式安装包通过。
+
+## 第 35 批：macOS 选题与草稿原生验收
+
+2026-10-28，继续 `master / a029b9816cbd9299ed92b549edb3e6efb0a71e39` 的既有未提交工作区，使用本机 macOS arm64、Vite / Tauri WKWebView 和带 marker 的合成资料库。证据在 `.local/macos-workbench-20261028-b35/`。本批没有产品代码变更、工具安装、登录凭据 / 模型调用、提交、推送或安装包发布。
+
+### 独立创作和参考
+
+从第 34 批研究专题的“写选题”进入，新稿只预选该专题 r10，标题 / 观点 / 正文为空且保存禁用。填写自己的中文观点、带 emoji 的多行正文，再通过选择器加入视频 A 与真实 CPU 片段，保存为 `macOS 专题参考与冲突验收😀`（`dca049f3-646b-4a99-be36-dd9af6aca9e6`）r1，三类引用分别保存，不把专题研究内容或文案复制进正文。
+
+原生另核对视频“写选题”和片段“用于选题”入口，均只有对应参考，自己的字段保持空白；离开时显式放弃这些未保存的新稿，没有额外落库。工作台显示实际 3 个选题，并可打开本轮选题的准确 r5 正文。
+
+移除视频参考后，未保存导航保护仍有效；继续编辑并显式保存 r4，数据库仅剩专题 / 片段参考。只读核对既有专题 / 成员 / 笔记 / analysis / comparison 与第 34 批快照一致，5 个源媒体哈希不变，没有删除或改写原资料。重新加入视频、再次添加同一专题时持续提示“该资料已在参考列表中”，弹窗可关闭；最终 r5 保留专题、片段、视频三个参考，位置连续。
+
+证据：`{topic,video,clip}-inspiration-empty.txt`、`three-references-unsaved.txt`、`idea-created{.json,-r1.txt}`、`remove-reference-{unsaved,navigation,r4}.txt`、`remove-preserves-sources.json`、`duplicate-topic-rejected.txt`、`final-r5.txt`、`workbench-{ideas,reopened-r5}.txt`。
+
+### 真实 CAS 冲突和完整副本
+
+为制造真实并发修订，临时 Cargo example 先校验 profile marker 的工作区、identifier、本轮精确选题 ID / 标题及 r1，再用独立 SQLite 连接调用生产 `library::edit_idea` 提交 r2。未直接写 SQL 修改 revision，也未注入前端错误；该程序不经过桌面事件广播，因此由后续旧修订保存触发真实 CAS 检查。验收源码和构建结果在本批 `external-revision.rs`、`external-revision-build.log`、`external-revision.json`；执行后已删除仓库内临时 example，未新增长期工具或产品入口。
+
+原生界面保留 r1 时，先修改本地观点、完整多行正文，并在未保存列表移除视频，留下专题和片段两个参考；独立程序提交 r2 后，点击保存显示“草稿已更新，请重新读取并保留当前内容”，保存禁用，完整本地输入和两项参考没有丢失。只读 SQL 确认服务端 r2 的观点 / 正文及原来三项已保存参考均未被失败保存改变。
+
+点击“读取最新草稿并保留当前内容”后，编辑器显示服务端 r2，展开副本可读到完整 JSON：原本地标题、观点、多行正文、两个参考及 `expected_revision: 1`。从真实 AX 文本解析该 JSON，逐字段核对内容；复制按钮返回“已复制”反馈，本批不将反馈单独当作剪贴板字节核验。存在保留副本时离开仍触发导航保护，继续编辑不丢副本。证据副本保存后，显式移除界面副本，把保留文字经原生表单与服务端三参考人工合并，保存为 r3；后续参考移除 / 重加使最终修订为 r5。
+
+证据：`conflict-{local-before,rejected,reload,recovered-copy}.txt`、`conflict-atomicity.json`、`recovered-from-native-ax.json`、`recovered-{navigation-guard,copy-action}.txt`、`merged-r3.txt`。这轮验证了真实原生冲突与恢复路径；提交成功后回读失败、迟到响应等错误仍按既有浏览器和本批 Core 证据分别报告，没有声称全部在原生界面重放。
+
+### 来源、键盘、三窗口与重启
+
+- 参考专题打开当前 r10 研究内容和五个成员，可继续用键盘打开其片段；嵌套来源关闭后回到正确来源层级。直接视频来源进入原详情时，自己的编辑器不在活动 AX 树中；“返回草稿”恢复本轮正文及原触发按钮焦点。恢复库中另从专题成员进入视频再返回草稿，正文 r5 保留，焦点落回草稿区域。
+- 真实片段使用原文件绑定的 1920～4490 ms 播放，结束显示 Play、“片段播放完成”和滑块 0.748 / 六秒，约 4.49 秒，不宣称逐帧精度。原文和自己的稿件仍分别存储。
+- 正常退出后顺序重建 1440×900、1024×680 窗口，连同最初 1280×800 实拍核对标题、观点、多行正文、参考与局部滚动。宽窗口 Tab 路径贯穿编辑器和三项参考；最小窗口真实 Tab 到片段入口、Return 打开、Escape 关闭后回到原按钮，再 Tab 到该参考移除按钮，截图中的焦点完整可见。
+- 重启后的选题、参考、专题 / 成员、笔记、analysis、comparison、原文各表与源快照完整相等，包含旧 AI 选题来源及本轮人工 r5、引用身份和顺序。未把未保存的保留副本当作已持久化资料。
+
+证据：`topic-reader.*`、`topic-nested-{clip-playing,clip-ended,close-focus}.txt`、`topic-close-focus.txt`、`video-source-{hidden-editor,return}.txt`、`idea-{1440,1280,1024}.*`、`keyboard-{1440,1024}.json`、`keyboard-1024-clip-focus.jpg`、`keyboard-clip-{playing,ended,close,next}.txt`、`source-snapshot.json`、`restart-comparison.json`。
+
+### 两种原生备份恢复
+
+经 macOS 原生目录选择器创建仅资料与含视频两包，分别恢复到新标记空库 `macos-b35 / restore`、`macos-b35-media / restore`；恢复前均确认 0 资产。每包含 5 资产、5 文案、6 笔记、2 专题和 3 选题。
+
+| 模式 | 实际结果 |
+| --- | --- |
+| 仅资料 | 0 视频文件、6 个文件未随包提供；全部选题、参考、专题 / 成员、笔记 / 拆解 / 比较逐行一致，本轮观点 / 正文 / r5 / 三参考保留。专题内容和成员可读；片段明确“文件已移动或删除”，没有有效媒体 URL |
+| 含视频 | 5 个视频恢复，原缺失的 1 个文件仍缺失；上述记录完整一致。5 个媒体和 1 张 PNG 的 SHA-256 一致；草稿片段实际使用新恢复目录，范围结束正常暂停；从参考专题的视频成员返回后仍为自己的 r5 草稿 |
+
+原文额外检查按既有恢复契约区分语义与重定位字段：正文、不可变版本、身份及时间等语义字段完整一致；Source.path 和识别缓存 key 随恢复路径重算，包含媒体时 Source.mtime_ns 绑定实际恢复文件，不含媒体时保留原 mtime / size 并标缺失。初始额外整行比较因这些预期字段不同未通过，记录中保留该边界；改为逐字段核对实际文件 stat、缺失路径、缓存 key 资产前缀 / 形状及其他字段相等，未把整行完全相等作为恢复契约。
+
+备份为 `backup-notes/映取资料备份-20261028-205526-25c934c0`、`backup-media/映取资料备份-20261028-205542-9bdb0a30`。证据：`backup-{notes,media}.txt`、`restore-{notes,media}-{empty,result}.txt`、`restored-{notes,media}-{idea,topic}.txt`、`restored-notes-missing-clip.txt`、`restored-media-play-{start,ended}.txt`、`restored-topic-video-{detail,return}.txt`、`all-row-comparison.json`、`media-integrity.json`。
+
+### 检查和完成范围
+
+`cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib idea_tests -- --test-threads=1`：**8 passed**，覆盖创作正文与原文隔离、三类参考、错误归属 / 类型 / 去重、原子保存 / CAS、移除保护、归档 / 重关联 / 缺失后继续编辑、工作台摘要、双轮含 / 不含媒体恢复、非法包及 schema9→10 回滚重试。来源归档、记录删除和迁移等边界属于实际 arm64 Core 用例，未声称本批全部以原生交互重放。
+
+本批没有产品代码变更，不重复已通过的前端构建、全量 Rust 或 Clippy；临时并发验收程序实际构建及执行通过并已清理。完整浏览器脚本 / Windows 重跑为 NOT_RUN，Intel 为 UNAVAILABLE。文档链接、证据断言与 `git diff --check` 通过，附哈希清单，本轮原生应用及 Vite 已停止。
+
+WB-309 的 Apple Silicon 子项完成，累计 **16 个平台子项**；主清单仍 **21 / 49**。Apple Silicon 剩余 WB-301、WB-303～WB-305 四项，长自然口播样本缺口保持。没有启动 WB-312 / WB-313 或 P3，也未将本批原生创作验收扩大为模型输出、视听质量或正式安装包通过。
+
+## 第 36 批：macOS 片段收藏与范围播放原生验收
+
+2026-10-28，继续 `master / a029b9816cbd9299ed92b549edb3e6efb0a71e39` 的既有未提交工作区，在 macOS arm64 / WKWebView 使用独立标记 profile `macos-b36 / upgrade`。原第 30～35 批累积资料库未用于本轮文件变更；本批证据在 `.local/macos-workbench-20261028-b36/`。没有产品代码变更、工具安装、模型 / 真实凭据调用、提交、推送或正式安装包发布。
+
+### 真实 Tauri、媒体范围与文件版本
+
+旧库通过实际应用迁移，得到 2 资产、3 个文件登记；当前 2 个视频可用，1 个缺失。正 PTS 测试 MP4 复用已有 clock 样本，首视频 PTS 5 秒、容器 duration 11 秒；WKWebView 实际探测范围为 **0～11 秒**，seek 0 仍落在 0，不能直接套用 Windows / Chromium 先前的 5 秒下界。保存 5.2～6.6 秒后从绑定文件实际播放，结束显示 Play、“片段播放完成”和滑块 0.6 / 11 秒，约 6.6 秒；不以原生控件整数显示宣称逐帧精度。原生表单尾端 20 秒、负数起点及结束早于开始均禁止保存。
+
+普通 MP4 实际 duration 4 秒。无时间识别原文通过选区引用，手工填写 0.4～1.2 秒，保存标题、理由、不可变 document ID / v1 / 精确原句；到点暂停，滑块 0.3 / 4 秒。点击不同收藏后，文件版本 Select 和 asset protocol URL 切换到各自固定文件。原生“标为开始 / 标为结束”读取实际当前位置；两者相等时保存禁用，没有由字数推造时间。
+
+另用临时 Rust example 校验本轮 marker、工作区与精确 ID，再调用生产 `library::create_clip`：正 PTS 文件搭配普通文件的识别原文返回 `CLIP_SOURCE_MISMATCH`；随后以另一渲染器报告的 0～20 秒能力创建收藏。该行为不直接写 SQL、不伪造前端错误；当前 WKWebView 再次播放时明确“片段无法完整播放，可播放范围：00:00.000–00:11.000”，暂停且数据库终点仍为 20000 ms。源码与构建结果保留在证据目录，仓库临时 example 已删除。
+
+证据：`media-provenance.json`、`positive-pts-{initial-range,outside-tail,saved,play-start,play-ended}.txt`、`positive-pts-1280.jpg`、`plain-citation-{saved,v1}.txt`、`plain-play-ended.txt`、`bound-{special,plain}-version-play.txt`、`native-clock-marks.txt`、`negative-head-rejected.txt`、`editor-1024-reversed.txt`、`clip-domain-{acceptance.rs,build.log,result.json}`、`stored-outside-range-rejected.txt`。
+
+### 真实源变化、失败输入与双草稿
+
+只对本轮独立 profile 的自有测试媒体操作，先保存原文件、hash 和 stat。界面尚保留可用状态时，在普通源末尾追加一个字节，再点击保存，实际 Core 返回“源文件已变化，无法按原范围播放”，标题、理由与 0.2～0.8 秒输入保留，失败没有新增收藏。恢复原字节和原纳秒 mtime 后重试成功。
+
+- 仅修改 mtime 后刷新，两个普通源收藏拒播，正 PTS 收藏仍可用；固定 v1 原文继续可读。
+- 暂时移走普通文件后刷新，相关收藏显示缺失并禁用；随后恢复原字节、mtime 和原路径。
+- 通过原生文件选择器把同一 file ID 重新关联到新的副本路径。新文件可用，旧收藏仍显示源变化并禁用，没有跟随新路径重绑定；历史文案可读且明确来源失效。原始测试文件仍保留完整字节。
+- 同时编辑人工整理稿并新建 6～7 秒片段，导航到下载中心触发统一草稿保护；“保存后离开”同时保存两者并完成导航。最终 5 个片段、3 篇文案；自己的整理正文独立存储，20 秒收藏终点未被缩短。
+
+证据：`file-change-state.json`、`original-preserved.mp4`、`pending-before-source-change.txt`、`source-change-save-rejected.txt`、`save-after-source-restored.txt`、`changed-source-{clips-disabled,citation-readable}.txt`、`missing-source-clips-disabled.txt`、`relinked-source-old-clips.txt`、`dual-draft-{guard,saved-left}.txt`、`dual-draft-database.json`。
+
+### 原生 WKWebView 受控事件边界
+
+独立 `macos-b36-fault / empty` 应用加载临时测试页面，使用未修改的生产播放器组件和 WKWebView 实际解码的 4 秒合成 MP4。IPC / 收藏资料由现有 fixture 提供；测试页通过可见按钮制造 duration 变化及提前 ended，不声称这些事件由真实文件自然发生。
+
+| 受控情形 | 可观察结果 |
+| --- | --- |
+| 播放 0.2～3.5 秒时将 duration 收缩至 1 秒并触发 durationchange | 暂停；持续显示“片段未完整播放：可播放范围已变化，请重新打开或使用系统播放器”；保存终点仍 3500 ms，无完成提示 |
+| 重启独立夹具后，在终点前暂停并触发 ended | 暂停；持续显示“片段未完整播放：视频提前结束，请尝试系统播放器”；终点仍 3500 ms，无完成提示 |
+
+HTTP 夹具初始 preload 未就绪，保留初始记录，之后通过原生 Play 手势建立播放；不能从初始未就绪推断 WebM 不受支持。播放前确认真实媒体推进，夹具降速仅为留出受控事件操作时间。生产 asset protocol 的实际播放证据与本段分开报告。
+
+证据：`wkwebview-fault-fixture.html`、`fault-config.json`、`build-fault-{base,config}.log`、`fault-initial-decoding.txt`、`fault-user-play.txt`、`fault-{range-shrink,early-ended}.{txt,jpg}`。本批结束已移除仓库临时 HTML，未新增长期测试入口或产品配置。
+
+### 三窗口、键盘、重启及原生备份恢复
+
+顺序正常退出并重建同一源 profile 的 1440×900、1024×680，连同初始 1280×800 实拍核对播放器 / 收藏表单 / 历史状态 / 固定原文。最小窗口按设计改为纵向并局部滚动，Tab 可到结束标记、理由、取消，保存按钮可见且焦点完整；宽窗口 Tab 顺序经过两个秒数、标记与理由，禁用保存不进入焦点序列。取消已修改表单触发草稿保护，最小窗口显式放弃临时无效输入，未额外落库。源库重启后，资产、文件、片段和文案表与快照逐行相等。
+
+通过 macOS 原生目录选择器备份，再分别恢复到新标记空库 `macos-b36 / restore` 与 `macos-b36-media / restore`；恢复前确认 0 资产。两包均保留 2 资产、5 片段、3 文案。
+
+| 模式 | 实际结果 |
+| --- | --- |
+| 仅资料 | 0 视频随包、3 个文件未提供；5 收藏的身份、范围、标题 / 理由、引用 ID / v1 / 原句均保留，缺源禁用播放，固定历史原文可读 |
+| 含视频 | 2 个媒体恢复且 SHA-256 与源文件一致，原缺失文件仍缺失；正 PTS 收藏实际使用新恢复目录播放，6.6 秒结束暂停；两个历史普通源收藏仍显示来源变化，原文可读，没有被重基到新版本 |
+
+比较按现有恢复契约处理 Source.path / mtime 和 recognition cache key 重定位：片段 / 文案其他语义字段相等，随包媒体 Source 绑定实际 stat，缺失 / 历史来源保留 size / mtime 并使用不可用路径。没有要求恢复绝对路径等于原路径。备份为 `backup-notes/映取资料备份-20261028-212634-9f313c64`、`backup-media/映取资料备份-20261028-212648-3a2cba79`。
+
+证据：`clips-1440.*`、`editor-{1440,1024}.jpg`、`keyboard-{1440,1024}.json`、`keyboard-1024-focus.jpg`、`citation-1024.*`、`source-snapshot.json`、`restart-comparison.json`、`backup-{notes,media}.txt`、`restore-{notes,media}-{empty,result}.txt`、`restored-{notes,media}-clips.txt`、`restored-notes-citation.txt`、`restored-media-historical-citation.txt`、`restored-media-play-{start,ended}.txt`、`all-row-comparison.json`、`media-integrity.json`。
+
+### 检查与完成范围
+
+```sh
+cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib clip_tests -- --test-threads=1
+cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib clip_events_restart -- --test-threads=1
+```
+
+分别 **6 passed / 1 passed**：覆盖范围 / 来源 / 不可变引用及来源链、保存 / 删除不裁剪、v4→v5 迁移一致性备份 / 失败回滚重试、含 / 不含媒体及重关联后二次恢复、非法包拒绝、事件 / 重开与历史媒体导出保护。这些迁移、二次恢复、删除、导出保护边界属于实际 arm64 Core 用例，不声称本批全部经原生界面重放。
+
+本批无产品代码变化，实际验收应用及临时 example 构建通过，不重复全量 Rust / Clippy / 前端构建。完整浏览器脚本、Windows 重跑和正式安装包为 NOT_RUN；Intel 为 UNAVAILABLE。文档链接、证据断言和 `git diff --check` 通过，附哈希清单，临时文件已清理，验收应用与本轮 Vite 已停止。
+
+WB-303 的 Apple Silicon 子项完成，累计 **17 个平台子项**，主清单仍 **21 / 49**。Apple Silicon 剩余 WB-301、WB-304、WB-305 三项；WB-301 的长自然口播样本缺口不变。未启动 WB-312 / WB-313 或 P3，亦不将范围试听扩大为逐帧剪辑、逐字同步或视听质量人工评价。
+
+## 第 37 批：macOS 关键帧原生验收与预览焦点修复
+
+2026-10-28，在 `master / a029b9816cbd9299ed92b549edb3e6efb0a71e39` 的既有未提交工作区继续 WB-304。使用独立 marker profile `macos-b37 / empty`、Vite / Tauri WKWebView、现有打包 engine 0.17.0 与本机 FFmpeg；所有输入均为本轮生成或复用的合成视频。没有使用此前累积资料库作文件变更，没有工具安装、模型 / 真实凭据调用、提交、推送或发布。证据根目录 `.local/macos-workbench-20261028-b37/`。
+
+### 实际媒体、请求位置和整批提交
+
+从 macOS 原生文件选择器导入 5 个测试视频，数据库由生产导入流程写入。以实际播放器时钟执行当前位置取帧，不把预期的 seek 设置值冒充最终请求；例如横屏实际请求为 490 ms，实际帧为 500 ms。PNG 从真实 Core / 引擎 / FFmpeg 生成并经二进制 IPC 读取、解码与原生预览。
+
+| 输入 / 原生操作 | 实际结果 |
+| --- | --- |
+| 320×180、10 fps 横屏测试图 | 490→500 ms；片段 400～1600 ms 的三点请求 600 / 1000 / 1400，实际相同；五点请求 520 / 760 / 1000 / 1240 / 1480，实际 600 / 800 / 1000 / 1300 / 1500 ms |
+| 90×160 竖屏黑色视频 | 242→300 ms，PNG 为 90×160、`black=true`，黑图保留且比例正常 |
+| 160×90、SAR 2:1 蓝色视频 | 237→300 ms，输出方形像素 PNG 为 320×90、`black=false`，预览等比完整展示 |
+| 首视频 PTS 5 秒的 MP4 | 首帧之前当前位置抽帧显示“采样位置没有可用画面”，没有新增图片；5200～6600 ms 三点请求 5433 / 5900 / 6366，实际 5500 / 5900 / 6400 ms，保留原始 PTS 与 time base |
+| 窄范围 400～1600 ms 请求九帧 | 最后请求 1533 ms 的下一帧落到 1600 ms 区间终点，按半开区间契约整批拒绝，原有九张横屏图保留，无半批写入 |
+| 较宽 400～3400 ms 请求九帧 | 成功保存九张，图库初始 12 张，点击加载更多后共 18 张横屏图；请求、实际 PTS 和采样序号逐条保留 |
+
+原生控件设置一次目标滑块值未改变最终当前位置，因此只使用保存 DTO 和实际取帧结果报告时间，没有把目标 350 ms 当成已实现的原生定位。截图只证明取样静图，不宣称已看完连续动作或听过声音。
+
+证据：`media-provenance.json`、`landscape-position-start.txt`、`landscape-preview.*`、`landscape-sampling-complete.txt`、`portrait-preview.*`、`sar-preview.*`、`positive-head-rejected.txt`、`positive-sampling-complete.txt`、`five-sampling-complete.txt`、`nine-narrow-rejected.txt`、`nine-wide-complete.txt`、`gallery-more-1440.txt`、`gallery-1440.jpg`、`png-metadata.json` 与 `png-initial/`。
+
+### 真实取消 / 退出与资源管理
+
+为留出原生操作时间，使用本轮 24 秒、3840×2160、长 GOP 的合成 H.264 视频，从 0～23 秒片段启动九帧提取。只读进程采样记录实际应用、打包引擎、同进程组 FFmpeg 及 `task_staging`，不注入延迟、不使用替身引擎。
+
+- 首轮在运行中点击取消，界面显示“本次关键帧提取已取消”。终态后核对所有已观察到的引擎 / FFmpeg PID 不存在、暂存目录与登记均删除；总图片数仍为原来的 9，4K 资产没有半批图片。
+- 再次启动九帧，在界面“正在提取 0 / 9”时 Cmd+Q。退出后实际应用、引擎与 FFmpeg PID 均不存在，暂存已回收，图片仍为 9；重开后既有九张 PNG 的整行元数据和字节哈希一致。
+- 图库扩至 23 张总图后，删除一张自建测试图片，仅该资源移除，片段 / 文件表未变。删除宽范围测试片段，级联移除它剩余的 8 张图；其他图片 ID 保留、视频未删除。最终 5 资产 / 5 文件 / 3 片段 / 14 张 PNG。
+- 对本轮自有 SAR 文件追加一字节、暂时移走，刷新后分别显示来源变化 / 缺失并禁止新抽帧，旧 PNG 始终可预览。恢复原字节及原纳秒 mtime，再经原生选择器关联到新副本路径，当前文件可用，旧图仍显示来源变化，没有绑定到新视频。原始五个媒体最终 SHA-256 均与创建时一致。
+
+证据：`observe-processes.py`、`{cancel,quit}-processes.json`、`{cancel,quit}-verification.json`、`cancel-{running,requested,terminal}.txt`、`quit-running.txt`、`before-restart-keyframes.json`、`restart-initial-verification.json`、`before-delete-snapshot.json`、`delete-{single,clip}-verification.json`、`changed-source-{gallery,preview}.txt`、`missing-source-{gallery,preview}.txt`、`relinked-source-gallery.txt`、`sar-original-stat.json`。
+
+### 预览焦点修复与三窗口
+
+在 1024×680 实际 Tab 到图片按钮，Enter 打开、Escape 关闭后，焦点落在 HTML 根，下一 Tab 跳到工作台；这是实际键盘失败，保留 `keyboard-preview-close.txt` / `keyboard-preview-next.txt`，没有用此前 AX 直接点击的结果覆盖它。
+
+根因是预览使用受控 Dialog，未提供 DialogTrigger，默认关闭行为没有原图片按钮可恢复。`FrameImage` 现在把实际触发按钮传给父级，随当前预览保存；在 Dialog 的 `onCloseAutoFocus` 中沿既有模式恢复仍连接的原按钮，使用 `preventScroll` 保留阅读位置。未新增依赖、公共协议或全局焦点管理。现有 `tests/library-keyframes.browser.js` 改用 Enter 打开，并补原按钮焦点断言。
+
+修复后在源库 1024×680、仅资料恢复库 1440×900、含视频恢复库 1280×800，实际 Tab / Enter / Escape 均返回对应图片按钮；最小窗口下一 Tab 为同一图片的删除按钮。图库、预览尺寸与局部滚动实拍核对，无页面横向扩张。完整浏览器脚本本批 NOT_RUN，只完成脚本语法检查；三种原生键盘路径与浏览器断言不是同一证据。
+
+证据：`keyboard-1024.json`、`gallery-keyboard-1024.jpg`、`preview-1024.jpg`、`keyboard-fixed-path-{1024,1440,1280}.json`、`keyboard-fixed-close-{1024,1440,1280}.txt`、`keyboard-fixed-next-1024.txt`、`keyboard-fixed-focus-1024.jpg`、`restored-notes-preview-1440.jpg`、`restored-media-preview-1280.jpg`。
+
+### 两种原生备份恢复
+
+仅资料包为 `backup-notes/映取资料备份-20261028-221355-7eca6c2e`，含视频包为 `backup-media/映取资料备份-20261028-221625-59363255`。分别通过 macOS 两次目录选择恢复到全新 marker 空库 `macos-b37 / restore` 与 `macos-b37-media / restore`；两者恢复前均为 0 资产，完成后保留 5 资产 / 3 片段 / 14 图片。
+
+| 模式 | 实际核对 |
+| --- | --- |
+| 仅资料 | 5 个媒体缺失，14 张 PNG 字节与完整 metadata 相等，缺源图片仍实际预览；来源缺失状态保留，新抽帧禁用 |
+| 含视频 | 5 个媒体 SHA-256 一致，14 张 PNG 字节与完整 metadata 相等，竖屏黑图原生预览正常；历史 SAR 图仍显示来源变化且可预览，未改绑到新源 |
+
+片段、图片的 Source.path / mtime 按既有机制重定位，其他字段精确相等；实际媒体来源核对恢复文件 stat，缺失 / 历史来源保留 size / mtime 并使用不可用路径。两模式合计 28 次 PNG 解码与哈希比较通过。源库最终重启后，资产 / 文件 / 片段 / 图片整行及 PNG 哈希与快照相等。
+
+第一次含视频备份在复制尚未完成时被验收操作退出，临时包被清理，该次不计作成功；保留 `backup-media-interrupted.txt`。重新备份等待明确完成后才退出，只有后者用于恢复和哈希核对。证据另含 `backup-{notes,media}.txt`、`restore-{notes,media}-{empty,result}.txt`、`restored-notes-{gallery,preview}.txt`、`restored-media-{gallery,preview,historical-gallery,historical-preview}.txt`、`source-snapshot.json`、`restart-final-verification.json`、`all-row-comparison.json`、`png-integrity.json`、`media-integrity.json`。
+
+### 验证与完成范围
+
+```sh
+PYTHONPATH=python-engine .venv/bin/python -m pytest tests/test_keyframes.py -q
+cargo test --locked --manifest-path src-tauri/Cargo.toml --features desktop,mcp --lib keyframe -- --test-threads=1
+npm run build
+node --check tests/library-keyframes.browser.js
+```
+
+Python **16 passed**；Rust **9 passed**；前端类型 / 构建与浏览器脚本语法通过，保留既有 bundle 体积提示。自动化覆盖非关键帧 / 正 PTS、SAR / 黑帧、非法范围、缺依赖 / 解码 / 超时诊断、PNG 完整性、整批事务失败、迁移失败回滚重试、历史源双轮恢复、取消 / 退出与暂存清理。缺依赖 / 超时和事务故障采用现有测试夹具，不声称本轮卸载 FFmpeg 或在原生 UI 注入数据库故障；真实原生生命周期证据见上文。
+
+本批只修改关键帧预览焦点和相关回归断言；Rust / 引擎没有产品修改，不扩大全量 Rust / Clippy。完整浏览器套件与 Windows 重跑、包含本批焦点修复的正式安装包为 NOT_RUN；Intel 为 UNAVAILABLE。文档链接、证据断言与 `git diff --check` 通过，附哈希清单，原生验收应用与本轮 Vite 已停止。
+
+WB-304 Apple Silicon 子项完成，累计 **18 个平台子项**；主清单仍 **21 / 49**，总项等待 Intel。Apple Silicon 剩余 WB-301、WB-305；WB-301 长自然口播样本缺口不变。本批未启动 WB-312 / WB-313 或 P3。
+
+## 第 38 批：macOS 同步阅读原生验收
+
+2026-10-28，在 `master / a029b9816cbd9299ed92b549edb3e6efb0a71e39` 的既有未提交工作区继续 WB-305。使用独立 marker profile `macos-b38 / empty`、Vite / Tauri WKWebView / SQLite / asset protocol；本批无产品代码变更、ASR 重跑、模型 / 凭据调用、工具安装、提交、推送或发布。证据根目录为 `.local/macos-workbench-20261028-b38/`。
+
+### 数据来源与验收边界
+
+复用现有 `tests/fixtures/seed_sync_profile.py` 的隔离测试方式，在实际应用完成 schema11 初始化并退出后，本地临时准备程序校验精确 identifier、工作区 marker、应用已停止、空库与外键，再写入测试资料。不对日常库或此前累积验收库写 SQL；原库只读，复制媒体 / 输出到本轮自有目录。
+
+| 来源 | 数据与本批用途 |
+| --- | --- |
+| 合成持久化 UI 夹具 | 4 秒视频的三段与无时间 v1、正 PTS / 尾越界段落、300 秒实际 MP4 配 150 段合成时间；模型名明确为“WB305 合成 UI 夹具”。时间按既有 schema 构造，非 FSMN 实测，不用于 ASR 精度或 WB-301 长自然语音验收 |
+| 既有实际 CPU 输出副本 | 第 30 批短样本 1920～4490 ms 一段，以及第 31 批 66 秒合成语音的四个实际 VAD 段；保留原文本 / timing / operation ID / 模型元数据和已知识别错字。只重基副本 Source 并清空旧路径缓存 key，没有重跑 ASR或更正文案 |
+
+最终 5 资产、6 文件、6 篇原文，其中 5 篇有 timing、162 个段落；实际 CPU 的前两段仍各接近 30 秒，未将其改造成句子或逐字时间。准备源码、完整来源及媒体 SHA-256 在 `seed-native-profile.py`、`fixture-provenance.json`，原库未被本批文件变更影响。
+
+### 跳转、高亮、键盘与版本
+
+- 真实 WKWebView 播放短样本，点击第二段从 1.8 秒附近开始；Enter 跳转第一段后，在约 0.63 秒暂停，第一段高亮且焦点仍为第一段按钮。继续播放后约 1.19 秒暂停，处于 0.8～1.8 秒静音间隙，截图确认没有段落高亮。
+- 从文案版本控件经实际 Tab 到“文案段落”，Space 播放 / 暂停；Down / Down / Up 的焦点顺序为第一 / 第二 / 第一段，Enter 再次跳转，播放不抢焦点。全文区域 Space 没有启动播放；整理稿输入允许空格且播放器仍暂停，导航时显式放弃该临时未保存稿。
+- 选取模式下播放不建立选区。反向选择第三段到第一段，三段连续选中；保存表单精确预填 0.200～3.800 秒和换行连接的完整三段原句，不删除范围内静音。通过真实 Tauri 保存 `macOS 反向选三段含静音😀`，只读数据库核对 document ID / v2、file ID、200 / 3800 ms、精确 quote。
+- 取消选取清空状态；有选区时切到无时间 v1，显示旧版全文而无同步区域，切回 v2 不带入旧选区。v1 显示期间，已保存片段仍打开固定 v2 原文。按第三段再第一段连续请求，后一次生效，暂停落在约 0.75 秒；这是实际连续原生操作，不声称人为制造了并发 IPC 反序。
+
+证据：`short-{initial,jump-paused,space-playing,space-paused,arrow-focus,enter-playing,enter-paused,gap-paused}.*`、`short-enter-current.jpg`、`short-gap-no-highlight.jpg`、`selection-play-no-selection.txt`、`reverse-contiguous-selection.*`、`selected-clip-{prefill,saved}.txt`、`saved-clip-binding.json`、`selection-canceled.txt`、`legacy-v1-no-timing.txt`、`clip-fixed-v2-while-v1.txt`、`version-switch-clears-selection-v{1,2}.txt`、`latest-jump-first-wins.txt`、`full-text-space-isolated.txt`、`editor-space-isolated.txt`、`editor-navigation-guard.txt`。
+
+### 长文跟随与实际 CPU 时间
+
+300 秒 MP4 的第 100 段起点为 198.1 秒，真实媒体定位后在约 198.6 秒暂停，截图显示第 100 段高亮，阅读区自动滚到该位置。关闭自动滚动，原生滚动到第 146～150 段阅读，随后继续真实播放到约 212.7 秒，内层阅读位置仍停在末尾；重新开启后回到第 107 段并高亮。
+
+再次将焦点置于文案段落区域并播放，自动跟随推进到第 108 段，约 215.4 秒暂停，焦点仍在同一阅读区域，截图显示可见焦点轮廓和当前段。滚动仅发生在文案区，没有将正文焦点改成当前段。文件名 `long-scroll-off-top.*` 是首次操作的历史命名，实际截图在末尾阅读，不把它当作滚到顶部的证据。
+
+既有实际 CPU 66 秒结果分别从 60.420 秒第三段、63.420 秒第四段跳转；第三段暂停约 60.7 秒，原生高亮对应已保存原句。既有真实短段从 1.920 秒跳转，沿用原“开饭时间早上九点。”识别文本，不据本批 UI 定位宣称该错字已修正或识别质量通过。
+
+证据：`long-198s-current.txt`、`long-198s-follow-1280.jpg`、`long-scroll-off-{top,playing,advanced}.*`、`long-scroll-on-current.*`、`long-follow-focus-preserved.*`、`cpu66-{third-segment,fourth-segment}.txt`、`cpu66-third-segment.jpg`、`cpu-short-segment.*`。
+
+### 可播放范围、文件与来源状态
+
+正 PTS MP4 的第二段从 5.3 秒跳转，暂停约 5.59 秒，保留媒体零点；该 WKWebView 的实际可播放范围为 0～11 秒，不能套用 Windows 的 5 秒 seek 下界。12 秒段落明确“段落起点不在可播放范围内”。选择包含末尾越界段的连续范围后，表单仍为 0.200～12.500 秒，显示实际 0～11 秒范围并禁止保存，没有截短到 11 秒；随后显式放弃临时无效草稿。
+
+短样本切到另一个 file ID 时，提示“请选择文案对应的文件版本”，播放及段落按钮禁用；切回正确文件恢复。对本轮自有主文件追加一字节、暂时移走后刷新，分别显示文件变化 / 缺失、同步禁用；阅读全文仍能读到精确旧正文。恢复原字节和纳秒 mtime 后，再通过原生选择器关联同内容的新路径：当前文件可用，旧文案仍提示来源变化，禁止同步，没有跟随新文件绑定。原始媒体最终 SHA-256 与准备时一致。
+
+离开实际 CPU 播放详情后，活动 AX 树没有播放器；重新进入从新播放入口开始。本批没有通过 WebView 内部对象探针断言已卸载元素的 `src` 字节状态，不将 AX 不可见单独当作全部回调释放证据；清理实现与已有专项证据继续按其层级保留。
+
+证据：`positive-{5s-jump,tail-rejected,unavailable-selection-prefill}.txt`、`positive-tail-rejected.jpg`、`wrong-file-sync-disabled.txt`、`matched-file-sync-restored.txt`、`changed-source-{sync-disabled,text-readable}.txt`、`missing-source-sync-disabled.txt`、`relinked-source-sync-disabled.txt`、`short-original-stat.json`、`navigation-no-active-player.txt`。
+
+### 三窗口、重启与检查
+
+顺序重建同一 profile 的 1440×900、1024×680，连同初始 1280×800 实拍核对。宽窗口两列，最小窗口纵向与局部滚动符合既有设计；最小窗口真实 Down 从第 100 段到第 101 段，Enter 定位到 200.1 秒附近，Space 暂停后焦点仍在第 101 段。长段与工具栏可读，固定 v2 引用重启后仍可打开。不能从 AX 单次最多列出的前 100 个子节点推断只有 100 段，完整 150 段以实际键盘 / 截图与 SQLite 分别核对。
+
+重启后的资产、文件、六篇文案、片段、timing 与 162 段各表逐行相等，媒体哈希保持。证据：`long-{1440,1024}.*`、`keyboard-{1440,1024}.json`、`cpu66-1024.*`、`restarted-fixed-citation-1024.txt`、`fixed-citation-1024.jpg`、`source-snapshot.json`、`restart-verification.json`。
+
+`cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib timing_tests -- --test-threads=1`：**7 passed**，覆盖不可变文案 / Source 与时间绑定、事务失败回滚、旧库一致性备份 / 升级重试、旧包无时间语义、含 / 不含媒体恢复及重基后去重、非法时间 artifact 拒绝。本批没有重复原生备份恢复；第 30 批已完成真实短段与固定引用的原生恢复，本批两种恢复由当前 arm64 Core 用例验证，不能描述为本轮重新操作了两种原生恢复。
+
+没有产品代码变更，不重复第 37 批已通过的前端构建或扩大 Rust / Clippy 范围。完整浏览器 / Windows 重跑、ASR 重跑与正式安装包为 NOT_RUN，Intel 为 UNAVAILABLE。文档链接、证据断言和 `git diff --check` 通过，附哈希清单，本轮原生应用与 Vite 已停止。
+
+WB-305 Apple Silicon 子项完成，累计 **19 个平台子项**；总项继续等待 Intel，主清单仍 **21 / 49**。Apple Silicon 仅 WB-301 仍有长自然口播样本 / 质量验收缺口；本批合成长文和既有 66 秒合成语音不能关闭该缺口。未启动 WB-312 / WB-313 或 P3。
+
+## 第 39 批：macOS 长语音时间来源复验
+
+2026-10-29，在 `master / a029b9816cbd9299ed92b549edb3e6efb0a71e39` 既有未提交工作区继续 WB-301。arm64 / macOS 27.0.1，独立 marker profile `macos-b39 / empty`，1280×800 Tauri WKWebView、Rust Core、真实打包引擎与 SQLite。本批没有产品代码变更、新工具 / 模型安装、真实凭据调用、提交、推送或发布。证据根目录 `.local/macos-workbench-20261029-b39/`；时间来源专页见[补验结果](transcript-timing-validation.md#macos-apple-silicon-长语音补验2026-10-29)。
+
+### 完整输入与真实 CPU / VAD
+
+Windows workspace connector 的当前注册目录仍未提供本仓库，没有跨用其他项目目录或绕过 workspace 根访问旧样本。原 Windows 297.586 秒输入不可用，同输入对照保留 NOT_RUN；本轮选择两个独立完整长输入完成同类复验。
+
+| 输入 | 来源与边界 | 实际结果 |
+| --- | --- | --- |
+| 完整解说视频 | 既有隔离下载 `douyin_7696105473535135018.mp4`，44,144,781 字节，SHA-256 `aa33c044b412374e94620e01a92a66a5adbfe0d45f72080b48a7c5e52d1ef7ee`；完整 628.541 秒非循环视频，配音人类 / 合成来源未独立核实 | PCM16 16kHz / 10056655 帧；独立 VAD 与 CPU SRT 各 58 条，最短 / 中位 / 最长 540 / 8550 / 30000 ms，CLI 27.971 秒 |
+| 完整真人朗读 | [LibriVox《阿Q正传》](https://librivox.org/the-true-story-of-ah-q-by-xun-lu/)官方目录列出 Vivienne Wong 与 2016-12-22 日期；从目录链接下载第一章完整 MP3，未裁切、循环、拼接或变速 | 466.782 秒 / 7468513 帧；独立 VAD 与 CPU SRT 各 129 条，最短 / 中位 / 最长 750 / 2430 / 30000 ms，CLI 20.089 秒；生产 Python 再推理的全部段落 / 合并正文完全一致 |
+
+模型与二进制均复用已授权的本地安装，真实哈希 / manifest 见 `runtime-provenance.json`。视频沿生产媒体零点提取方式转为 PCM；真人 MP3 SHA-256 为 `16e30ba525da16e2f46621399d0b4f632f9f93558ab37a62dbd480f9a65ef748`，规范 WAV 为 `1117cafcb46a1a5a7c39d324274c14741d427988467348f2d27a6f1acac5a168`。来源、FFprobe、实际采样数和转换方式分别保留在 `input-provenance.json`、`audio-provenance.json`、`human-input-provenance.json`；仅本地验收，不加入安装包。
+
+主运行实际命令：
+
+```sh
+.venv/bin/python scripts/verify_transcript_timing.py \
+  --cpu-directory '<已有 Nano CPU 安装目录>' \
+  --english-audio .local/macos-workbench-20261028/timing-inputs/en.wav \
+  --natural-audio .local/macos-workbench-20261029-b39/natural-commentary.wav \
+  --output .local/macos-workbench-20261029-b39/timing
+```
+
+四组 `short-zh / pause-zh-en / continuous-zh / natural-zh` 主运行退出 0、`summary.json=PASSED`，分别 1 / 3 / 4 / 58 个窗口；独立 VAD 起止与 CPU SRT 一致，本轮均无省略，输入哈希不变。中文错字保留，中英停顿样本仍只证明已知素材位置与语音窗口关系，不是词边界准确率。
+
+真人朗读由本地 `verify-human-reading.py` 复用现有运行器的 VAD / SRT 解析与有序匹配函数，再调用实际生产 `transcription.recognize`，退出 0；全部 129 段的起止 / 文本、合并正文、7468513 帧和 `vad_segment` 精度一致，输入哈希未变。该样本未进入原生知识库，不能将它描述为原生 UI 验收。原始 VAD、SRT、CLI / 生产日志、事件和 timing 文件均在 `human-timing/`，结论在 `human-timing/result.json`。
+
+### 实际原生长视频转录与重启
+
+通过 macOS 文件选择器导入完整视频，在 UI 启动实际 CPU 提取原文。新空库没有 SQL 预置段落；模型 GGUF 在精确 identifier / marker 的隔离目录硬链接复用，manifest / LICENSE / SOURCE 保留，后端显式为 CPU。
+
+成功后选择 `v1 Fun-ASR-Nano`，显示 CPU、语音段级时间、58 个段落和 3938 字。只读 SQLite 核对不可变文案 `fbc0db47-5a97-498e-8c44-4ef2b6e40dbb`、文件 `d9f8cee4-9da9-498e-8829-16d1c397f7c6`、operation `3db3204d-d43f-4533-a404-e959a36d4779`、Source 实际 size / 纳秒 mtime 与 10056655 帧；每段起止 / 文本与独立 CPU SRT 完全相等，全文为全部段落换行连接。
+
+第 41 段从 427.390 秒跳转，暂停在约 427.9 秒；第 58 段从 621.890 秒跳转，暂停在约 622 秒。截图确认当前段高亮、阅读区跟随，视频实际画面可见。Cmd+Q 后重开，原 v1 和 58 段仍可读，末段跳转到 10:21 附近；退出后只读比对文案、timing 和全部段落与此前快照一致，源文件哈希未变。
+
+证据：`native-{imported,transcription-start,transcription-state,document-v1}.txt`、`native-database-verification.json`、`native-long-jump-{427s,621s}.{txt,jpg}`、`native-restart-{document,jump}.txt`、`native-restart-jump.jpg`、`restart-verification.json`。
+
+### 精度限制与完成范围
+
+首个 30 秒解说窗口跨多句，并在 30 秒处切开词组；末尾重复 / 不完整表达保留。真人朗读中专名误识别、同音错字和最长 30 秒窗口也保留。15 / 150 / 450 秒画面中的三个烧录字幕短语在相应解说窗口出现，仅是有限画面对照，不是独立音频真值。未做全文人工听审、WER / CER、句子 / 词 / 字边界或卡点同步验收，不能把时间映射通过表述为全文质量通过。观察详见 `quality-and-timing-review.json`。
+
+WB-301 的交付仍为 `fsmn_vad / vad_segment` 语音段级粗定位，10ms 只是网格。完整非循环长输入及具名真人录音已补时间来源证据，Apple Silicon 子项完成；原 Windows 约 298 秒同输入比较与 CUDA 为 NOT_RUN，Intel 为 UNAVAILABLE。正式安装包本批未重做；真实打包引擎在隔离开发态 Tauri 中运行，不等于本轮正式 DMG 验收。
+
+没有产品代码变更，不重复此前已通过的类型 / 构建、单元测试或 Clippy；本批以真实 VAD / CPU / 生产路径、原生 UI、重启、数据库和媒体哈希验证为主。文档链接、证据断言与 `git diff --check` 通过，附证据哈希清单，本轮原生应用 / ASR 进程与 Vite 已停止。
+
+Apple Silicon 累计 **20 个平台子项完成**；当前已列出的 Apple Silicon 平台子项已无未勾选项。Intel 仍等待可用设备，跨平台总项不勾选，主清单保持 **21 / 49**。WB-312 / WB-313 与 P3 未启动。
+
+## 第 40 批：WB-312 片段、图片与分析模板
+
+2026-10-29，在 `master / a029b9816cbd9299ed92b549edb3e6efb0a71e39` 的既有未提交工作区实现 WB-312，并完成当前 Apple Silicon 验收。未改动此前未提交功能，不提交、推送或发布。独立 marker profile 为 `macos-b40 / empty`，arm64 / macOS 27.0.1，1280×800 原生 Tauri / WKWebView；证据根目录 `.local/macos-workbench-20261029-b40/`，协议样本和客户端详细记录在 `.local/wb312/`。
+
+### 实现与当前契约
+
+- `mcp_read/media.rs` 复用领域服务，`get_clip` 可发现 / 分页读取片段，保留 document_id / version、范围、Unicode 引用摘录和文件状态；`get_keyframes` 只读已有 PNG，保留文件 / 片段 / batch / 原始 PTS / time_base / 采样范围，使用精确有理数时间筛选，不以显示毫秒替代。
+- 同一 Core 锁和既有 IPC 白名单承载两个只读方法，适配器不另开库或读取任意路径；不提取新帧、不启动转录 / 播放、不修改资料。现有 1 MiB IPC 不扩大，每页原图总计最多 512 KiB；逐图明确 included / not_requested / too_large / page_budget_exceeded。实际图片单独作为 SDK image/png 块，文本与 structuredContent 只保留元数据。
+- `mcp_adapter/prompts.rs` 提供 analyze_copywriting、compare_videos、observe_production 三个可选静态模板，要求固定来源、采样与未观察项，区分事实 / 观察 / 建议；不读库、不自动调用模型或写回。SDK 声明 Prompts 能力，静态目录无分页，未知名称、参数和 cursor 明确失败。Tools-only 流程独立可用。
+- 视频 / 音频请求明确 MEDIA_UNSUPPORTED；采样 PNG 不代表连续运动、转场、声音或全文质量。schema11 / backup9 没有变化。Base64 0.22.1 已存在锁文件，本次只补直接依赖声明；没有引入新版本、下载工具或模型，九个 MCP 相关包的完整许可随生成脚本同步保留。
+
+准确字段、大小限制和客户端支持矩阵见[媒体契约](mcp-media-tools.md)，复验入口见[开发文档](development.md#wb-312-片段图片与模板验收)。
+
+### SDK 与重要边界
+
+`node scripts/verify-mcp-adapter.mjs --media` 复用既有独立 Core host 和官方 TS SDK，经真实 stdio / Unix socket；最终运行 `.local/wb312/run-FaLAA8/summary.json=PASSED`，此前首轮通过样本 `.local/wb312/run-6tdTzr/` 保留用于原生合成库来源。
+
+合成资料包含一个绑定 doc-a1 / v1 的片段和两张 16×16 PNG；实际 MP4 只是四字节文件哨兵，不可播放，不用它证明播放、ASR 或抽帧质量。SDK 从两个 image 块解码出精确 256 个红色 / 绿色像素；元数据按实际图片顺序对应，分页、仅元数据、片段 / 文件 / 时间过滤、固定文档、未知 / 跨资产 ID、非法参数和视频 / 音频失败检查通过。先执行 Tools-only 读取，再测试三项 Prompts 的发现 / 获取与非法输入，没有让 Tools 依赖模板。
+
+当前核心测试另覆盖缺源仍可读历史 PNG、无写入、单张图过大、双图超页预算与 limit=1 重读，以及 **749.6ms 显示为 750ms 时仍按原始 PTS 落入 end_ms=750 的范围**。新模型审计回归拒绝错颜色、错 PTS / 采样范围、缺少真实 image 块或声称观看了未提供的视频 / 音频，避免只看到模型生成 JSON 就判定通过。
+
+首轮新增测试因未初始化 settings 表失败；完成隔离测试初始化后通过。首轮 Clippy 指出共用 fixture 被重复声明，改为共用已有测试模块引用后通过。失败输出保留在本轮诊断归档，未删除 / 弱化有效测试或改变生产行为以消除失败。
+
+### 原生连接、模型看图与来源
+
+通过 macOS 原生启动生成空库并正常退出；核对精确 identifier、工作区 marker、应用进程已停止、目标库为空和外键后，仅复制合成源库的五张 library 表中 asset-a 资料。没有复制设置、凭据、日常库或真实视频，合成来源记录在 `native-synthetic-fixture.json`。
+
+原生设置默认 MCP / 写授权均关闭，开启服务后保持只读，使用 AX 可见的通用 JSON 记录实际 helper 路径和 Unix socket，而非构造假连接。Codex CLI 0.161.0 在无账号协议轮 `.local/wb312/client-8x7kbB/` 实际读到固定片段和两个图片块；旧 / 新连接在服务关闭与应用退出后均失败，重启默认关闭，重新开启后新会话可读，helper / 客户端自然退出。
+
+用户随后明确允许本机已登录 Codex 账号仅发送两张纯色合成 PNG 与合成元数据。模型轮 `.local/wb312/client-dL0I83/` 实际使用 **gpt-6.1-sol**，只调用 get_clip / get_keyframes；其他三个继承服务被关闭，命令、文件、网页、代理和写工具没有被模型执行。认证保留在 Codex 自身存储，不读取 / 复制认证文件，不持久化原始账号事件或 stderr。
+
+模型实际收到两个 image 块，正确给出红 / 绿主色；帧 ID、500 / 750 PTS、1/1000 time_base、100～900ms / 750ms 起的采样范围与两个 batch_id 精确相等。交付给模型的 PNG SHA-256 与原生 SQLite body 一致：红图 `9507aff0da43c03eb890beb29d0caf6a551586aa1f27f8d9ca3418d9da6f2218`，绿图 `319e263e3217bdea0a99f4799bcd0e85e895ec68610a73e198cf1474a79c4bd7`。模型报告明确 video_observed=false / audio_observed=false，说明采样范围不等于颜色持续范围、不能推断运动 / 转场 / 声音。原报告末尾仍有一句与验收无关的标题说明，原样保留，不将颜色检查当作完整报告写作质量验收。
+
+模型轮的服务关闭 / 重新开启、应用退出、重启默认关闭与新连接恢复全部通过，客户端退出码 0、没有强制结束。其后在原生资产详情看到 00:00.100～00:00.900 的片段及两图，分别打开红 / 绿预览，与实际 image 块一致；“查看引用原文 v1”仍打开 doc-a1 的固定整理稿 v1，不跳到后来的 v3。最终五表所复制资料逐行与种子库相等，图片哈希一致；没有 AI 写回。
+
+证据：`native-mcp-{default-off,on}.txt`、`native-capture.json`、`native-restart-default-off.txt`、`model-{service-stopped,restarted-off}.txt`、`native-source-detail.txt`、`native-frame-{red,green}.{txt,jpg}`、`native-pinned-document-v1.txt`、`native-verification.json`；SDK / 模型各轮的 summary、实际工具结果、image PNG、模型原报告与消息均保留，证据索引附哈希。
+
+### 验证与完成范围
+
+```sh
+cargo build --locked --manifest-path src-tauri/Cargo.toml --features mcp --bin yingqu-mcp --example mcp-ipc-fixture
+cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib mcp_ -- --test-threads=1
+cargo test --locked --manifest-path src-tauri/Cargo.toml --lib mcp_read::media -- --test-threads=1
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop,mcp --all-targets -- -D warnings
+node scripts/verify-mcp-adapter.mjs --media
+node --test tests/mcp-client-checks.test.mjs
+.venv/bin/python scripts/update_mcp_licenses.py --check
+```
+
+MCP 定向核心 **26 passed**、无 MCP feature 媒体测试 **1 passed**、最后新增原始 PTS / 图片预算边界 **1 passed**、客户端审计 **16 passed**；Clippy、许可、实际调试应用构建、SDK / 两轮原生 Codex 及文档检查通过。没有 UI 代码变更，不扩大前端构建 / 浏览器套件；原生窗口本批只验证受影响的设置、图片和固定来源，不宣称重新验收全部三窗口。正式 DMG、Windows 为 NOT_RUN，Intel 为 UNAVAILABLE。
+
+WB-312 实现与 Apple Silicon 子项完成，累计 **21 个平台子项**；纯色合成图片验收不代替真实作品制作分析、文本质量或人工视听评价。跨平台主项仍未勾选，总计保持 **21 / 49**。WB-313 / P3 未开始。本轮原生应用、MCP helper、Codex 验收进程与 Vite 已停止。
+
+
+## 第 41 批：WB-313 真实视频学习到创作组合验收
+
+2026-10-29，在 `master / a029b9816cbd9299ed92b549edb3e6efb0a71e39` 的既有未提交工作区，完成 Apple Silicon 的实际视频组合验收，并修复大 PNG 无法交付模型的问题。原生 `macos-b41 / empty` marker profile，1280×800 Tauri / WKWebView；证据 `.local/macos-workbench-20261029-b41/`，真实客户端记录 `.local/wb313/client-apKZ6l/`。不提交、推送、发布或安装新工具。
+
+### 实际输入、时间与来源
+
+输入沿用本机已下载的两份实际 MP4，不是 UI fixture，不新增平台请求或使用平台凭据。`input-provenance.json` 保留 ffprobe、字节数与完整 SHA-256：
+
+| 资料 | 输入 | 实际结果 |
+| --- | --- | --- |
+| A：奶酪解说 | douyin_7696105473535135018.mp4，1280×720、628.541 秒、44,144,781 字节；SHA-256 aa33c044b412374e94620e01a92a66a5adbfe0d45f72080b48a7c5e52d1ef7ee | 本轮原生 CPU 转录成功，58 段 / 3938 字；固定识别原文 v1，document_id=60a5cde6-4156-42c1-a2f5-a8c993fd350c |
+| B：街面竖屏画面 | tiktok_7664079467140173086.mp4，1080×1920、50.347 秒、4,805,731 字节；SHA-256 41984c9b638e0b18a14705432af0516c2a2cf13c9c34dc79ef04891b713e3d40 | 本轮原生转录明确“未识别到语音，已有资料已保留”；0 篇文案，不虚构对白，也不据此声称全片无声 |
+
+A 从真实识别语音段收藏 0–30000ms，clip_id=389ec243-99ea-484b-8634-0a79c8027002；该段跨句且末端切词，只是粗定位，不是逐字字幕。B 手动收藏 0–8000ms，clip_id=6d376ab0-23fd-4e89-a319-ea24ef1633f3，无文案绑定。两片段均在原生播放器明确于 30 / 8 秒暂停并显示“片段播放完成”。最初两次 A 播放因操作提前导航或开发页面刷新中断，不计通过；成功证据为 `clip-a-play-{start,end}-r3.txt`、`clip-b-play-{start,end}.txt`。
+
+真实提取 A 的 5 / 15 / 25 秒及 B 的约 1.333 / 4 / 6.667 秒共六张 PNG。A 原始 PTS 为 64000 / 192000 / 320000、time_base=1/12800；B 为 20480 / 61440 / 102400、time_base=1/15360。B 第三帧请求 6666ms、实际显示 6667ms，保留精确原始有理时间。`expected.json` 保存全部逻辑 ID、文件 / 片段 / batch、采样范围及原图哈希。
+
+### 大图交付修复
+
+六张原 PNG 均大于 512 KiB，WB-312 的原图预算会只给元数据，实际模型无法观察。`mcp_read/media.rs` 使用已经锁定的 image 0.25.10（仅 PNG）生成最长边 384 的临时等比 PNG；返回 `image_is_preview` 和实际 `image_width` / `image_height`。每页仍最多交付 512 KiB，IPC 1 MiB 不扩大，保存原图、原尺寸、PTS 和绑定不变。未请求图片时不解码，不新增抽帧、视频 / 音频管线或任意路径接口。十个 MCP 相关包的完整许可已同步。
+
+`native-preflight.json`：六张实际图经官方 TS SDK / 原生 stdio / Unix socket 交付，A 为384×216，B为216×384，每张约115～142 KiB；图片均能解码。模型收到的六张图片 SHA-256 与这些 SDK 预览逐张一致。原图保存体哈希和来源元数据写前 / 写后相同，见 `preservation.json`、`source-before-model.json`、`source-final-snapshot.json`。不把预览当作原分辨率，不把静帧当作运动、转场或音频。
+
+### 原生学习、AI 写回与质量分层
+
+1. 原生保存 A 文案拆解、A / B 制作手法拆解，明确 AI 手动录入和“Codex（本会话助手，具体型号未核实）”；只绑定实际原文 / 片段 / 图片，不声明已听声音。原生对比工作台固定两资产、文案 / 拆解修订及片段，保存比较笔记 67c99ca5-6d37-4e59-b4f4-abdba88c918f，内容限资料状态和未观察项，不冒充人工视听评语。
+2. 本会话观察实际 SDK 预览后，经操作脚本转交受控 MCP 新增两条 AI general 笔记及“为什么钥匙总在出门前‘消失’？一场玄关收纳小实验”选题。该草稿 r1 把 A 的反常识断言误写为问题式开场，复核发现后在原生界面修订为 r2，AI 创建来源保留。旧 r1 备份和最初恢复证据保留；最终包包含修订 r2。这不是独立 Codex CLI 模型 turn。
+3. 用户本轮明确允许把这两份视频的 ASR 正文、六张采样预览和本轮观察记录发送至本机 Codex 已登录账号的模型服务，结果仅写入隔离库。未发送视频 / 音频文件，不读取或复制认证文件。另明确确认“两段可视听，A开场基本一致”，人工范围只有两段各8秒；见 `account-authorization.json`、`human-review.json`。
+4. Codex CLI 0.161.0 报告模型 gpt-6.1-sol。`--p2 --allow-account` 的模型 turn 只准 yingqu 只读 Tools，实际读取两资产、两片段、已有六条笔记、固定原文 v1 和六张图，返回逐帧观察、对比、限制及“剩菜标签该写日期，还是写下一步？”独立选题。原统计事实与狮子外观对象的真实性均未确认，没有为 B 编造文案，也未声称观察了视频或音频。
+5. 运行器审核实际调用 / 图片交付与精确原句后，另经真实 RPC 追加两条模型 AI 笔记（83653c15-7907-42d8-922f-6a151f90fdd3、21cad3e8-e82e-46d2-a6ea-b9abaf92f0f3）和选题18d7eed3-b857-4737-8010-784541bae3ed。这是运行器转交模型输出写回，不是模型自主调用写工具。原生显示 gpt-6.1-sol、两条固定文案引用及双片段参考；笔记回读正文相同，已有记录未被改写。
+
+协议审核只返回 semanticQuality=REQUIRES_REVIEW。本会话另逐帧 / 原句复核文本，`text-quality-review.json=PASSED_SCOPED`：模型使用实际缩小预览、来源和未观察项，原创选题没有复用原统计结论；这是执行助手复核，不冒充独立人工创作评分。全文 ASR 准确率、统计事实、完整连续视听质量、传播效果及作品发布效果均 NOT_RUN。人工反馈和模型文本复核分别记录，不互相替代。
+
+模型初次对一次原文和六条笔记使用 length=20000，被上限16000以INVALID_INPUT拒绝；调整参数后读取成功。保留全部失败调用，不把这些失败当作已读取证据。服务关闭 / 应用退出使旧连接与新握手均失败；重开 / 重启恢复只读，客户端重新连接成功，自然退出code=0、forced=false。完整 summary、model-tools、model-messages 和 operator-tools 在 `.local/wb313/client-apKZ6l/`。
+
+### 最终两种备份恢复
+
+最终库包含2资产、1篇文案、2片段、6原 PNG、8笔记（3结构化 / 1比较 / 4 general）和2选题 / 4片段参考，无专题。两种包均由原生目录选择器创建，等待明确完成后才退出：
+
+- 仅资料：`backup-final-notes/映取资料备份-20261029-103134-8e7a6cfa`。
+- 含视频：`backup-final-media/映取资料备份-20261029-103148-6f843cbe`，两份 MP4 均随包。
+
+分别经两个原生目录选择器恢复到新的 marker 空库 `macos-b41-final-notes / restore`、`macos-b41-final-media / restore`，恢复前确认0资产 / 0笔记 / 0选题，均明确恢复完成。仅资料库保留模型来源、两条原句及固定原文v1，视频缺失明确提示；历史PNG仍在。含媒体库从模型选题的B参考打开正确0–8000ms片段，8秒终点暂停并显示完成。
+
+`verify-final-restores.py` 只读检查十张表：正文、AI来源、结构化与比较数据、逻辑ID、文案版本、片段、PNG保存体哈希、PTS、采样绑定及双选题参考均相等；Source.path / mtime与recognition_key按既有恢复机制重定位，逐条核验与恢复文件绑定。含媒体两份MP4哈希与输入一致。见 `final-restore-integrity.json`、`restore-final-*-snapshot.json`、`restore-final-*-{result,model-idea,model-citations,model-original-v1,model-play-*}.txt`（按各模式实际文件留存）。最初6笔记 / 1选题的两轮备份恢复另保留于 `restore-integrity.json`，不代替最终模型写回后的恢复结果。
+
+### 检查、设计与平台边界
+
+| 验证 | 实际结果 |
+| --- | --- |
+| Rust MCP 定向 | 26 passed；`mcp-regression.log`，含大图预览、原图不变、预算 / PTS、读取及受控写入回归 |
+| 无 mcp feature 媒体测试 | 1 passed；`media-no-mcp.log` |
+| Clippy desktop,mcp all-targets | PASSED；`preview-clippy.log` |
+| 官方 SDK --media | PASSED，`.local/wb312/run-BHEjNy/`；首轮宿主二进制未更新导致IPC_PROTOCOL_ERROR，更新宿主 / helper后通过，失败 `.local/wb312/run-8IGvOF/` 保留 |
+| 客户端审核回归 | 17 passed，`client-guards-final.log`；拒绝未交付图、错误PTS / 片段 / 文案版本、未读引用和虚构音视频观察 |
+| 许可 / 格式 / 差异 | 十包许可校验、媒体Rust格式和最终差异检查通过 |
+| 真实模型 / 原生 / 人工 | 分别如上，不以fixture或自评代替人工反馈 |
+
+schema11 / writer9 / reader1～9 和 engine0.17.0 / JSONL v3保持；没有新增UI行为或设计token，沿用DESIGN.md的原文 / AI来源及观点、草稿、参考分区。技术方案、媒体与写入契约、开发命令和任务清单已同步，备份格式无需升级。源profile及四个恢复profile保留供复查，验收应用、MCP helper、客户端和Vite已停止。
+
+WB-313 的 Apple Silicon 子项完成，累计22个平台子项；Windows本项NOT_RUN，Intel无设备UNAVAILABLE，正式安装包本批NOT_RUN。跨平台主项仍未勾选，主清单保持21 / 49，P3未启动。
+
+
+## 第 42 批：WB-401 真实使用问题与优先级评估
+
+2026-10-29，按用户明确要求完成P3首项使用后评估。权威交付为[真实使用评估报告](workbench-real-use-assessment.md)，证据`.local/macos-workbench-20261029-b42/`，八张本轮原生截图原样随报告保存在`docs/assets/wb401/`。工作区仍为master / a029b9816cbd9299ed92b549edb3e6efb0a71e39加既有未提交内容，不提交、推送或发布，不修改生产行为。
+
+用户先回复“选题”，随后明确“看过参考后，仍难提炼自己的选题和观点”。首要需求据此为参考到独立观点的提炼引导；没有捏造日常发生次数、时间或具体选题案例。用户反馈、当前原生操作、代码契约和第41批前置背景分开。采用Product Design audit的当前截图 / 逐步审查方法，预检无保存的插件用户上下文；没有启用仿真用户或子Agent。
+
+在已有`macos-b41-final-media / restore`隔离库重新操作找回参考、整理辨认、片段复用、比较到选题四步：
+
+| 步骤 | 当前观察 |
+| --- | --- |
+| 找回参考 | 两次关键词查询均命中文本；两次进入笔记命中的B资产却落在无识别原文页，未直接定位笔记 |
+| 整理辨认 | 两条通用AI笔记显示general及序号，实际读取两条候选后找到目标；已有摘要可提供模型 / 来源 / 时间 |
+| 片段复用 | “用于选题”正确预选固定片段，正文独立；来源实际播放0～8000ms并于8秒停止，Escape可关闭 |
+| 形成选题 | 双视频比较及固定引用可回读；从比较所在详情“写选题”仅预选所属A，添加参考菜单支持视频 / 片段 / 专题，没有直接笔记项 |
+
+评估排序为U-01选题提炼引导、O-01命中定位、O-02笔记辨认、O-03比较转接；每条均有用户或当前操作来源、影响、最小方案、粗估人日及观察目标。没有把两次复现当作全用户发生率，也没有用收藏 / 生成数量替代成效。全文索引、向量检索、作者研究、导出、发布复盘、远程MCP与自动分析保持独立待评估；不将建议自动变成实现授权。
+
+本轮八张报告截图均保存后实际查看，哈希与本地原件一致；三张未正确滚动的截图被标为拒收，不作为产品故障或用户耗时。两次预选参考的临时草稿通过离开保护放弃。`preservation.json`只读核对十张业务内容表前后相同（2资产 / 1文案 / 2片段 / 6图 / 8笔记 / 2选题 / 4参考），正常访问记录可能变化，不声称整库字节相等。没有新模型调用、账号使用或资料上传。
+
+本次为评估和文档交付，不修改DESIGN.md、生产接口或schema / backup。检查新增及改动文档、八张JPEG、相对引用、任务状态、差异和业务资料保留；不新增单元测试或重复无关构建。完整可访问性、有效编辑计时、多用户与长期效果、Windows / Intel / 安装包均未在本轮评估。验收应用和本轮Vite停止，隔离资料与证据保留。
+
+WB-401评估完成，主清单为22 / 49；已有22个Apple Silicon平台子项的完成范围不变，WB-313的Windows / Intel限制保持。WB-402～WB-406没有启动。

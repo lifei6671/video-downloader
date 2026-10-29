@@ -1,5 +1,7 @@
 //! P1B public read views. Existing library services remain the domain authority.
 mod types;
+mod media;
+pub use media::{ClipInput, Clips, KeyframesInput, Keyframes};
 pub use types::*;
 
 use crate::library;
@@ -17,6 +19,9 @@ pub enum ReadError {
     AssetNotFound,
     DocumentNotFound,
     NoteNotFound,
+    ClipNotFound,
+    FileNotFound,
+    MediaUnsupported,
     CategoryNotFound,
     TagNotFound,
     VersionConflict,
@@ -33,6 +38,9 @@ impl ReadError {
             Self::AssetNotFound => "ASSET_NOT_FOUND",
             Self::DocumentNotFound => "DOCUMENT_NOT_FOUND",
             Self::NoteNotFound => "NOTE_NOT_FOUND",
+            Self::ClipNotFound => "CLIP_NOT_FOUND",
+            Self::FileNotFound => "FILE_NOT_FOUND",
+            Self::MediaUnsupported => "MEDIA_UNSUPPORTED",
             Self::CategoryNotFound => "CATEGORY_NOT_FOUND",
             Self::TagNotFound => "TAG_NOT_FOUND",
             Self::VersionConflict => "VERSION_CONFLICT",
@@ -64,6 +72,8 @@ pub(crate) fn dispatch(
             "mcp_list_categories" => serde_json::to_value(list_categories(db, input(params)?)?)?,
             "mcp_list_tags" => serde_json::to_value(list_tags(db, input(params)?)?)?,
             "mcp_list_notes" => serde_json::to_value(list_notes(db, input(params)?)?)?,
+            "mcp_get_clip" => serde_json::to_value(media::clips(db, input(params)?)?)?,
+            "mcp_get_keyframes" => serde_json::to_value(media::keyframes(db, input(params)?)?)?,
             "mcp_read_note" => serde_json::to_value(read_note(db, input(params)?)?)?,
             _ => bail!("INVALID_INPUT"),
         })
@@ -71,7 +81,7 @@ pub(crate) fn dispatch(
     result.map_err(ReadError::from_domain)
 }
 
-fn id(value: &str) -> Result<()> {
+pub(crate) fn id(value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 128 {
         bail!("INVALID_INPUT");
     }

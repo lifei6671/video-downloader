@@ -1,6 +1,6 @@
 # MCP 转录长操作
 
-对应 WB-311。沿用 rmcp 3.8.0、stdio → 本机 IPC → Core，以及现有单转录 worker / PythonBridge / 暂存提交生命周期；没有新调度器、依赖或数据库格式。schema11、备份 writer9 / reader1～9、engine0.17.0 / JSONL v3 不变。Windows 验证和 macOS 待办见[第 29 批记录](workbench-knowledge-base-validation.md#第-29-批wb-311-mcp-转录长操作)。
+对应 WB-311。沿用 rmcp 3.8.0、stdio → 本机 IPC → Core，以及现有单转录 worker / PythonBridge / 暂存提交生命周期；没有新调度器、依赖或数据库格式。schema11、备份 writer9 / reader1～9、engine0.17.0 / JSONL v3 不变。Windows 验证见[第 29 批记录](workbench-knowledge-base-validation.md#第-29-批wb-311-mcp-转录长操作)，Apple Silicon 原生验收与 Unix 回收修复见[第 31 批记录](workbench-knowledge-base-validation.md#第-31-批macos-原生组合验收与取消回收修复)；Intel 无可用机器，保持 UNAVAILABLE。
 
 ## 工具与授权
 
@@ -29,7 +29,7 @@
 
 state 为 running / completed / no_speech / failed / canceled / interrupted。phase 只公开 extracting_audio / segmenting / loading_model / recognizing，backend 只公开 cpu / cuda，未知值为空；分段计数使用实际进度，不估造百分比。
 
-取消请求只给现有 worker 发送信号，不立即返回 canceled。Core 继续由 PythonBridge 终止并等待实际子进程树，再清理暂存目录和登记记录；完成这些步骤后才发布 canceled。回收或提交失败返回 failed及固定错误，不伪装取消完成。取消和正常完成竞态保留真实终态，取消已完成的操作不会将其重写成 canceled。桌面原有等待式取消接口不变。
+取消请求只给现有 worker 发送信号，不立即返回 canceled。Core 继续由 PythonBridge 终止并等待实际子进程树，再清理暂存目录和登记记录；完成这些步骤后才发布 canceled。回收或提交失败返回 failed及固定错误，不伪装取消完成。取消和正常完成竞态保留真实终态，取消已完成的操作不会将其重写成 canceled。桌面原有等待式取消接口不变。Unix 路径先终止私有进程组并等待直接子进程，再在现有五秒清理限额内等待进程组消失；只有 ESRCH 证明组已消失，EPERM 仍继续等待。超限或回收失败不会发布取消完成。
 
 ## 超时、断连与重启
 
@@ -41,4 +41,4 @@ state 为 running / completed / no_speech / failed / canceled / interrupted。ph
 
 控制调用仅返回固定分类：INVALID_INPUT、WRITE_DISABLED、ASSET_NOT_FOUND、FILE_NOT_FOUND、FILE_MISSING、DEPENDENCY_BUSY、TRANSCRIPTION_BUSY、OPERATION_NOT_FOUND、SERVICE_UNAVAILABLE、CORE_OPERATION_FAILED。后台失败的 error_code 复用现有引擎固定码和本地转录错误白名单，未知诊断归为 ENGINE_PROTOCOL_ERROR；不透传任意 SQLite / IO 文本或路径。业务错误不关闭有效连接，服务丢失与超时沿用适配器生命周期规则。
 
-测试使用合成媒体 / 引擎和标记资料库，官方 SDK 通过真实 stdio 与 Windows 命名管道验证三工具、进度、客户端断连、Core已提交后丢回执的超时、服务重连、授权重置、真实引擎与子进程 PID回收、暂存清理，以及已完成结果复用。识别质量、真实模型或多模态支持不由这些测试证明，WB-312 / WB-313 仍待实施；macOS两种架构继续独立待验收。
+测试使用合成媒体 / 引擎和标记资料库，官方 SDK 通过真实 stdio 与 Windows 命名管道验证三工具、进度、客户端断连、Core已提交后丢回执的超时、服务重连、授权重置、真实引擎与子进程 PID回收、暂存清理，以及已完成结果复用。这些夹具不证明识别质量或多模态支持。Apple Silicon 另经真实打包 CPU ASR、原生授权 / 服务开关、实际 PID / 暂存清理、缓存和重启完成组合验收，见[第 31 批记录](workbench-knowledge-base-validation.md#第-31-批macos-原生组合验收与取消回收修复)；确定性回执超时仍由协议夹具验证。Intel 保持 UNAVAILABLE；WB-312 已实现[片段、PNG 与分析模板](mcp-media-tools.md)，WB-313 组合验收仍待执行。

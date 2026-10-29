@@ -2,7 +2,7 @@
 
 对应 [WB-204](workbench-knowledge-base-tasks.md)。七项工具已由 SDK schema、stdio → 本机 IPC → 同一 Core 的领域服务适配实现；Windows 验证通过，macOS Intel / Apple Silicon 编译及原生验收继续 `UNAVAILABLE`。WB-205 已实现 [受限 Resources](mcp-resources.md)，直接复用本页读取服务，Windows 验证通过、macOS 待验收；WB-206 已接入 [MCP 设置](mcp-settings.md)，WB-207 已完成[安装包接入及 Windows 安装后连接验证](mcp-packaging.md)，WB-208 已完成 [Windows 真实客户端与模型组合验收](mcp-client-acceptance.md)，macOS 继续待办。
 
-WB-310 已另接入[六项受控写入](mcp-write-tools.md)，默认未授权；本页七项读取范围和 Resources 不变。
+WB-310 已另接入[六项受控写入](mcp-write-tools.md)，默认未授权；WB-312 新增[片段、PNG 与分析模板](mcp-media-tools.md)，本页七项读取范围和 Resources 不变。
 
 ## 统一读取规则
 

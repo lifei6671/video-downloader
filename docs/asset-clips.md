@@ -1,6 +1,6 @@
 # 片段收藏与范围播放（WB-303）
 
-片段保存原视频引用、开始 / 结束毫秒、标题、收藏理由和可选的已保存文案引用。不生成裁剪视频；没有时间信息的文案也能配合播放器手动标记。Windows 的验证结果见[第二十一批记录](workbench-knowledge-base-validation.md#第二十一批wb-303-片段收藏与范围播放)，macOS Intel / Apple Silicon 继续待验收。
+片段保存原视频引用、开始 / 结束毫秒、标题、收藏理由和可选的已保存文案引用。不生成裁剪视频；没有时间信息的文案也能配合播放器手动标记。Windows 的验证结果见[第二十一批记录](workbench-knowledge-base-validation.md#第二十一批wb-303-片段收藏与范围播放)，macOS Apple Silicon 的验证结果见[第 36 批记录](workbench-knowledge-base-validation.md#第-36-批macos-片段收藏与范围播放原生验收)，Intel 因无设备继续 UNAVAILABLE。
 
 ## 存储与绑定
 
@@ -30,6 +30,8 @@ schema v5 新增 `asset_clips`。`file_id` 必须属于当前资产；`source_js
 复用当前 HTML 视频元素及原生 controls，无新播放器依赖。开始时真正 seek 到 `seekable` 首端，检查实际落点，再与有限 `duration`、`seekable` 交集生成可播放范围；监听范围变化刷新编辑器。不会把转录 WAV 长度或登记时长当作播放器上限。
 
 正 PTS MP4 的实际例子：`seekable.start(0)` 报 0，但 seek 0 会落到 5 秒；本轮 Chromium 的 duration 会从 6.692 / 8.804 秒继续变化到 10.2 / 10.9 秒。故可播上限来自当前会话，不能把上轮 8.804 秒写死。范围覆盖失败时暂停并显示当前可播放区间；起点 seek 落点偏差超过 50ms 时拒播。该阈值用于发现定位受限，不是音画或剪切精度保证。
+
+macOS Apple Silicon 的 WKWebView 对本轮首视频 PTS 为 5 秒、容器 duration 为 11 秒的 MP4，实际探测范围为 0～11 秒，seek 0 仍可落在 0；不能套用上述 Windows / Chromium 的 5 秒下界。原生 5.2～6.6 秒播放结束暂停在 6.6 秒，20 秒终点在该会话中被拒绝；平台差异以当次播放器实测为准。
 
 范围播放使用动画帧检查和 `timeupdate` 到点暂停，并回到保存终点；原生控件可暂停 / 恢复，恢复到范围外时重新定位起点。失焦 / 隐藏暂停片段，切文件、离开详情或来源变化释放媒体与回调。这是供学习的范围试听，受播放器帧率、系统调度、解码和浏览器时钟精度影响，不承诺逐帧截断、逐字同步或精确剪辑。部分容器会继续改变 duration；当次拒绝的范围可在重新加载后再检验，不改写已保存区间。
 

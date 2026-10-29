@@ -66,7 +66,7 @@ export function LibraryComparisonWorkspace({ assetIds, active, navigation, back 
   function point(index: number, update: (p: Point) => Point) { setPoints(old => old.map((p, i) => i === index ? update(p) : p)); }
   return <section className="library-comparison" aria-label="跨视频对比工作区">
     <div className="library-section-heading"><Button size="sm" variant="ghost" onClick={() => navigation.request(back)}>返回知识库</Button><h2>跨视频对比</h2></div>
-    <div className="comparison-scroll"><div className="comparison-grid" style={{ gridTemplateColumns: `repeat(${assetIds.length}, minmax(260px, 1fr))` }}>{assetIds.map(id => {
+    <div className="comparison-scroll" onFocusCapture={event => event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' })}><div className="comparison-grid" style={{ gridTemplateColumns: `repeat(${assetIds.length}, minmax(260px, 1fr))` }}>{assetIds.map(id => {
       const c = columns[id], source = c?.source;
       const choose = (patch: Partial<ComparisonPin>) => { if (source) void load(id, { ...source.pin, ...patch }); };
       return <article className="comparison-column" key={id} data-comparison-asset={id} aria-busy={!!loading[id]}><header><h3 title={c?.detail.asset.title}>{c?.detail.asset.title || '读取视频…'}</h3><LibraryError message={errors[id]} />{loading[id] && <p role="status">读取中…</p>}<Button size="sm" variant="ghost" disabled={loading[id]} onClick={() => void load(id)}>读取最新来源</Button></header>

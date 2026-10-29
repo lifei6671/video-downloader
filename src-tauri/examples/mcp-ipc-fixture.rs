@@ -31,6 +31,9 @@ async fn main() -> anyhow::Result<()> {
         let mut db = rusqlite::Connection::open(&path)?;
         library::initialize(&mut db, &path)?;
         fixture::seed(&db, &root)?;
+        if std::env::var("YINGQU_WB312_FIXTURE").as_deref() == Ok("1") {
+            fixture::seed_media(&db, &root)?;
+        }
         if std::env::var("YINGQU_WB205_FIXTURE").as_deref() == Ok("1") {
             yingqu_core::settings::load(&db, root.join("downloads"))?;
             fixture::seed_resource_boundary(&db)?;

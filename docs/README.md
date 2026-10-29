@@ -4,6 +4,7 @@
 
 - [自媒体工作台、视频知识库与 MCP 技术方案](workbench-knowledge-base-plan.md)：独立资产与文案、分类标签、迁移、MCP 接入及分阶段验收，按阶段实施。
 - [工作台与知识库实施任务清单](workbench-knowledge-base-tasks.md)：按依赖拆解的可勾选任务、交付物与验收条件。
+- [真实使用问题与优先级评估](workbench-real-use-assessment.md)：WB-401 的用户选题反馈、四步当前原生证据、优先级 / 成本及后续验证目标，评估不代表功能实现。
 - [工作台与知识库实施记录](workbench-knowledge-base-validation.md)：调用路径、隔离验证、平台边界和分批开发证据。
 - [MCP 协议与 SDK 选型验证](mcp-sdk-validation.md)：WB-201 的固定 SDK、双模式 stdio、Windows 客户端连接、复验入口与 macOS 待办。
 - [应用核心本机 IPC](mcp-local-ipc.md)：WB-202 的启停、命名管道 / Unix socket 权限、内部协议 v1、只读白名单与验证边界。
@@ -11,6 +12,7 @@
 - [P1B 七项只读工具](mcp-read-tools.md)：WB-204 的公开 Schema、分页、Unicode 切片、版本 / 修订引用、错误及读取边界。
 - [受限 MCP Resources](mcp-resources.md)：WB-205 的稳定 URI、模板发现、统一读取范围、路径 / 凭据边界及 Tools 兼容路径。
 - [MCP 转录长操作](mcp-transcription-operations.md)：WB-311 的启动 / 查询 / 取消、单并发、权限、断连超时及实际进程回收。
+- [MCP 片段、图片与分析模板](mcp-media-tools.md)：WB-312 的固定片段引用、PNG / PTS / 采样范围、三个可选模板及真实客户端媒体边界。
 - [MCP 受控写入](mcp-write-tools.md)：WB-310 六项新增工具、独立写入授权、AI 来源、schema11 / backup9 与人工内容保护。
 - [MCP 设置与客户端配置](mcp-settings.md)：WB-206 的默认关闭、真实启停、实际程序路径、Codex TOML / 通用 JSON、原生复制及 Windows 验证。
 - [MCP 安装包与分发](mcp-packaging.md)：WB-207 的构建 feature、完整许可、安装目录、Windows NSIS 安装后连接与 macOS 待办。

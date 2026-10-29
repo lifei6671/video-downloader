@@ -3,7 +3,7 @@ use crate::desktop_core::Core;
 use serde_json::json;
 
 #[path = "../../tests/fixtures/mcp_library.rs"]
-mod fixture;
+pub(super) mod fixture;
 
 fn core(root: &std::path::Path) -> std::sync::Arc<Core> {
     let path = root.join("test.sqlite");

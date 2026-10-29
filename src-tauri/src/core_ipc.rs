@@ -158,7 +158,7 @@ fn dispatch(core: &Weak<Core>, frame: &[u8]) -> Value {
             Err(error) => failure(id, error.code()),
         };
     }
-    if matches!(request.method.as_str(), "mcp_search_assets" | "mcp_get_asset" | "mcp_read_transcript" | "mcp_list_categories" | "mcp_list_tags" | "mcp_list_notes" | "mcp_read_note") {
+    if matches!(request.method.as_str(), "mcp_get_clip" | "mcp_get_keyframes" | "mcp_search_assets" | "mcp_get_asset" | "mcp_read_transcript" | "mcp_list_categories" | "mcp_list_tags" | "mcp_list_notes" | "mcp_read_note") {
         let Some(core) = core.upgrade() else { return failure(id, "SERVICE_UNAVAILABLE"); };
         return match core.read_mcp_tool(&request.method, request.params) {
             Ok(value) => json!({"version":VERSION,"id":request.id,"result":value}),

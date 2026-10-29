@@ -51,4 +51,4 @@ schema v1～v10 升级前沿用一致性数据库备份及事务迁移，失败�
 
 ## 验证
 
-Rust 覆盖正文与原文隔离、三类参考、错误归属 / 类型 / 去重、原子保存 / CAS、移除保护、归档 / 重关联 / 缺失后继续编辑、工作台摘要、两轮含 / 不含媒体恢复、恶意包和 schema9→10 回滚重试。浏览器分别检查三视口、三个灵感入口、来源往返、完整冲突副本和读失败；Windows 原生核对生产 Tauri / SQLite / 实际范围播放及空闲重开。实际结果见[第二十七批记录](workbench-knowledge-base-validation.md#第二十七批wb-309-自己的选题和草稿)，macOS Intel / Apple Silicon 继续待验收。
+Rust 覆盖正文与原文隔离、三类参考、错误归属 / 类型 / 去重、原子保存 / CAS、移除保护、归档 / 重关联 / 缺失后继续编辑、工作台摘要、两轮含 / 不含媒体恢复、恶意包和 schema9→10 回滚重试。浏览器分别检查三视口、三个灵感入口、来源往返、完整冲突副本和读失败；Windows 原生核对生产 Tauri / SQLite / 实际范围播放及空闲重开。Apple Silicon 已完成原生三类参考、三个灵感入口、真实 CAS 冲突及完整副本、来源往返、三窗口 / 键盘、重启和两种备份恢复；8 项核心回归通过。Intel 无可用机器，继续 UNAVAILABLE。实际结果见[第二十七批记录](workbench-knowledge-base-validation.md#第二十七批wb-309-自己的选题和草稿)及[第 35 批记录](workbench-knowledge-base-validation.md#第-35-批macos-选题与草稿原生验收)。

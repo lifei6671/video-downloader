@@ -11,15 +11,17 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { DEFAULT_INHERITED_ENV_VARS, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 import { verifyOperations } from './mcp-operation-checks.mjs';
+import { verifyMedia } from './mcp-media-checks.mjs';
+const mediaMode = process.argv.length === 3 && process.argv[2] === '--media';
 const operationMode = process.argv.length === 3 && process.argv[2] === '--operations';
 import { verifyWrites } from './mcp-write-checks.mjs';
 const writeMode = process.argv.length === 3 && process.argv[2] === '--writes';
 const resourceMode = process.argv.length === 3 && process.argv[2] === '--resources';
-const fullLibrary = operationMode || writeMode || resourceMode || (process.argv.length === 3 && process.argv[2] === '--library');
-assert(process.argv.length === 2 || fullLibrary, 'Usage: node scripts/verify-mcp-adapter.mjs [--library | --resources | --writes | --operations]');
+const fullLibrary = mediaMode || operationMode || writeMode || resourceMode || (process.argv.length === 3 && process.argv[2] === '--library');
+assert(process.argv.length === 2 || fullLibrary, 'Usage: node scripts/verify-mcp-adapter.mjs [--library | --resources | --writes | --operations | --media]');
 import { expectedTools as readTools, allTools as expectedTools } from './mcp-client-checks.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const evidenceRoot = join(root, '.local', operationMode ? 'wb311' : writeMode ? 'wb310' : resourceMode ? 'wb205' : fullLibrary ? 'wb204' : 'wb203');
+const evidenceRoot = join(root, '.local', mediaMode ? 'wb312' : operationMode ? 'wb311' : writeMode ? 'wb310' : resourceMode ? 'wb205' : fullLibrary ? 'wb204' : 'wb203');
 await mkdir(evidenceRoot, { recursive: true });
 const output = await mkdtemp(join(evidenceRoot, 'run-'));
 const profile = join(output, '中文 MCP adapter');
@@ -44,7 +46,7 @@ class JsonProcess {
   constructor(label, command, args, fixture = false) {
     this.label = label; this.fixture = fixture; this.wire = []; this.stderr = ''; this.pending = new Map(); this.sequence = 0;
     this.failure = null; this.status = null; this.parseErrors = [];
-    this.proc = spawn(command, args, { windowsHide: true, cwd: profile, env: { ...cleanEnv, ...(fixture ? { YINGQU_WB203_FIXTURE: '1', ...(operationMode ? { YINGQU_WB311_FIXTURE: '1' } : {}), ...(fullLibrary ? { YINGQU_WB204_FIXTURE: '1', ...(resourceMode ? { YINGQU_WB205_FIXTURE: '1' } : {}) } : {}) } : {}) } });
+    this.proc = spawn(command, args, { windowsHide: true, cwd: profile, env: { ...cleanEnv, ...(fixture ? { YINGQU_WB203_FIXTURE: '1', ...(mediaMode ? { YINGQU_WB312_FIXTURE: '1' } : {}), ...(operationMode ? { YINGQU_WB311_FIXTURE: '1' } : {}), ...(fullLibrary ? { YINGQU_WB204_FIXTURE: '1', ...((resourceMode || mediaMode) ? { YINGQU_WB205_FIXTURE: '1' } : {}) } : {}) } : {}) } });
     this.closed = new Promise(resolve => {
       this.proc.once('close', (code, signal) => { this.status = { code, signal }; this.fail(new Error(`Child closed: ${label}`)); resolve(this.status); });
     });
@@ -126,7 +128,7 @@ try {
     const tools = await client.listTools();
     assert.deepEqual(tools.tools.map(tool => tool.name), expectedTools);
     for (const tool of tools.tools) {
-      assert.equal(tool.annotations.readOnlyHint, readTools.includes(tool.name) || tool.name === 'get_operation');
+      assert.equal(tool.annotations.readOnlyHint, readTools.includes(tool.name) || ['get_operation', 'get_clip', 'get_keyframes'].includes(tool.name));
       assert.equal(tool.inputSchema.additionalProperties, false);
       assert(tool.outputSchema);
       assert(!/"format":"uint(?:32|64)"/.test(JSON.stringify(tool.outputSchema)), 'Nonstandard integer format in public schema');
@@ -161,6 +163,7 @@ try {
     }
     if (writeMode) summary.checks.writes = await verifyWrites(client, core);
     if (fullLibrary && !writeMode && !operationMode) summary.checks.libraryReads = await verifyLibraryReads(client, core);
+    if (mediaMode) summary.checks.media = await verifyMedia(client, output);
     if (resourceMode) summary.checks.resources = await verifyResources(client, core);
     summary.checks.officialTypescriptClient = { status: 'PASSED', server: client.getServerVersion(), tools, categories, tags, liveUpdate: true };
   } finally {

@@ -38,7 +38,7 @@ async page => {
     await detail().locator('.library-detail-labels').getByText('拍摄手法', { exact: true }).waitFor();
     await detail().getByRole('button', { name: '返回列表', exact: true }).click();
     await detail().waitFor({ state: 'hidden' });
-    await page.waitForFunction(() => document.activeElement?.classList.contains('library-asset-title') || document.activeElement?.classList.contains('library-list'));
+    await page.waitForFunction(() => document.activeElement?.classList.contains('library-asset-title'));
     results.push(width + ': responsive detail/Unicode path/seconds timestamp/metadata/file version/copy/location/memberships/back focus');
   }
   await load(); await open('a2');

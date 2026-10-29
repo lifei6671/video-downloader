@@ -1,6 +1,7 @@
 //! Stdio MCP adapter. Only the running application's local IPC owns domain data.
 mod ipc;
 mod resources;
+mod prompts;
 
 use crate::mcp_read;
 use ipc::{Client, Connection};
@@ -91,6 +92,27 @@ impl Adapter {
 
 #[tool_router]
 impl Adapter {
+    #[tool(description = "Read saved clip references for asset_id, optionally one clip_id, with cursor/limit pagination. Returns pinned document/version and quote excerpts. No video/audio bytes, no paths, no playback or extraction. Use read_transcript for full text and get_keyframes for saved still images.", annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn get_clip(&self, Parameters(input): Parameters<mcp_read::ClipInput>) -> Result<Json<mcp_read::Clips>, ErrorData> {
+        self.read("mcp_get_clip", input).await
+    }
+    #[tool(description = "Read saved sampled PNGs and original PTS for asset_id, optional file_id/clip_id and half-open start_ms/end_ms. Returns metadata followed by inline image blocks in the same included-frame order. limit defaults to 3, max 9; include_images=false gives metadata only. 512 KiB delivered-PNG budget; oversized saved PNGs use labelled max-edge-384 previews. Inspect image_is_preview and image_width/image_height; fine text may be unreadable. Retry page-budget skips with limit=1. Video/audio return MEDIA_UNSUPPORTED. Still samples cannot establish transitions, motion or sound; preserve IDs, batch, sampled range, PTS and source status when analyzing. Works without Prompts.", output_schema = rmcp::handler::server::tool::schema_for_output::<mcp_read::Keyframes>(), annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn get_keyframes(&self, Parameters(input): Parameters<mcp_read::KeyframesInput>) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let mut result = self.read::<_, mcp_read::Keyframes>("mcp_get_keyframes", input).await?.0;
+        let mut images = Vec::new();
+        for frame in &mut result.frames.items {
+            if let Some(data) = frame.image_base64.take() {
+                images.push(rmcp::model::ContentBlock::image(data, "image/png"));
+            }
+        }
+        let metadata = serde_json::to_value(result).map_err(|_| AdapterError::IpcProtocolError.tool_error())?;
+        let mut content = vec![rmcp::model::ContentBlock::json(&metadata)?];
+        content.extend(images);
+        let mut response = rmcp::model::CallToolResult::success(content);
+        response.structured_content = Some(metadata);
+        Ok(response)
+    }
+
     #[tool(description = "Start local transcription and immediately return its Core operation ID. Same running file reuses its ID; another file is busy. force=false reuses unchanged saved results. Requires desktop write permission; disconnect does not cancel.", annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
     async fn start_transcription(&self, Parameters(input): Parameters<crate::mcp_operations::StartInput>) -> Result<Json<crate::mcp_operations::Operation>, ErrorData> {
         self.read("mcp_start_transcription", input).await
@@ -242,9 +264,18 @@ impl ServerHandler for Adapter {
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+                .enable_prompts()
                 .build(),
         )
         .with_server_info(Implementation::new("yingqu-mcp", env!("CARGO_PKG_VERSION")))
+    }
+
+    async fn list_prompts(&self, request: Option<PaginatedRequestParams>, _context: RequestContext<RoleServer>) -> Result<rmcp::model::ListPromptsResult, ErrorData> {
+        if request.is_some_and(|r| r.cursor.is_some()) { return Err(ErrorData::invalid_params("INVALID_PROMPT_CURSOR", None)); }
+        Ok(prompts::list())
+    }
+    async fn get_prompt(&self, request: rmcp::model::GetPromptRequestParams, _context: RequestContext<RoleServer>) -> Result<rmcp::model::GetPromptResponse, ErrorData> {
+        Ok(prompts::get(request)?.into())
     }
 
     async fn list_resources(

@@ -1,6 +1,6 @@
 # 关键帧提取与资源管理（WB-304）
 
-在资产详情中从播放器当前位置取帧，或从已保存片段均匀提取 3 / 5 / 9 帧。这里的“关键帧”是学习用的画面资源，不要求输入视频的 I 帧，也不保证与播放器截图完全相同。Windows 验证见[第二十二批记录](workbench-knowledge-base-validation.md#第二十二批wb-304-关键帧提取与资源管理)；macOS Intel / Apple Silicon 继续待验收。
+在资产详情中从播放器当前位置取帧，或从已保存片段均匀提取 3 / 5 / 9 帧。这里的“关键帧”是学习用的画面资源，不要求输入视频的 I 帧，也不保证与播放器截图完全相同。Windows 验证见[第二十二批记录](workbench-knowledge-base-validation.md#第二十二批wb-304-关键帧提取与资源管理)；macOS Apple Silicon 验证见[第 37 批记录](workbench-knowledge-base-validation.md#第-37-批macos-关键帧原生验收与预览焦点修复)；Intel 无设备，继续 UNAVAILABLE。
 
 ## 时间和采样
 
@@ -22,7 +22,7 @@ Source 变化或缺失时已有图片继续可读，并显示来源状态；禁�
 
 ## 界面与备份
 
-图库显示真实图片、实际时间、请求时间、文件版本、片段采样范围与黑帧 / 来源状态。点击预览，Escape 关闭；图片读取失败可重读，删除失败保留图片。初始显示 12 张，按需再加载 12 张；离开详情释放 Blob URL，后台任务仍由 Core 管理。配色与边框沿用 DESIGN.md。
+图库显示真实图片、实际时间、请求时间、文件版本、片段采样范围与黑帧 / 来源状态。点击或键盘 Enter 预览，Escape 关闭后恢复原图片按钮焦点；图片读取失败可重读，删除失败保留图片。初始显示 12 张，按需再加载 12 张；离开详情释放 Blob URL，后台任务仍由 Core 管理。配色与边框沿用 DESIGN.md。
 
 当前逻辑包 writer **v9**、reader **v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9**，v9 增加[AI 创建来源](mcp-write-tools.md)，v8 增加[自己的选题与草稿](ideas-and-drafts.md)，v7 增加[研究专题](research-topics.md)，v6 增加[比较笔记](video-comparison.md)，v5 增加[结构化拆解](structured-analysis.md)；v4 首次新增 `keyframes` 及带大小 / SHA-256 的图片 payload；不包含视频时也保留全部图片。恢复完整校验归属、采样与时间、PNG、片段和 Source 关系，失败不发布恢复目录。文案、片段和图片共用历史 Source 重定位，恢复后再次备份仍保留同一来源身份。旧 reader 拒绝新版本，旧包不能混入图片数据。当前 schema v11 保留 v6 图片表，schema v1～v10 升级前保留一致性备份，迁移失败事务回滚，旧资料仍可恢复。
 

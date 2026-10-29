@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 
 export const expectedTools = ['get_asset', 'list_categories', 'list_notes', 'list_tags', 'read_note', 'read_transcript', 'search_assets'];
-export const allTools = [...expectedTools, 'create_note', 'create_category', 'add_asset_categories', 'add_asset_tags', 'create_topic', 'create_idea', 'start_transcription', 'get_operation', 'cancel_operation'].sort();
-export function validateModelItem(item) {
+export const allTools = [...expectedTools, 'get_clip', 'get_keyframes', 'create_note', 'create_category', 'add_asset_categories', 'add_asset_tags', 'create_topic', 'create_idea', 'start_transcription', 'get_operation', 'cancel_operation'].sort();
+export function validateModelItem(item, allowedTools = expectedTools) {
   assert(['userMessage', 'agentMessage', 'plan', 'reasoning', 'contextCompaction', 'mcpToolCall'].includes(item.type), `Unexpected item: ${item.type}`);
-  if (item.type === 'mcpToolCall') { assert.equal(item.server, 'yingqu'); assert(expectedTools.includes(item.tool)); }
+  if (item.type === 'mcpToolCall') { assert.equal(item.server, 'yingqu'); assert(allowedTools.includes(item.tool)); }
 }
 export function unavailable(kind, error) {
   const message = JSON.stringify(error);

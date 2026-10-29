@@ -27,8 +27,9 @@ async page => {
     await panel().getByText('已保存 3 张关键帧', { exact: true }).waitFor(); await ready();
     await page.waitForFunction(() => document.querySelectorAll('.library-frame-image img').length === 3 && [...document.querySelectorAll('.library-frame-image img')].every(image => image.complete && image.naturalWidth === 1));
     check(await page.evaluate(() => { const rows = window.keyframesTest.snapshot(); return rows.length === 3 && rows[0].requested_ms === 625 && rows[0].actual_ms === 700 && rows.every(row => row.clip_id && row.sample_count === 3); }), 'uniform sampling metadata');
-    await images().first().click(); await page.getByRole('dialog').getByRole('img', { name: /^关键帧 / }).waitFor();
+    await images().first().focus(); await page.keyboard.press('Enter'); await page.getByRole('dialog').getByRole('img', { name: /^关键帧 / }).waitFor();
     await page.keyboard.press('Escape'); await page.getByRole('dialog').waitFor({ state: 'hidden' });
+    check(await images().first().evaluate(button => button === document.activeElement), 'preview close did not restore image trigger focus');
     const urls = await panel().locator('img').evaluateAll(imgs => imgs.map(image => image.src));
     await panel().scrollIntoViewIfNeeded();
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'horizontal overflow');

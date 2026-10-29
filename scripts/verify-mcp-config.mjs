@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { DEFAULT_INHERITED_ENV_VARS, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { allTools } from './mcp-client-checks.mjs';
 
 const args = process.argv.slice(2);
 const outputFlag = args.indexOf('--output');
@@ -51,7 +52,7 @@ try {
     try {
       await client.connect(transport, { timeout: 10000 });
       const inventory = await client.listTools();
-      assert.equal(inventory.tools.length, 16);
+      assert.deepEqual(inventory.tools.map(tool => tool.name).sort(), allTools);
       const result = await client.callTool({ name: 'list_categories', arguments: {} });
       assert(!result.isError, JSON.stringify(result));
       summary.checks.jsonLaunchHandshakeRead = 'PASSED';
@@ -81,7 +82,8 @@ try {
         child.stdin.write(JSON.stringify({ method: 'initialized', params: {} }) + '\n');
         const inventory = await request('mcpServerStatus/list', { serverName: 'yingqu', detail: 'toolsAndAuthOnly' });
         const server = inventory.result?.data.find(item => item.name === 'yingqu');
-        assert(server?.tools.read_transcript && Object.keys(server.tools).length === 7, JSON.stringify(inventory));
+        assert(server?.tools, JSON.stringify(inventory));
+        assert.deepEqual(Object.keys(server.tools).sort(), allTools);
         summary.checks.codexCopiedTomlDiscovery = 'PASSED';
         summary.codex = version.stdout.trim();
       } finally {

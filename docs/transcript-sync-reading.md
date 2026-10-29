@@ -1,6 +1,6 @@
 # 视频与文案同步阅读（WB-305）
 
-识别原文有已保存 `timing` 时默认显示同步阅读，支持段落跳转、播放跟随、自动滚动开关、键盘播放和连续段落选取。Windows 验证见[第二十三批](workbench-knowledge-base-validation.md#第二十三批wb-305-视频与文案同步阅读)；macOS Intel / Apple Silicon 继续待验收。
+识别原文有已保存 `timing` 时默认显示同步阅读，支持段落跳转、播放跟随、自动滚动开关、键盘播放和连续段落选取。Windows 验证见[第二十三批](workbench-knowledge-base-validation.md#第二十三批wb-305-视频与文案同步阅读)；macOS Apple Silicon 验证见[第 38 批](workbench-knowledge-base-validation.md#第-38-批macos-同步阅读原生验收)；Intel 无设备，继续 UNAVAILABLE。
 
 ## 时间、来源与可用范围
 
@@ -28,4 +28,4 @@
 
 “阅读全文”随时切回不可变原文，可选字引用笔记 / 片段、复制和导出全文；“同步阅读”返回段落界面。版本切换不把旧选区转移到新文案，普通刷新不会偷偷读取新版本。
 
-本批仅增加前端交互，schema v6、逻辑备份 v4、engine 0.17.0 / JSONL v3 及 MCP 范围不变。没有重新运行 ASR、修改模型或新增第三方依赖。
+同步阅读本身不升级 schema、备份格式或引擎协议；当前程序使用 schema v11、逻辑包 writer v9 / reader v1～v9，保留原有 timing 契约。第 38 批只验收现有行为，真实 CPU 结果为此前输出的副本复验，长文 UI 时间为明确标注的合成夹具；没有重新运行 ASR、修改模型或新增依赖，不将界面定位容差用于宣称语义精度。

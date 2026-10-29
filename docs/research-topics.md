@@ -43,4 +43,4 @@ schema **v9** 新增：
 
 ## 验证
 
-Rust 专题测试覆盖三类成员、去重、错误归属、全排列 / CAS、原子失败、移除保护、归档 / 缺失 / 重关联状态、schema 升级回滚、一致性备份、空专题库及两轮含 / 不含媒体恢复和恶意关系。浏览器验证三视口、资料选择、顺序、视频返回、笔记 / 播放 / 键盘、失败和冲突恢复；Windows 原生验证真实 Tauri / SQLite / 媒体和空闲重开。macOS Intel / Apple Silicon 继续待验收。实际结果见[第二十六批记录](workbench-knowledge-base-validation.md#第二十六批wb-308-研究专题)。
+Rust 专题测试覆盖三类成员、去重、错误归属、全排列 / CAS、原子失败、移除保护、归档 / 缺失 / 重关联状态、schema 升级回滚、一致性备份、空专题库及两轮含 / 不含媒体恢复和恶意关系。浏览器验证三视口、资料选择、顺序、视频返回、笔记 / 播放 / 键盘、失败和冲突恢复；Windows 原生验证真实 Tauri / SQLite / 媒体和空闲重开。Apple Silicon 已完成原生专题 / 成员 / 来源、三窗口与键盘、范围播放、重启和两种备份恢复；7 项专题核心回归通过。Intel 无可用机器，继续 UNAVAILABLE。实际结果见[第二十六批记录](workbench-knowledge-base-validation.md#第二十六批wb-308-研究专题)及[第 34 批记录](workbench-knowledge-base-validation.md#第-34-批macos-研究专题原生验收)。

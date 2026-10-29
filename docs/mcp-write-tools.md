@@ -1,6 +1,6 @@
 # MCP 受控写入
 
-对应 WB-310。复用已选定的 rmcp 3.8.0、stdio 适配器、本机 IPC 与 Rust 领域服务，不新增依赖。读取与 Resources 继续使用现有边界；WB-311 已加入[转录长操作](mcp-transcription-operations.md)，片段及多模态工具仍由 WB-312 实施。
+对应 WB-310。复用已选定的 rmcp 3.8.0、stdio 适配器、本机 IPC 与 Rust 领域服务，不新增依赖。读取与 Resources 继续使用现有边界；WB-311 已加入[转录长操作](mcp-transcription-operations.md)，WB-312 已加入[片段、PNG 与分析模板](mcp-media-tools.md)。
 
 ## 授权与生命周期
 
@@ -8,7 +8,7 @@
 
 `get_mcp_connection` 增加 `write_enabled:boolean`；桌面命令 `set_mcp_write_enabled(enabled)` 返回真实 ConnectionInfo。服务未运行时不能授权，返回 `MCP_SERVICE_DISABLED`。关闭写入保持连接及读取可用；关闭服务、退出或重新启动应用清除授权，重开服务仍为只读。幂等开启已经运行的服务不撤销既有授权。
 
-WB-310 的工具清单包含七项读取和六项新增写入；WB-311 另加入三项转录控制 / 查询，当前共16项。下述六项新增写入可被发现，便于已连接客户端直接响应授权变化。写工具可被发现不代表有权限：Core 在同一个锁内检查权限、关闭状态并提交领域操作。撤销完成后才到达的请求返回 `WRITE_DISABLED`；已提交的数据保留。IPC 没有授权、设置修改、文件删除或任意 Core 调用入口，客户端不能自行打开写入。
+WB-310 的工具清单包含七项读取和六项新增写入；WB-311 另加入三项转录控制 / 查询，WB-312 加入两项媒体读取，当前共 18 项。下述六项新增写入可被发现，便于已连接客户端直接响应授权变化。写工具可被发现不代表有权限：Core 在同一个锁内检查权限、关闭状态并提交领域操作。撤销完成后才到达的请求返回 `WRITE_DISABLED`；已提交的数据保留。IPC 没有授权、设置修改、文件删除或任意 Core 调用入口，客户端不能自行打开写入。
 
 ## 六项工具
 
@@ -41,4 +41,4 @@ schema v11 为 research_topics / library_ideas 增加可空 ai_source_json；v1�
 
 公开错误只允许固定 code：`WRITE_DISABLED`、`INVALID_INPUT`、`INVALID_CITATION`、`ASSET_NOT_FOUND`、`CATEGORY_NOT_FOUND`、`CATEGORY_EXISTS`、`TAG_NOT_FOUND`、`TOPIC_INVALID`、`IDEA_INVALID`、`IDEA_REFERENCE_INVALID`、`IDEA_REFERENCE_EXISTS`、`SERVICE_UNAVAILABLE`、`CORE_WRITE_FAILED`。底层 SQL、路径或错误参数不透传。业务错误保持连接可读，Core / IPC 断连沿用进程回收规则。
 
-Windows 验证证据与 macOS Intel / Apple Silicon 待验收状态见 [第 28 批记录](workbench-knowledge-base-validation.md#第-28-批wb-310-受控-mcp-写入)。真实模型自主生成写入结果的质量评价不等于协议验收，本批不调用模型账号。
+Windows 验证见[第 28 批记录](workbench-knowledge-base-validation.md#第-28-批wb-310-受控-mcp-写入)，Apple Silicon 的原生授权、六工具及来源备份恢复验收见[第 31 批记录](workbench-knowledge-base-validation.md#第-31-批macos-原生组合验收与取消回收修复)；Intel 无可用机器，保持 UNAVAILABLE。真实模型自主生成写入结果的质量评价不等于协议验收，本批不调用模型账号。

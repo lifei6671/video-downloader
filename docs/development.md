@@ -109,6 +109,14 @@ src-tauri/target/debug/examples/timing_acceptance.exe '<配置 JSON 路径>'
 
 没有已验证 CUDA 环境时省略 `--cuda-directory`，相应项明确为 `NOT_RUN`；macOS 只复验其 CPU 路径，不要求 Windows CUDA。主实验调用真实 VAD、CPU `--srt` 和生产 CUDA 编排，可能持续数分钟，日志与 JSON 保留在新目录。核对裁剪实际采样、片段对应和源文件哈希；不把结构检查当作完整文本准确率或词边界精度。
 
+macOS 沿用同一运行器，使用已有模型目录与独立测试输入，例如：
+
+```sh
+.venv/bin/python scripts/verify_transcript_timing.py --cpu-directory '<已有 Nano CPU 目录>' --english-audio '<官方英文 PCM16 WAV>' --natural-audio '<隔离完整长语音 PCM16 WAV>' --output .local/wb301/macos-new-run
+```
+
+2026-10-29 的完整 628.541 秒解说和 466.782 秒具名朗读结果见 [Apple Silicon 补验](transcript-timing-validation.md#macos-apple-silicon-长语音补验2026-10-29)。前者跑完整四组主实验并经 Tauri 真实转录入库；后者另以既有 VAD / SRT 校验函数和生产 `transcription.recognize` 交叉核对，没有原生入库。新样本只用于本地验证，保留来源、完整输入哈希和转换记录，不加入安装包。
+
 官方英文输入来自固定的 `https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512/resolve/272c57b82523ada6fd87095e955f8e29100979ab/example/en.mp3`，本轮原文件 SHA-256 为 `f10378336a4e584f3f63799e62f99d5add3c2a401b51d3abe7d3a3a82f255ada`。如本地没有该样本，可下载到新的测试输入目录，用已安装 FFmpeg 转为所需格式，再记录转换结果哈希：
 
 ```powershell
@@ -301,6 +309,25 @@ open src-tauri/target/release/bundle/macos/映取.app
 `tauri.macos.conf.json` 自动合并，声明最低 macOS 13.3，以匹配现有 Tailwind 4 的 Safari/WebKit 16.4 要求；13.3 实机兼容性仍待验证。依据：[Tailwind 浏览器要求](https://tailwindcss.com/docs/compatibility)、[WebKit 16.4](https://webkit.org/blog/13966/webkit-features-in-safari-16-4/)。Apple Silicon 本机证据及剩余验收见 [macOS 验证记录](macos-validation.md)。
 
 开发依赖锁文件包含平台标记：`macholib` 只在 macOS 安装，`pefile` / `pywin32-ctypes` 只在 Windows 安装。更新锁文件使用 `uv pip compile --universal python-engine/requirements-dev.in -o python-engine/requirements-dev.txt`，避免再次生成只适用当前主机的清单。
+
+### macOS 工作台与 MCP 隔离验收
+
+复用当前 `.venv`、Node 依赖及已构建引擎；若依赖缺失，按锁文件同步。ASR helper 构建需要 CMake。先在独立终端启动 `npm run dev`，再执行：
+
+```sh
+.venv/bin/python scripts/p1a-acceptance-macos.py --scenario upgrade --run-id macos-check
+open '.local/p1a-acceptance/macos-check/upgrade/映取隔离验收.app'
+cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib -- --test-threads=1
+cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --test core_ipc -- --test-threads=1
+cargo build --locked --manifest-path src-tauri/Cargo.toml --features mcp --bin yingqu-mcp --example mcp-ipc-fixture
+node scripts/verify-mcp-adapter.mjs --resources
+node scripts/verify-mcp-adapter.mjs --writes
+node scripts/verify-mcp-adapter.mjs --operations
+```
+
+`--scenario` 支持 `empty`、`upgrade`、`restore`；`--viewport` 支持 `1440x900`（默认）、`1280x800`、`1024x680`。退出同一验收程序后可用相同 run-id 切换窗口尺寸，资料保留。运行器使用编译时独立 identifier，在 `~/Library/Application Support/me.disign.yingqu.p1a-<run-id>-<scenario>/` 创建匹配 marker 后准备合成数据，拒绝未标记或标记不符的目录。生产入口和 example 共用一次 `generate_context!`，避免 macOS 重复嵌入 Info.plist。重跑前退出同一验收程序；重跑保留资料库。
+
+此 `.app` 是依赖 Vite 和仓库引擎的调试入口，不是安装包。协议脚本通过真实 stdio / Unix socket 连接合成 Core；`--operations` 的识别器是测试夹具，不证明真实 ASR 精度。SDK 选型探针另按 WB-201 命令构建后运行 `node scripts/verify-mcp-sdk.mjs --codex '<本机 Codex 原生程序绝对路径>'`，仅发现工具，不使用登录或模型 turn。安装包、真实模型、原生 UI 及 Intel / Apple Silicon 分开验收，实际结果见[工作台实施记录](workbench-knowledge-base-validation.md)。
 
 ## 真实下载验证
 
@@ -506,6 +533,8 @@ playwright-cli -s=wb303 run-code --filename tests/library-clips.browser.js
 
 原生验证复用 `scripts/p1a-acceptance.ps1 -Scenario upgrade -RunId wb303-final -BuildOnly` 的带标记独立 profile，只能对该合成 profile 运行 `tests/library-clips.native.js`；脚本先校验下载目录属于 wb303-final，再重建该 profile 的测试收藏。特殊第二文件必须在首次迁移前准备并同步合成旧任务的登记字节数，不能在替换测试视频后仍使用旧指纹。只给该测试进程设置 WebView2 9333 调试端口，经 CDP 操作真实生产 UI / IPC / SQLite / asset protocol，测试后结束该实例及调试端口，不对日常程序开放调试。原生用例依赖 Windows WebView2，不以浏览器 mock 或 CDP 连接本身当作 macOS / 安装包验收。实际操作与限制见[第二十一批记录](workbench-knowledge-base-validation.md#第二十一批wb-303-片段收藏与范围播放)。
 
+macOS Apple Silicon 片段矩阵使用 `scripts/p1a-acceptance-macos.py` 的独立 `macos-b36 / upgrade` 标记 profile；通过 CUA 操作真实 WKWebView / Tauri / SQLite / asset protocol，含正 PTS、文件变化、双草稿、三视口和两种原生备份恢复。范围收缩 / 提前结束另外使用临时可见控件的 WKWebView 事件夹具，IPC 为合成 fixture，不等同真实文件自然触发；验收源码保留在本地证据目录，仓库临时页已移除。实际命令与证据范围见[第 36 批记录](workbench-knowledge-base-validation.md#第-36-批macos-片段收藏与范围播放原生验收)，不代替 Intel 或正式安装包验收。
+
 ## WB-304 关键帧验证
 
 复用现有 FFmpeg、Pillow 与已锁定 Rust png 0.18.1，重建 engine 0.17.0 后运行：
@@ -518,6 +547,8 @@ cargo clippy --offline --manifest-path src-tauri/Cargo.toml --features desktop,m
 ```
 
 `tests/library-keyframes.browser.js` 使用现有知识库浏览器 fixture；`tests/library-keyframes.native.js` 仅连接带标记的 wb304-final 隔离 profile / WebView2 9334，调用真实 IPC，不适用于日常 profile。`src-tauri/examples/keyframes_acceptance.rs` 使用显式配置的合成源与已标记全新目录验证源码 / 打包引擎、SQLite、重开和无媒体备份恢复；不代替 GUI 或安装包验收。具体命令、输入及本轮证据见[第二十二批记录](workbench-knowledge-base-validation.md#第二十二批wb-304-关键帧提取与资源管理)。Windows TEMP/TMP 不可写时使用工作区临时目录；不弱化取消 / 清理断言。
+
+macOS Apple Silicon 原生专项使用 `scripts/p1a-acceptance-macos.py --run-id macos-b37 --scenario empty --viewport 1280x800` 创建独立标记资料库，复用已打包引擎与本机 FFmpeg，通过 CUA 验证真实 Tauri / PNG / 子进程生命周期和两种恢复。使用 24 秒 4K 合成视频留出真实取消 / 退出观察时间，不用测试进程冒充 FFmpeg；相关 Python / arm64 Core 用例与原生证据分别报告。三窗口补验预览关闭后的按钮焦点，见[第 37 批记录](workbench-knowledge-base-validation.md#第-37-批macos-关键帧原生验收与预览焦点修复)。
 
 ## WB-305 同步阅读验证
 
@@ -533,6 +564,8 @@ playwright-cli -s=wb305 run-code --filename tests/library-sync.native.js
 
 本轮 natural-sync.mp4 为 WB-301 的约 297.586 秒测试 WAV 与 160×90 / 5fps 合成灰色视频复用封装，79 段时间和正文直接复用原测试 CUDA 输出；没有重新执行 ASR，也不据此验收原视频镜头与文字逐帧对应。短样本为合成 MP4 测试媒体，具体原生 / 浏览器及回归结果见[第二十三批](workbench-knowledge-base-validation.md#第二十三批wb-305-视频与文案同步阅读)。
 
+macOS Apple Silicon 同步阅读原生专项使用独立 `macos-b38 / empty` profile。按既有 `seed_sync_profile.py` 方式，只在停机且 marker / 工作区 / 空库匹配后准备本地 fixture；本轮将已有 CPU 输出与明确合成的 300 秒 / 150 段 UI 时间分开留证，实际播放 / 键盘 / 来源变化均经 CUA 操作 Tauri WKWebView。现有 Windows CDP 脚本不用于 macOS；夹具不作为 WB-301 长自然语音验收，详见[第 38 批记录](workbench-knowledge-base-validation.md#第-38-批macos-同步阅读原生验收)。
+
 ## WB-306 拆解与来源验证
 
 ```powershell
@@ -546,7 +579,7 @@ playwright-cli -s=wb306 run-code --filename tests/library-analysis.native.js
 
 沿用已有串行核心测试约定与工作区 TEMP/TMP，避免大量 Windows 子进程并发引起 TDL fixture 超时和日志读取竞争；不更改超时或弱化断言。浏览器使用合成笔记及真实媒体 / PNG，原生仅连接 `scripts/p1a-acceptance.ps1 -Scenario upgrade -RunId wb306-final -BuildOnly` 的带标记测试 profile，WebView2 调试端口 9336。原生通过生产命令创建引用 / 拆解并实际提取 PNG，不使用日常知识库或模型凭据。
 
-`tests/library-analysis.restart.js` 在空闲重开前后只读保存笔记快照，比对完整 ID / 创建来源 / 模型 / 修订 / 资源引用 / 正文；这是空闲强制重开测试，不代替优雅退出。旧文案 5 组、失败恢复 9 组、备份 4 组、片段 9 组回归分开运行，避免共用 CLI 会话并发和 Vite 重载。新版 schema v7 可继续使用已有 MCP / 同步阅读合成样本工具，Mac 两架构待办不变。具体结果见[第二十四批](workbench-knowledge-base-validation.md#第二十四批wb-306-结构化文案和制作手法拆解)。
+`tests/library-analysis.restart.js` 在空闲重开前后只读保存笔记快照，比对完整 ID / 创建来源 / 模型 / 修订 / 资源引用 / 正文；这是空闲强制重开测试，不代替优雅退出。旧文案 5 组、失败恢复 9 组、备份 4 组、片段 9 组回归分开运行，避免共用 CLI 会话并发和 Vite 重载。新版 schema v7 可继续使用已有 MCP / 同步阅读合成样本工具。Apple Silicon 可用上文 macOS 隔离运行器及 `--viewport` 顺序切换三个窗口，复用已保存的片段 / PNG，从原生表单创建人工及显式合成 AI 手动录入拆解；两种备份分别恢复到独立 `restore` 空库，比较 Note / analysis、固定引用、PNG 和媒体哈希。Apple Silicon 结果见[第 32 批记录](workbench-knowledge-base-validation.md#第-32-批macos-结构化拆解原生验收)，Intel 仍为 UNAVAILABLE。具体结果见[第二十四批](workbench-knowledge-base-validation.md#第二十四批wb-306-结构化文案和制作手法拆解)。
 
 ### WB-307 跨视频对比验证
 
@@ -558,6 +591,8 @@ playwright-cli -s=wb307 run-code --filename tests/library-comparison.browser.js
 playwright-cli -s=wb307 run-code --filename tests/library-comparison.native.js
 ```
 
+macOS 使用 `scripts/p1a-acceptance-macos.py --run-id <隔离标识> --scenario upgrade --viewport 1280x800` 创建 / 重建带 marker 的原生 profile；同一 run-id 保留资料，退出后再重建窗口。用原生 WKWebView 验证 2 / 4 视频和未知资料、逐结论来源、来源修订后的历史摘录、范围播放及键盘。另在全新 `restore` profile 验证含 / 不含视频备份；只读 SQL 核对比较 / 笔记 / 拆解行及媒体哈希。Apple Silicon 结果见[第 33 批记录](workbench-knowledge-base-validation.md#第-33-批macos-跨视频对比原生验收)；Windows CDP 脚本不作为 Mac 原生结果。定向核心命令为 `cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib comparison_tests -- --test-threads=1`。
+
 ### WB-308 研究专题验证
 
 沿用已安装工具与独立 profile，资料为合成样本。`npm run build` 后启动 Vite，使用已有 Edge / Playwright CLI 跑 `tests/library-topics.browser.js`；真实 Windows 另用 `scripts/p1a-acceptance.ps1 -Scenario upgrade -RunId wb308-final -BuildOnly`，9338 调试端口只供 `tests/library-topics.native.js` / `restart.js` 连接本轮标记程序。不要对日常 profile 执行。核心保持工作区 TEMP/TMP、串行全库测试，不同时重建正在运行的测试 EXE。
@@ -568,6 +603,8 @@ playwright-cli -s=wb308 run-code --filename tests/library-topics.browser.js
 playwright-cli -s=wb308 run-code --filename tests/library-topics.native.js
 ```
 
+macOS 使用已有 `scripts/p1a-acceptance-macos.py` 的带 marker 合成 profile，顺序重建三个规定窗口并以真实 WKWebView 操作；另建空 `restore` profile 验证含 / 不含媒体备份。核对三类成员、正文先保存、去重 / 键盘排序、来源往返、当前笔记与比较固定摘录、媒体缺失及实际范围播放；SQL 只读核对专题 / 成员的 ID、修订、顺序与来源行，媒体另验哈希。Apple Silicon 结果见[第 34 批记录](workbench-knowledge-base-validation.md#第-34-批macos-研究专题原生验收)。定向核心命令为 `cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib topic_tests -- --test-threads=1`；Windows CDP 脚本不替代 Mac 原生操作。
+
 ### WB-309 选题与草稿验证
 
 沿用既有工具，先 `npm run build`，Vite / Edge 的独立会话执行 `tests/library-ideas.browser.js`。真实 Windows 使用 `scripts/p1a-acceptance.ps1 -Scenario upgrade -RunId wb309-final -BuildOnly` 和 9339 调试端口，`tests/library-ideas.native.js` / `restart.js` 仅连接带 WB309 marker 的合成 profile。不要使用日常知识库。核心测试保持工作区 TEMP/TMP 和串行模式，不重建正在运行的同名测试 EXE。
@@ -577,6 +614,8 @@ cargo test --offline --manifest-path src-tauri/Cargo.toml --features desktop,mcp
 playwright-cli -s=wb309 run-code --filename tests/library-ideas.browser.js
 playwright-cli -s=wb309 run-code --filename tests/library-ideas.native.js
 ```
+
+macOS 使用已有 `scripts/p1a-acceptance-macos.py` 的带 marker 合成 profile 和真实 WKWebView，分别验证三个灵感入口、观点 / 草稿 / 三类参考、来源往返、三窗口 / 键盘及重启；两种备份恢复到独立空库。CAS 验收可在确认 marker、工作区和本轮选题 ID 后，由独立连接调用生产 `library::edit_idea` 提交下一修订，再在原生旧编辑器保存；不得直接改 revision、伪造错误或操作日常库。临时验收程序退出并清理，证据保留源码、前后状态及原生完整副本。定向核心命令为 `cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib idea_tests -- --test-threads=1`。Apple Silicon 结果见[第 35 批记录](workbench-knowledge-base-validation.md#第-35-批macos-选题与草稿原生验收)。
 
 ### WB-310 受控 MCP 写入验证
 
@@ -593,6 +632,48 @@ node scripts/verify-mcp-native-write.mjs
 playwright-cli -s=wb310 run-code --filename tests/mcp-writing-native.browser.js
 node scripts/verify-mcp-native-write.mjs --restart
 ```
+
+### WB-312 片段、图片与模板验收
+
+复用已有官方 SDK、Rust、Node、Python / Pillow 和隔离 Core fixture，无新增工具安装：
+
+```sh
+cargo build --locked --manifest-path src-tauri/Cargo.toml --features mcp --bin yingqu-mcp --example mcp-ipc-fixture
+cargo test --locked --manifest-path src-tauri/Cargo.toml --features mcp --lib mcp_ -- --test-threads=1
+cargo test --locked --manifest-path src-tauri/Cargo.toml --lib mcp_read::media -- --test-threads=1
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop,mcp --all-targets -- -D warnings
+node scripts/verify-mcp-adapter.mjs --media
+node --test tests/mcp-client-checks.test.mjs
+.venv/bin/python scripts/update_mcp_licenses.py --check
+```
+
+`--media` 在全新 `.local/wb312/run-*` 创建带 marker 的合成资料库：原文固定版本、一个片段、两张 16×16 纯色 PNG。真实 stdio / 本机 IPC 验证输入 Schema、分页、图片块及像素解码、仅元数据、采样范围、未知 / 跨资产 ID、明确不支持视频 / 音频、三个 Prompts 与 Tools-only 流程，并复用原有服务关闭 / EOF / 应用退出检查。不把无效 MP4 哨兵当作可播放视频、真实抽帧或 ASR 样本。
+
+原生复验使用新的 marker profile 和仅合成资料。`capture.json` 沿用 WB-208 的实际原生配置形状，`expected.json` 必须包含 `{"purpose":"wb312-synthetic"}`；原生界面核对固定版本与 PNG，不能对日常库或真实资料执行。复用现有客户端运行器：
+
+```sh
+node scripts/verify-mcp-client.mjs '<本机 Codex 原生程序>' '<capture.json>' '<expected.json>' --media
+```
+
+默认不进行模型推理。只有明确授权使用账号及发送这些合成图片 / 元数据后，才添加 `--allow-account`；不会读取或复制认证文件。`--media` 的模型 turn 必须实际调用 get_clip / get_keyframes、接收两个 image 块、识别正确主色并返回精确 PTS / 采样范围，明确视频 / 音频未观察；结果保存于 `.local/wb312/client-*`。控制终端仍按提示配合原生关闭 / 开启服务、退出及重启，直到 summary / 自然退出都通过。
+
+真实媒体分析质量、正式安装包和各平台独立记录，不以纯色图片识别通过替代 WB-313。Base64 复用已锁定的 0.22.1，新增直接依赖声明与完整许可，不引入新版本或媒体框架。契约与限制见[片段、图片与模板](mcp-media-tools.md)。
+
+### WB-313 真实视频组合验收
+
+复用上述构建、媒体读取及受控新增写入，不新增数据库格式或单独的任务系统。每轮使用 `scripts/p1a-acceptance-macos.py` 创建带 marker 的新空库，通过原生导入实际视频、CPU 转录、收藏片段、采样与结构化拆解。记录输入 SHA-256、固定 document_id / version、片段、原始 PTS / time_base 和六张保存 PNG 的哈希；没有识别文案的资料保留未知。
+
+`expected.json` 的 purpose 为 `wb313-real`，assets 数组包含实际 id、document（无文案为 null）及 frames（含 id、file_id、clip_id、batch_id、原始 PTS / time_base、采样范围和原尺寸）。`capture.json` 来自本轮原生设置的通用 JSON，沿用 WB-208 的 `{status,json,info}` 形状。只对已明确授权的输入及隔离库执行：
+
+```sh
+node scripts/verify-mcp-client.mjs '<本机 Codex 原生程序>' '<capture.json>' '<expected.json>' --p2 --allow-account
+```
+
+`--p2` 不与 `--media` 混用。省略 `--allow-account` 只验协议和生命周期；使用账号及发送真实正文 / 图片必须有明确授权，既有合成资料授权不自动扩展。模型 turn 仅准只读 MCP Tools，必须实际接收全部六张图、读取固定原文和已有笔记，明确预览、采样及音视频未观察的限制。`scripts/mcp-p2-checks.mjs` 检查实际调用、图片块、固定引用和报告，然后运行器经现有 RPC 追加两条 general AI 笔记及一个带双片段参考的选题；这属于运行器转交模型输出写回，不等于模型自主调用写工具。桌面写授权须开启；不覆盖人工资料或原文。输出与调用记录保存在 `.local/wb313/client-*`，语义仍须另行复核。
+
+按终端提示经原生界面关闭 / 开启服务、退出 / 重启，确认授权复位及自然退出。最终资料通过两种原生备份恢复到新的空库，核对正文、来源、固定版本、PNG / PTS、双片段参考及媒体哈希。Source 路径和可用媒体 mtime 按恢复契约重定位，不要求绝对路径相同。schema11 / writer9 / reader1～9 不变，`DESIGN.md` 的已有原文 / AI 来源、草稿与参考分区继续适用。
+
+SDK、模型实际输入、文本语义复核、人工视听和各平台分开记录。人工只试听短段时不得扩写为全片准确；图片模型不能声称观察过连续运动、转场或声音。大图预览复用锁定的 image 0.25.10（仅 PNG），不会修改库内原图；第 40 批纯色图片记录仍为独立历史证据。当前批次结果见[第 41 批记录](workbench-knowledge-base-validation.md#第-41-批wb-313-真实视频学习到创作组合验收)。
 
 ### WB-311 MCP 转录长操作验证
 

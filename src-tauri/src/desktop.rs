@@ -643,7 +643,13 @@ fn request_exit(app: &tauri::AppHandle) {
 }
 
 fn main() {
-    run(tauri::Builder::default(), tauri::generate_context!());
+    run(tauri::Builder::default(), context());
+}
+
+// Share one macro expansion with the isolated acceptance entry point. On macOS
+// each expansion embeds an Info.plist symbol, so two expansions cannot link.
+pub fn context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
 }
 
 pub(crate) fn run(builder: tauri::Builder<tauri::Wry>, context: tauri::Context<tauri::Wry>) {
@@ -881,6 +887,15 @@ pub(crate) fn run(builder: tauri::Builder<tauri::Wry>, context: tauri::Context<t
             tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
                 api.prevent_exit();
                 request_exit(app);
+            }
+            // Cocoa's native Quit / Cmd-Q emits Exit without ExitRequested.
+            // Finish the same cleanup before the native termination returns.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Exit if !app.state::<AtomicBool>().swap(true, Ordering::SeqCst) => {
+                tauri::async_runtime::block_on(async {
+                    app.state::<Arc<UpdateDownloads>>().shutdown().await;
+                    app.state::<AppCore>().shutdown().await;
+                });
             }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show_main_window(app),

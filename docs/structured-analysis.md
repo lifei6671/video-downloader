@@ -1,6 +1,6 @@
 # 文案与制作手法拆解（WB-306）
 
-知识库笔记新增“文案拆解”和“制作手法拆解”，沿用已有笔记、原文引用、片段及关键帧，不建立第二套学习资料库。Windows 验证见[第二十四批](workbench-knowledge-base-validation.md#第二十四批wb-306-结构化文案和制作手法拆解)；macOS Intel / Apple Silicon 继续待验收。
+知识库笔记新增“文案拆解”和“制作手法拆解”，沿用已有笔记、原文引用、片段及关键帧，不建立第二套学习资料库。Windows 验证见[第二十四批](workbench-knowledge-base-validation.md#第二十四批wb-306-结构化文案和制作手法拆解)；Apple Silicon 原生表单、来源 / 引用、三窗口、重启及两种备份恢复验收见[第 32 批记录](workbench-knowledge-base-validation.md#第-32-批macos-结构化拆解原生验收)；Intel 无可用机器，保持 UNAVAILABLE。
 
 ## 模板和引用
 

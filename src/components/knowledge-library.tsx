@@ -98,7 +98,14 @@ export function KnowledgeLibrary({ active, navigation, destination }: { active: 
   function openMembership(ids: string[], trigger: HTMLElement) { organizationTrigger.current = trigger; setMembershipIds(ids); }
   function closeMembership() { setMembershipIds(null); requestAnimationFrame(() => { if (organizationTrigger.current?.isConnected) organizationTrigger.current.focus(); else listRef.current?.focus(); }); }
   function openDetail(id: string, trigger: HTMLElement) { detailTrigger.current = trigger; setDetailFile(undefined); setDetailInitialError(undefined); setActionError(''); setDetailId(id); }
-  function backToList() { setDetailId(null); requestAnimationFrame(() => { if (detailTrigger.current?.isConnected) detailTrigger.current.focus({ preventScroll: true }); else listRef.current?.focus({ preventScroll: true }); }); }
+  function backToList() {
+    const assetId = detailId;
+    setDetailId(null);
+    requestAnimationFrame(() => {
+      const trigger = detailTrigger.current?.isConnected ? detailTrigger.current : listRef.current?.querySelector<HTMLElement>(`[data-library-asset="${CSS.escape(assetId ?? '')}"] .library-asset-title`);
+      (trigger ?? listRef.current)?.focus({ preventScroll: true });
+    });
+  }
   function startIdea(reference?: IdeaReferenceInput) { navigation.request(() => { setIdeaSession({ key: ++ideaSequence.current, reference }); setIdeaSource(false); setCompareIds(null); }); }
   function readIdeaAsset(id: string, trigger: HTMLElement | null) { ideaTrigger.current = trigger; setDetailId(id); setDetailFile(undefined); setDetailInitialError(undefined); setIdeaSource(true); }
   function returnToIdea() { setIdeaSource(false); requestAnimationFrame(() => { if (ideaTrigger.current?.isConnected) ideaTrigger.current.focus({ preventScroll: true }); else document.querySelector<HTMLElement>('.library-ideas')?.focus(); }); }
