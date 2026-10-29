@@ -45,6 +45,15 @@ if request['method'] in ('check_dependencies', 'install_dependency'):
             time.sleep(120)
     emit('dependencies', result=dict(platform='fixture', directory=params['runtime_directory'], tools=[]))
     sys.exit(0)
+if request['method'] == 'get_audio_excerpt':
+    import subprocess
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'python-engine'))
+    from local_tools import installed_tool
+    stage = Path(params['staging_dir'])
+    child = subprocess.Popen([installed_tool('ffmpeg'), '-nostdin', '-v', 'error', '-re', '-f', 'lavfi', '-i', 'sine=duration=120', '-f', 'null', '-'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000 if sys.platform == 'win32' else 0)
+    (stage / 'partial').write_bytes(b'partial')
+    (Path(params['runtime_directory']).parent / 'audio-started.json').write_text(json.dumps(dict(engine=os.getpid(), child=child.pid, stage=str(stage))))
+    time.sleep(120)
 if request['method'] == 'extract_keyframes':
     import base64
     import subprocess

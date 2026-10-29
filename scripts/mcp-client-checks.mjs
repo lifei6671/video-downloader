@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
 export const expectedTools = ['get_asset', 'list_categories', 'list_notes', 'list_tags', 'read_note', 'read_transcript', 'search_assets'];
-export const allTools = [...expectedTools, 'get_clip', 'get_keyframes', 'create_note', 'create_category', 'add_asset_categories', 'add_asset_tags', 'create_topic', 'create_idea', 'start_transcription', 'get_operation', 'cancel_operation'].sort();
+export const allTools = [...expectedTools, 'get_clip', 'get_keyframes', 'create_note', 'create_category', 'add_asset_categories', 'add_asset_tags', 'start_transcription', 'get_operation', 'cancel_operation', 'start_frame_sampling', 'get_frame_sampling_status', 'cancel_frame_sampling', 'get_audio_excerpt'].sort();
 export function validateModelItem(item, allowedTools = expectedTools) {
   assert(['userMessage', 'agentMessage', 'plan', 'reasoning', 'contextCompaction', 'mcpToolCall'].includes(item.type), `Unexpected item: ${item.type}`);
   if (item.type === 'mcpToolCall') { assert.equal(item.server, 'yingqu'); assert(allowedTools.includes(item.tool)); }

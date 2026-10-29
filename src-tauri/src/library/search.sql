@@ -1,6 +1,5 @@
-WITH RECURSIVE selected_categories(id) AS (
+WITH selected_categories(id) AS (
     SELECT value FROM json_each(?2)
-    UNION SELECT c.id FROM library_categories c JOIN selected_categories p ON c.parent_id=p.id
 ), hits AS (
     SELECT id AS asset_id, 'title' AS field, title AS body, NULL AS document_id,
         NULL AS version, NULL AS note_id, 0 AS priority
@@ -14,13 +13,17 @@ WITH RECURSIVE selected_categories(id) AS (
     UNION ALL
     SELECT asset_id,'note',body,NULL,NULL,id,4 FROM asset_notes
         WHERE ?1!='' AND instr(lower(body),lower(?1))>0
+            AND id NOT IN (SELECT value FROM json_each(?10))
 ), ranked AS (
     SELECT asset_id,field,substr(body,max(1,instr(lower(body),lower(?1))-40),120) AS excerpt,document_id,version,note_id,
         row_number() OVER (PARTITION BY asset_id ORDER BY priority,version DESC,document_id,note_id) AS rank
     FROM hits
 )
 SELECT a.id,a.title,a.author,a.platform,a.video_id,a.canonical_url,a.created_at,a.updated_at,a.archived_at,
-    r.field,r.excerpt,r.document_id,r.version,r.note_id
+    r.field,r.excerpt,r.document_id,r.version,r.note_id,
+    (SELECT json_group_array(category_id) FROM asset_categories WHERE asset_id=a.id),
+    (SELECT json_group_array(tag_id) FROM asset_tags WHERE asset_id=a.id),
+    EXISTS(SELECT 1 FROM asset_documents WHERE asset_id=a.id)
 FROM library_assets a LEFT JOIN ranked r ON r.asset_id=a.id AND r.rank=1
 WHERE (?1='' OR r.asset_id IS NOT NULL)
     AND (a.archived_at IS NOT NULL)=?4

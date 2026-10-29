@@ -25,12 +25,12 @@ try {
     & $python -X utf8 (Join-Path $PSScriptRoot 'check_packaged_mcp.py') $destination --main-binary $MainBinary --build-dir (Join-Path $workspace 'src-tauri\target\release')
     if ($LASTEXITCODE -ne 0) { throw 'Installed MCP check failed' }
     $hashes = @{}
-    foreach ($binary in @($MainBinary, 'yingqu-mcp.exe')) {
+    foreach ($binary in @($MainBinary)) {
         $installedHash = (Get-FileHash -LiteralPath (Join-Path $destination $binary) -Algorithm SHA256).Hash
         $hashes[$binary] = $installedHash
     }
     $record['binaries'] = $hashes
-    $record['comparison'] = 'helper identical; main identical after the Tauri NSIS marker patch only'
+    $record['comparison'] = 'main identical after the Tauri NSIS marker patch only; MCP HTTP integrated in desktop'
     $record['status'] = 'PASSED'
     $record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $output 'installation.json') -Encoding utf8
     $verified = $true

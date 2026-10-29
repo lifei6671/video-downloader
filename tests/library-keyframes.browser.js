@@ -13,8 +13,9 @@ async page => {
   const ready = () => page.waitForFunction(() => document.querySelector('.library-keyframes')?.getAttribute('aria-busy') === 'false' && document.querySelector('.library-clips')?.getAttribute('aria-busy') === 'false');
   const load = async () => {
     await page.goto('http://127.0.0.1:1420/tests/fixtures/knowledge-library.html?detail=1&writing=1');
-    await page.getByRole('button', { name: '知识库', exact: true }).click();
+    await page.getByRole('button', { name: '素材库', exact: true }).click();
     await page.locator('[data-library-asset="a0"]').getByRole('button', { name: /^查看视频资料/ }).click(); await ready();
+    await detail().getByText('历史片段', { exact: true }).click();
     await page.evaluate(() => window.libraryDetailTest.seedClip('a0', 'f-a0', 500, 1250)); await ready();
   };
   const sample = async count => {
@@ -36,7 +37,7 @@ async page => {
     await page.screenshot({ path: 'output/playwright/wb304-' + width + '.png', animations: 'disabled' });
     await page.getByRole('button', { name: '下载中心', exact: true }).click();
     check(await page.evaluate(urls => urls.every(url => window.frameUrls.revoked.includes(url)), urls), 'hidden gallery did not revoke URLs');
-    await page.getByRole('button', { name: '知识库', exact: true }).click(); await ready();
+    await page.getByRole('button', { name: '素材库', exact: true }).click(); await ready();
     await images().first().waitFor();
     results.push(width + ': sampled images, exact metadata, image preview/Escape, no overflow, hidden URL release and return');
   }
@@ -72,7 +73,7 @@ async page => {
   await load(); await page.evaluate(() => window.keyframesTest.mode('hold-start')); await sample(3);
   await page.getByRole('button', { name: '下载中心', exact: true }).click();
   await page.evaluate(() => window.keyframesTest.releaseStart());
-  await page.getByRole('button', { name: '知识库', exact: true }).click(); await ready();
+  await page.getByRole('button', { name: '素材库', exact: true }).click(); await ready();
   await page.waitForFunction(() => [...document.querySelectorAll('.library-keyframes button')].some(button => button.textContent === '取消提取关键帧' && !button.disabled));
   await panel().getByRole('button', { name: '取消提取关键帧', exact: true }).click(); await panel().getByText('本次关键帧提取已取消', { exact: true }).waitFor();
   await page.evaluate(() => { window.keyframesTest.mode('success'); window.keyframesTest.emitOld(); });
@@ -82,7 +83,7 @@ async page => {
   await load();
   await page.getByRole('button', { name: '下载中心', exact: true }).click();
   await page.evaluate(() => { window.keyframesTest.holdRead(); window.keyframesTest.mode('hold'); });
-  await page.getByRole('button', { name: '知识库', exact: true }).click(); await ready();
+  await page.getByRole('button', { name: '素材库', exact: true }).click(); await ready();
   await sample(3);
   await panel().getByRole('button', { name: '取消提取关键帧', exact: true }).waitFor();
   await page.evaluate(() => window.keyframesTest.releaseRead());

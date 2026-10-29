@@ -24,14 +24,9 @@ type AppCore = Arc<Core>;
 async fn get_mcp_connection(
     core: State<'_, AppCore>,
 ) -> Result<yingqu_core::mcp_connection::ConnectionInfo, String> {
-    let mut info = yingqu_core::mcp_connection::connection_info(
-        core.mcp_ipc_status().await,
-        &std::env::current_exe().map_err(|_| "IO_ERROR")?,
-    )
-    .map_err(error)?;
-    info.write_enabled = info.status.enabled && core.mcp_write_enabled();
-    Ok(info)
+    Ok(yingqu_core::mcp_connection::connection_info(core.mcp_service_status().await, core.mcp_write_enabled()))
 }
+
 #[tauri::command]
 async fn set_mcp_write_enabled(core: State<'_, AppCore>, enabled: bool) -> Result<yingqu_core::mcp_connection::ConnectionInfo, String> {
     core.set_mcp_write_enabled(enabled).await.map_err(error)?;
@@ -42,35 +37,16 @@ async fn set_mcp_service_enabled(
     core: State<'_, AppCore>,
     enabled: bool,
 ) -> Result<yingqu_core::mcp_connection::ConnectionInfo, String> {
-    let executable = std::env::current_exe().map_err(|_| "IO_ERROR")?;
-    if enabled {
-        yingqu_core::mcp_connection::adapter_path(&executable).map_err(error)?;
-    }
-    core
-        .inner()
-        .set_mcp_ipc_enabled(enabled)
-        .await
-        .map_err(error)?;
+    core.inner().set_mcp_service_enabled(enabled).await.map_err(error)?;
     get_mcp_connection(core).await
 }
 #[tauri::command]
-async fn copy_mcp_client_config(
+async fn copy_mcp_connection_url(
     app: tauri::AppHandle,
     core: State<'_, AppCore>,
-    format: yingqu_core::mcp_connection::ConfigFormat,
 ) -> Result<(), String> {
     let info = get_mcp_connection(core).await?;
-    app.clipboard()
-        .write_text(info.config(format).map_err(error)?)
-        .map_err(|_| "CLIPBOARD_WRITE_FAILED".into())
-}
-#[tauri::command]
-async fn get_mcp_ipc_status(core: State<'_, AppCore>) -> Result<yingqu_core::core_ipc::IpcStatus, String> {
-    Ok(core.mcp_ipc_status().await)
-}
-#[tauri::command]
-async fn set_mcp_ipc_enabled(core: State<'_, AppCore>, enabled: bool) -> Result<yingqu_core::core_ipc::IpcStatus, String> {
-    core.inner().set_mcp_ipc_enabled(enabled).await.map_err(error)
+    app.clipboard().write_text(info.url().map_err(error)?).map_err(|_| "CLIPBOARD_WRITE_FAILED".into())
 }
 mod library_commands;
 mod library_transfer_commands;
@@ -748,12 +724,10 @@ pub(crate) fn run(builder: tauri::Builder<tauri::Wry>, context: tauri::Context<t
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_mcp_ipc_status,
             get_mcp_connection,
             set_mcp_service_enabled,
             set_mcp_write_enabled,
-            copy_mcp_client_config,
-            set_mcp_ipc_enabled,
+            copy_mcp_connection_url,
             library_commands::search_library_assets,
             library_commands::get_workbench,
             library_transfer_commands::get_library_backup_info,
@@ -765,6 +739,8 @@ pub(crate) fn run(builder: tauri::Builder<tauri::Wry>, context: tauri::Context<t
             library_commands::record_library_visit,
             library_commands::get_library_asset,
             library_commands::archive_library_asset,
+            library_commands::get_task_collection_states,
+            library_commands::set_task_collected,
             library_commands::list_library_categories,
             library_commands::create_library_category,
             library_commands::update_library_category,

@@ -4,6 +4,8 @@ pub mod files;
 pub mod library;
 #[cfg(feature = "mcp")]
 pub mod mcp_adapter;
+#[cfg(feature = "mcp")]
+pub mod mcp_http;
 pub mod mcp_read;
 pub mod mcp_write;
 pub mod mcp_operations;

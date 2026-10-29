@@ -1,5 +1,7 @@
 # MCP 真实客户端与 P1B 验收
 
+当前轻量素材库验收见[本轮记录](material-library-validation.md)。历史 --p2 选题写回依赖已退出公开 MCP 的 create_idea，现于启动前明确拒绝；原记录仅保留当时结果，不作为当前可执行验收入口。当前使用 --materials 验证检索、文案、采样、图片及音频能力边界。
+
 对应 [WB-208](workbench-knowledge-base-tasks.md)。Windows x64 的安装后真实客户端、模型对比、来源核对和断连重连通过；macOS Intel / Apple Silicon 均为 `UNAVAILABLE`，P1B 总项保留未勾选。未发布版本。
 
 ## 客户端与资料范围

@@ -83,6 +83,7 @@ pub(crate) fn register_local(
         })
     };
     if let Some((file_id, asset_id, _)) = existing {
+        super::archive_asset(db, &asset_id, false)?;
         return Ok(ImportedVideo {
             asset_id,
             file_id,

@@ -7,6 +7,45 @@ use rmcp::schemars;
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+pub struct AudioInput {
+    pub asset_id: String,
+    pub file_id: String,
+    #[cfg_attr(feature = "mcp", schemars(transform = super::types::json_integer))]
+    pub start_ms: u64,
+    #[cfg_attr(feature = "mcp", schemars(transform = super::types::json_integer))]
+    pub end_ms: u64,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
+pub struct AudioExcerpt {
+    pub asset_id: String,
+    pub file_id: String,
+    #[cfg_attr(feature = "mcp", schemars(transform = super::types::json_integer))]
+    pub start_ms: u64,
+    #[cfg_attr(feature = "mcp", schemars(transform = super::types::json_integer))]
+    pub end_ms: u64,
+    #[cfg_attr(feature = "mcp", schemars(transform = super::types::json_integer))]
+    pub actual_start_ms: u64,
+    #[cfg_attr(feature = "mcp", schemars(transform = super::types::json_integer))]
+    pub actual_end_ms: u64,
+    pub format: String,
+    #[cfg_attr(feature = "mcp", schemars(transform = super::types::json_integer))]
+    pub sample_rate: u32,
+    #[cfg_attr(feature = "mcp", schemars(transform = super::types::json_integer))]
+    pub channels: u32,
+    #[cfg_attr(feature = "mcp", schemars(transform = super::types::json_integer))]
+    pub bits_per_sample: u32,
+    #[cfg_attr(feature = "mcp", schemars(transform = super::types::json_integer))]
+    pub frames: u64,
+    pub source_changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "mcp", schemars(skip))]
+    pub audio_base64: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct ClipInput {
     pub asset_id: String,
     pub clip_id: Option<String>,
@@ -42,7 +81,7 @@ pub struct Clips {
     pub scope: String,
 }
 pub(super) fn clips(db: &Connection, input: ClipInput) -> Result<Clips> {
-    id(&input.asset_id)?;
+    require_collected(db, &input.asset_id)?;
     if let Some(value) = &input.clip_id {
         id(value)?;
     }
@@ -157,7 +196,7 @@ pub struct Keyframes {
     pub scope: String,
 }
 pub(super) fn keyframes(db: &Connection, input: KeyframesInput) -> Result<Keyframes> {
-    id(&input.asset_id)?;
+    require_collected(db, &input.asset_id)?;
     if input.media_type != "image" {
         bail!("MEDIA_UNSUPPORTED");
     }

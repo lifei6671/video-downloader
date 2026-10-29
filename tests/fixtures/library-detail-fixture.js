@@ -28,7 +28,7 @@ export function installLibraryDetailFixture({ api, libraryApi, state, calls, clo
     if (mode === 'sync-long') return '/.local/wb305/long.webm';
     if (mode === 'audio') return '/tests/fixtures/media/audio-only.webm';
     if (mode === 'unsupported') return '/tests/fixtures/media/unsupported.webm';
-    return fileId === 'portrait' ? '/tests/fixtures/media/player-portrait.mp4' : '/tests/fixtures/media/player.webm';
+    return files.get(assetId)?.find(file => file.id === fileId)?.path.endsWith('竖屏样本.mp4') ? '/tests/fixtures/media/player-portrait.mp4' : '/tests/fixtures/media/player.webm';
   };
   const clipRows = new Map(); let clipSequence = 1;
   const fileFor = (assetId, fileId) => files.get(assetId)?.find(file => file.id === fileId);

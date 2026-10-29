@@ -93,3 +93,37 @@ impl Core {
             .map_or_else(IpcStatus::disabled, Server::status))
     }
 }
+
+#[cfg(feature = "mcp")]
+impl Core {
+    pub async fn mcp_service_status(&self) -> crate::mcp_connection::ServiceStatus {
+        self.mcp_http.lock().await.as_ref().map_or_else(crate::mcp_connection::ServiceStatus::disabled, crate::mcp_http::Server::status)
+    }
+    pub async fn set_mcp_service_enabled(self: &Arc<Self>, enabled: bool) -> Result<crate::mcp_connection::ServiceStatus> {
+        self.set_mcp_service_enabled_on_port(enabled, crate::mcp_http::PORT).await
+    }
+    /// Rust integration fixtures use an OS-assigned port; the interface is always loopback.
+    pub async fn set_mcp_service_enabled_on_port(self: &Arc<Self>, enabled: bool, port: u16) -> Result<crate::mcp_connection::ServiceStatus> {
+        let mut server = self.mcp_http.lock().await;
+        if enabled && self.inner.lock().unwrap().closing { bail!("INVALID_STATE"); }
+        if let Some(current) = server.as_ref().filter(|current| enabled && current.status().enabled) { return Ok(current.status()); }
+        if let Some(previous) = server.take() {
+            self.inner.lock().unwrap().mcp_write_enabled = false;
+            previous.cancel();
+            let ipc = self.set_mcp_ipc_enabled(false).await;
+            let http = previous.stop().await;
+            ipc?; http?;
+        }
+        if enabled {
+            self.inner.lock().unwrap().mcp_write_enabled = false;
+            let ipc = self.set_mcp_ipc_enabled(true).await?;
+            match crate::mcp_http::Server::start(ipc.endpoint.ok_or_else(|| anyhow::anyhow!("IPC_SERVICE_FAILED"))?, port).await {
+                Ok(started) => *server = Some(started),
+                Err(error) => { self.set_mcp_ipc_enabled(false).await?; return Err(error); }
+            }
+        } else {
+            self.set_mcp_ipc_enabled(false).await?;
+        }
+        Ok(server.as_ref().map_or_else(crate::mcp_connection::ServiceStatus::disabled, crate::mcp_http::Server::status))
+    }
+}

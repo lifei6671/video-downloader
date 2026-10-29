@@ -1,20 +1,21 @@
 # 应用核心本机 IPC
 
-对应 [WB-202](workbench-knowledge-base-tasks.md)。Windows 本机管道与独立进程验证已完成；macOS Intel / Apple Silicon 的 Unix domain socket 实现已落盘，编译和运行均为 `UNAVAILABLE`，继续保留验收。这里的协议只连接应用 Core，不是 MCP stdio 协议，不能直接作为 AI 客户端的 MCP 配置。
+对应 [WB-202](workbench-knowledge-base-tasks.md)。Windows 本机管道与独立进程验证已完成；macOS Intel / Apple Silicon 的 Unix domain socket 实现已落盘，编译和运行均为 `UNAVAILABLE`，继续保留验收。这里的协议只连接应用 Core，不是对外 MCP 协议，不能直接作为 AI 客户端的 MCP 配置。
 
 ## 启停与所有权
 
 `Core::open` 总是默认关闭 IPC，不自动创建监听端点。`Core::set_mcp_ipc_enabled(true)` 创建监听器；重复开启保持同一端点，关闭等待监听及已连接会话全部结束。`Core::shutdown` 先标记应用关闭，再停止 IPC，禁止重新开启，随后完成既有 worker 回收。
 
-监听器由同一个 Core 持有，会话仅保留 `Weak<Core>`。请求调用现有 `library_categories` / `library_tags`，不另开 SQLite、不创建第二套调度器、不启动下载或转录引擎。不监听 TCP / HTTP，也不隐式启动主应用。
+监听器由同一个 Core 持有，会话仅保留 `Weak<Core>`。白名单请求复用现有检索、受控写入及媒体服务，不另开 SQLite 或创建第二套调度器；引擎只由明确授权的媒体请求触发。此内部 IPC 本身不监听 TCP / HTTP，也不隐式启动主应用；对外 HTTP 由同一 Core 持有的独立传输层负责。
 
-桌面已注册 `get_mcp_ipc_status` 和 `set_mcp_ipc_enabled` 两条 Tauri 命令，后者参数为 `{ "enabled": true }`。状态形状为：
+旧桌面公开的 `get_mcp_ipc_status` / `set_mcp_ipc_enabled` 已移除，改由 HTTP 服务统一管理。以下状态仅供 Rust 内部与隔离测试使用：
 
 ```json
 {"enabled":true,"endpoint":"<实际系统端点>","error":null}
 ```
 
-关闭时 `enabled=false`、`endpoint=null`。监听任务意外结束时 `error=IPC_SERVICE_FAILED`，不继续声称已启用；停用或再次启用会回收原任务，并明确传播失败。开关只在当前 Core 生命周期内生效，重启恢复关闭。WB-206 已接入[产品设置与客户端配置](mcp-settings.md)，新增命令在桌面层检查适配程序及生成配置，不改变低层 IPC 契约；WB-203 已实现 [stdio 适配进程](mcp-stdio-adapter.md)，Windows 验证通过，macOS 继续待验收。
+关闭时 `enabled=false`、`endpoint=null`。监听任务意外结束时 `error=IPC_SERVICE_FAILED`，不继续声称已启用；停用或再次启用会回收原任务，并明确传播失败。开关只在当前 Core 生命周期内生效，重启恢复关闭。当前由[HTTP 服务](mcp-streamable-http.md)统一启停；每个工具或资源请求使用独立内部 IPC 连接，HTTP 取消会关闭该请求的连接。外部客户端只获得 HTTP URL，不接收 IPC 端点或启动命令。原 IPC 限额、当前用户系统端点权限及媒体回收逻辑保留。
+
 
 ## 系统端点与权限
 
@@ -69,3 +70,7 @@ WB-204 另外明确开放 `mcp_search_assets`、`mcp_get_asset`、`mcp_read_tran
 复验命令见 [开发文档](development.md#wb-202-本机-ipc-验证)，实际结果见[实施记录](workbench-knowledge-base-validation.md)。Windows 覆盖受保护 DACL、默认关闭、实时 Core 数据、重复启停、端点占用、不同资料库隔离、非法请求、分片 Unicode、大小边界和连接回收，并以独立子进程验证通信及退出断连。
 
 WB-203 已接入 stdio，WB-204 已完成七项只读工具及 Windows 分页 / 引用 / Unicode / 边界验证；WB-205～WB-207 的 Resources、设置、配置与分发，以及 WB-208 的 [Windows 真实客户端组合验收](mcp-client-acceptance.md)均已有独立证据，P1B 仅 Windows 限定通过。macOS 两种架构的编译、权限与 socket 生命周期需要各自原生环境验收；Windows 结果不能替代。
+
+## 有界视听请求
+
+关键帧启动/查询/取消通过现有短调用派发，PNG只读取已保存结果。get_audio_excerpt在独立连接按需解码，限制两路并发、最长15秒媒体、1 MiB响应及35秒适配期限；Core使用25秒桥接期限，其他请求保留原有期限和连接。服务停止会通知音频回收进程后再清理临时目录，同时中断堵塞的响应写入。普通断连不取消已授权的持久化转录/采样；请求所有的临时音频会被取消。详见[媒体契约](mcp-media-tools.md)。

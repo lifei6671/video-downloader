@@ -288,7 +288,10 @@ impl Core {
     ) -> Result<Snapshot> {
         let mut inner = self.inner.lock().unwrap();
         if inner.closing { bail!("INVALID_STATE"); }
-        if require_mcp_write && !inner.mcp_write_enabled { bail!("WRITE_DISABLED"); }
+        if require_mcp_write {
+            if !inner.mcp_write_enabled { bail!("WRITE_DISABLED"); }
+            crate::mcp_read::require_collected(&inner.db, asset_id)?;
+        }
         let file = crate::library::asset_file(&inner.db, asset_id, file_id)?;
         let source = Source::read(&file.path)?;
         if inner.dependency_cancel.is_some() {

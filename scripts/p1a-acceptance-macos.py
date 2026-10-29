@@ -40,7 +40,7 @@ def main():
         label='main', title=f'映取 P1A {args.scenario} {args.viewport} 隔离验收', width=width, height=height,
         minWidth=1024, minHeight=680, decorations=True, theme='Light', backgroundColor='#f9f9fb')]))
     subprocess.run(['cargo', 'build', '--locked', '--manifest-path', str(workspace / 'src-tauri/Cargo.toml'),
-                    '--features', 'desktop,mcp', '--example', 'p1a-acceptance', '--bin', 'yingqu-mcp'],
+                    '--features', 'desktop,mcp', '--example', 'p1a-acceptance'],
                    cwd=workspace, env={**os.environ, 'TAURI_CONFIG': json.dumps(config)}, check=True)
     # A local debug app, not an installer: the engine and UI use the existing dev paths.
     app = output / '映取隔离验收.app'
@@ -48,7 +48,6 @@ def main():
     binaries.mkdir(parents=True, exist_ok=True)
     target = workspace / 'src-tauri/target/debug'
     shutil.copy2(target / 'examples/p1a-acceptance', binaries / 'p1a-acceptance')
-    shutil.copy2(target / 'yingqu-mcp', binaries / 'yingqu-mcp')
     with (app / 'Contents/Info.plist').open('wb') as stream:
         plistlib.dump(dict(CFBundleIdentifier=identifier, CFBundleName='映取隔离验收',
                            CFBundleExecutable='p1a-acceptance', CFBundlePackageType='APPL',

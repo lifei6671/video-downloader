@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 assert(process.argv.length === 2 || (process.argv.length === 3 && process.argv[2] === '--restart'));
 const targets = await (await fetch('http://127.0.0.1:9340/json')).json();
@@ -38,10 +38,9 @@ try {
   } else {
     const info = await invoke('set_mcp_service_enabled', { enabled: true });
     assert.equal(info.write_enabled, false);
-    const config = JSON.parse(info.configs.json).mcpServers.yingqu;
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['path', 'systemroot', 'windir', 'temp', 'tmp', 'pathext'].includes(key.toLowerCase())));
-    client = new Client({ name: 'wb310-native-synthetic-client', version: '1.0' });
-    await client.connect(new StdioClientTransport({ ...config, env, stderr: 'pipe' }));
+    const url = info.status.endpoint; assert(url);
+      client = new Client({ name: 'wb310-native-synthetic-client', version: '1.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(url)));
     const read = async (name, args = {}) => (await client.callTool({ name, arguments: args })).structuredContent;
     const assets = await read('search_assets', { limit: 10 }); const asset = assets.items.find(i => i.asset.video_id === '7300000000000000001').asset.id;
     const detail = await read('get_asset', { asset_id: asset }); const document = detail.documents.items.find(d => d.kind === 'edited') ?? detail.documents.items[0]; assert(document);

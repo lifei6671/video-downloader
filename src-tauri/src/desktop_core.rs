@@ -35,6 +35,8 @@ pub mod workbench;
 mod mcp_ipc_api;
 #[path = "mcp_operations_api.rs"]
 mod mcp_operations_api;
+#[path = "mcp_audio_api.rs"]
+mod mcp_audio_api;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -211,6 +213,9 @@ pub struct Core {
     _instance_lock: std::fs::File,
     ipc_profile: PathBuf,
     mcp_ipc: tokio::sync::Mutex<Option<crate::core_ipc::Server>>,
+    #[cfg(feature = "mcp")]
+    mcp_http: tokio::sync::Mutex<Option<crate::mcp_http::Server>>,
+    audio_slots: tokio::sync::Semaphore,
     inner: Mutex<Inner>,
     program: String,
     args: Vec<String>,
@@ -590,6 +595,9 @@ impl Core {
             _instance_lock: instance_lock,
             ipc_profile: db_path.canonicalize().context("IO_ERROR")?,
             mcp_ipc: tokio::sync::Mutex::new(None),
+            #[cfg(feature = "mcp")]
+            mcp_http: tokio::sync::Mutex::new(None),
+            audio_slots: tokio::sync::Semaphore::new(2),
             inner: Mutex::new(Inner {
                 db,
                 tasks,
@@ -2056,6 +2064,10 @@ impl Core {
                 .collect::<Vec<_>>();
             (active, std::mem::take(&mut inner.workers))
         };
+        #[cfg(feature = "mcp")]
+        if let Err(error) = self.set_mcp_service_enabled(false).await {
+            eprintln!("MCP HTTP shutdown failed: {}", error.root_cause());
+        }
         if let Err(error) = self.set_mcp_ipc_enabled(false).await {
             eprintln!("MCP IPC shutdown failed: {}", error.root_cause());
         }
@@ -2105,6 +2117,8 @@ mod tests {
         let file = root.path().join("video.mp4");
         std::fs::write(&file,b"1234").unwrap();
         let task = library_fixture(&app,"100",&file);
+        assert!(!app.task_collection_states(std::slice::from_ref(&task.id)).unwrap()[0].collected);
+        app.set_task_collected(&task.id, true).unwrap();
         let asset_id = library::asset_for_task(&app.inner.lock().unwrap().db,&task.id).unwrap().unwrap();
         {
             let inner = app.inner.lock().unwrap();
@@ -2145,7 +2159,7 @@ mod tests {
         app.delete_local_file(&task.id).unwrap();
         assert!(!file.exists());
         let inner = app.inner.lock().unwrap();
-        let assets = library::list_assets(&inner.db,false,0,20).unwrap();
+        let assets = library::list_assets(&inner.db,true,0,20).unwrap();
         assert_eq!(assets.len(),1);
         assert!(library::asset_files(&inner.db,&assets[0].id).unwrap()[0].missing);
     }
@@ -2264,6 +2278,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         let task = transcript_video(&app, "speech.mp4").await;
+        app.set_task_collected(&task.id, true).unwrap();
         let original = std::fs::read(task.path.as_ref().unwrap()).unwrap();
         app.start_transcription(&task.id, false).unwrap();
         let result = transcript_done(&app, &task.id).await;

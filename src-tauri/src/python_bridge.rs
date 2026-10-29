@@ -142,6 +142,10 @@ pub(crate) fn error_code(value: &Value) -> &'static str {
         Some("KEYFRAME_RANGE_INVALID") => "KEYFRAME_RANGE_INVALID",
         Some("KEYFRAME_RANGE_UNAVAILABLE") => "KEYFRAME_RANGE_UNAVAILABLE",
         Some("KEYFRAME_FAILED") => "KEYFRAME_FAILED",
+        Some("AUDIO_FAILED") => "AUDIO_FAILED",
+        Some("AUDIO_NO_TRACK") => "AUDIO_NO_TRACK",
+        Some("AUDIO_RANGE_UNAVAILABLE") => "AUDIO_RANGE_UNAVAILABLE",
+        Some("AUDIO_TIMEOUT") => "AUDIO_TIMEOUT",
         Some("FORMAT_UNAVAILABLE") => "FORMAT_UNAVAILABLE",
         Some("FFMPEG_UNAVAILABLE") => "FFMPEG_UNAVAILABLE",
         Some("JS_RUNTIME_UNAVAILABLE") => "JS_RUNTIME_UNAVAILABLE",
@@ -396,6 +400,7 @@ impl PythonBridge {
                         "extract_cover" => "cover_extracted",
                         "probe_local_video" => "local_video_probed",
                         "extract_keyframes" => "keyframes_extracted",
+                        "get_audio_excerpt" => "audio_excerpt",
                         "transcribe_video" => "transcribed",
                         _ => "download_finished",
                     }
@@ -467,7 +472,7 @@ impl PythonBridge {
         let result = tokio::select! {
             result = async {
                 if !matches!(method, "download_video" | "transcribe_video") {
-                    let limit = match method { "install_dependency" if params["tool"] == "fun-asr-nano" => 2700, "install_dependency" => 600, "extract_cover" => 20, "probe_local_video" => 40, "extract_keyframes" => 240, _ => 80 };
+                    let limit = match method { "install_dependency" if params["tool"] == "fun-asr-nano" => 2700, "install_dependency" => 600, "extract_cover" => 20, "probe_local_video" => 40, "extract_keyframes" => 240, "get_audio_excerpt" => 25, _ => 80 };
                     timeout(Duration::from_secs(limit), bridge.execute(id, method, params, progress))
                         .await.context("TIMEOUT")?
                 } else {

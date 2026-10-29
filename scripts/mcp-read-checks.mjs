@@ -28,7 +28,8 @@ export async function verifyLibraryReads(client, core) {
   const page2 = await call('search_assets', { limit: 2, cursor: page1.next_cursor });
   assert.equal(new Set([...page1.items, ...page2.items].map(item => item.asset.id)).size, 4);
   assert.equal(page2.next_cursor, null);
-  assert.equal((await call('search_assets', { category_ids: ['cat-a'] })).items.length, 2);
+  assert.deepEqual((await call('search_assets', { category_ids: ['cat-a'] })).items.map(item => item.asset.id), ['asset-a']);
+  assert.deepEqual((await call('search_assets', { category_ids: ['cat-b'] })).items.map(item => item.asset.id), ['asset-b']);
   assert.equal((await call('search_assets', { tag_ids: ['tag-a'], query: '学习' })).items.length, 2);
   assert.equal((await call('search_assets', { file_state: 'changed' })).items[0].asset.id, 'asset-c');
   assert.equal((await call('search_assets', { query: '不存在' })).items.length, 0);
@@ -39,7 +40,9 @@ export async function verifyLibraryReads(client, core) {
   const tags = await call('list_tags', { query: '学习', limit: 1 });
   assert.equal(tags.tags[0].asset_count, 2);
   const asset = await call('get_asset', { asset_id: 'asset-a', limit: 1 });
+  await core.request('archive_asset', { asset_id: 'oversize', archived: false });
   await assert.rejects(client.callTool({ name: 'get_asset', arguments: { asset_id: 'oversize' } }), error => error.code === -32603 && error.message.includes('RESPONSE_TOO_LARGE'));
+  await core.request('archive_asset', { asset_id: 'oversize', archived: true });
   assert.equal(asset.documents.total, 3); assert.equal(asset.documents.items.length, 1);
   const nextAsset = await call('get_asset', { asset_id: 'asset-a', limit: 1, document_cursor: asset.documents.next_cursor });
   assert.notEqual(nextAsset.documents.items[0].id, asset.documents.items[0].id);
@@ -89,7 +92,7 @@ export async function verifyLibraryReads(client, core) {
     ['search_assets', { category_ids: ['missing'] }, 'CATEGORY_NOT_FOUND'],
     ['search_assets', { tag_ids: ['missing'] }, 'TAG_NOT_FOUND'],
   ]) await fails(name, args, error);
-  await fails('search_assets', { category_ids: Array(100).fill('\0'.repeat(128)) }, 'INVALID_INPUT');
+  await assert.rejects(client.callTool({ name:'search_assets', arguments:{ category_ids: Array(100).fill('\0'.repeat(128)) } }), error => error.code === 413);
   assert.equal((await call('list_notes', { asset_id: 'empty' })).notes.length, 0);
   for (const name of ['get_settings', 'read_file', 'execute_sql']) {
     await assert.rejects(client.callTool({ name, arguments: {} }), { code: -32602 });

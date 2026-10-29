@@ -60,6 +60,44 @@ fn legacy_transcript(db: &Connection, task: &Task, text: &str) {
 }
 
 #[test]
+fn downloads_require_collection_and_preserve_identity_and_materials() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("collection.sqlite");
+    let mut db = Connection::open(&path).unwrap();
+    initialize(&mut db, &path).unwrap();
+    db.execute_batch("CREATE TABLE download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL); CREATE TABLE video_transcripts(task_id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);").unwrap();
+    let video = root.path().join("video.mp4");
+    std::fs::write(&video, b"1234").unwrap();
+    let first = task(&db, "first", "100", &video);
+    let asset_id = register_task(&db, &first).unwrap().unwrap();
+    assert!(search_assets(&db, &SearchRequest::default()).unwrap().items.is_empty());
+    let ids = vec!["first".into(), "unknown".into()];
+    assert!(!task_collection_states(&db, &ids).unwrap()[0].collected);
+    set_task_collected(&db, "first", true).unwrap();
+    let updated = asset(&db, &asset_id).unwrap().updated_at;
+    set_task_collected(&db, "first", true).unwrap();
+    assert_eq!(asset(&db, &asset_id).unwrap().updated_at, updated);
+    let second = task(&db, "second", "100", &root.path().join("hd.mp4"));
+    assert_eq!(register_task(&db, &second).unwrap().unwrap(), asset_id);
+    assert!(task_collection_states(&db, &["second".into()]).unwrap()[0].collected);
+    let document = save_edited(&db, &asset_id, "收藏文案", 0, None).unwrap();
+    set_task_collected(&db, "second", false).unwrap();
+    register_task(&db, &second).unwrap();
+    assert!(asset(&db, &asset_id).unwrap().archived_at.is_some());
+    assert_eq!(documents(&db, &asset_id).unwrap()[0].id, document);
+    set_task_collected(&db, "first", true).unwrap();
+    db.execute("DELETE FROM download_tasks", []).unwrap();
+    std::fs::remove_file(&video).unwrap();
+    drop(db);
+    let mut db = Connection::open(&path).unwrap();
+    initialize(&mut db, &path).unwrap();
+    assert_eq!(search_assets(&db, &SearchRequest::default()).unwrap().items[0].asset.id, asset_id);
+    assert!(asset_files(&db, &asset_id).unwrap().iter().all(|f| f.missing));
+    assert_eq!(documents(&db, &asset_id).unwrap()[0].id, document);
+    assert_eq!(db.query_row("SELECT version FROM library_schema", [], |r| r.get::<_, i64>(0)).unwrap(), 11);
+}
+
+#[test]
 fn schema_upgrade_backs_up_wal_data_and_rejects_future_versions() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("application.sqlite3");
@@ -142,7 +180,7 @@ fn migration_merges_identity_preserves_versions_and_skips_non_videos() {
     let tasks = [first, second, different, album, failed, preview];
     backfill(&mut db, &tasks).unwrap();
     backfill(&mut db, &tasks).unwrap();
-    let assets = list_assets(&db, false, 0, 100).unwrap();
+    let assets = list_assets(&db, true, 0, 100).unwrap();
     assert_eq!(assets.len(), 2);
     let id = asset_for_task(&db, "first").unwrap().unwrap();
     assert_eq!(Some(id.clone()), asset_for_task(&db, "second").unwrap());
@@ -181,7 +219,7 @@ fn migration_error_rolls_back_all_assets_and_can_be_retried() {
     db.execute("DELETE FROM video_transcripts WHERE task_id='broken'", [])
         .unwrap();
     backfill(&mut db, &[first]).unwrap();
-    assert_eq!(list_assets(&db, false, 0, 100).unwrap().len(), 1);
+    assert_eq!(list_assets(&db, true, 0, 100).unwrap().len(), 1);
 }
 
 #[test]
@@ -190,6 +228,7 @@ fn root_names_cycles_multi_membership_and_atomic_batches() {
     let task = task(&db, "first", "100", Path::new("missing.mp4"));
     backfill(&mut db, &[task]).unwrap();
     let asset = asset_for_task(&db, "first").unwrap().unwrap();
+    set_task_collected(&db, "first", true).unwrap();
     let parent = create_category(&db, None, " 职场 ").unwrap();
     assert_eq!(
         create_category(&db, None, "职场").unwrap_err().to_string(),
@@ -323,6 +362,7 @@ fn task_removal_keeps_documents_notes_categories_and_legacy_cover() {
     legacy_transcript(&db, &task, "不会被历史清理删除");
     backfill(&mut db, &[task]).unwrap();
     let asset = asset_for_task(&db, "first").unwrap().unwrap();
+    set_task_collected(&db, "first", true).unwrap();
     let category = create_category(&db, None, "职场").unwrap();
     set_category_membership(&db, std::slice::from_ref(&asset), &category, true).unwrap();
     create_note(

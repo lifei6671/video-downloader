@@ -72,14 +72,40 @@ pub fn list_assets(db: &Connection, archived: bool, offset: u32, limit: u32) -> 
 pub fn archive_asset(db: &Connection, id: &str, archived: bool) -> Result<()> {
     require_asset(db, id)?;
     db.execute(
-        "UPDATE library_assets SET archived_at=?1,updated_at=?2 WHERE id=?3",
+        "UPDATE library_assets SET archived_at=?1,updated_at=?2 WHERE id=?3 AND (archived_at IS NOT NULL)!=?4",
         params![
             archived.then(now).map(sql_integer).transpose()?,
             sql_integer(now())?,
-            id
+            id,
+            archived
         ],
     )?;
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskCollectionState {
+    pub task_id: String,
+    pub asset_id: String,
+    pub collected: bool,
+}
+
+/// Resolve a whole task page in one query; unregistered tasks are omitted.
+pub fn task_collection_states(db: &Connection, task_ids: &[String]) -> Result<Vec<TaskCollectionState>> {
+    if task_ids.len() > 10_000 || task_ids.iter().any(|id| id.is_empty()) {
+        bail!("INVALID_INPUT");
+    }
+    let mut query = db.prepare("SELECT l.task_id,l.asset_id,a.archived_at IS NULL FROM asset_task_links l JOIN library_assets a ON a.id=l.asset_id WHERE l.task_id IN (SELECT value FROM json_each(?1)) ORDER BY l.task_id")?;
+    let rows = query.query_map([serde_json::to_string(task_ids)?], |row| Ok(TaskCollectionState {
+        task_id: row.get(0)?, asset_id: row.get(1)?, collected: row.get(2)?,
+    }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn set_task_collected(db: &Connection, task_id: &str, collected: bool) -> Result<TaskCollectionState> {
+    let asset_id = asset_for_task(db, task_id)?.context("ASSET_NOT_FOUND")?;
+    archive_asset(db, &asset_id, !collected)?;
+    Ok(TaskCollectionState { task_id: task_id.into(), asset_id, collected })
 }
 
 pub fn asset_for_task(db: &Connection, task_id: &str) -> Result<Option<String>> {
@@ -195,7 +221,7 @@ pub fn register_task(db: &Connection, task: &Task) -> Result<Option<String>> {
         None => None,
     };
     let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
-    db.execute("INSERT OR IGNORE INTO library_assets(id,title,author,platform,video_id,canonical_url,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+    db.execute("INSERT OR IGNORE INTO library_assets(id,title,author,platform,video_id,canonical_url,created_at,updated_at,archived_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?8)",
         params![id, video.and_then(|v| v["title"].as_str()).unwrap_or("已下载视频"),
             video.and_then(|v| v["author"].as_str()), identity.map(|v| v.0), identity.map(|v| v.1),
             video.and_then(|v| v["canonical_url"].as_str()), sql_integer(task.completed_at.unwrap_or(task.created_at))?, sql_integer(now())?])?;

@@ -70,6 +70,9 @@ pub struct SearchItem {
     pub asset: Asset,
     pub hit: Option<SearchHit>,
     pub files: FileCounts,
+    pub category_ids: Vec<String>,
+    pub tag_ids: Vec<String>,
+    pub has_transcript: bool,
 }
 #[derive(Debug, Serialize)]
 pub struct SearchPage {
@@ -78,6 +81,10 @@ pub struct SearchPage {
 }
 
 pub fn search_assets(db: &Connection, request: &SearchRequest) -> Result<SearchPage> {
+    search_assets_excluding_notes(db, request, &[])
+}
+
+pub(crate) fn search_assets_excluding_notes(db: &Connection, request: &SearchRequest, excluded_notes: &[String]) -> Result<SearchPage> {
     if request.limit == 0
         || request.limit > 100
         || request.query.chars().count() > 512
@@ -109,7 +116,8 @@ pub fn search_assets(db: &Connection, request: &SearchRequest) -> Result<SearchP
                 .map(|c| sql_integer(c.created_at))
                 .transpose()?,
             request.cursor.as_ref().map(|c| &c.id),
-            request.unorganized
+            request.unorganized,
+            serde_json::to_string(excluded_notes)?
         ],
         |r| {
             let field: Option<String> = r.get(9)?;
@@ -124,13 +132,13 @@ pub fn search_assets(db: &Connection, request: &SearchRequest) -> Result<SearchP
                     })
                 })
                 .transpose()?;
-            Ok((asset_row(r)?, hit))
+            Ok((asset_row(r)?, hit, r.get::<_, String>(14)?, r.get::<_, String>(15)?, r.get::<_, bool>(16)?))
         },
     )?;
     let mut items = Vec::new();
     let mut more = false;
     for row in rows {
-        let (asset, hit) = row?;
+        let (asset, hit, category_ids, tag_ids, has_transcript) = row?;
         let files = asset_files(db, &asset.id)?;
         let counts = FileCounts {
             total: files.len(),
@@ -154,6 +162,9 @@ pub fn search_assets(db: &Connection, request: &SearchRequest) -> Result<SearchP
             asset,
             hit,
             files: counts,
+            category_ids: serde_json::from_str(&category_ids)?,
+            tag_ids: serde_json::from_str(&tag_ids)?,
+            has_transcript,
         });
     }
     let next_cursor = if more {

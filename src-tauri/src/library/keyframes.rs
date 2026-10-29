@@ -66,13 +66,20 @@ impl KeyframeData {
         {
             bail!("KEYFRAME_RANGE_UNAVAILABLE");
         }
-        if self.clip_id.is_none()
+        if self.clip_id.is_none() && self.sample_end_ms.is_none()
             && (self.sample_count != 1
                 || self.sample_index != 0
                 || self.sample_start_ms != self.requested_ms
                 || self.sample_end_ms.is_some())
         {
             bail!("KEYFRAME_INVALID_RESULT");
+        }
+        if self.clip_id.is_none() && self.sample_end_ms.is_some() {
+            let end = self.sample_end_ms.context("KEYFRAME_INVALID_RESULT")?;
+            if !matches!(self.sample_count, 3 | 5 | 9)
+                || sample_points(self.sample_start_ms, end, self.sample_count)?[self.sample_index as usize] != self.requested_ms {
+                bail!("KEYFRAME_INVALID_RESULT");
+            }
         }
         Ok(())
     }

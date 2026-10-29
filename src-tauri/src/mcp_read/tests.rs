@@ -27,6 +27,56 @@ fn call(core: &Core, method: &str, params: Value) -> Value {
 }
 
 #[test]
+fn collection_scope_cannot_be_bypassed_by_ids_filters_or_citations() {
+    let root = tempfile::tempdir().unwrap(); let core = core(root.path());
+    core.archive_library_asset("asset-a", true).unwrap();
+    let before = core.search_library(library::SearchRequest { archived: true, ..Default::default() }).unwrap();
+    assert!(before.items.iter().any(|i| i.asset.id == "asset-a"));
+    for (method, params) in [
+        ("mcp_get_asset", json!({"asset_id":"asset-a"})),
+        ("mcp_read_transcript", json!({"asset_id":"asset-a","document_id":"doc-a1"})),
+        ("mcp_list_notes", json!({"asset_id":"asset-a"})),
+        ("mcp_read_note", json!({"note_id":"note-a"})),
+        ("mcp_get_keyframes", json!({"asset_id":"asset-a"})),
+        ("mcp_get_clip", json!({"asset_id":"asset-a"})),
+    ] { assert_eq!(core.read_mcp_tool(method, params).unwrap_err(), ReadError::AssetNotFound, "{method}"); }
+    assert_eq!(core.read_mcp_tool("mcp_search_assets", json!({"archived":true})).unwrap_err(), ReadError::InvalidInput);
+    assert!(call(&core, "mcp_search_assets", json!({}))["items"].as_array().unwrap().iter().all(|i| i["asset"]["id"] != "asset-a"));
+    core.archive_library_asset("asset-a", false).unwrap();
+    core.archive_library_asset("asset-b", true).unwrap();
+    assert_eq!(core.read_mcp_tool("mcp_read_note", json!({"note_id":"note-a"})).unwrap_err(), ReadError::AssetNotFound);
+    assert_eq!(call(&core, "mcp_read_transcript", json!({"asset_id":"asset-a","document_id":"doc-a1"}))["content"]["text"], fixture::TEXT);
+}
+
+#[test]
+fn historical_comparison_sources_and_note_search_obey_the_same_collection_scope() {
+    for document_source in [false, true] {
+        let root = tempfile::tempdir().unwrap(); let core = core(root.path());
+        let db = Connection::open(root.path().join("test.sqlite")).unwrap();
+        let analysis = library::create_analysis(&db, "asset-b", &library::NewAnalysis {
+            content: library::AnalysisInput::Copywriting { opening: "removed-analysis-only-secret".into(), viewpoint: String::new(), evidence: String::new(), turn: String::new(), ending: String::new(), takeaways: String::new() },
+            origin: library::NoteOrigin::Human, model_name: None, citations: vec![],
+        }).unwrap();
+        let pin = |asset: &str| json!({"asset_id":asset,"document_id":null,"copywriting":null,"technique":null,"clip_ids":[]});
+        let mut b = pin("asset-b"); b["copywriting"] = json!({"id":analysis,"revision":1});
+        if document_source { b["document_id"] = json!("doc-b1"); }
+        let comparison = library::create_comparison(&db, "asset-a", &serde_json::from_value(json!({
+            "title":"historical comparison", "asset_ids":["asset-a","asset-b"],
+            "points":[{"text":"saved conclusion","sources":[pin("asset-a"),b]}]
+        })).unwrap()).unwrap();
+        let term = if document_source { "镜头学习" } else { "removed-analysis-only-secret" };
+        assert!(call(&core, "mcp_read_note", json!({"note_id":comparison}))["content"]["text"].as_str().unwrap().contains(term));
+        core.archive_library_asset("asset-b", true).unwrap();
+        assert_eq!(core.read_mcp_tool("mcp_read_note", json!({"note_id":comparison})).unwrap_err(), ReadError::AssetNotFound);
+        assert!(call(&core, "mcp_search_assets", json!({"query":term}))["items"].as_array().unwrap().is_empty());
+        assert_eq!(core.search_library(library::SearchRequest { query: term.into(), ..Default::default() }).unwrap().items[0].asset.id, "asset-a");
+        let visible = library::create_note(&db, "asset-a", library::NewNote { kind: "inspiration", body: term, origin: library::NoteOrigin::Human, model_name: None, citations: &[] }).unwrap();
+        let found = call(&core, "mcp_search_assets", json!({"query":term,"limit":1}));
+        assert_eq!(found["items"][0]["hit"]["note_id"], visible);
+    }
+}
+
+#[test]
 fn search_and_taxonomy_pages_match_domain_data_and_actual_counts() {
     let root = tempfile::tempdir().unwrap();
     let core = core(root.path());
@@ -76,7 +126,7 @@ fn search_and_taxonomy_pages_match_domain_data_and_actual_counts() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        1
     );
     assert_eq!(
         call(&core, "mcp_search_assets", json!({"file_state":"changed"}))["items"][0]["asset"]
@@ -91,7 +141,7 @@ fn search_and_taxonomy_pages_match_domain_data_and_actual_counts() {
         "mcp_list_categories",
         json!({"limit":1,"cursor":cats["next_cursor"]}),
     );
-    assert_eq!(next["categories"][0]["parent_id"], "cat-a");
+    assert!(next["categories"][0]["parent_id"].is_null());
     assert_eq!(
         call(&core, "mcp_list_tags", json!({}))["tags"][0]["asset_count"],
         2

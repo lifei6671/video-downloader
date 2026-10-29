@@ -46,6 +46,7 @@ pub struct NoteInput {
 #[serde(deny_unknown_fields)]
 pub struct CategoryInput {
     pub name: String,
+    /// Legacy compatibility field; only null is accepted. Categories have one level.
     pub parent_id: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -126,6 +127,8 @@ pub(crate) fn dispatch(db: &Connection, method: &str, params: Value) -> Result<W
     Ok(match method {
         "mcp_create_note" => {
             let request: NoteInput = input(params)?;
+            crate::mcp_read::require_collected(db, &request.asset_id)?;
+            require_collected_sources(db, &request.source)?;
             request.source.validate(db)?;
             let id = library::create_note(
                 db,
@@ -142,6 +145,7 @@ pub(crate) fn dispatch(db: &Connection, method: &str, params: Value) -> Result<W
         }
         "mcp_create_category" => {
             let request: CategoryInput = input(params)?;
+            if request.parent_id.is_some() { bail!("INVALID_INPUT"); }
             Written {
                 value: json!({"id":library::create_category(db, request.parent_id.as_deref(), &request.name)?}),
                 scope: LibraryScope::Categories,
@@ -150,6 +154,7 @@ pub(crate) fn dispatch(db: &Connection, method: &str, params: Value) -> Result<W
         }
         "mcp_add_asset_categories" | "mcp_add_asset_tags" => {
             let request: MembershipInput = input(params)?;
+            crate::mcp_read::require_collected(db, &request.asset_id)?;
             if request.ids.is_empty() || request.ids.len() > 100 {
                 bail!("INVALID_INPUT");
             }
@@ -167,6 +172,7 @@ pub(crate) fn dispatch(db: &Connection, method: &str, params: Value) -> Result<W
         }
         "mcp_create_topic" => {
             let request: TopicInput = input(params)?;
+            require_collected_sources(db, &request.source)?;
             created(
                 library::topics::create_with_source(db, &request.input, Some(&request.source))?,
                 LibraryScope::Topics,
@@ -175,6 +181,16 @@ pub(crate) fn dispatch(db: &Connection, method: &str, params: Value) -> Result<W
         }
         "mcp_create_idea" => {
             let request: IdeaInput = input(params)?;
+            require_collected_sources(db, &request.source)?;
+            for reference in &request.input.references {
+                if reference.kind == library::IdeaReferenceKind::Topic {
+                    for member in library::research_topic(db, &reference.resource_id)?.members {
+                        crate::mcp_read::require_collected(db, &member.member.asset_id)?;
+                    }
+                } else {
+                    crate::mcp_read::require_collected(db, reference.asset_id.as_deref().context("INVALID_INPUT")?)?;
+                }
+            }
             if request.input.references.len() > 100 {
                 bail!("INVALID_INPUT");
             }
@@ -186,6 +202,11 @@ pub(crate) fn dispatch(db: &Connection, method: &str, params: Value) -> Result<W
         }
         _ => bail!("INVALID_INPUT"),
     })
+}
+
+fn require_collected_sources(db: &Connection, source: &library::AiSource) -> Result<()> {
+    for citation in &source.citations { crate::mcp_read::require_collected(db, &citation.asset_id)?; }
+    Ok(())
 }
 
 #[cfg(test)]

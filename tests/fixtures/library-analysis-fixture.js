@@ -1,5 +1,5 @@
 // UI-only persistence semantics. Domain tests exercise SQLite, graph validation and recovery.
-export function installAnalysisFixture({ libraryApi, notes, clone, saved, fail, calls, waitForSave }) {
+export function installAnalysisFixture({ libraryApi, notes, clone, saved, fail, calls, nextTimestamp, waitForSave }) {
   let sequence = 1;
   let restoreFrames;
   const labels = { opening: '开头', viewpoint: '观点', evidence: '论据', turn: '转折', ending: '结尾', takeaways: '可借鉴点' };
@@ -21,7 +21,7 @@ export function installAnalysisFixture({ libraryApi, notes, clone, saved, fail, 
     if (input.origin === 'ai' && !input.model_name?.trim()) throw 'ANALYSIS_MODEL_REQUIRED';
     const content = build(assetId, input.content);
     const id = 'analysis-note-' + sequence++;
-    notes.set(id, { id, asset_id: assetId, kind: content.kind + '_analysis', body: body(content), origin: input.origin, model_name: input.model_name, citations: clone(input.citations), analysis: { content, human_revised: false }, revision: 1, created_at: 1793000200, updated_at: 1793000200 });
+    notes.set(id, { id, asset_id: assetId, kind: content.kind + '_analysis', body: body(content), origin: input.origin, model_name: input.model_name, citations: clone(input.citations), analysis: { content, human_revised: false }, revision: 1, created_at: nextTimestamp(), updated_at: nextTimestamp() });
     saved('notes', [assetId]); return id;
   };
   libraryApi.editAnalysis = async (assetId, id, content, expectedRevision) => {

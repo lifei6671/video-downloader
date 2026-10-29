@@ -8,9 +8,11 @@
 
 `get_mcp_connection` 增加 `write_enabled:boolean`；桌面命令 `set_mcp_write_enabled(enabled)` 返回真实 ConnectionInfo。服务未运行时不能授权，返回 `MCP_SERVICE_DISABLED`。关闭写入保持连接及读取可用；关闭服务、退出或重新启动应用清除授权，重开服务仍为只读。幂等开启已经运行的服务不撤销既有授权。
 
-WB-310 的工具清单包含七项读取和六项新增写入；WB-311 另加入三项转录控制 / 查询，WB-312 加入两项媒体读取，当前共 18 项。下述六项新增写入可被发现，便于已连接客户端直接响应授权变化。写工具可被发现不代表有权限：Core 在同一个锁内检查权限、关闭状态并提交领域操作。撤销完成后才到达的请求返回 `WRITE_DISABLED`；已提交的数据保留。IPC 没有授权、设置修改、文件删除或任意 Core 调用入口，客户端不能自行打开写入。
+当前默认发现 20 项工具：七项基础读取、片段与关键帧读取、短音频读取、四项笔记/组织写入、三项转录操作、三项关键帧采样操作。create_topic / create_idea 保留内部 IPC 和领域兼容，退出 MCP 默认发现及调用。下述历史六项中仅 create_note / create_category / add_asset_categories / add_asset_tags 对外可发现。
 
-## 六项工具
+Core 在同一锁内校验权限、收录状态并提交写入；所有素材所有者、AI 来源引用以及内部选题/专题素材引用均须已收录。撤销后新请求返回 WRITE_DISABLED；已提交的数据保留，已启动任务按原生命周期完成。IPC 不提供授权、设置修改、文件删除或任意调用，客户端不能自行开启写入。
+
+## 四项公开工具与历史内部兼容
 
 所有对象拒绝未知字段，输入不接受目标文件路径、已有正文 ID 或 SQL。每条内部请求沿用 64 KiB 总上限（含封装与换行），输出沿用 1 MiB。超过限制不执行操作。模型名称是调用方声明的信息，不表示应用已验证模型身份。
 
@@ -19,7 +21,7 @@ WB-310 的工具清单包含七项读取和六项新增写入；WB-311 另加入
 | 工具 | 输入 | 输出与行为 |
 | --- | --- | --- |
 | `create_note` | `asset_id,body,source` | `{id,origin:"ai"}`；新增 general 笔记，模型与引用使用现有 Note 字段；不创建结构化拆解或比较记录 |
-| `create_category` | `name,parent_id` | `{id}`；创建分类，沿用名称 / 父级与重名校验，不提供改名或删除 |
+| `create_category` | `name,parent_id` | `{id}`；创建一级分类，parent_id 只能省略或为 null，非空返回 INVALID_INPUT；沿用名称及重名校验，不提供改名或删除 |
 | `add_asset_categories` | `asset_id,ids` | `{asset_id,ids}`；向一个资产追加 1～100 个现有分类 ID，整个批次同事务 |
 | `add_asset_tags` | `asset_id,ids` | `{asset_id,ids}`；向一个资产追加 1～100 个现有标签 ID，不创建标签 |
 | `create_topic` | `input:{title,description},source` | `{id,origin:"ai"}`；创建独立研究专题，保存 AI 来源与文案引用；不追加或编辑已有成员 |

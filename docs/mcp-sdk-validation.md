@@ -1,5 +1,7 @@
 # MCP 协议与 SDK 选型验证
 
+本文为 SDK 选型及历史 stdio 试验记录。产品现已使用[本机 Streamable HTTP](mcp-streamable-http.md)，不再提供命令启动；当前结果见[HTTP 验证](mcp-http-validation.md)。
+
 核验日期：2026-10-28。对应 WB-201，技术选型与 Windows 最小互通验证已完成；macOS Intel / Apple Silicon 的构建与客户端验证仍待办。本文不代表知识库已开放 MCP，也不代表 P1B 阶段验收通过。
 
 ## 选型结论

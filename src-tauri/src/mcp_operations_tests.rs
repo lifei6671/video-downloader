@@ -53,6 +53,39 @@ fn call(core: &Arc<Core>, method: &str, operation: &str) -> Value {
     core.mcp_operation_tool(method, json!({"operation_id":operation}))
         .unwrap()
 }
+
+#[tokio::test]
+async fn range_sampling_is_explicit_authorized_and_bound_to_operation_id() {
+    let root = tempfile::tempdir().unwrap();
+    let core = fixture(root.path());
+    let (asset, file) = seed(&core, root.path(), "range-frames");
+    let input = json!({"asset_id":asset,"file_id":file,"start_ms":0,"end_ms":3000});
+    assert_eq!(core.mcp_operation_tool("mcp_start_frame_sampling", input.clone()).unwrap_err(), crate::mcp_operations::OperationError::WriteDisabled);
+    core.inner.lock().unwrap().mcp_write_enabled = true;
+    for count in [0, 1, 4, 10] {
+        let mut invalid = input.clone(); invalid["count"] = json!(count);
+        assert_eq!(core.mcp_operation_tool("mcp_start_frame_sampling", invalid).unwrap_err(), crate::mcp_operations::OperationError::KeyframeRangeInvalid);
+    }
+    let run = core.mcp_operation_tool("mcp_start_frame_sampling", input.clone()).unwrap();
+    let id = run["operation_id"].as_str().unwrap();
+    assert_eq!(run["total"], 5);
+    assert_eq!(core.mcp_operation_tool("mcp_start_frame_sampling", input).unwrap_err(), crate::mcp_operations::OperationError::KeyframeBusy);
+    assert_eq!(core.mcp_operation_tool("mcp_get_frame_sampling_status", json!({"operation_id":"wrong"})).unwrap_err(), crate::mcp_operations::OperationError::KeyframeOperationNotFound);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let status = core.mcp_operation_tool("mcp_get_frame_sampling_status", json!({"operation_id":id})).unwrap();
+            if status["state"] != "running" { assert_eq!(status["state"], "completed", "{status}"); break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let frames = core.library_keyframes(&asset).unwrap();
+    assert_eq!(frames.len(), 5);
+    assert!(frames.iter().all(|f| f.data.clip_id.is_none() && f.data.sample_end_ms == Some(3000) && f.actual_ms == f.data.requested_ms));
+    core.mcp_operation_tool("mcp_cancel_frame_sampling", json!({"operation_id":id})).unwrap();
+    core.archive_library_asset(&asset, true).unwrap();
+    assert_eq!(core.mcp_operation_tool("mcp_get_frame_sampling_status", json!({"operation_id":id})).unwrap_err(), crate::mcp_operations::OperationError::AssetNotFound);
+    core.shutdown().await;
+}
 async fn done(core: &Arc<Core>, operation: &str) -> Value {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {

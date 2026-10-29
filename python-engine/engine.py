@@ -25,6 +25,7 @@ import runtime_dependencies
 import local_cover
 import local_video
 import keyframes
+import audio_excerpt
 import transcription
 import author_profile
 import douyin_cover
@@ -354,6 +355,9 @@ def operate(method, params, emit):
         raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
     try:
         runtime_dependencies.configure(params.get('runtime_directory'))
+        if method == 'get_audio_excerpt':
+            emit('audio_excerpt', **audio_excerpt.extract(params))
+            return
         if method == 'extract_keyframes':
             emit('keyframes_extracted', **keyframes.extract(params, emit))
             return
@@ -375,6 +379,8 @@ def operate(method, params, emit):
         raise EngineError(str(error), 'transcription') from None
     except keyframes.KeyframeError as error:
         raise EngineError(str(error), 'keyframes') from None
+    except audio_excerpt.AudioError as error:
+        raise EngineError(str(error), 'audio') from None
     except local_video.ProbeError as error:
         raise EngineError(str(error), 'local_video') from None
     except runtime_dependencies.DependencyError as error:

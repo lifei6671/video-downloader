@@ -23,7 +23,7 @@ export interface LibrarySearchHit {
   document_id: string | null; document_version: number | null; note_id: string | null;
 }
 export interface LibrarySearchPage {
-  items: { asset: LibraryAsset; hit: LibrarySearchHit | null; files: { total: number; available: number; changed: number } }[];
+  items: { category_ids: string[]; tag_ids: string[]; has_transcript: boolean; asset: LibraryAsset; hit: LibrarySearchHit | null; files: { total: number; available: number; changed: number } }[];
   next_cursor: LibraryCursor | null;
 }
 export interface LibraryDocumentSummary {
@@ -52,7 +52,7 @@ export interface LibraryClipInput extends ClipRange {
   file_id: string; title: string; reason: string; playable: ClipRange;
   document_id: string | null; quote: string | null;
 }
-export type KeyframeRequest = { kind: 'position'; file_id: string; position_ms: number } | { kind: 'clip'; clip_id: string; count: number };
+export type KeyframeRequest = { kind: 'position'; file_id: string; position_ms: number } | { kind: 'clip'; clip_id: string; count: number } | { kind: 'range'; file_id: string; start_ms: number; end_ms: number; count?: 3 | 5 | 9 };
 export interface LibraryKeyframe {
   id: string; asset_id: string; file_id: string; clip_id: string | null; batch_id: string;
   sample_start_ms: number; sample_end_ms: number | null; sample_index: number; sample_count: number;
@@ -120,7 +120,8 @@ export interface IdeaReferenceInput { kind: IdeaReferenceKind; asset_id: string 
 export interface IdeaReferenceView { reference: IdeaReferenceInput; title: string; asset_title: string | null; missing: boolean; archived: boolean; file_state: string | null; topic_revision: number | null }
 export interface IdeaDetail { idea: LibraryIdea; references: IdeaReferenceView[] }
 export interface IdeaInput { title: string; viewpoint: string; body: string; references: IdeaReferenceInput[] }
-export interface LibraryDestination { view?: 'ideas'; ideaId?: string; ideaReference?: IdeaReferenceInput; sequence: number; assetId?: string; fileId?: string; scope?: 'uncategorized' | 'unorganized'; error?: string }
+export interface LibraryWritingSelection { documentId?: string; noteId?: string }
+export interface LibraryDestination extends LibraryWritingSelection { view?: 'ideas'; ideaId?: string; ideaReference?: IdeaReferenceInput; sequence: number; assetId?: string; fileId?: string; scope?: 'uncategorized' | 'unorganized'; error?: string }
 
 export type LibraryExportFormat = 'txt' | 'markdown' | 'json';
 export type LibraryContentSelection = { kind: 'document' | 'note'; id: string };
@@ -131,7 +132,10 @@ export interface LibraryTransferSnapshot {
   path: string; error: string | null;
   result: { ideas?: number; topics?: number; assets: number; files?: number; documents?: number; notes?: number; missing_media: number; bytes?: number } | null;
 }
+export interface TaskCollectionState { task_id: string; asset_id: string; collected: boolean }
 export const libraryApi = {
+  taskCollectionStates: (taskIds: string[]) => invoke<TaskCollectionState[]>('get_task_collection_states', { taskIds }),
+  setTaskCollected: (taskId: string, collected: boolean) => invoke<TaskCollectionState>('set_task_collected', { taskId, collected }),
   ideas: () => invoke<IdeaSummary[]>('list_library_ideas'),
   idea: (ideaId: string) => invoke<IdeaDetail>('get_library_idea', { ideaId }),
   prepareIdeaReference: (input: IdeaReferenceInput) => invoke<IdeaReferenceView>('prepare_library_idea_reference', { input }),

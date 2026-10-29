@@ -204,6 +204,29 @@ fn frames_roundtrip_portable_backup_twice_with_and_without_media_and_relinked_so
     }
 }
 #[test]
+fn range_frames_roundtrip_v9_backup_and_validate_sample_positions() {
+    let root = tempfile::tempdir().unwrap();
+    let db = database();
+    let (asset, file, source, _) = seed(&db, root.path());
+    for (i, point) in sample_points(0, 1000, 5).unwrap().into_iter().enumerate() {
+        let mut frame = data(&asset, &file, None);
+        frame.id = format!("range-{i}"); frame.sample_start_ms = 0; frame.sample_end_ms = Some(1000);
+        frame.sample_count = 5; frame.sample_index = i as u32; frame.requested_ms = point; frame.pts = point;
+        frame.time_base_num = 1; frame.time_base_den = 1000;
+        insert_frame(&db, &frame, &source, &png()).unwrap();
+        let mut invalid = frame.clone(); invalid.requested_ms += 1;
+        assert!(invalid.validate().is_err());
+        invalid = frame; invalid.sample_count = 4; assert!(invalid.validate().is_err());
+    }
+    let package = root.path().join("backup");
+    write_backup(capture_backup(&db, true).unwrap(), &package, &mut |_| Ok(())).unwrap();
+    let mut restored = database();
+    commit_restore(&mut restored, prepare_restore(&package, &root.path().join("media"), &mut |_| Ok(())).unwrap()).unwrap();
+    let frames = keyframes(&restored, &asset).unwrap();
+    assert_eq!(frames.len(), 5);
+    assert!(frames.iter().all(|f| f.data.clip_id.is_none() && !f.source_changed && !f.missing));
+}
+#[test]
 fn v6_migration_backup_and_retry_preserve_v5_material() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("v5.sqlite");

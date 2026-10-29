@@ -123,7 +123,7 @@ fn unicode_literal_search_all_text_surfaces_and_versioned_hits() {
 }
 
 #[test]
-fn combined_filters_include_descendants_and_all_tags_without_duplicates() {
+fn flat_category_filters_and_all_tags_without_duplicates() {
     let db = database();
     let root = tempfile::tempdir().unwrap();
     for id in ["a", "b", "c"] {
@@ -138,6 +138,10 @@ fn combined_filters_include_descendants_and_all_tags_without_duplicates() {
     let parent = create_category(&db, None, "职场").unwrap();
     let child = create_category(&db, Some(&parent), "成长").unwrap();
     set_category_membership(&db, &["a".into(), "b".into()], &child, true).unwrap();
+    // Historical hierarchy metadata must not expand a first-level category filter.
+    assert!(search_assets(&db, &SearchRequest { category_ids: vec![parent.clone()], ..Default::default() }).unwrap().items.is_empty());
+    assert_eq!(ids(search_assets(&db, &SearchRequest { category_ids: vec![child.clone()], ..Default::default() }).unwrap()), ["b", "a"]);
+
     let t1 = create_tag(&db, "故事").unwrap();
     let t2 = create_tag(&db, "反问").unwrap();
     set_tag_membership(&db, &["a".into(), "b".into()], &t1, true).unwrap();

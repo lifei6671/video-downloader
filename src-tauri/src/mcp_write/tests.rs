@@ -17,6 +17,21 @@ fn source() -> Value {
 fn note() -> Value {
     json!({"asset_id":"a","body":"AI 学习笔记😀","source":source()})
 }
+
+#[test]
+fn uncollected_owners_and_citation_sources_cannot_be_written_through_mcp() {
+    let db = database(); seed(&db);
+    library::archive_asset(&db, "a", true).unwrap();
+    let before = db.total_changes();
+    for (method, params) in [
+        ("mcp_create_note", note()),
+        ("mcp_add_asset_categories", json!({"asset_id":"a","ids":["unknown"]})),
+        ("mcp_add_asset_tags", json!({"asset_id":"a","ids":["tag"]})),
+        ("mcp_create_note", json!({"asset_id":"b","body":"reference removed source","source":source()})),
+        ("mcp_create_topic", json!({"input":{"title":"topic","description":""},"source":source()})),
+    ] { assert_eq!(dispatch(&db, method, params).err().expect("uncollected write must fail").to_string(), "ASSET_NOT_FOUND", "{method}"); }
+    assert_eq!(db.total_changes(), before);
+}
 fn write(db: &Connection, method: &str, input: Value) -> Value {
     dispatch(db, method, input).unwrap().value
 }
@@ -276,4 +291,14 @@ fn schema_ten_upgrade_rolls_back_then_retries_with_a_consistent_backup() {
         11
     );
     assert_eq!(library::research_topics(&db).unwrap()[0].title, "保留研究");
+}
+
+#[test]
+fn category_creation_accepts_only_one_level() {
+    let db = database();
+    let parent = library::create_category(&db, None, "一级").unwrap();
+    let before = db.total_changes();
+    assert_eq!(dispatch(&db, "mcp_create_category", json!({"name":"子级", "parent_id":parent})).err().unwrap().to_string(), "INVALID_INPUT");
+    assert_eq!(db.total_changes(), before);
+    assert!(dispatch(&db, "mcp_create_category", json!({"name":"另一个一级"})).is_ok());
 }

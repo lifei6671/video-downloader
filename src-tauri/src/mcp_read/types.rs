@@ -276,6 +276,7 @@ pub struct FileSummary {
 pub struct DocumentSummary {
     pub id: String,
     pub asset_id: String,
+    pub file_id: Option<String>,
     pub kind: String,
     #[cfg_attr(feature = "mcp", schemars(transform = json_integer))]
     pub version: u64,

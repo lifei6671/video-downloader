@@ -1,7 +1,7 @@
 //! P1B public read views. Existing library services remain the domain authority.
 mod types;
 mod media;
-pub use media::{ClipInput, Clips, KeyframesInput, Keyframes};
+pub use media::{AudioInput, AudioExcerpt, ClipInput, Clips, KeyframesInput, Keyframes};
 pub use types::*;
 
 use crate::library;
@@ -29,6 +29,15 @@ pub enum ReadError {
     OutOfRange,
     CoreReadFailed,
     ServiceUnavailable,
+    FileMissing,
+    AudioSourceChanged,
+    AudioBusy,
+    AudioNoTrack,
+    AudioRangeUnavailable,
+    AudioFailed,
+    AudioTimeout,
+    Canceled,
+    FfmpegUnavailable,
 }
 impl ReadError {
     pub fn code(self) -> &'static str {
@@ -48,6 +57,15 @@ impl ReadError {
             Self::OutOfRange => "OUT_OF_RANGE",
             Self::CoreReadFailed => "CORE_READ_FAILED",
             Self::ServiceUnavailable => "SERVICE_UNAVAILABLE",
+            Self::FileMissing => "FILE_MISSING",
+            Self::AudioSourceChanged => "AUDIO_SOURCE_CHANGED",
+            Self::AudioBusy => "AUDIO_BUSY",
+            Self::AudioNoTrack => "AUDIO_NO_TRACK",
+            Self::AudioRangeUnavailable => "AUDIO_RANGE_UNAVAILABLE",
+            Self::AudioFailed => "AUDIO_FAILED",
+            Self::AudioTimeout => "AUDIO_TIMEOUT",
+            Self::Canceled => "CANCELED",
+            Self::FfmpegUnavailable => "FFMPEG_UNAVAILABLE",
         }
     }
     pub(crate) fn from_domain(error: anyhow::Error) -> Self {
@@ -86,6 +104,35 @@ pub(crate) fn id(value: &str) -> Result<()> {
         bail!("INVALID_INPUT");
     }
     Ok(())
+}
+pub(crate) fn require_collected(db: &Connection, asset_id: &str) -> Result<()> {
+    id(asset_id)?;
+    if library::asset(db, asset_id)?.archived_at.is_some() { bail!("ASSET_NOT_FOUND"); }
+    Ok(())
+}
+fn require_note_collected(db: &Connection, note: &library::Note) -> Result<()> {
+    require_collected(db, &note.asset_id)?;
+    for citation in &note.citations { require_collected(db, &citation.asset_id)?; }
+    if let Some(comparison) = &note.comparison {
+        for asset in &comparison.asset_ids { require_collected(db, asset)?; }
+        for source in comparison.points.iter().flat_map(|point| &point.sources) { require_collected(db, &source.pin.asset_id)?; }
+    }
+    Ok(())
+}
+fn excluded_note_hits(db: &Connection, query: &str) -> Result<Vec<String>> {
+    if query.trim().is_empty() { return Ok(vec![]); }
+    let mut statement = db.prepare("SELECT n.id,n.asset_id FROM asset_notes n JOIN library_assets a ON a.id=n.asset_id WHERE a.archived_at IS NULL AND instr(lower(n.body),lower(?1))>0")?;
+    let candidates = statement.query_map([query.trim()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut excluded = vec![];
+    for (id, asset) in candidates {
+        let note = library::read_note(db, &asset, &id)?;
+        match require_note_collected(db, &note) {
+            Ok(()) => {},
+            Err(error) if error.to_string() == "ASSET_NOT_FOUND" => excluded.push(id),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(excluded)
 }
 fn limit(value: u32) -> Result<()> {
     if !(1..=100).contains(&value) {
@@ -160,7 +207,7 @@ fn list_categories(db: &Connection, request: ListInput) -> Result<Categories> {
         .map(|item| Category {
             asset_count: counts.get(&item.id).copied().unwrap_or(0),
             id: item.id,
-            parent_id: item.parent_id,
+            parent_id: None,
             name: item.name,
             position: item.position,
         })
@@ -211,6 +258,7 @@ fn document(value: library::DocumentSummary) -> DocumentSummary {
     DocumentSummary {
         id: value.id,
         asset_id: value.asset_id,
+        file_id: value.file_id,
         kind: value.kind,
         version: value.version,
         source_document_id: value.source_document_id,
@@ -237,6 +285,7 @@ fn note(value: library::NoteSummary) -> NoteSummary {
     }
 }
 fn search_assets(db: &Connection, request: SearchInput) -> Result<SearchPage> {
+    if request.archived { bail!("INVALID_INPUT"); }
     limit(request.limit)?;
     if request.category_ids.len() > 100 || request.tag_ids.len() > 100 {
         bail!("INVALID_INPUT");
@@ -247,7 +296,7 @@ fn search_assets(db: &Connection, request: SearchInput) -> Result<SearchPage> {
     if let Some(cursor) = &request.cursor {
         id(&cursor.id)?;
         let exists = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM library_assets WHERE id=?1 AND created_at=?2)",
+            "SELECT EXISTS(SELECT 1 FROM library_assets WHERE id=?1 AND created_at=?2 AND archived_at IS NULL)",
             rusqlite::params![
                 cursor.id,
                 i64::try_from(cursor.created_at).context("INVALID_CURSOR")?
@@ -258,7 +307,8 @@ fn search_assets(db: &Connection, request: SearchInput) -> Result<SearchPage> {
             bail!("INVALID_CURSOR");
         }
     }
-    let page = library::search_assets(
+    let excluded = excluded_note_hits(db, &request.query)?;
+    let page = library::search_assets_excluding_notes(
         db,
         &library::SearchRequest {
             query: request.query,
@@ -280,6 +330,7 @@ fn search_assets(db: &Connection, request: SearchInput) -> Result<SearchPage> {
             }),
             limit: request.limit,
         },
+        &excluded,
     )?;
     let items = page
         .items
@@ -348,7 +399,7 @@ fn notes_page(
     })
 }
 fn get_asset(db: &Connection, request: AssetInput) -> Result<AssetDetail> {
-    id(&request.asset_id)?;
+    require_collected(db, &request.asset_id)?;
     limit(request.limit)?;
     let detail = library::asset_detail(db, &request.asset_id)?;
     Ok(AssetDetail {
@@ -412,7 +463,7 @@ fn document_reference(summary: &DocumentSummary, offset: u64, length: u64) -> Do
     }
 }
 fn read_transcript(db: &Connection, request: TranscriptInput) -> Result<Transcript> {
-    id(&request.asset_id)?;
+    require_collected(db, &request.asset_id)?;
     let documents = library::document_summaries(db, &request.asset_id)?;
     let selected = match request.document_id.as_deref() {
         Some(value) => {
@@ -441,7 +492,7 @@ fn read_transcript(db: &Connection, request: TranscriptInput) -> Result<Transcri
     })
 }
 fn list_notes(db: &Connection, request: NotesInput) -> Result<NotesPage> {
-    id(&request.asset_id)?;
+    require_collected(db, &request.asset_id)?;
     notes_page(
         library::note_summaries(db, &request.asset_id)?,
         request.cursor.as_deref(),
@@ -465,7 +516,9 @@ fn read_note(db: &Connection, request: NoteInput) -> Result<Note> {
             bail!("NOTE_NOT_FOUND");
         }
     }
+    require_collected(db, &asset_id)?;
     let value = library::read_note(db, &asset_id, &request.note_id)?;
+    require_note_collected(db, &value)?;
     if request
         .revision
         .is_some_and(|revision| revision != value.revision)

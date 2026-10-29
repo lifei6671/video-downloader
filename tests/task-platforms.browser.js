@@ -6,7 +6,7 @@ async page=>{
   const panel=()=>page.getByRole('tabpanel');
   const titles=()=>panel().locator('[data-slot="card-title"]').allTextContents();
   const expected={全部:['douyin-live','tiktok-wait','youtube-done','youtube-failed','Telegram https://t.me/c/100/9','下载任务 unknown-failed'],抖音:['douyin-live'],TikTok:['tiktok-wait'],YouTube:['youtube-done','youtube-failed'],Telegram:['Telegram https://t.me/c/100/9']};
-  const load=async(query='')=>{await page.goto(base+'/tests/fixtures/task-platforms.html'+query);await page.getByRole('button',{name:'下载任务',exact:true}).click();await tabs().waitFor()};
+  const load=async(query='')=>{await page.goto(base+'/tests/fixtures/task-platforms.html'+query);await page.getByRole('button',{name:'下载任务',exact:true}).click();await tabs().waitFor();const listToggle=page.getByRole('button',{name:'切换为列表',exact:true});if(await listToggle.isVisible())await listToggle.click()};
   const results=[];
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
     await page.setViewportSize({width,height});await load();
@@ -59,22 +59,25 @@ async page=>{
     check(await panel().evaluate(node=>node.scrollHeight>node.clientHeight+500),'task list does not scroll');
     const box=await panel().boundingBox();
     await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.wheel(0,600);
-    await page.waitForFunction(()=>document.querySelector('[role="tabpanel"]').scrollTop>200);
+    await page.waitForFunction(()=>document.querySelector('.task-browser [role="tabpanel"]').scrollTop>200);
     const afterTabs=await tabs().boundingBox();const afterHeading=await heading.boundingBox();
     check(Math.abs(afterTabs.y-beforeTabs.y)<1 && Math.abs(afterHeading.y-beforeHeading.y)<1,'tab/header moved with list');
     check(await content.evaluate(node=>node.scrollTop===0 && node.scrollHeight<=node.clientHeight+1),'outer content also scrolls');
     check(await tabs().getByRole('tab',{name:'全部',exact:true}).evaluate(node=>{
       const box=node.getBoundingClientRect();return node.contains(document.elementFromPoint(box.x+box.width/2,box.y+box.height/2));
     }),'list painted over tabs');
+    const expectedCount=await page.evaluate(()=>window.taskPlatformsTest.snapshot().filter(t=>t.download_requested).length);
+    for(let attempt=0;attempt<8 && await cards.count()<expectedCount;attempt++){const count=await cards.count();await panel().focus();await page.keyboard.press('Control+End');await page.waitForFunction(count=>document.querySelectorAll('.task-browser [data-slot=card]').length>count,count);}
     await panel().focus();await page.keyboard.press('Control+End');
-    await page.waitForFunction(()=>{const n=document.querySelector('[role="tabpanel"]');return n.scrollHeight-n.clientHeight-n.scrollTop<2});
+    await page.waitForFunction(()=>{const n=document.querySelector('.task-browser [role="tabpanel"]');return n.scrollHeight-n.clientHeight-n.scrollTop<2});
     const last=await cards.last().boundingBox();const viewport=await panel().boundingBox();
     check(last.y>=viewport.y && last.y+last.height<=viewport.y+viewport.height+1,'last task is unreachable');
     check(Math.abs((await cards.first().boundingBox()).height-firstHeight)<1,'scroll changes card height');
     check(Math.abs((await tabs().boundingBox()).y-beforeTabs.y)<1,'keyboard scroll moves tabs');
     await page.screenshot({path:'.local/task-tabs-fixed-'+width+'.png',animations:'disabled'});
     await tabs().getByRole('tab',{name:'抖音',exact:true}).click();
-    check((await titles()).length===51,'fixed tab cannot filter long list');
+    check((await titles()).length>=30 && (await titles()).every(t=>t.startsWith('douyin-')),'fixed tab cannot filter loaded tasks');
+    check(await page.evaluate(()=>window.taskPlatformsTest.snapshot().filter(t=>t.video?.platform==='douyin'&&t.download_requested).length)===51,'platform filter lost underlying tasks');
     await tabs().getByRole('tab',{name:'TikTok',exact:true}).click();
     check((await titles()).join(',')==='tiktok-wait','short filter after long list failed');
     check(await panel().evaluate(node=>node.scrollTop===0),'short filter retained invalid scroll offset');

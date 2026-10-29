@@ -96,10 +96,24 @@ impl Core {
             library::archive_asset(db, id, archived)
         })
     }
+    pub fn task_collection_states(&self, task_ids: &[String]) -> Result<Vec<library::TaskCollectionState>> {
+        self.library_read(|db| library::task_collection_states(db, task_ids))
+    }
+    pub fn set_task_collected(&self, task_id: &str, collected: bool) -> Result<library::TaskCollectionState> {
+        let state = self.library_write(LibraryScope::Assets, vec![], |db| {
+            library::set_task_collected(db, task_id, collected)
+        })?;
+        Ok(state)
+    }
     pub fn library_categories(&self) -> Result<Vec<Category>> {
-        self.library_read(library::categories)
+        self.library_read(|db| {
+            let mut categories = library::categories(db)?;
+            for category in &mut categories { category.parent_id = None; }
+            Ok(categories)
+        })
     }
     pub fn create_library_category(&self, parent: Option<&str>, name: &str) -> Result<String> {
+        if parent.is_some() { bail!("INVALID_INPUT"); }
         self.library_write(LibraryScope::Categories, vec![], |db| {
             library::create_category(db, parent, name)
         })
@@ -111,8 +125,15 @@ impl Core {
         name: &str,
         position: i64,
     ) -> Result<()> {
+        if parent.is_some() { bail!("INVALID_INPUT"); }
         self.library_write(LibraryScope::Categories, vec![], |db| {
-            library::update_category(db, id, parent, name, position)
+            // A flat editor must not rewrite historical hierarchy metadata.
+            let saved_parent = library::categories(db)?
+                .into_iter()
+                .find(|category| category.id == id)
+                .context("CATEGORY_NOT_FOUND")?
+                .parent_id;
+            library::update_category(db, id, saved_parent.as_deref(), name, position)
         })
     }
     pub fn delete_library_category(&self, id: &str) -> Result<()> {

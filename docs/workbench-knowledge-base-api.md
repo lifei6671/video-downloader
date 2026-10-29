@@ -1,12 +1,18 @@
-# 知识库检索与桌面命令契约
+# 素材库检索与桌面命令契约
 
 WB-202 新增的 Core 本机 IPC、状态与启停命令单独维护于 [本机 IPC 契约](mcp-local-ipc.md)。它复用本页分类 / 标签读取服务，不把桌面 DTO 直接作为未来 MCP 的公开资料接口。
 
 对应 [WB-111、WB-112、WB-114、WB-115、WB-116、WB-117、WB-118](workbench-knowledge-base-tasks.md)，实现于 `library/search.rs`、`library/views.rs`、`library_api.rs`、`library_commands.rs`、`src/lib/library-api.ts` 及 `library_transfer.rs` / `library/backup.rs` / `library/content_export.rs`。本页说明本地桌面 API；WB-113～WB-118 已接入知识库列表、分类标签、资产详情、文件播放、正文编辑、笔记、基础工作台和导出备份恢复，MCP 读取及受控新建已由 WB-204～WB-310 接入，专项边界见[受控写入](mcp-write-tools.md)。
 
+## 主动收藏与任务关联
+
+`library_assets.archived_at` 为 NULL 表示已收录，非 NULL 表示未收录或已移出。新下载成功仍自动登记资产、文件与 `asset_task_links`，新资产默认未收录；同平台、同作品 ID 的不同清晰度复用原资产，新增文件版本不改变其收藏状态。升级不回写既有资产的 archived_at。手动导入本地视频主动收录，已登记本地文件再次导入也会收录。
+
+桌面新增 `get_task_collection_states({taskIds}) -> [{task_id,asset_id,collected}]`，一次 SQL 批量解析任务，未登记任务省略。`set_task_collected({taskId,collected})` 返回相同状态对象，经已有任务关联更新原资产；重复设置幂等。每批最多 10,000 个非空任务 ID。`archive_library_asset` 保持原契约，重复同状态不改写时间。移出不删除媒体、笔记或文案，清理下载历史不删除资产资料。schema v11、逻辑包 v9 不变，历史高级资料和恢复能力保留。
+
 ## 1. 检索
 
-前端通过 `libraryApi.search(request)` 调用 `search_library_assets`。外层 Tauri 参数为 `{request}`；request 内字段保持 Rust DTO 的 snake_case，缺省值如下：
+列表结果新增 category_ids、tag_ids 和 has_transcript 摘要，搜索命中的 document_id / note_id 可直接打开相应文案版本或笔记。前端通过 `libraryApi.search(request)` 调用 `search_library_assets`。外层 Tauri 参数为 `{request}`；request 内字段保持 Rust DTO 的 snake_case，缺省值如下：
 
 ```json
 {
@@ -25,7 +31,7 @@ WB-202 新增的 Core 本机 IPC、状态与启停命令单独维护于 [本机 
 
 - 中文单字、短词和普通子串均可匹配；`%`、`_`、引号及反斜杠按普通字符处理，不作为通配或 SQL。去除查询首尾空白，查询原始长度上限 512 个 Unicode 字符；英文采用 SQLite 原生 ASCII 大小写转换，不承诺跨语言分词或语义搜索。
 - 搜索标题、作者、全部保留版本的识别原文 / 整理稿，以及笔记正文。每资产返回一个优先命中，顺序为标题、作者、整理稿、识别原文、笔记；同一文案类型优先较新的匹配版本，不把历史命中伪装成当前稿。
-- 多个分类是 OR，包含后代；多个标签是 AND。不同维度之间是 AND，重复标签和重叠分类不使资产重复。`uncategorized=true` 不能同时指定分类。
+- 多个一级分类是 OR，仅匹配直接关联，不包含历史后代；多个标签是 AND。不同维度之间是 AND，重复标签和重叠分类不使资产重复。`uncategorized=true` 不能同时指定分类。
 - `platform` 支持 `douyin`、`tiktok`、`youtube`、`telegram`、`local`；`null` 不限平台，`local` 匹配无平台身份的资产。`archived=false` 只返回在库资产，`true` 只返回已移出的资产。
 - `unorganized=true` 仅返回尚无整理稿版本且没有任何笔记的资产；识别原文不改变此状态，与分类及标签等其他筛选按 AND 组合。
 - `file_state` 为 `all`、`available`、`missing`、`changed`。至少一个文件存在即 available；所有文件不可用或没有文件即 missing；至少一个现存文件与登记指纹不符即 changed。available 与 changed 可重叠，结果附实际文件计数。
@@ -259,3 +265,7 @@ Note 增加可选 `analysis:{content,human_revised}`，技术观察读取时带�
 ## WB-311 MCP 转录长操作
 
 新增三项固定 IPC映射，start / cancel沿用独立写授权，get按真实 operation ID只读查询；复用原转录worker、持久摘要和进程回收。立即返回的 running + cancel_requested 不等于实际取消完成；工具目录16项，schema11 / writer9 / engine0.17.0 不变。字段、缓存 / 操作保留范围、超时和断连规则见[转录长操作](mcp-transcription-operations.md)。
+
+## 一级分类接口
+
+桌面分类读取的 `parent_id` 固定为 null；新建、更新接口保留旧参数形状，但非空 parent 返回 `INVALID_INPUT`。MCP `create_category` 仅接受省略或 null 的 `parent_id`，分类读取同样平铺。底层旧层级、稳定 ID、关联及备份可恢复信息继续保留，不执行自动迁移。分类筛选仅查询直接关联。列表内创建新分类，不再在管理弹窗中新建；已移出和导入入口隐藏，原有资产状态及导入服务保留。

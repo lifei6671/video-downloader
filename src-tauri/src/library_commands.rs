@@ -64,6 +64,14 @@ pub fn archive_library_asset(
     core.archive_library_asset(&asset_id, archived)
         .map_err(error)
 }
+#[tauri::command(async)]
+pub fn get_task_collection_states(core: State<AppCore>, task_ids: Vec<String>) -> Result<Vec<TaskCollectionState>, String> {
+    core.task_collection_states(&task_ids).map_err(error)
+}
+#[tauri::command]
+pub fn set_task_collected(core: State<AppCore>, task_id: String, collected: bool) -> Result<TaskCollectionState, String> {
+    core.set_task_collected(&task_id, collected).map_err(error)
+}
 #[tauri::command]
 pub fn list_library_categories(core: State<AppCore>) -> Result<Vec<Category>, String> {
     core.library_categories().map_err(error)

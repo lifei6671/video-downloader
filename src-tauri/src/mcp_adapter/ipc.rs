@@ -66,6 +66,7 @@ pub(super) struct Client {
     requests: mpsc::Sender<Call>,
 }
 impl Client {
+    #[cfg(test)]
     pub(super) async fn call(&self, method: &'static str) -> Result<Value, AdapterError> {
         self.request(method, json!({})).await
     }
@@ -132,11 +133,14 @@ async fn exchange_loop(
                 _ => AdapterError::IpcProtocolError,
             },
             request = requests.recv() => {
-                let Some(request) = request else { return AdapterError::IpcDisconnected; };
+                let Some(mut request) = request else { return AdapterError::IpcDisconnected; };
                 sequence += 1;
                 let id = sequence.to_string();
-                let outcome = tokio::time::timeout(REQUEST_TIMEOUT, exchange(&mut stream, &id, request.method, request.params)).await
-                    .unwrap_or(Err(AdapterError::IpcTimeout));
+                let deadline = if request.method == "mcp_get_audio_excerpt" { Duration::from_secs(35) } else { REQUEST_TIMEOUT };
+                let outcome = tokio::select! {
+                    result = tokio::time::timeout(deadline, exchange(&mut stream, &id, request.method, request.params)) => result.unwrap_or(Err(AdapterError::IpcTimeout)),
+                    _ = request.reply.closed() => return AdapterError::IpcDisconnected,
+                };
                 let fatal = match outcome {
                     Err(AdapterError::CoreReadFailed | AdapterError::ResponseTooLarge | AdapterError::Domain(_) | AdapterError::WriteDomain(_) | AdapterError::OperationDomain(_)) | Ok(_) => None,
                     Err(error) => Some(error),

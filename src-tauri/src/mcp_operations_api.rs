@@ -64,6 +64,9 @@ impl Core {
         method: &str,
         params: Value,
     ) -> Result<Value, OperationError> {
+        if matches!(method, "mcp_start_frame_sampling" | "mcp_get_frame_sampling_status" | "mcp_cancel_frame_sampling") {
+            return self.mcp_frame_sampling(method, params).map_err(OperationError::from_domain);
+        }
         let result = (|| -> Result<Operation> {
             if method == "mcp_start_transcription" {
                 let input: StartInput = serde_json::from_value(params).context("INVALID_INPUT")?;
@@ -97,6 +100,7 @@ impl Core {
                 .as_ref()
                 .filter(|a| a.snapshot.operation_id == input.operation_id)
             {
+                crate::mcp_read::require_collected(&inner.db, active.snapshot.asset_id.as_deref().context("ASSET_NOT_FOUND")?)?;
                 if method == "mcp_cancel_operation" {
                     let _ = active.cancel.send(true);
                 }
@@ -107,15 +111,47 @@ impl Core {
                 .values()
                 .find(|s| s.operation_id == input.operation_id)
             {
+                crate::mcp_read::require_collected(&inner.db, snapshot.asset_id.as_deref().context("ASSET_NOT_FOUND")?)?;
                 return public(snapshot.summary(), false);
             }
             let stored: String = inner.db.query_row("SELECT snapshot FROM asset_transcriptions WHERE json_extract(snapshot,'$.operation_id')=?1",[&input.operation_id],|r|r.get(0)).optional()?.context("OPERATION_NOT_FOUND")?;
             let snapshot: Snapshot = serde_json::from_str(&stored)?;
+            crate::mcp_read::require_collected(&inner.db, snapshot.asset_id.as_deref().context("ASSET_NOT_FOUND")?)?;
             public(snapshot, false)
         })();
         result
             .and_then(|value| Ok(serde_json::to_value(value)?))
             .map_err(OperationError::from_domain)
+    }
+    fn mcp_frame_sampling(self: &Arc<Self>, method: &str, params: Value) -> Result<Value> {
+        let snapshot = if method == "mcp_start_frame_sampling" {
+            let input: crate::mcp_operations::FrameSamplingInput = serde_json::from_value(params).context("INVALID_INPUT")?;
+            id(&input.asset_id)?; id(&input.file_id)?;
+            self.start_mcp_keyframes(&input.asset_id, super::keyframes::KeyframeRequest::Range {
+                file_id: input.file_id, start_ms: input.start_ms, end_ms: input.end_ms, count: input.count,
+            })?
+        } else {
+            let input: OperationInput = serde_json::from_value(params).context("INVALID_INPUT")?;
+            id(&input.operation_id)?;
+            let mut inner = self.inner.lock().unwrap();
+            if inner.closing { bail!("SERVICE_UNAVAILABLE"); }
+            if method == "mcp_cancel_frame_sampling" && !inner.mcp_write_enabled { bail!("WRITE_DISABLED"); }
+            let asset_id = inner.keyframe_run.as_ref().filter(|run| run.snapshot.id == input.operation_id)
+                .context("KEYFRAME_OPERATION_NOT_FOUND")?.snapshot.asset_id.clone();
+            crate::mcp_read::require_collected(&inner.db, &asset_id)?;
+            let run = inner.keyframe_run.as_mut().context("KEYFRAME_OPERATION_NOT_FOUND")?;
+            if method == "mcp_cancel_frame_sampling" && run.snapshot.state == "running" {
+                run.snapshot.canceling = true; run.snapshot.sequence += 1;
+                let _ = run.cancel.send(true);
+            }
+            run.snapshot.clone()
+        };
+        Ok(serde_json::to_value(crate::mcp_operations::FrameSamplingStatus {
+            operation_id: snapshot.id, asset_id: snapshot.asset_id, file_id: snapshot.file_id,
+            state: snapshot.state.into(), start_ms: snapshot.start_ms, end_ms: snapshot.end_ms,
+            requested_ms: snapshot.requested_ms, completed: snapshot.completed, total: snapshot.total,
+            sequence: snapshot.sequence, canceling: snapshot.canceling, error: snapshot.error, frame_ids: snapshot.frame_ids,
+        })?)
     }
 }
 

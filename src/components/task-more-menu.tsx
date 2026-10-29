@@ -13,11 +13,12 @@ export type CoverMenuActions = {
   copy: () => void;
 };
 
-export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, deleteFile, cancel, transcript, coverActions, children, onOpenChange }: {
+export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, deleteFile, cancel, transcript, collection, coverActions, children, onOpenChange }: {
   task: Task;
   children?: ReactNode;
   onOpenChange?: (open: boolean) => void;
   transcript?: { label: string; open: (returnFocus: HTMLElement | null) => void };
+  collection?: { collected: boolean; toggle: () => void; open: () => void };
   cancel?: (returnFocus: HTMLElement | null) => void;
   coverActions?: CoverMenuActions;
   busy: boolean;
@@ -39,6 +40,7 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
   const removable = ['completed', 'failed', 'canceled'].includes(task.status);
   const available = hasFile || hasLink || removable || !!cancel || !!coverActions;
   const items = <>
+      {collection && <><Item disabled={busy} onSelect={collection.toggle}><FolderOpen />{collection.collected ? '移出素材库' : '加入素材库'}</Item>{collection.collected && <Item disabled={busy} onSelect={collection.open}><FolderOpen />打开素材详情</Item>}</>}
       {hasFile && <Item disabled={busy} onSelect={reveal}><FolderOpen />打开文件夹</Item>}
       {transcript && <Item disabled={busy} onSelect={() => transcript.open(context ? row.current : trigger.current)}><FileText />{transcript.label}</Item>}
       {hasLink && <Item disabled={busy} onSelect={copy}><Copy />复制原链接</Item>}

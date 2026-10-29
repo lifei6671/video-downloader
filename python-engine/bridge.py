@@ -34,7 +34,7 @@ def main():
             raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
         request = json.loads(line)
         if (not isinstance(request, dict) or request.get('protocol_version') != PROTOCOL_VERSION
-                or request.get('method') not in ('identify_input', 'resolve_video', 'download_video', 'check_dependencies', 'install_dependency', 'extract_cover', 'transcribe_video', 'probe_local_video', 'extract_keyframes')
+                or request.get('method') not in ('identify_input', 'resolve_video', 'download_video', 'check_dependencies', 'install_dependency', 'extract_cover', 'transcribe_video', 'probe_local_video', 'extract_keyframes', 'get_audio_excerpt')
                 or not isinstance(request.get('id'), str) or not 0 < len(request['id']) <= 128):
             raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
         request_id = request['id']

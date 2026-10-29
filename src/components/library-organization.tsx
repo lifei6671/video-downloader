@@ -7,55 +7,48 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Spinner } from '@/components/ui/spinner';
 
-export function categoryRows(categories: LibraryCategory[], parent: string | null = null, depth = 0): { category: LibraryCategory; depth: number }[] {
-  return categories.filter(category => category.parent_id === parent).sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
-    .flatMap(category => [{ category, depth }, ...categoryRows(categories, category.id, depth + 1)]);
+export function categoryRows(categories: LibraryCategory[]): { category: LibraryCategory; depth: number }[] {
+  return [...categories].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name)).map(category => ({ category, depth: 0 }));
 }
 
 export function LibraryError({ message }: { message: string }) {
   return message ? <Alert variant="destructive" role="alert"><AlertDescription>{message}</AlertDescription></Alert> : null;
 }
 
-type CategoryEdit = { id: string | null; name: string; parent: string; position: number };
+type CategoryEdit = { id: string | null; name: string; position: number };
 export function OrganizationDialog({ kind, categories, tags, close, changed }: {
   kind: 'categories' | 'tags'; categories: LibraryCategory[]; tags: LibraryTag[]; close: () => void; changed: () => void;
 }) {
-  const [edit, setEdit] = useState<CategoryEdit>({ id: null, name: '', parent: 'root', position: 0 });
+  const [edit, setEdit] = useState<CategoryEdit>({ id: null, name: '', position: 0 });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const categoryMode = kind === 'categories';
   const noun = categoryMode ? '分类' : '标签';
   const rows = categoryMode ? categoryRows(categories).map(row => ({ ...row.category, depth: row.depth })) : tags.map(tag => ({ ...tag, depth: 0 }));
-  const descendants = new Set<string>();
-  function collect(id: string) { descendants.add(id); categories.filter(category => category.parent_id === id).forEach(category => collect(category.id)); }
-  if (edit.id && categoryMode) collect(edit.id);
   async function run(action: () => Promise<unknown>, success: string) {
     if (busy) return;
     setBusy(true); setError('');
-    try { await action(); changed(); toast.success(success); setEdit({ id: null, name: '', parent: 'root', position: 0 }); }
+    try { await action(); changed(); toast.success(success); setEdit({ id: null, name: '', position: 0 }); }
     catch (reason) { setError(errorText(reason)); }
     finally { setBusy(false); }
   }
   return <Dialog open onOpenChange={open => { if (!open && !busy) close(); }}><DialogContent showCloseButton={!busy} className="library-organization-dialog" onEscapeKeyDown={event => { if (busy) event.preventDefault(); }} onInteractOutside={event => { if (busy) event.preventDefault(); }}>
-    <DialogHeader><DialogTitle>管理{noun}</DialogTitle><DialogDescription className="sr-only">新建、修改和删除{noun}</DialogDescription></DialogHeader>
+    <DialogHeader><DialogTitle>管理{noun}</DialogTitle><DialogDescription className="sr-only">{categoryMode ? '修改和删除分类' : '新建、修改和删除标签'}</DialogDescription></DialogHeader>
     <LibraryError message={error} />
-    <form className="library-organization-form" onSubmit={event => {
+    {(!categoryMode || edit.id) && <form className="library-organization-form" onSubmit={event => {
       event.preventDefault(); const name = edit.name.trim(); if (!name) return;
       if (Array.from(name).length > 128) { setError(`${noun}名称最多 128 个字符`); return; }
-      void run(() => categoryMode ? edit.id ? libraryApi.updateCategory(edit.id, name, edit.parent === 'root' ? null : edit.parent, edit.position) : libraryApi.createCategory(name, edit.parent === 'root' ? null : edit.parent) : edit.id ? libraryApi.renameTag(edit.id, name) : libraryApi.createTag(name), `${noun}已${edit.id ? '更新' : '新建'}`);
+      void run(() => categoryMode ? edit.id ? libraryApi.updateCategory(edit.id, name, null, edit.position) : libraryApi.createCategory(name, null) : edit.id ? libraryApi.renameTag(edit.id, name) : libraryApi.createTag(name), `${noun}已${edit.id ? '更新' : '新建'}`);
     }}>
       <label className="library-field">{noun}名称<Input autoFocus value={edit.name} maxLength={256} disabled={busy} onChange={event => setEdit(old => ({ ...old, name: event.target.value }))} /></label>
-      {categoryMode && <><label className="library-field">上级分类<Select value={edit.parent} disabled={busy} onValueChange={parent => setEdit(old => ({ ...old, parent }))}><SelectTrigger aria-label="上级分类"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="root">无上级分类</SelectItem>{categoryRows(categories).filter(({ category }) => !descendants.has(category.id)).map(({ category, depth }) => <SelectItem key={category.id} value={category.id}>{'　'.repeat(depth)}{category.name}</SelectItem>)}</SelectContent></Select></label>
-      {edit.id && <label className="library-field">排序<Input type="number" min={0} step={1} value={edit.position} disabled={busy} onChange={event => setEdit(old => ({ ...old, position: Number(event.target.value) }))} /></label>}</>}
-      <div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || !edit.name.trim() || !Number.isSafeInteger(edit.position) || edit.position < 0}>{busy ? <Spinner /> : <Plus />}{edit.id ? '保存修改' : `新建${noun}`}</Button>{edit.id && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => { setEdit({ id: null, name: '', parent: 'root', position: 0 }); setError(''); }}>取消修改</Button>}</div>
-    </form>
+      <div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || !edit.name.trim() || !Number.isSafeInteger(edit.position) || edit.position < 0}>{busy ? <Spinner /> : <Plus />}{edit.id ? '保存修改' : `新建${noun}`}</Button>{edit.id && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => { setEdit({ id: null, name: '', position: 0 }); setError(''); }}>取消修改</Button>}</div>
+    </form>}
     <ul className="library-organization-list" aria-label={`${noun}管理列表`}>{rows.length ? rows.map(row => <li key={row.id}>
       <span className="min-w-0 flex-1 truncate" style={{ paddingInlineStart: row.depth * 12 }} title={row.name}>{row.name}</span>
-      <Button size="icon-sm" variant="ghost" aria-label={`修改${noun} ${row.name}`} disabled={busy} onClick={() => { setError(''); const category = categories.find(item => item.id === row.id); setEdit({ id: row.id, name: row.name, parent: category?.parent_id ?? 'root', position: category?.position ?? 0 }); }}><Pencil /></Button>
+      <Button size="icon-sm" variant="ghost" aria-label={`修改${noun} ${row.name}`} disabled={busy} onClick={() => { setError(''); const category = categories.find(item => item.id === row.id); setEdit({ id: row.id, name: row.name, position: category?.position ?? 0 }); }}><Pencil /></Button>
       <Button size="icon-sm" variant="ghost" aria-label={`删除${noun} ${row.name}`} disabled={busy} onClick={() => void run(() => categoryMode ? libraryApi.deleteCategory(row.id) : libraryApi.deleteTag(row.id), `${noun}已删除`)}><Trash2 /></Button>
     </li>) : <li className="text-muted-foreground">暂无{noun}</li>}</ul>
     <DialogFooter><Button variant="outline" disabled={busy} onClick={close}>完成</Button></DialogFooter>

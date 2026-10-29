@@ -51,6 +51,7 @@ impl Server {
             .context("IPC_BIND_FAILED")?;
         let endpoint = listener.endpoint().to_owned();
         let (stop, mut stopping) = watch::channel(false);
+        let stop_on_exit = stop.clone();
         let task = tokio::spawn(async move {
             let mut listener = listener;
             let mut connections = JoinSet::new();
@@ -67,14 +68,14 @@ impl Server {
                     stream = listener.accept(), if connections.len() < MAX_CONNECTIONS => {
                         match stream {
                             Ok(stream) => {
-                                connections.spawn(serve(stream, core.clone()));
+                                connections.spawn(serve(stream, core.clone(), stopping.clone()));
                             }
                             Err(error) => break Err(error),
                         }
                     }
                 }
             };
-            connections.abort_all();
+            let _ = stop_on_exit.send(true);
             while connections.join_next().await.is_some() {}
             outcome
         });
@@ -194,25 +195,54 @@ fn dispatch(core: &Weak<Core>, frame: &[u8]) -> Value {
     }
 }
 
-async fn serve(stream: impl AsyncRead + AsyncWrite + Unpin, core: Weak<Core>) -> io::Result<()> {
+async fn serve(stream: impl AsyncRead + AsyncWrite + Unpin, core: Weak<Core>, mut stopping: watch::Receiver<bool>) -> io::Result<()> {
     let mut stream = BufReader::new(stream);
     let mut frame = Vec::new();
     loop {
-        let buffer = stream.fill_buf().await?;
+        let buffer = tokio::select! {
+            biased;
+            _ = stopping.wait_for(|stop| *stop) => return Ok(()),
+            result = stream.fill_buf() => result?,
+        };
         if buffer.is_empty() {
             return Ok(());
         }
         let newline = buffer.iter().position(|byte| *byte == b'\n');
         let count = newline.map_or(buffer.len(), |index| index + 1);
         if frame.len() + count > MAX_REQUEST_BYTES {
-            write_response(&mut stream, failure(None, "REQUEST_TOO_LARGE")).await?;
+            tokio::select! {
+                biased;
+                _ = stopping.wait_for(|stop| *stop) => return Ok(()),
+                result = write_response(&mut stream, failure(None, "REQUEST_TOO_LARGE")) => result?,
+            }
             return Ok(());
         }
         frame.extend_from_slice(&buffer[..count]);
         stream.consume(count);
         if newline.is_some() {
-            let response = dispatch(&core, &frame);
-            write_response(&mut stream, response).await?;
+            let audio = serde_json::from_slice::<Request>(&frame).ok().filter(|r| r.method == "mcp_get_audio_excerpt");
+            let response = if let Some(request) = audio {
+                if request.id.is_empty() || request.id.len() > 128 { failure(None, "INVALID_REQUEST") }
+                else if request.version != VERSION { failure(Some(&request.id), "VERSION_UNSUPPORTED") }
+                else if let Some(core) = core.upgrade() {
+                    let cancel = async {
+                        tokio::select! {
+                            _ = stopping.wait_for(|stop| *stop) => {},
+                            _ = stream.fill_buf() => {},
+                        }
+                    };
+                    match core.mcp_audio_excerpt(request.params, cancel).await {
+                        Ok(value) => json!({"version":VERSION,"id":request.id,"result":value}),
+                        Err(error) => failure(Some(&request.id), error.code()),
+                    }
+                } else { failure(Some(&request.id), "SERVICE_UNAVAILABLE") }
+            } else { dispatch(&core, &frame) };
+            if *stopping.borrow() { return Ok(()); }
+            tokio::select! {
+                biased;
+                _ = stopping.wait_for(|stop| *stop) => return Ok(()),
+                result = write_response(&mut stream, response) => result?,
+            }
             frame.clear();
         }
     }

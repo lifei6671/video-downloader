@@ -106,6 +106,10 @@ fn p1a_upgrade_learning_history_clear_and_material_restore_round_trip() {
     prepare();
     let core = open();
     assert_eq!(core.list().len(), 5);
+    // Legacy download records without registered assets follow the new explicit collection flow.
+    for state in core.task_collection_states(&core.list().iter().map(|t| t.id.clone()).collect::<Vec<_>>()).unwrap() {
+        core.set_task_collected(&state.task_id, true).unwrap();
+    }
     let assets = core.search_library(Default::default()).unwrap();
     assert_eq!(assets.items.len(), 2); // The album is not a video asset.
     let asset = assets
@@ -146,7 +150,11 @@ fn p1a_upgrade_learning_history_clear_and_material_restore_round_trip() {
         )
         .unwrap();
     let parent = core.create_library_category(None, "学习").unwrap();
-    let child = core.create_library_category(Some(&parent), "口播").unwrap();
+    let child = library::create_category(&core.inner.lock().unwrap().db, Some(&parent), "口播").unwrap();
+    core.update_library_category(&child, None, "口播资料", 0).unwrap();
+    assert_eq!(library::categories(&core.inner.lock().unwrap().db).unwrap().into_iter().find(|category| category.id == child).unwrap().parent_id.as_deref(), Some(parent.as_str()));
+    assert!(core.library_categories().unwrap().iter().all(|category| category.parent_id.is_none()));
+
     let other = core.create_library_category(None, "制作").unwrap();
     for category in [&child, &other] {
         core.set_library_categories(std::slice::from_ref(&asset), category, true)
@@ -157,7 +165,7 @@ fn p1a_upgrade_learning_history_clear_and_material_restore_round_trip() {
         .unwrap();
     let request = SearchRequest {
         query: "灵感😀 100%_".into(),
-        category_ids: vec![parent],
+        category_ids: vec![child.clone()],
         tag_ids: vec![tag],
         ..Default::default()
     };
@@ -204,6 +212,8 @@ fn p1a_upgrade_learning_history_clear_and_material_restore_round_trip() {
         })
         .unwrap();
     assert_eq!((report.assets, report.documents, report.notes), (2, 3, 1));
+    assert_eq!(library::categories(&restored.inner.lock().unwrap().db).unwrap().into_iter().find(|category| category.id == child).unwrap().parent_id.as_deref(), Some(parent.as_str()));
+
     assert_eq!(
         restored.search_library(request).unwrap().items[0].asset.id,
         asset
@@ -318,8 +328,10 @@ fn typed_core_round_trip_exposes_summaries_and_checks_ownership_and_revisions() 
     let a = seed(&core, root.path(), "one");
     let b = seed(&core, root.path(), "two");
     let parent = core.create_library_category(None, "职场").unwrap();
-    let child = core.create_library_category(Some(&parent), "成长").unwrap();
-    core.update_library_category(&child, Some(&parent), "学习", 2)
+    assert_eq!(core.create_library_category(Some(&parent), "成长").unwrap_err().to_string(), "INVALID_INPUT");
+    let child = core.create_library_category(None, "成长").unwrap();
+    assert_eq!(core.update_library_category(&child, Some(&parent), "学习", 2).unwrap_err().to_string(), "INVALID_INPUT");
+    core.update_library_category(&child, None, "学习", 2)
         .unwrap();
     core.set_library_categories(std::slice::from_ref(&a.asset_id), &child, true)
         .unwrap();
@@ -328,6 +340,7 @@ fn typed_core_round_trip_exposes_summaries_and_checks_ownership_and_revisions() 
     core.set_library_tags(std::slice::from_ref(&a.asset_id), &tag, true)
         .unwrap();
     assert_eq!(core.library_categories().unwrap().len(), 2);
+    assert!(core.library_categories().unwrap().iter().all(|category| category.parent_id.is_none()));
     assert_eq!(core.library_tags().unwrap()[0].name, "故事");
     let doc = core
         .save_library_document(&a.asset_id, "中文口播😀", 0, None)
@@ -507,6 +520,7 @@ fn deleting_through_existing_download_command_invalidates_library_file_state() {
         "bytes":4,"total_bytes":4,"speed_bps":null,"error":null,"path":path,"created_at":1,"completed_at":2,"canceling":false,"download_requested":true
     })).unwrap();
     super::super::publish(&mut core.inner.lock().unwrap(), task, &*core.emit).unwrap();
+    core.set_task_collected("download", true).unwrap();
     let asset_id = core.search_library(SearchRequest::default()).unwrap().items[0]
         .asset
         .id

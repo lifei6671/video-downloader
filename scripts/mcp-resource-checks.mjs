@@ -53,8 +53,10 @@ export async function verifyResources(client, core) {
   assert.equal(asset.documents.items.length, 1);
   await equivalent(`yingqu://assets/asset-a?limit=1&document_cursor=${encodeURIComponent(asset.documents.next_cursor)}`, 'get_asset', { asset_id: 'asset-a', limit: 1, document_cursor: asset.documents.next_cursor });
   await equivalent('yingqu://assets/asset-b', 'get_asset', { asset_id: 'asset-b' });
-  await equivalent('yingqu://assets/archived', 'get_asset', { asset_id: 'archived' });
+
+  await core.request('archive_asset', { asset_id: '中文 +%😀', archived: false });
   await equivalent(`yingqu://assets/${encodeURIComponent('中文 +%😀')}`, 'get_asset', { asset_id: '中文 +%😀' });
+  await core.request('archive_asset', { asset_id: '中文 +%😀', archived: true });
   const doc = await equivalent('yingqu://assets/asset-a/documents/doc-a1?version=1&offset=1&length=3', 'read_transcript', { asset_id: 'asset-a', document_id: 'doc-a1', version: 1, offset: 1, length: 3 });
   assert.equal(doc.content.text, '😀e\u0301');
   await equivalent(`yingqu://assets/asset-a/documents/doc-a1?offset=${doc.content.total_characters}&length=1`, 'read_transcript', { asset_id: 'asset-a', document_id: 'doc-a1', offset: doc.content.total_characters, length: 1 });
@@ -70,6 +72,7 @@ export async function verifyResources(client, core) {
     await assert.rejects(client.callTool({ name: tool, arguments: args }), error => error.code === (resourceCode === -32002 ? -32602 : resourceCode) && error.message.includes(message));
   }
   for (const args of [
+    ['yingqu://assets/archived', 'get_asset', { asset_id: 'archived' }, 'ASSET_NOT_FOUND', -32002],
     ['yingqu://assets/missing', 'get_asset', { asset_id: 'missing' }, 'ASSET_NOT_FOUND', -32002],
     ['yingqu://assets/asset-b/documents/doc-a1', 'read_transcript', { asset_id: 'asset-b', document_id: 'doc-a1' }, 'DOCUMENT_NOT_FOUND', -32002],
     ['yingqu://assets/asset-b/notes/note-a', 'read_note', { asset_id: 'asset-b', note_id: 'note-a' }, 'NOTE_NOT_FOUND', -32002],
@@ -83,7 +86,7 @@ export async function verifyResources(client, core) {
     ['yingqu://assets/asset-a/documents/doc-a1?offset=99999', 'read_transcript', { asset_id: 'asset-a', document_id: 'doc-a1', offset: 99999 }, 'OUT_OF_RANGE'],
     ['yingqu://assets/asset-a/notes/note-a?citation_limit=101', 'read_note', { asset_id: 'asset-a', note_id: 'note-a', citation_limit: 101 }, 'INVALID_INPUT'],
     ['yingqu://assets/asset-a/notes/note-a?citation_offset=99', 'read_note', { asset_id: 'asset-a', note_id: 'note-a', citation_offset: 99 }, 'OUT_OF_RANGE'],
-    ['yingqu://assets/oversize', 'get_asset', { asset_id: 'oversize' }, 'RESPONSE_TOO_LARGE', -32603],
+    ['yingqu://assets/oversize', 'get_asset', { asset_id: 'oversize' }, 'ASSET_NOT_FOUND', -32002],
   ]) await pairedFailure(...args);
   for (const uri of [
     'file:///C:/private', 'http://127.0.0.1/private', 'https://example.invalid', 'yingqu://settings/private',

@@ -3,6 +3,10 @@
 <body><div id="root"></div><script type="module">
 // Explicit browser-only mock of IPC. No download, login or platform request occurs.
 import {api} from '/src/api';
+import {libraryApi} from '/src/lib/library-api';
+libraryApi.subscribe=async()=>()=>{};
+libraryApi.taskCollectionStates=async ids=>ids.map(task_id=>({task_id,asset_id:'asset-'+task_id,collected:false}));
+libraryApi.setTaskCollected=async(task_id,collected)=>({task_id,asset_id:'asset-'+task_id,collected});
 const scenario = new URLSearchParams(location.search).get('scenario') || 'telegram';
 const sourcePlatform = ['author-missing','author-broken','author-results'].includes(scenario) ? 'douyin' : scenario.replace('cached-cover-', '').replace('author-', '');
 const platform = ['douyin','tiktok','youtube'].includes(sourcePlatform) ? sourcePlatform : scenario === 'album' ? 'douyin' : 'telegram';

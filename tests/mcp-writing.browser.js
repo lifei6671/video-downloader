@@ -38,38 +38,7 @@ async page => {
   await page.evaluate(() => window.mcpTest.stop()); await panel.getByText('服务异常', { exact: true }).waitFor();
   check(await writing.isDisabled() && await writing.getAttribute('aria-checked') === 'false', 'failed listener retained write UI');
   results.push({ pendingFailureStaleReadsAndListenerFailure: 'PASS' });
-  await load();
-  await page.evaluate(() => { window.ideasTest.seedAi(); window.topicsTest.seedAi(); });
-  await page.getByRole('button', { name: '工作台', exact: true }).click();
-  await page.getByRole('button', { name: '选题与草稿', exact: true }).click();
-  await page.getByRole('button', { name: 'AI 选题草稿', exact: true }).click();
-  const ideas = page.getByRole('region', { name: '选题与草稿' });
-  await ideas.getByText('AI 创建', { exact: true }).waitFor();
-  await ideas.locator('summary').filter({ hasText: 'synthetic-model' }).click();
-  await ideas.getByText('精确来源原句', { exact: true }).waitFor();
-  await ideas.getByRole('textbox', { name: '自己的草稿', exact: true }).fill('人工修改后的草稿');
-  await ideas.getByRole('button', { name: '保存草稿', exact: true }).click();
-  await page.waitForFunction(() => window.ideasTest.snapshot()[0].idea.revision === 2);
-  await ideas.getByText('AI 创建', { exact: true }).waitFor();
-  await ideas.getByRole('button', { name: '返回知识库', exact: true }).click();
-  await page.getByRole('button', { name: '研究专题', exact: true }).click();
-  await page.getByRole('button', { name: 'AI 研究专题', exact: true }).click();
-  const topics = page.getByRole('region', { name: '研究专题' });
-  await topics.getByText('AI 创建', { exact: true }).waitFor();
-  await topics.locator('summary').filter({ hasText: 'synthetic-model' }).click();
-  await topics.getByText('精确来源原句', { exact: true }).waitFor();
-  results.push({ aiProvenanceCitationsAndManualEditing: 'PASS' });
-  await load();
-  await page.evaluate(() => window.ideasTest.seedAi(true));
-  await page.getByRole('button', { name: '工作台', exact: true }).click();
-  await page.getByRole('button', { name: '选题与草稿', exact: true }).click();
-  await ideas.getByRole('button', { name: 'AI 选题草稿', exact: true }).click();
-  const provenance = ideas.locator('details').filter({ hasText: 'AI 创建' });
-  await provenance.locator('summary').click();
-  check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'long provenance overflowed viewport');
-  const paragraph = provenance.locator('blockquote > p').first();
-  check(await paragraph.evaluate(el => el.clientHeight <= 160 && el.scrollHeight > el.clientHeight), 'long source has no bounded scroll');
-  await page.screenshot({ path: '.local/wb310/long-source-1024.png', fullPage: true });
-  results.push({ longModelAndCitationLayout: 'PASS' });
+  // Topic/idea navigation was retired from the default UI. Their persistence and
+  // provenance remain covered by Core tests; this suite verifies the current permission UI.
   return results;
 }

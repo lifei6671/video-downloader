@@ -12,10 +12,11 @@ async page => {
       if (await page.getByRole('alertdialog').isVisible()) await page.getByRole('button', { name: '放弃修改', exact: true }).click();
     }
     await page.goto('http://127.0.0.1:1420/tests/fixtures/knowledge-library.html?detail=1&writing=1');
-    await page.getByRole('button', { name: '知识库', exact: true }).click();
+    await page.getByRole('button', { name: '素材库', exact: true }).click();
     await page.locator('[data-library-asset=a0]').getByRole('button', { name: /^查看视频资料/ }).click(); await ready();
+    await detail().getByText('历史片段', { exact:true }).click();
   };
-  const create = async () => { await clips().getByRole('button', { name: '收藏片段', exact: true }).click(); await clips().getByRole('button', { name: '标为开始', exact: true }).waitFor({ state: 'visible' }); await page.waitForFunction(() => [...document.querySelectorAll('.library-clips button')].some(b => b.textContent === '标为开始' && !b.disabled)); };
+  const create = async () => { await detail().getByText('历史片段', { exact: true }).evaluate(node => { node.parentElement.open = true; }); await clips().getByRole('button', { name: '收藏片段', exact: true }).click(); await clips().getByRole('button', { name: '标为开始', exact: true }).waitFor({ state: 'visible' }); await page.waitForFunction(() => [...document.querySelectorAll('.library-clips button')].some(b => b.textContent === '标为开始' && !b.disabled)); };
   const fill = async (start, end, title = '开场学习😀') => { await clips().getByRole('textbox', { name: '片段标题', exact: true }).fill(title); await clips().getByRole('textbox', { name: '片段开始时间', exact: true }).fill(start); await clips().getByRole('textbox', { name: '片段结束时间', exact: true }).fill(end); };
   const save = async () => { await clips().getByRole('button', { name: '保存片段', exact: true }).click(); await clips().locator('form').waitFor({ state: 'hidden' }); await ready(); };
   for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
@@ -39,7 +40,9 @@ async page => {
   await load();
   await detail().getByRole('combobox', { name: '文案版本', exact: true }).click(); await page.getByRole('option', { name: 'v1 SenseVoiceSmall', exact: true }).click(); await ready();
   await detail().getByRole('textbox', { name: '识别原文全文', exact: true }).evaluate(el => { el.focus(); el.setSelectionRange(0, 6); el.dispatchEvent(new Event('select', { bubbles: true })); document.dispatchEvent(new Event('selectionchange')); });
+  await detail().getByText('历史片段', { exact:true }).evaluate(node => { node.parentElement.open = false; });
   await detail().getByRole('button', { name: '引用所选文字收藏片段', exact: true }).click();
+  check(await clips().isVisible(), 'citation action left the new draft hidden');
   await page.waitForFunction(() => [...document.querySelectorAll('.library-clips button')].some(b => b.textContent === '标为开始' && !b.disabled));
   await fill('0.2', '1.5', '固定旧文案'); await save();
   await clips().getByRole('button', { name: '查看引用原文 v1', exact: true }).click();
@@ -103,7 +106,7 @@ async page => {
   check(await detail().getByText('片段播放完成', { exact: true }).count() === 0, 'early ended reported success');
   results.push('media-event fault injection: live range shrink and early ended pause/report failure without rewriting clip');
 
-  await load(); await detail().getByRole('tab', { name: '整理稿', exact: true }).click(); await ready();
+  await load(); await detail().getByRole('tab', { name: '整理文案', exact: true }).click(); await ready();
   await detail().getByRole('textbox', { name: '整理稿内容', exact: true }).fill('两份草稿同时保留');
   await create(); await fill('0.2', '0.8', '同时保存的片段');
   await page.getByRole('button', { name: '下载中心', exact: true }).click();

@@ -40,7 +40,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let operation_fixture = std::env::var("YINGQU_WB311_FIXTURE").as_deref() == Ok("1");
-    let (program, args) = if operation_fixture {
+    let av_fixture = std::env::var("YINGQU_AV_FIXTURE").as_deref() == Ok("1");
+    let (program, args) = if av_fixture {
+        let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        (project.join(if cfg!(windows) {".venv/Scripts/python.exe"} else {".venv/bin/python"}).to_string_lossy().into_owned(), vec![project.join("python-engine/bridge.py").to_string_lossy().into_owned()])
+    } else if operation_fixture {
         let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let db = rusqlite::Connection::open(root.join("yingqu.sqlite"))?;
         for (file, name) in [("file-a", "hold-mcp"), ("file-c", "speech")] {
@@ -49,6 +53,10 @@ async fn main() -> anyhow::Result<()> {
         }
         (project.join(if cfg!(windows) {".venv/Scripts/python.exe"} else {".venv/bin/python"}).to_string_lossy().into_owned(), vec![project.join("tests/fixtures/desktop_engine.py").to_string_lossy().into_owned()])
     } else { ("unused-fixture".into(), vec![]) };
+    if av_fixture {
+        let db = rusqlite::Connection::open(root.join("yingqu.sqlite"))?;
+        db.execute("UPDATE asset_documents SET text=?1 WHERE id='doc-rec'", ["你有没有发现，下载了几百个视频，真正要用的时候，一个也找不到？问题不在于收藏得太少，而在于没有把素材变成可检索的线索。先保留原视频与原文，再补一条自己的灵感，最后用分类和标签把它们连接起来。下次创作，先搜索问题，再打开对应素材。"])?;
+    }
     let core = Core::open(
         &root.join("yingqu.sqlite"),
         root.join("downloads"),
@@ -58,19 +66,21 @@ async fn main() -> anyhow::Result<()> {
     )?;
     core.create_library_category(None, "中文灵感😀")?;
     let tag = core.create_library_tag("制作手法")?;
-    core.set_mcp_ipc_enabled(true).await?;
+    core.set_mcp_service_enabled_on_port(true, 0).await?;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
         let request: serde_json::Value = serde_json::from_str(&line)?;
         let result = match request["method"].as_str() {
-            Some("status") => serde_json::to_value(core.mcp_ipc_status().await)?,
+            Some("status") => serde_json::to_value(core.mcp_service_status().await)?,
+            Some("archive_asset") => { core.archive_library_asset(request["params"]["asset_id"].as_str().ok_or_else(||anyhow::anyhow!("fixture asset required"))?, request["params"]["archived"].as_bool().ok_or_else(||anyhow::anyhow!("fixture state required"))?)?; serde_json::json!({"updated":true}) },
+            Some("import_av") if av_fixture => serde_json::to_value(core.import_local_video(root.join("av.mp4")).await?)?,
             Some("write_permission") => { core.set_mcp_write_enabled(request["params"]["enabled"].as_bool().unwrap_or(false)).await?; serde_json::json!({"write_enabled":core.mcp_write_enabled()}) }
             Some("transcription_processes") if operation_fixture => { let marker=root.join("mcp-transcription-started.json"); if marker.exists() { serde_json::from_slice(&std::fs::read(marker)?)? } else { serde_json::Value::Null } },
             Some("private_probe") => {
                 serde_json::json!({"configured":core.settings().profiles.iter().any(|profile|profile.platform == "youtube" && profile.cookie_configured && profile.proxy.as_ref().is_some_and(|proxy|proxy.contains("WB205_SYNTHETIC_PROXY_PASSWORD")))})
             }
-            Some("stop") => serde_json::to_value(core.set_mcp_ipc_enabled(false).await?)?,
-            Some("start") => serde_json::to_value(core.set_mcp_ipc_enabled(true).await?)?,
+            Some("stop") => serde_json::to_value(core.set_mcp_service_enabled(false).await?)?,
+            Some("start") => serde_json::to_value(core.set_mcp_service_enabled_on_port(true, 0).await?)?,
             Some("rename") => {
                 core.rename_library_tag(&tag, "镜头节奏😀")?;
                 serde_json::json!({"renamed":true})

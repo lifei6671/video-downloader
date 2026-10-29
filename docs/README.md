@@ -1,5 +1,7 @@
 # 技术文档
 
+- [轻量素材库与 MCP 视听验收](material-library-validation.md)：主动收藏、范围采样、短音频、收录权限、实际验证与平台缺口。
+
 - [片段收藏与范围播放](asset-clips.md)：WB-303 的版本 / 文件绑定、特殊 MP4 可播放范围、schema v5 与备份 v3，以及 Windows / macOS 验收边界。
 
 - [自媒体工作台、视频知识库与 MCP 技术方案](workbench-knowledge-base-plan.md)：独立资产与文案、分类标签、迁移、MCP 接入及分阶段验收，按阶段实施。
@@ -8,7 +10,8 @@
 - [工作台与知识库实施记录](workbench-knowledge-base-validation.md)：调用路径、隔离验证、平台边界和分批开发证据。
 - [MCP 协议与 SDK 选型验证](mcp-sdk-validation.md)：WB-201 的固定 SDK、双模式 stdio、Windows 客户端连接、复验入口与 macOS 待办。
 - [应用核心本机 IPC](mcp-local-ipc.md)：WB-202 的启停、命名管道 / Unix socket 权限、内部协议 v1、只读白名单与验证边界。
-- [stdio MCP 适配进程](mcp-stdio-adapter.md)：WB-203 的独立入口、SDK 握手、Core IPC 工具映射、退出回收和 macOS 待办。
+- [本机 Streamable HTTP MCP](mcp-streamable-http.md)：固定连接地址、开关及读写授权、SDK 传输、关闭和媒体回收。
+- [HTTP MCP 验证](mcp-http-validation.md)：本轮 Core、SDK、浏览器和原生验证的实际状态。
 - [P1B 七项只读工具](mcp-read-tools.md)：WB-204 的公开 Schema、分页、Unicode 切片、版本 / 修订引用、错误及读取边界。
 - [受限 MCP Resources](mcp-resources.md)：WB-205 的稳定 URI、模板发现、统一读取范围、路径 / 凭据边界及 Tools 兼容路径。
 - [MCP 转录长操作](mcp-transcription-operations.md)：WB-311 的启动 / 查询 / 取消、单并发、权限、断连超时及实际进程回收。

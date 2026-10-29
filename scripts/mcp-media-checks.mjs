@@ -39,7 +39,7 @@ export async function verifyMedia(client, output) {
     const path = join(output, `sdk-image-${index}.png`);
     await writeFile(path, Buffer.from(images[0].data, 'base64')); imageFiles.push(path);
   }
-  const decoder = spawnSync(resolve('.venv/bin/python'), ['-c',
+  const decoder = spawnSync(resolve(process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python'), ['-c',
     'import json,sys; from PIL import Image; print(json.dumps([{"size":Image.open(p).size,"colors":Image.open(p).convert("RGB").getcolors()} for p in sys.argv[1:]]))', ...imageFiles], { encoding: 'utf8' });
   assert.equal(decoder.status, 0, decoder.stderr);
   const decoded = JSON.parse(decoder.stdout);

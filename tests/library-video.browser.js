@@ -7,7 +7,7 @@ async page => {
   const video = () => detail().locator('video');
   const readyDetail = () => page.waitForFunction(() => document.querySelector('.library-asset-detail')?.getAttribute('aria-busy') === 'false');
   const readyVideo = () => page.waitForFunction(() => document.querySelector('.library-asset-detail video')?.readyState >= 2);
-  const load = async () => { await page.goto('http://127.0.0.1:1420/tests/fixtures/knowledge-library.html?detail=1'); await page.getByRole('button', { name: '知识库', exact: true }).click(); await page.waitForFunction(() => document.querySelector('.library-list')?.getAttribute('aria-busy') === 'false'); };
+  const load = async () => { await page.goto('http://127.0.0.1:1420/tests/fixtures/knowledge-library.html?detail=1'); await page.getByRole('button', { name: '素材库', exact: true }).click(); await page.waitForFunction(() => document.querySelector('.library-list')?.getAttribute('aria-busy') === 'false'); };
   const open = async (id = 'a0') => { await page.locator('[data-library-asset="' + id + '"]').getByRole('button', { name: /^查看视频资料/ }).click(); await readyDetail(); };
   const play = async () => { await detail().getByRole('button', { name: /^(播放视频|重新播放)$/ }).click(); };
   const capture = async () => video().evaluate(element => { window.retiredLibraryVideo = element; });
@@ -23,15 +23,15 @@ async page => {
     check(decoded.width === 160 && decoded.height === 90 && decoded.controls && decoded.fit === 'contain', 'landscape decode/controls/contain');
     check(await video().evaluate(v => v.paused && Math.abs(v.volume - 0.3) < 0.01), 'pause/volume failed');
     await capture();
-    await detail().getByRole('combobox', { name: '文件版本' }).click(); await page.getByRole('option', { name: '版本 2：竖屏样本.mp4', exact: true }).click();
+    await page.evaluate(() => window.libraryDetailTest.changeFile('a0', 'f-a0', { path: 'C:\\SyntheticVideos\\竖屏样本.mp4', width: 90, height: 160 }));
     await released(); check(await video().count() === 0, 'file switch kept old media');
     await play(); await readyVideo();
     check(await video().evaluate(v => v.videoWidth === 90 && v.videoHeight === 160 && v.controls && getComputedStyle(v).objectFit === 'contain'), 'portrait H264 decode/fit');
-    check(await page.evaluate(() => window.libraryDetailTest.calls.some(call => call.method === 'playback' && call.assetId === 'a0' && call.fileId === 'portrait')), 'wrong file playback IDs');
+    check(await page.evaluate(() => window.libraryDetailTest.calls.some(call => call.method === 'playback' && call.assetId === 'a0' && call.fileId === 'f-a0')), 'wrong file playback IDs');
     await video().evaluate(v => { v.pause(); });
     await page.screenshot({ path: '.local/wb114-playback-' + width + '.png', animations: 'disabled' });
     await capture(); await page.getByRole('button', { name: '下载中心', exact: true }).click(); await released();
-    await page.getByRole('button', { name: '知识库', exact: true }).click(); await readyDetail();
+    await page.getByRole('button', { name: '素材库', exact: true }).click(); await readyDetail();
     check(await video().count() === 0, 'return navigation started playback automatically');
     await play(); await readyVideo(); await capture();
     await detail().getByRole('button', { name: '返回列表', exact: true }).click(); await released();
@@ -57,7 +57,7 @@ async page => {
   await load(); await open(); await page.evaluate(() => window.libraryDetailTest.mode('missing')); await play();
   await detail().getByText('文件缺失', { exact: true }).waitFor();
   check(await detail().getByRole('button', { name: '播放视频', exact: true }).isDisabled(), 'prepare-time missing source did not refresh file state');
-  check(await detail().getByRole('list', { name: '文案版本摘要' }).isVisible(), 'missing source removed materials');
+  check(await detail().getByRole('textbox', { name: '原始文案内容' }).isVisible(), 'missing source removed saved text');
   await load(); await open(); await play(); await readyVideo(); await capture();
   await page.evaluate(() => window.libraryDetailTest.changeFile('a0', 'f-a0', { missing: true }));
   await detail().getByText('文件缺失', { exact: true }).waitFor(); await released();

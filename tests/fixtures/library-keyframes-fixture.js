@@ -36,8 +36,8 @@ export function installKeyframeFixture({ libraryApi, clone, saved }) {
     const clip = request.kind === 'clip' ? window.libraryDetailTest.clips().find(c => c.id === request.clip_id && c.asset_id === assetId) : null;
     const fileId = clip?.file_id ?? request.file_id, file = fileFor(assetId, fileId);
     if (!file || file.missing) throw 'FILE_MISSING'; if (file.changed) throw 'KEYFRAME_SOURCE_CHANGED';
-    const start = clip?.start_ms ?? request.position_ms, end = clip?.end_ms ?? null;
-    const points = clip ? Array.from({ length: request.count }, (_, i) => start + Math.floor((end - start) * (2 * i + 1) / (2 * request.count))) : [start];
+    const start = clip?.start_ms ?? request.start_ms ?? request.position_ms, end = clip?.end_ms ?? request.end_ms ?? null;
+    const points = end != null ? Array.from({ length: request.count }, (_, i) => start + Math.floor((end - start) * (2 * i + 1) / (2 * request.count))) : [start];
     operation = { id: 'frames-run-' + sequence++, sequence: 1, asset_id: assetId, file_id: fileId, clip_id: clip?.id ?? null,
       state: 'running', completed: 0, total: points.length, canceling: false, error: null, frame_ids: [], points, start, end, source: binding(file) };
     emit();

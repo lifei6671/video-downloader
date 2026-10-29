@@ -37,6 +37,22 @@ fn request(method: &str) -> Value {
 }
 
 #[tokio::test]
+async fn service_stop_interrupts_backpressured_response_writes() {
+    let root = tempfile::tempdir().unwrap(); let core = fixture(root.path());
+    let db = rusqlite::Connection::open(root.path().join("test.sqlite")).unwrap();
+    db.execute("INSERT INTO library_assets(id,title,created_at,updated_at) VALUES('large',?1,1,1)", ["x".repeat(800_000)]).unwrap();
+    let (mut client, server) = tokio::io::duplex(1024);
+    let (stop, stopping) = watch::channel(false);
+    let worker = tokio::spawn(serve(server, Arc::downgrade(&core), stopping));
+    client.write_all(b"{\"version\":1,\"id\":\"test\",\"method\":\"mcp_get_asset\",\"params\":{\"asset_id\":\"large\"}}\n").await.unwrap();
+    let mut first = [0]; client.read_exact(&mut first).await.unwrap();
+    assert!(!worker.is_finished(), "response should exceed the unread duplex buffer");
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), worker).await.unwrap().unwrap().unwrap();
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn additive_writes_require_desktop_permission_and_reset_on_service_restart() {
     let root = tempfile::tempdir().unwrap();
     let core = fixture(root.path());

@@ -14,13 +14,13 @@ packaging = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packaging)
 
 
-def test_missing_helper_is_not_a_valid_install(tmp_path):
+def test_missing_desktop_or_notices_is_not_a_valid_install(tmp_path):
     with pytest.raises(ValueError, match='Missing packaged MCP file'):
         packaging.check_app(tmp_path)
 
 
 def test_mismatched_notices_are_rejected_before_launch(tmp_path):
-    for name in ['yingqu.exe', 'yingqu-mcp.exe', 'yingqu', 'yingqu-mcp']:
+    for name in ['yingqu.exe', 'yingqu']:
         (tmp_path / name).write_text('not executable')
     (tmp_path / 'licenses').mkdir()
     (tmp_path / 'licenses/mcp-licenses.txt').write_text('outdated or incomplete notices')
@@ -31,17 +31,20 @@ def test_mismatched_notices_are_rejected_before_launch(tmp_path):
 def test_nsis_comparison_allows_only_the_expected_main_marker(tmp_path):
     built, installed = tmp_path / 'build', tmp_path / 'installed'
     built.mkdir(); installed.mkdir()
-    (built / 'yingqu-mcp.exe').write_bytes(b'native helper')
-    (installed / 'yingqu-mcp.exe').write_bytes(b'native helper')
     (built / 'yingqu.exe').write_bytes(b'prefix__TAURI_BUNDLE_TYPE_VAR_UNKsuffix')
     (installed / 'yingqu.exe').write_bytes(b'prefix__TAURI_BUNDLE_TYPE_VAR_NSSsuffix')
     packaging.verify_windows_binaries(installed, built, 'yingqu.exe')
     (installed / 'yingqu.exe').write_bytes(b'prefix__TAURI_BUNDLE_TYPE_VAR_NSSchanged')
     with pytest.raises(ValueError, match='beyond the Tauri NSIS marker'):
         packaging.verify_windows_binaries(installed, built, 'yingqu.exe')
-    (installed / 'yingqu-mcp.exe').write_bytes(b'old helper')
-    with pytest.raises(ValueError, match='MCP helper differs'):
-        packaging.verify_windows_binaries(installed, built, 'yingqu.exe')
+
+
+def test_http_mcp_install_does_not_need_a_command_helper(tmp_path):
+    for name in ['yingqu.exe', 'yingqu']:
+        (tmp_path / name).write_bytes(b'isolated synthetic desktop')
+    (tmp_path / 'licenses').mkdir()
+    shutil.copy2(ROOT / 'vendor/mcp-licenses.txt', tmp_path / 'licenses/mcp-licenses.txt')
+    packaging.check_app(tmp_path)
 
 
 @pytest.mark.parametrize('workflow,step', [('ci.yml', 'Build desktop'), ('release.yml', 'Build installer')])

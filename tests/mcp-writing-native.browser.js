@@ -17,7 +17,7 @@ async page => {
   check(!(await invoke('get_mcp_connection')).write_enabled, 'native service implicitly granted write');
   await writing.focus(); await p.keyboard.press('Space'); await panel.getByText('已允许写入', { exact: true }).waitFor();
   check((await invoke('get_mcp_connection')).write_enabled, 'native toggle did not authorize Core');
-  await panel.getByRole('button', { name: '复制配置', exact: true }).click(); await panel.getByText('配置已复制', { exact: true }).waitFor();
+  await panel.getByRole('button', { name: '复制地址', exact: true }).click(); await panel.getByText('地址已复制', { exact: true }).waitFor();
   await p.screenshot({ path: '.local/wb310/native-writing-settings.png', fullPage: true });
   await writing.click(); await panel.getByText('仅允许读取', { exact: true }).waitFor();
   check(!(await invoke('get_mcp_connection')).write_enabled, 'native toggle failed to revoke');

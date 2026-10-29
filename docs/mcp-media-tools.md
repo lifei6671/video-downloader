@@ -1,6 +1,6 @@
 # MCP 片段、采样图片与分析模板
 
-对应 WB-312。复用 rmcp 3.8.0、stdio → 本机 IPC → 同一 Rust Core；新增两个只读工具和三个可选 Prompts，不改变 schema11 / backup9，不自动抽帧、播放、上传、调用模型或写回。Apple Silicon 已完成 SDK、原生连接与获准的合成图片模型验收，见[第 40 批记录](workbench-knowledge-base-validation.md#第-40-批wb-312-片段图片与分析模板)。Windows 为 NOT_RUN，Intel 为 UNAVAILABLE，正式安装包本批未制作。
+对应 WB-312。复用 rmcp 3.8.0、Streamable HTTP → 本机 IPC → 同一 Rust Core；新增两个只读工具和三个可选 Prompts，不改变 schema11 / backup9，不自动抽帧、播放、上传、调用模型或写回。Apple Silicon 已完成 SDK、原生连接与获准的合成图片模型验收，见[第 40 批记录](workbench-knowledge-base-validation.md#第-40-批wb-312-片段图片与分析模板)。Windows 为 NOT_RUN，Intel 为 UNAVAILABLE，正式安装包本批未制作。
 
 ## 读取片段
 
@@ -34,7 +34,7 @@
 - `too_large`：预览处理后仍超过 512 KiB，不能交付；不能仅凭元数据声称看过。
 - `page_budget_exceeded`：该图可单独提供，但本页剩余预算不足。用 limit=1，从该图之前的 cursor 重新读取；不要把原页 next_cursor 当作跳过图片的已读证明。
 
-缺失或变化的源文件不删除历史 PNG，仍可消费已经保存的图片，但来源状态明确保留。大图预览与真实六帧 SDK 结果见[第 41 批记录](workbench-knowledge-base-validation.md#第-41-批wb-313-真实视频学习到创作组合验收)。整段视频、音频、连续运动、转场与声音不在本工具的观察范围。没有新增视频 / 音频传输管线，也不以本地路径或签名地址冒充客户端可消费的媒体。
+缺失或变化的源文件不删除历史 PNG，仍可消费已经保存的图片，但来源状态明确保留。大图预览与真实六帧 SDK 结果见[第 41 批记录](workbench-knowledge-base-validation.md#第-41-批wb-313-真实视频学习到创作组合验收)。整段视频、音频、连续运动、转场与声音不在本工具的观察范围。get_keyframes 本身不传输视频或音频；短音频通过下述独立工具提供，不以本地路径或签名地址冒充客户端可消费的媒体。
 
 ## 分析模板与 Tools 兼容
 
@@ -52,7 +52,7 @@
 
 ## 错误与实际支持
 
-沿用只读工具的 ID、分页、未知字段、Core 关闭和 IPC 大小限制。新增固定领域错误 CLIP_NOT_FOUND、FILE_NOT_FOUND、MEDIA_UNSUPPORTED；语义错误为 RPC -32602，不附带路径或 SQL，错误后连接可继续使用。未知参数由 SDK 拒绝，isError=true。内部失败 / 响应超限仍按既有契约处理。
+沿用只读工具的 ID、分页、未知字段、Core 关闭和 IPC 大小限制。新增固定领域错误 CLIP_NOT_FOUND、FILE_NOT_FOUND、MEDIA_UNSUPPORTED；语义错误为 RPC -32602，不附带路径或 SQL，错误后连接可继续使用。未知参数由 SDK 拒绝，isError=true 且文本固定 INVALID_INPUT，不回显字段和值。内部失败 / 响应超限仍按既有契约处理。
 
 | 实际客户端 | 图片 | 视频 | 音频 | Prompts |
 | --- | --- | --- | --- | --- |
@@ -62,3 +62,21 @@
 | 官方 TS SDK / Codex CLI 0.161.0 / gpt-6.1-sol，第 41 批 | 六张实际采样 PNG 以有标记的 384×216 / 216×384 预览交付；模型收到的图片哈希与 SDK 预览一致，保存原 PNG 不变 | 未发送，未观察 | 未发送，未观察 | 模型仍只用 Tools；不扩写 Prompts 客户端 UI 能力 |
 
 第 40 批模型验收仅在明确授权后使用账号，数据限两张纯色合成 PNG 与合成引用信息；未发送真实视频、账号配置或凭据。纯色识别通过不证明真实作品制作分析的语义质量，WB-313 已另获真实资料授权，完成六张缩小预览、ASR 正文及本轮观察记录的组合验收，见[第 41 批记录](workbench-knowledge-base-validation.md#第-41-批wb-313-真实视频学习到创作组合验收)。复验命令见[开发文档](development.md#wb-312-片段图片与模板验收)。
+
+## 按需范围采样
+
+`start_frame_sampling({asset_id,file_id,start_ms,end_ms,count?})` 使用已收录视频的媒体时间半开区间 `[start_ms,end_ms)`；count 允许 3 / 5 / 9，默认 5。启动要求桌面写授权，立即返回 operation_id。`get_frame_sampling_status({operation_id})` / `cancel_frame_sampling({operation_id})` 只操作当前保留的准确 ID，被后续操作替换的 ID 返回 KEYFRAME_OPERATION_NOT_FOUND。取消需写授权，canceling=true 表示仍在清理，最终状态才表示完成回收。
+
+状态对象包含 asset_id、file_id、区间、requested_ms、state、completed / total、sequence、canceling、error、frame_ids。复用 Core 唯一关键帧 worker、sample_points、PythonBridge、来源指纹、PNG 原子批次和原始 PTS；并发冲突 KEYFRAME_BUSY。范围非法/已知时长外为 KEYFRAME_RANGE_INVALID，源变化为 KEYFRAME_SOURCE_CHANGED，缺文件为 FILE_MISSING。历史 Position、Clip 和备份读取保留。读取真实 PNG 仍使用 get_keyframes；保存图片缺失/源变化状态保留，静帧不能证明连续运动或转场。
+
+## 短音频读取
+
+`get_audio_excerpt({asset_id,file_id,start_ms,end_ms})` 仅接受逻辑 ID 与毫秒半开范围，每次最长 15 秒。检查收录状态、资产文件归属和登记指纹，使用已安装 FFmpeg 生成 WAV / PCM 16-bit / 16 kHz / mono，返回标准 MCP audio 内容块（audio/wav）。结构化元数据包含资产/文件 ID、请求范围、实际范围、format、sample_rate、channels、bits_per_sample、frames、source_changed，不携带本机路径或音频 base64 字段；音频仅在内容块中。
+
+提取保留媒体 PTS，实际区间依据输出首采样与 PCM 帧数计算，可与请求不同；完整精度保留在 frames/sample_rate 中。无音轨 AUDIO_NO_TRACK，超出可用音轨 AUDIO_RANGE_UNAVAILABLE，来源变化 AUDIO_SOURCE_CHANGED，缺文件 FILE_MISSING。参数拒绝越 15 秒、跨资产及未知字段。解码过程前后复核来源和收录状态，临时 WAV 不入库。最大 WAV 484,096 字节，base64 加元数据低于 IPC 1 MiB。
+
+音频有两个并发读取槽，满时 AUDIO_BUSY。使用独立连接，只有音频 IPC 期限为 35 秒，其余仍 5 秒；PythonBridge 25 秒总期限（FFmpeg 20 秒）后先回收实际进程树，再清理临时目录。MCP 请求取消、连接关闭及服务停止传播到解码器，停止也中断未被客户端消费的响应写入，其他连接可处理文本请求。
+
+官方 SDK 接收并解码 WAV 只能证明服务交付；客户端或模型不支持音频时，必须说明未听到声音，改用转录文字分析语义。真实客户端、模型、浏览器、原生应用和安装包证据分开记录于[本轮验收](material-library-validation.md)。
+
+当前传输已切换为[仅本机 HTTP](mcp-streamable-http.md)。本页历史 Apple Silicon / 模型证据不代表 HTTP 版本已完成该平台验收；本轮 Windows SDK、PNG、WAV 和客户端结果见[HTTP 验证](mcp-http-validation.md)。

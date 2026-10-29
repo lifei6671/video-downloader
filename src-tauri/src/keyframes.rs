@@ -13,7 +13,9 @@ use uuid::Uuid;
 pub enum KeyframeRequest {
     Position { file_id: String, position_ms: u64 },
     Clip { clip_id: String, count: u32 },
+    Range { file_id: String, start_ms: u64, end_ms: u64, #[serde(default = "default_count")] count: u32 },
 }
+pub(crate) fn default_count() -> u32 { 5 }
 #[derive(Clone, Debug, Serialize)]
 pub struct KeyframeSnapshot {
     pub id: String,
@@ -21,6 +23,9 @@ pub struct KeyframeSnapshot {
     pub asset_id: String,
     pub file_id: String,
     pub clip_id: Option<String>,
+    pub start_ms: u64,
+    pub end_ms: Option<u64>,
+    pub requested_ms: Vec<u64>,
     pub state: &'static str,
     pub completed: u64,
     pub total: u64,
@@ -58,11 +63,21 @@ impl Core {
         asset: &str,
         request: KeyframeRequest,
     ) -> Result<KeyframeSnapshot> {
+        self.start_keyframes_inner(asset, request, false)
+    }
+    pub(super) fn start_mcp_keyframes(self: &Arc<Self>, asset: &str, request: KeyframeRequest) -> Result<KeyframeSnapshot> {
+        self.start_keyframes_inner(asset, request, true)
+    }
+    fn start_keyframes_inner(self: &Arc<Self>, asset: &str, request: KeyframeRequest, require_mcp_write: bool) -> Result<KeyframeSnapshot> {
         let id = Uuid::new_v4().to_string();
         let mut inner = self.inner.lock().unwrap();
         let (snapshot, source, start, end, points, mut cancellation, done) = {
             if inner.closing {
                 bail!("INVALID_STATE");
+            }
+            if require_mcp_write {
+                if !inner.mcp_write_enabled { bail!("WRITE_DISABLED"); }
+                crate::mcp_read::require_collected(&inner.db, asset)?;
             }
             if inner
                 .keyframe_run
@@ -95,6 +110,13 @@ impl Core {
                         points,
                     )
                 }
+                KeyframeRequest::Range { file_id, start_ms, end_ms, count } => {
+                    if !matches!(count, 3 | 5 | 9) { bail!("KEYFRAME_RANGE_INVALID"); }
+                    let points = library::sample_points(start_ms, end_ms, count)?;
+                    let file = library::asset_file(&inner.db, asset, &file_id)?;
+                    if file.duration_ms.is_some_and(|duration| end_ms > duration) { bail!("KEYFRAME_RANGE_INVALID"); }
+                    (file_id, None, start_ms, Some(end_ms), points)
+                }
             };
             let file = library::asset_file(&inner.db, asset, &file_id)?;
             let source = Source::read(&file.path)?;
@@ -107,6 +129,9 @@ impl Core {
                 asset_id: asset.into(),
                 file_id,
                 clip_id,
+                start_ms: start,
+                end_ms: end,
+                requested_ms: points.clone(),
                 state: "running",
                 completed: 0,
                 total: points.len() as u64,

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 assert(process.argv.length === 2 || (process.argv.length === 3 && process.argv[2] === '--restart'));
 let target;
@@ -34,10 +34,9 @@ try {
   const initial = await invoke('get_mcp_connection');
   assert.equal(initial.status.enabled, false); assert.equal(initial.write_enabled, false);
   const info = await invoke('set_mcp_service_enabled', { enabled: true });
-  const config = JSON.parse(info.configs.json).mcpServers.yingqu;
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['path', 'systemroot', 'windir', 'temp', 'tmp', 'pathext'].includes(key.toLowerCase())));
+  const url = info.status.endpoint; assert(url);
   client = new Client({ name: 'wb311-native-operations', version: '1.0' });
-  await client.connect(new StdioClientTransport({ ...config, env, stderr: 'pipe' }));
+  await client.connect(new StreamableHTTPClientTransport(new URL(url)));
   const call = async (name, args) => (await client.callTool({ name, arguments: args })).structuredContent;
   if (restart) {
     const before = JSON.parse(await readFile(`${folder}/native-operation-data.json`, 'utf8'));

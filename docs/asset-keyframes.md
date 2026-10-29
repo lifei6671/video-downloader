@@ -29,3 +29,9 @@ Source 变化或缺失时已有图片继续可读，并显示来源状态；禁�
 本批没有实现逐帧剪辑、文案同步跟随、画面分析或 MCP 图片读取；后者仍由 WB-312 负责。截图只证明采样位置的画面，不代表已看完连续动作或听过声音。
 
 FFmpeg 行为依据：[命令文档](https://ffmpeg.org/ffmpeg.html)、[showinfo](https://ffmpeg.org/ffmpeg-filters.html#showinfo)。
+
+## 范围采样
+
+KeyframeRequest 新增 `Range { file_id, start_ms, end_ms, count }`，count 3 / 5 / 9，省略为 5；复用 sample_points 的均匀中点规则。无 clip_id 且有 sample_end_ms 的多帧批次按范围规则验证，必须逐一匹配 sample_index / sample_count 和 requested_ms；无终点的 Position 单帧及既有 Clip 规则保持不变。v9 备份沿用原字段，恢复可读取旧批次及新范围批次。
+
+详情“范围采样”显式输入开始秒、结束秒和数量；不随下载或详情打开自动启动。现有当前位置取帧与历史片段操作保留。MCP 按需启动、查询和取消契约见[媒体工具](mcp-media-tools.md)。

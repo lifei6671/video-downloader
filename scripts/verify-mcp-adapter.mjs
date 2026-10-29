@@ -1,37 +1,45 @@
 // WB-203: real adapter + synthetic Core, isolated from all daily profiles.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import {request as httpRequest} from 'node:http';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { verifyLibraryReads } from './mcp-read-checks.mjs';
 import { verifyResources } from './mcp-resource-checks.mjs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { DEFAULT_INHERITED_ENV_VARS, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 import { verifyOperations } from './mcp-operation-checks.mjs';
+import { verifyCollectionScope } from './mcp-scope-checks.mjs';
+const modeArgs = process.argv.slice(2);
+const codexPosition = modeArgs.indexOf('--codex');
+const codexExecutable = codexPosition < 0 ? null : modeArgs.splice(codexPosition, 2)[1];
+const allowAccount = modeArgs.includes('--allow-account');
+if (allowAccount) modeArgs.splice(modeArgs.indexOf('--allow-account'), 1);
+assert(!allowAccount || codexExecutable, '--allow-account requires --codex');
+const scopeMode = modeArgs.length === 1 && modeArgs[0] === '--scope';
+import { verifyAudiovisual } from './mcp-av-checks.mjs';
+const avMode = modeArgs.length === 1 && modeArgs[0] === '--av';
 import { verifyMedia } from './mcp-media-checks.mjs';
-const mediaMode = process.argv.length === 3 && process.argv[2] === '--media';
-const operationMode = process.argv.length === 3 && process.argv[2] === '--operations';
+const mediaMode = modeArgs.length === 1 && modeArgs[0] === '--media';
+const operationMode = modeArgs.length === 1 && modeArgs[0] === '--operations';
 import { verifyWrites } from './mcp-write-checks.mjs';
-const writeMode = process.argv.length === 3 && process.argv[2] === '--writes';
-const resourceMode = process.argv.length === 3 && process.argv[2] === '--resources';
-const fullLibrary = mediaMode || operationMode || writeMode || resourceMode || (process.argv.length === 3 && process.argv[2] === '--library');
-assert(process.argv.length === 2 || fullLibrary, 'Usage: node scripts/verify-mcp-adapter.mjs [--library | --resources | --writes | --operations | --media]');
+const writeMode = modeArgs.length === 1 && modeArgs[0] === '--writes';
+const resourceMode = modeArgs.length === 1 && modeArgs[0] === '--resources';
+const fullLibrary = scopeMode || avMode || mediaMode || operationMode || writeMode || resourceMode || (modeArgs.length === 1 && modeArgs[0] === '--library');
+assert(modeArgs.length === 0 || fullLibrary, 'Usage: node scripts/verify-mcp-adapter.mjs [--library | --resources | --writes | --operations | --media | --av | --scope]');
 import { expectedTools as readTools, allTools as expectedTools } from './mcp-client-checks.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const evidenceRoot = join(root, '.local', mediaMode ? 'wb312' : operationMode ? 'wb311' : writeMode ? 'wb310' : resourceMode ? 'wb205' : fullLibrary ? 'wb204' : 'wb203');
+const evidenceRoot = join(root, '.local', avMode ? 'materials-av' : mediaMode ? 'wb312' : operationMode ? 'wb311' : writeMode ? 'wb310' : resourceMode ? 'wb205' : fullLibrary ? 'wb204' : 'wb203');
 await mkdir(evidenceRoot, { recursive: true });
 const output = await mkdtemp(join(evidenceRoot, 'run-'));
 const profile = join(output, '中文 MCP adapter');
 await mkdir(profile);
 await writeFile(join(profile, 'fixture.json'), JSON.stringify({ purpose: 'wb203-synthetic' }));
-const executable = join(profile, process.platform === 'win32' ? 'yingqu-mcp.exe' : 'yingqu-mcp');
-await copyFile(join(root, 'src-tauri', 'target', 'debug', process.platform === 'win32' ? 'yingqu-mcp.exe' : 'yingqu-mcp'), executable);
 const fixtureExe = join(root, 'src-tauri', 'target', 'debug', 'examples', process.platform === 'win32' ? 'mcp-ipc-fixture.exe' : 'mcp-ipc-fixture');
 const cleanEnv = {
-  ...Object.fromEntries(DEFAULT_INHERITED_ENV_VARS.map(key => [key, ''])),
   ...Object.fromEntries(Object.entries(process.env)
     .filter(([key]) => ['path', 'systemroot', 'windir', 'temp', 'tmp', 'pathext'].includes(key.toLowerCase()))
     .map(([key, value]) => [process.platform === 'win32' ? key.toUpperCase() : key, value])),
@@ -46,7 +54,7 @@ class JsonProcess {
   constructor(label, command, args, fixture = false) {
     this.label = label; this.fixture = fixture; this.wire = []; this.stderr = ''; this.pending = new Map(); this.sequence = 0;
     this.failure = null; this.status = null; this.parseErrors = [];
-    this.proc = spawn(command, args, { windowsHide: true, cwd: profile, env: { ...cleanEnv, ...(fixture ? { YINGQU_WB203_FIXTURE: '1', ...(mediaMode ? { YINGQU_WB312_FIXTURE: '1' } : {}), ...(operationMode ? { YINGQU_WB311_FIXTURE: '1' } : {}), ...(fullLibrary ? { YINGQU_WB204_FIXTURE: '1', ...((resourceMode || mediaMode) ? { YINGQU_WB205_FIXTURE: '1' } : {}) } : {}) } : {}) } });
+    this.proc = spawn(command, args, { windowsHide: true, cwd: profile, env: { ...cleanEnv, ...(fixture ? { YINGQU_WB203_FIXTURE: '1', ...(avMode ? { YINGQU_AV_FIXTURE: '1' } : {}), ...(mediaMode ? { YINGQU_WB312_FIXTURE: '1' } : {}), ...(operationMode ? { YINGQU_WB311_FIXTURE: '1' } : {}), ...(fullLibrary ? { YINGQU_WB204_FIXTURE: '1', ...((resourceMode || mediaMode) ? { YINGQU_WB205_FIXTURE: '1' } : {}) } : {}) } : {}) } });
     this.closed = new Promise(resolve => {
       this.proc.once('close', (code, signal) => { this.status = { code, signal }; this.fail(new Error(`Child closed: ${label}`)); resolve(this.status); });
     });
@@ -102,17 +110,12 @@ class JsonProcess {
   }
 }
 
-async function legacyInitialize(child) {
-  const initialized = await child.request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'wb203-wire-client', version: '0.1.0' } });
-  assert.equal(initialized.result.protocolVersion, '2025-11-25');
-  child.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
-}
 const core = new JsonProcess('core', fixtureExe, [profile], true);
 let endpoint;
 try {
   endpoint = (await core.request('status')).result.endpoint;
   assert(endpoint);
-  const transport = new StdioClientTransport({ command: executable, args: ['--endpoint', endpoint], env: cleanEnv, stderr: 'pipe', cwd: profile });
+  const transport = new StreamableHTTPClientTransport(new URL(endpoint));
   const wire = []; let stderr = '';
   const start = transport.start.bind(transport); const send = transport.send.bind(transport);
   transport.start = async () => {
@@ -121,14 +124,13 @@ try {
     await start();
   };
   transport.send = async message => { wire.push({ direction: 'client', message: structuredClone(message) }); await send(message); };
-  transport.stderr.on('data', data => { stderr += data.toString(); });
   const client = new Client({ name: 'yingqu-wb203-ts-client', version: '0.1.0' });
   try {
     await client.connect(transport, { timeout: 8000 });
     const tools = await client.listTools();
     assert.deepEqual(tools.tools.map(tool => tool.name), expectedTools);
     for (const tool of tools.tools) {
-      assert.equal(tool.annotations.readOnlyHint, readTools.includes(tool.name) || ['get_operation', 'get_clip', 'get_keyframes'].includes(tool.name));
+      assert.equal(tool.annotations.readOnlyHint, readTools.includes(tool.name) || ['get_operation', 'get_clip', 'get_keyframes', 'get_audio_excerpt', 'get_frame_sampling_status'].includes(tool.name));
       assert.equal(tool.inputSchema.additionalProperties, false);
       assert(tool.outputSchema);
       assert(!/"format":"uint(?:32|64)"/.test(JSON.stringify(tool.outputSchema)), 'Nonstandard integer format in public schema');
@@ -147,7 +149,8 @@ try {
     if (operationMode) {
       const extras = [];
       async function extraClient(delayReply = false) {
-        const t = new StdioClientTransport({ command: executable, args: ['--endpoint', endpoint], env: cleanEnv, stderr: 'pipe', cwd: profile });
+        endpoint = (await core.request('status')).result.endpoint;
+        const t = new StreamableHTTPClientTransport(new URL(endpoint));
         if (delayReply) {
           const begin = t.start.bind(t);
           t.start = async () => { const receive = t.onmessage; t.onmessage = message => {
@@ -162,85 +165,67 @@ try {
       finally { await Promise.all(extras.map(c => c.close())); }
     }
     if (writeMode) summary.checks.writes = await verifyWrites(client, core);
-    if (fullLibrary && !writeMode && !operationMode) summary.checks.libraryReads = await verifyLibraryReads(client, core);
+    if (fullLibrary && !writeMode && !operationMode && !avMode) summary.checks.libraryReads = await verifyLibraryReads(client, core);
+    if (avMode) {
+      summary.checks.audiovisual = await verifyAudiovisual(client, core, profile, output);
+      if (codexExecutable) {
+        await core.request('write_permission', { enabled:true });
+        const capturePath=join(output,'codex-capture.json'), expectedPath=join(output,'codex-expected.json');
+        await writeFile(capturePath,JSON.stringify({status:'PASSED',json:JSON.stringify({mcpServers:{yingqu:{url:endpoint}}}),info:{status:{enabled:true,endpoint}}}));
+        await writeFile(expectedPath,JSON.stringify({purpose:'materials-synthetic',...summary.checks.audiovisual}));
+        const checked=spawnSync(process.execPath,[join(root,'scripts/verify-mcp-client.mjs'),resolve(codexExecutable),capturePath,expectedPath,'--materials',...(allowAccount?['--allow-account']:[])],{encoding:'utf8',windowsHide:true,timeout:300000});
+        await writeFile(join(output,'codex-result.log'),checked.stdout??'');
+        await writeFile(join(output,'codex-error.log'),checked.stderr??'');
+        summary.checks.codex={status:checked.status===0?'PASSED':'FAILED',exit:checked.status};
+        await core.request('write_permission', { enabled:false });
+        assert.equal(checked.status,0,'Codex audiovisual check failed; see isolated codex-result.log');
+      }
+    }
     if (mediaMode) summary.checks.media = await verifyMedia(client, output);
     if (resourceMode) summary.checks.resources = await verifyResources(client, core);
+    if (scopeMode) summary.checks.collectionScope = await verifyCollectionScope(client, core);
     summary.checks.officialTypescriptClient = { status: 'PASSED', server: client.getServerVersion(), tools, categories, tags, liveUpdate: true };
   } finally {
     try { await client.close(); }
     finally { await writeFile(join(output, 'typescript.json'), JSON.stringify(wire, null, 2)); await writeFile(join(output, 'typescript.stderr.log'), stderr); }
   }
 
-  const modern = new JsonProcess('modern', executable, ['--endpoint', endpoint]);
-  const meta = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientInfo': { name: 'wb203-modern-client', version: '0.1.0' }, 'io.modelcontextprotocol/clientCapabilities': {} };
-  const discovery = await modern.request('server/discover', { _meta: meta });
+  let modernSequence = 0;
+  const modern = async (method, params) => {
+    const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version':'2026-07-28', 'mcp-method':method }, body: JSON.stringify({jsonrpc:'2.0',id:++modernSequence,method,params}) });
+    const body = await response.text();
+    assert.equal(response.status, 200, body);
+    return JSON.parse(body);
+  };
+  const meta = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientInfo': { name: 'yingqu-http-modern-client', version: '1.0' }, 'io.modelcontextprotocol/clientCapabilities': {} };
+  const discovery = await modern('server/discover', { _meta: meta });
   assert(discovery.result.supportedVersions.includes('2026-07-28'));
-  assert.deepEqual((await modern.request('tools/list', { _meta: meta })).result.tools.map(tool => tool.name), expectedTools);
-  const result = await modern.request('tools/call', { _meta: meta, name: 'list_tags', arguments: {} });
-  assert.equal(result.result.structuredContent.tags[0].name, '镜头节奏😀');
-  assert.equal((await modern.request('tools/list', { _meta: { ...meta, 'io.modelcontextprotocol/protocolVersion': '1900-01-01' } })).error.code, -32022);
-  assert.equal((await modern.request('tools/list', { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' } })).error.code, -32602);
-  if (resourceMode) {
-    const templates = await modern.request('resources/templates/list', { _meta: meta });
-    assert.equal(templates.result.resourceTemplates.length, 3);
-    const resource = await modern.request('resources/read', { _meta: meta, uri: 'yingqu://assets/asset-a/documents/doc-a1?offset=1&length=3' });
-    assert.equal(JSON.parse(resource.result.contents[0].text).content.text, '😀e\u0301');
-    assert.equal(resource.result.ttlMs, 0);
-    assert.equal((await modern.request('resources/read', { _meta: meta, uri: 'file:///private' })).error.message, 'INVALID_RESOURCE_URI');
+  assert.deepEqual((await modern('tools/list', { _meta: meta })).result.tools.map(tool => tool.name), expectedTools);
+  for (const headers of [{origin:'https://evil.invalid'}, {host:'evil.invalid'}, {origin:'null'}]) {
+    const rejected = await new Promise((resolve, reject) => {
+      const request = httpRequest(endpoint, {method:'POST',signal:AbortSignal.timeout(5000),headers:{'content-type':'application/json',accept:'application/json, text/event-stream',...headers}}, response => {
+        let body=''; response.setEncoding('utf8'); response.on('data', chunk=>body+=chunk); response.on('end',()=>resolve({status:response.statusCode,body}));
+      }); request.on('error',reject); request.end('{}');
+    });
+    assert.equal(rejected.status,403, JSON.stringify({headers,body:rejected.body}));
+    assert(!rejected.body.includes(profile));
   }
-  assert.equal((await modern.close()).code, 0);
-  summary.checks.modernHandshake = { status: 'PASSED', protocol: '2026-07-28', eofExit: true };
-
-  const eof = new JsonProcess('legacy-eof', executable, ['--endpoint', endpoint]);
-  await legacyInitialize(eof);
-  assert((await eof.request('tools/list')).result);
-  assert.equal((await eof.close()).code, 0);
-  const earlyEof = new JsonProcess('early-eof', executable, ['--endpoint', endpoint]);
-  assert.equal((await earlyEof.close()).code, 0);
-  assert.equal((await core.request('status')).result.enabled, true);
-  summary.checks.clientDisconnect = { status: 'PASSED', beforeAndAfterInitialize: true, coreRemainsRunning: true };
-
-  const idle = new JsonProcess('idle-core-loss', executable, ['--endpoint', endpoint]);
-  await legacyInitialize(idle);
-  const initializing = new JsonProcess('modern-core-loss', executable, ['--endpoint', endpoint]);
-  // Receiving a valid discovery reply proves the child connected to the Core;
-  // no legacy initialize is sent on this process.
-  assert((await initializing.request('server/discover', { _meta: meta })).result);
+  assert.equal((await fetch(new URL('/private',endpoint))).status,404);
+  summary.checks.httpBoundary = {status:'PASSED', loopbackUrl:endpoint, originHostValidation:true, legacyAndModernProtocol:true};
+  await core.request('write_permission', {enabled:true});
+  const oldEndpoint = endpoint;
   await core.request('stop');
-  for (const child of [idle, initializing]) {
-    assert.equal(child.proc.stdin.writableEnded, false, 'stdin must stay open while the Core disconnects');
-    assert.equal((await child.waitExit()).code, 1);
-    assert.equal(child.stderr.trim(), 'IPC_DISCONNECTED');
-  }
-  const unavailable = new JsonProcess('service-disabled', executable, ['--endpoint', endpoint]);
-  assert.equal((await unavailable.waitExit()).code, 1);
-  assert.equal(unavailable.stderr.trim(), 'IPC_UNAVAILABLE');
-  assert.equal(unavailable.wire.length, 0);
-  summary.checks.serviceDisabled = { status: 'PASSED', idleAndDiscoveryDisconnect: true, openStdinExit: true, noAutomaticRestart: true };
-
-  await core.request('start');
-  const reconnected = new JsonProcess('fresh-connection', executable, ['--endpoint', endpoint]);
-  await legacyInitialize(reconnected);
-  assert((await reconnected.request('tools/call', { name: 'list_categories', arguments: {} })).result.structuredContent.categories.some(category => category.name === '中文灵感😀'));
-  assert.equal((await reconnected.close()).code, 0);
-  const exiting = new JsonProcess('application-exit', executable, ['--endpoint', endpoint]);
-  await legacyInitialize(exiting);
-  assert.equal((await core.close()).code, 0);
-  assert.equal((await exiting.waitExit()).code, 1);
-  assert.equal(exiting.stderr.trim(), 'IPC_DISCONNECTED');
-  const notRunning = new JsonProcess('application-not-running', executable, ['--endpoint', endpoint]);
-  assert.equal((await notRunning.waitExit()).code, 1);
-  assert.equal(notRunning.stderr.trim(), 'IPC_UNAVAILABLE');
-  summary.checks.applicationExit = { status: 'PASSED', freshAdapterAfterReenable: true, noAppLaunch: true };
-
-  const invalid = new JsonProcess('invalid-endpoint', executable, ['--endpoint', 'http://invalid.example/private-token']);
-  assert.equal((await invalid.waitExit()).code, 1);
-  assert.equal(invalid.stderr.trim(), 'INVALID_ENDPOINT');
-  assert(!invalid.stderr.includes('private-token'));
-  const argumentsMissing = new JsonProcess('invalid-args', executable, []);
-  assert.equal((await argumentsMissing.waitExit()).code, 2);
-  assert.equal(argumentsMissing.wire.length, 0);
-  summary.checks.cliAndDiagnostics = { status: 'PASSED', stdoutProtocolOnly: true, staticDiagnostics: true, unicodeExecutablePath: true };
+  await assert.rejects(fetch(oldEndpoint, {signal:AbortSignal.timeout(2000)}));
+  endpoint = (await core.request('start')).result.endpoint;
+  const fresh = new Client({name:'yingqu-http-restart',version:'1.0'});
+  await fresh.connect(new StreamableHTTPClientTransport(new URL(endpoint)));
+  try {
+    assert((await fresh.callTool({name:'list_tags',arguments:{}})).structuredContent.tags.length);
+    await assert.rejects(fresh.callTool({name:'create_category',arguments:{name:'readonly'}}), error => error.message.includes('WRITE_DISABLED'));
+  } finally { await fresh.close(); }
+  await core.close();
+  await assert.rejects(fetch(endpoint, {signal:AbortSignal.timeout(2000)}));
+  summary.checks.applicationExit = {status:'PASSED', stopRevokesOldAddress:true, reenableReadOnly:true};
   summary.status = 'PASSED';
 } catch (error) {
   summary.status = 'FAILED'; summary.error = String(error); throw error;

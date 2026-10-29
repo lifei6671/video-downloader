@@ -20,7 +20,7 @@ export function installLibraryWritingFixture({ api, libraryApi, state, calls, cl
   const summaryNote = n => ({ ...clone(n), body: undefined, citations: undefined, characters: Array.from(n.body).length, citation_count: n.citations.length });
   const readAsset = libraryApi.asset;
   libraryApi.asset = async id => ({ ...await readAsset(id), documents: allDocuments(id).map(d => clone(d.summary)), notes: allNotes(id).map(summaryNote) });
-  let failure = null; let holdRead = false; let holdSave = false; let sequence = 100; let pendingReads = []; let pendingSaves = []; let exportMode = 'success'; let pendingExports = [];
+  let failure = null; let holdRead = false; let holdSave = false; let sequence = 100; let timestamp = 1793000200; const nextTimestamp = () => ++timestamp; let pendingReads = []; let pendingSaves = []; let exportMode = 'success'; let pendingExports = [];
   const fail = method => { if (failure === method) { failure = null; throw method === 'document' || method === 'note' ? 'DATABASE_ERROR' : method === 'export' ? 'IO_ERROR' : 'DATABASE_ERROR'; } };
   const maxEdited = id => Math.max(0, ...allDocuments(id).filter(d => d.summary.kind === 'edited').map(d => d.summary.version));
   const addEdited = (id, text, sourceId) => {
@@ -46,7 +46,7 @@ export function installLibraryWritingFixture({ api, libraryApi, state, calls, cl
     progress: fileId => { const s = snapshots.get(fileId); Object.assign(s, { sequence: s.sequence + 1, phase: 'recognizing', total_segments: 10, completed_segments: 3 }); listeners.forEach(fn => fn(clone(s))); },
     complete: (id, fileId) => {
       const s = snapshots.get(fileId); const version = Math.max(...allDocuments(id).filter(d => d.summary.kind === 'recognized').map(d => d.summary.version)) + 1;
-      const old = documents.get('d-' + id); const next = clone(old); next.summary.id = 'recognition-' + sequence++; next.summary.version = version; next.summary.file_id = fileId; next.text = '新提取的识别原文'; next.source = source(id); documents.set(next.summary.id, next);
+      const old = documents.get('d-' + id); const next = clone(old); next.summary.id = 'recognition-' + sequence++; next.summary.version = version; next.summary.created_at = 1793000200; next.summary.file_id = fileId; next.text = '新提取的识别原文'; next.source = source(id); documents.set(next.summary.id, next);
       Object.assign(s, { sequence: s.sequence + 1, state: 'completed', phase: null, has_result: true }); saved('documents', [id]); listeners.forEach(fn => fn(clone(s)));
     },
   };
@@ -68,13 +68,13 @@ export function installLibraryWritingFixture({ api, libraryApi, state, calls, cl
     calls.push({ method: 'createNote', assetId, input: clone(input) }); fail('createNote');
     if (!input.body.trim()) throw 'INVALID_INPUT';
     for (const c of input.citations ?? []) if (documents.get(c.document_id)?.summary.asset_id !== c.asset_id || !documents.get(c.document_id).text.includes(c.quote)) throw 'INVALID_CITATION';
-    const id = 'note-new-' + sequence++; notes.set(id, { ...clone(input), id, asset_id: assetId, citations: input.citations ?? [], origin: 'human', model_name: null, revision: 1, created_at: 1793000000, updated_at: 1793000000 }); saved('notes', [assetId]); return id;
+    const id = 'note-new-' + sequence++; notes.set(id, { ...clone(input), id, asset_id: assetId, citations: input.citations ?? [], origin: 'human', model_name: null, revision: 1, created_at: nextTimestamp(), updated_at: nextTimestamp() }); saved('notes', [assetId]); return id;
   };
   libraryApi.editNote = async (assetId, id, text, expectedRevision) => {
     calls.push({ method: 'editNote', assetId, id, text, expectedRevision }); fail('editNote'); const note = notes.get(id);
     if (note.revision !== expectedRevision) throw 'NOTE_CONFLICT'; note.body = text; note.revision++; saved('notes', [assetId]);
   };
-  installAnalysisFixture({ libraryApi, notes, clone, saved, fail, calls, waitForSave: async () => { if (holdSave) await new Promise(resolve => pendingSaves.push(resolve)); } });
+  installAnalysisFixture({ libraryApi, notes, clone, saved, fail, calls, nextTimestamp, waitForSave: async () => { if (holdSave) await new Promise(resolve => pendingSaves.push(resolve)); } });
   if (new URLSearchParams(location.search).has('comparison')) installComparisonFixture({ libraryApi, notes, documents, clone, saved, fail, calls, asset });
   libraryApi.exportDocument = async (assetId, documentId) => { calls.push({ method: 'export', assetId, documentId }); fail('export'); if (exportMode === 'hold') await new Promise(resolve => pendingExports.push(resolve)); return exportMode === 'cancel' ? null : 'C:\\SyntheticExports\\文案.txt'; };
   libraryApi.exportContent = async (assetId, selection, format) => { if (selection.kind === 'document' && format === 'txt') return libraryApi.exportDocument(assetId, selection.id); calls.push({method:'exportContent', assetId, selection:clone(selection), format}); fail('export'); if (exportMode === 'hold') await new Promise(resolve => pendingExports.push(resolve)); return exportMode === 'cancel' ? null : 'C:\\SyntheticExports\\已保存内容.' + (format === 'markdown' ? 'md' : format); };
