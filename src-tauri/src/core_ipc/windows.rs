@@ -153,11 +153,9 @@ impl Listener {
 }
 
 #[cfg(test)]
-fn pipe_dacl(stream: &impl AsRawHandle) -> io::Result<String> {
+fn pipe_dacl(stream: &impl AsRawHandle) -> io::Result<LocalAllocation> {
     use windows_sys::Win32::Security::{
-        Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
-        },
+        Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT},
         DACL_SECURITY_INFORMATION,
     };
     let mut descriptor = ptr::null_mut();
@@ -177,28 +175,83 @@ fn pipe_dacl(stream: &impl AsRawHandle) -> io::Result<String> {
     if code != 0 {
         return Err(io::Error::from_raw_os_error(code as i32));
     }
-    let allocation = LocalAllocation(descriptor);
-    let mut text = ptr::null_mut();
-    let mut length = 0;
-    // SAFETY: descriptor is valid; the API allocates the output string.
-    if unsafe {
-        ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            allocation.0,
-            SDDL_REVISION_1,
-            DACL_SECURITY_INFORMATION,
-            &mut text,
-            &mut length,
+    Ok(LocalAllocation(descriptor))
+}
+
+#[cfg(test)]
+fn assert_protected_user_dacl(descriptor: &LocalAllocation, expected_sid: &str) {
+    use windows_sys::Win32::Security::{
+        Authorization::ConvertStringSidToSidW, EqualSid, GetAce, GetSecurityDescriptorControl,
+        GetSecurityDescriptorDacl, ACCESS_ALLOWED_ACE, ACE_HEADER, SE_DACL_PROTECTED,
+    };
+
+    let mut control = 0;
+    let mut revision = 0;
+    // SAFETY: descriptor owns a valid Win32 security descriptor; outputs are writable.
+    assert_ne!(
+        unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) },
+        0,
+        "reading descriptor control: {}",
+        io::Error::last_os_error()
+    );
+    assert_ne!(control & SE_DACL_PROTECTED, 0, "DACL was not protected");
+
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl = ptr::null_mut();
+    // SAFETY: descriptor stays live, and all output pointers are writable.
+    assert_ne!(
+        unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted) },
+        0,
+        "reading DACL: {}",
+        io::Error::last_os_error()
+    );
+    assert!(present != 0 && !dacl.is_null(), "missing DACL");
+    // SAFETY: The non-null DACL is owned by the live descriptor.
+    assert_eq!(unsafe { (*dacl).AceCount }, 1, "unexpected ACEs");
+
+    let mut ace = ptr::null_mut();
+    // SAFETY: The DACL has exactly one ACE; ace is a writable output pointer.
+    assert_ne!(
+        unsafe { GetAce(dacl, 0, &mut ace) },
+        0,
+        "reading ACE: {}",
+        io::Error::last_os_error()
+    );
+    // ACCESS_ALLOWED_ACE_TYPE is 0 in the Win32 ACE_HEADER contract.
+    // SAFETY: GetAce returned a valid ACE with a header in the live descriptor.
+    assert_eq!(
+        unsafe { (*ace.cast::<ACE_HEADER>()).AceType },
+        0,
+        "missing allow ACE"
+    );
+    // SAFETY: The same live ACE header contains the inheritance flags.
+    assert_eq!(
+        unsafe { (*ace.cast::<ACE_HEADER>()).AceFlags },
+        0,
+        "unexpected ACE flags"
+    );
+
+    let expected: Vec<u16> = format!("{expected_sid}\0").encode_utf16().collect();
+    let mut expected_ptr = ptr::null_mut();
+    // SAFETY: expected is terminated UTF-16; the API allocates the output SID.
+    assert_ne!(
+        unsafe { ConvertStringSidToSidW(expected.as_ptr(), &mut expected_ptr) },
+        0,
+        "converting expected SID: {}",
+        io::Error::last_os_error()
+    );
+    let expected = LocalAllocation(expected_ptr);
+    // Compare actual SIDs: SDDL may abbreviate the local Administrator SID as LA.
+    // SAFETY: The verified allow ACE contains a valid SID starting at SidStart;
+    // both the descriptor and the converted expected SID remain live.
+    let equal = unsafe {
+        EqualSid(
+            ptr::addr_of_mut!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart).cast(),
+            expected.0,
         )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    let text_allocation = LocalAllocation(text.cast());
-    // SAFETY: API returns length UTF-16 code units including the terminator.
-    let result =
-        unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(text, length as usize - 1)) };
-    drop(text_allocation);
-    Ok(result)
+    };
+    assert_ne!(equal, 0, "wrong user: expected {expected_sid}");
 }
 
 #[cfg(test)]
@@ -209,21 +262,53 @@ async fn pipe_has_a_protected_dacl_for_only_the_current_user() {
         .await
         .unwrap();
     let descriptor = pipe_dacl(&listener.pending).unwrap();
-    assert!(
-        descriptor.starts_with("D:P"),
-        "DACL was not protected: {descriptor}"
+    assert_protected_user_dacl(&descriptor, &current_user_sid().unwrap());
+}
+
+#[cfg(test)]
+fn dacl_fixture(sddl: &str) -> LocalAllocation {
+    let sddl: Vec<u16> = format!("{sddl}\0").encode_utf16().collect();
+    let mut descriptor = ptr::null_mut();
+    // SAFETY: sddl is terminated UTF-16; the API allocates the output descriptor.
+    assert_ne!(
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        },
+        0,
+        "converting fixture descriptor: {}",
+        io::Error::last_os_error()
     );
-    assert_eq!(
-        descriptor.matches('(').count(),
-        1,
-        "unexpected ACEs: {descriptor}"
-    );
-    assert!(
-        descriptor.contains(&current_user_sid().unwrap()),
-        "wrong user: {descriptor}"
-    );
-    assert!(
-        descriptor.contains("(A;;"),
-        "missing allow ACE: {descriptor}"
-    );
+    LocalAllocation(descriptor)
+}
+
+#[test]
+fn dacl_sid_comparison_accepts_aliases_and_numeric_sids() {
+    for (trustee, expected) in [
+        ("LA", "LA"),
+        ("SY", "S-1-5-18"),
+        ("S-1-5-18", "SY"),
+        ("S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1001"),
+    ] {
+        let descriptor = dacl_fixture(&format!("D:P(A;;FA;;;{trustee})"));
+        assert_protected_user_dacl(&descriptor, expected);
+    }
+}
+
+#[test]
+#[should_panic(expected = "wrong user")]
+fn dacl_sid_comparison_rejects_a_different_user() {
+    let descriptor = dacl_fixture("D:P(A;;FA;;;SY)");
+    assert_protected_user_dacl(&descriptor, "S-1-5-32-544");
+}
+
+#[test]
+#[should_panic(expected = "unexpected ACE flags")]
+fn dacl_check_rejects_inherit_only_access() {
+    let descriptor = dacl_fixture("D:P(A;IO;FA;;;SY)");
+    assert_protected_user_dacl(&descriptor, "S-1-5-18");
 }
