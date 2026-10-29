@@ -10,7 +10,7 @@
 
 - 检测复用 `python-engine/local_tools.py`，实际执行版本命令。FFmpeg 必须可执行；YouTube 的 JavaScript 运行时要求 Deno 2.3+ 或 Node.js 22+，满足其一即可。无法执行、低版本或过期链接按不可用处理。
 - 当前进程 PATH、注册表 PATH、常见工具安装目录的发现保持原样；系统候选后补充应用数据目录 `runtime/ffmpeg`、`runtime/javascript`。后续媒体操作使用同一目录和发现逻辑。
-- 用户点击缺失项才下载：FFmpeg/FFprobe 固定使用上游 `b6.1.1` Release 资产，Windows x64 / macOS Intel 二进制实际版本为 6.1.1，macOS Apple Silicon 为 6.0.0；按平台校验实际版本。Deno 为 2.9.7。其他系统/架构可检测已有工具，但不猜测下载包。
+- 用户点击缺失项才下载：FFmpeg/FFprobe 固定使用上游 `b6.1.1` Release 资产，Windows x64 / macOS Intel 二进制实际版本为 6.1.1，macOS Apple Silicon 为 6.0；按平台校验实际版本。Deno 为 2.9.7。其他系统/架构可检测已有工具，但不猜测下载包。
 - 使用固定 HTTPS 来源、固定大小与 SHA-256，逐跳限制 GitHub 及其 Release/源码域名；不提供镜像、远程脚本、shell 安装器、管理员提权或任意 URL。使用系统代理，不携带平台 Cookie/代理快照。
 - 下载到 Rust 创建的专属暂存目录；真实字节进度经 JSONL/Tauri Channel 返回。每文件先检查大小与 SHA-256，再解压：gzip 有输出上限，zip 只读取固定可执行文件，不整体释放归档路径。
 - 保留上游 LICENSE、FFmpeg 构建说明及 SOURCE.txt。实际运行版本通过后才提交专属目录，完成后重新检测。macOS 对二进制执行本地 ad-hoc 签名；不安装全局包、不改变 PATH、不覆盖系统工具。

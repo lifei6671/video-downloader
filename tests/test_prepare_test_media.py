@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -56,3 +57,28 @@ def test_check_only_reports_missing_dependency_without_installing(tmp_path, monk
     monkeypatch.setattr(media.runtime_dependencies, 'install', lambda *args: pytest.fail('unexpected download'))
     with pytest.raises(RuntimeError, match='Media tests require working ffmpeg, ffprobe'):
         media.prepare(check_only=True)
+
+
+@pytest.mark.parametrize('launch_error', [False, True])
+def test_install_failure_keeps_diagnostics_and_original_error(tmp_path, monkeypatch, capsys, launch_error):
+    monkeypatch.setenv('RUNNER_TEMP', str(tmp_path))
+    monkeypatch.delenv('GITHUB_PATH', raising=False)
+    monkeypatch.setattr(local_tools, 'MANAGED_DIR', None)
+    monkeypatch.setattr(local_tools, 'installed_tool', lambda name: None)
+    def install(tool, stage, emit):
+        prepared = Path(stage) / 'prepared'
+        prepared.mkdir()
+        (prepared / ('ffmpeg.exe' if media.sys.platform == 'win32' else 'ffmpeg')).write_bytes(b'fixture')
+        raise media.runtime_dependencies.DependencyError('DEPENDENCY_VALIDATION_FAILED')
+    def run(args, **kwargs):
+        assert Path(args[0]).is_file() and args[1:] == ['-version']
+        if launch_error:
+            raise OSError('cannot execute fixture')
+        return subprocess.CompletedProcess(args, 2, 'ffmpeg version fixture', 'fixture loader error')
+    monkeypatch.setattr(media.runtime_dependencies, 'install', install)
+    monkeypatch.setattr(media.subprocess, 'run', run)
+    with pytest.raises(media.runtime_dependencies.DependencyError, match='DEPENDENCY_VALIDATION_FAILED'):
+        media.prepare()
+    output = capsys.readouterr().out
+    assert ('cannot execute fixture' if launch_error else 'exit 2\nffmpeg version fixture\nfixture loader error') in output
+    assert not list((tmp_path / 'yingqu-test-media').glob('install-*'))

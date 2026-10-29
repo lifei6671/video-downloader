@@ -122,9 +122,9 @@ def test_install_checks_hash_executes_version_and_becomes_real_resolver_candidat
 
 @pytest.mark.parametrize('platform,version,accepted', [
     ('win32-x64', '6.1.1', True), ('darwin-x64', '6.1.1', True),
-    ('darwin-arm64', '6.0.0', True), ('darwin-arm64', '6.1.1', False),
+    ('darwin-arm64', '6.0', True), ('darwin-arm64', '6.1.1', False),
     ('win32-x64', '6.0.0', False), ('darwin-x64', '6.0.0', False),
-    ('darwin-arm64', '6.0.01', False),
+    ('darwin-arm64', '6.0.0', False), ('darwin-arm64', '6.01', False),
 ])
 def test_fixed_ffmpeg_versions_match_each_platform_payload(isolated, monkeypatch, platform, version, accepted):
     fixture_downloads(monkeypatch, 'ffmpeg', ffmpeg_version=version)

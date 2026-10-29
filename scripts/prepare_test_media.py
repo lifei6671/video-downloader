@@ -1,6 +1,7 @@
 """Prepare existing pinned FFmpeg dependencies for CI media tests."""
 import argparse
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -16,8 +17,22 @@ def prepare(check_only=False):
         root.mkdir(exist_ok=True)
         runtime_dependencies.configure(str(root))
         with tempfile.TemporaryDirectory(prefix='install-', dir=root) as stage:
-            runtime_dependencies.install('ffmpeg', stage,
-                                         lambda event, **data: print(event, data.get('phase', ''), flush=True))
+            try:
+                runtime_dependencies.install('ffmpeg', stage,
+                                             lambda event, **data: print(event, data.get('phase', ''), flush=True))
+            except runtime_dependencies.DependencyError:
+                # Preserve executable diagnostics before TemporaryDirectory removes them.
+                for name in ('ffmpeg', 'ffprobe'):
+                    binary = Path(stage) / 'prepared' / (name + ('.exe' if sys.platform == 'win32' else ''))
+                    if binary.is_file():
+                        try:
+                            result = subprocess.run([str(binary), '-version'], capture_output=True,
+                                                    text=True, errors='replace', timeout=5)
+                            print(f'{name}: exit {result.returncode}\n{result.stdout[:2000]}\n{result.stderr[:2000]}',
+                                  flush=True)
+                        except (OSError, subprocess.SubprocessError) as error:
+                            print(f'{name}: {error}', flush=True)
+                raise
 
     tools = {name: local_tools.installed_tool(name) for name in ('ffmpeg', 'ffprobe')}
     missing = [name for name, path in tools.items() if not path]
