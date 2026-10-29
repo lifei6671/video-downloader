@@ -88,7 +88,7 @@ Pillow 精确锁定并随 sidecar 分发，PyInstaller 一并收集其许可。�
 
 用户明确授权运行依赖页下载缺失工具，替代此前“只检测、不下载”的约束。仅作为应用专属外部工具，不更新内置解析引擎。
 
-- FFmpeg/FFprobe：采用 [eugeneware/ffmpeg-static b6.1.1](https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1) 的 Windows x64 / macOS x64、arm64 gzip 静态构建。SHA-256、压缩大小直接核对该 Release 的公开资产元数据，与 Downvid 固定 manifest 对照一致；没有复用其源码。下载保留各平台 LICENSE、README（包含构建/源码说明），二者亦校验 SHA-256。许可依实际构建的 LGPL/GPL 声明，不将静态构建统一描述为 MIT。资产来源及校验值见 `python-engine/runtime_assets.py`。
+- FFmpeg/FFprobe：采用 [eugeneware/ffmpeg-static b6.1.1](https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1) 的 Windows x64 / macOS x64、arm64 gzip 静态构建。Release 标签与二进制版本分别记录：Windows x64 / macOS x64 为 6.1.1，arm64 为 6.0.0，安装器按平台验证。SHA-256、压缩大小直接核对该 Release 的公开资产元数据，与 Downvid 固定 manifest 对照一致；没有复用其源码。下载保留各平台 LICENSE、README（包含构建/源码说明），二者亦校验 SHA-256。许可依实际构建的 LGPL/GPL 声明，不将静态构建统一描述为 MIT。资产来源及校验值见 `python-engine/runtime_assets.py`。
 - Deno：采用官方 [denoland/deno v2.9.7](https://github.com/denoland/deno/releases/tag/v2.9.7)，按三目标下载 zip，仅提取 deno/deno.exe；固定 Release 资产 digest 和大小。安装时保留同 tag 的 LICENSE.md（MIT，原作者声明），同样固定 SHA-256；SOURCE.txt 记录下载 URL。
 - 下载源只有上述固定 GitHub Release/官方源码地址，无执行远程安装脚本、镜像降级或 PATH 改写。新增工具版本升级须重新核验产物哈希、许可、平台实际执行和本项目媒体接入，不能只更改版本文案。
 

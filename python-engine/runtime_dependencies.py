@@ -19,7 +19,7 @@ import json
 import transcription
 import nano_cuda
 import local_tools
-from runtime_assets import assets
+from runtime_assets import assets, FFMPEG_VERSIONS
 
 
 class DependencyError(Exception):
@@ -216,7 +216,8 @@ def install(tool, staging, emit, variant=None):
                 if signed.returncode:
                     raise DependencyError('DEPENDENCY_VALIDATION_FAILED')
             output = local_tools.tool_output(file, '--version' if name == 'deno' else '-version')
-            pattern = r'^deno 2\.9\.7(?:\s|$)' if name == 'deno' else rf'^{name} version 6\.1\.1(?:\s|$|-)'
+            pattern = (r'^deno 2\.9\.7(?:\s|$)' if name == 'deno' else
+                       rf'^{name} version {re.escape(FFMPEG_VERSIONS[platform_key()])}(?:\s|$|-)')
             if not re.match(pattern, output):
                 raise DependencyError('DEPENDENCY_VALIDATION_FAILED')
         if not reuse_existing:

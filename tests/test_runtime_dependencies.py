@@ -61,13 +61,14 @@ def isolated(monkeypatch, tmp_path):
     return tmp_path
 
 
-def fixture_downloads(monkeypatch, tool, failure=None):
+def fixture_downloads(monkeypatch, tool, failure=None, ffmpeg_version=None):
+    ffmpeg_version = ffmpeg_version or runtime_assets.FFMPEG_VERSIONS[deps.platform_key()]
     suffix = '.exe' if sys.platform == 'win32' else ''
     names = ['ffmpeg', 'ffprobe'] if tool == 'ffmpeg' else ['deno']
     downloads, bodies, requests = [], {}, []
     for name in names:
         filename = name + suffix
-        binary = f'{name} version 6.1.1\n'.encode() if name != 'deno' else b'deno 2.9.7\n'
+        binary = f'{name} version {ffmpeg_version}\n'.encode() if name != 'deno' else b'deno 2.9.7\n'
         if name == 'deno':
             stream = io.BytesIO()
             with zipfile.ZipFile(stream, 'w') as archive:
@@ -117,6 +118,27 @@ def test_install_checks_hash_executes_version_and_becomes_real_resolver_candidat
     else:
         assert local_tools.installed_tool('ffmpeg') == row['path']
         assert local_tools.installed_tool('ffprobe')
+
+
+@pytest.mark.parametrize('platform,version,accepted', [
+    ('win32-x64', '6.1.1', True), ('darwin-x64', '6.1.1', True),
+    ('darwin-arm64', '6.0.0', True), ('darwin-arm64', '6.1.1', False),
+    ('win32-x64', '6.0.0', False), ('darwin-x64', '6.0.0', False),
+    ('darwin-arm64', '6.0.01', False),
+])
+def test_fixed_ffmpeg_versions_match_each_platform_payload(isolated, monkeypatch, platform, version, accepted):
+    fixture_downloads(monkeypatch, 'ffmpeg', ffmpeg_version=version)
+    monkeypatch.setattr(deps, 'platform_key', lambda: platform)
+    stage = isolated / '.install-platform'
+    stage.mkdir()
+    if accepted:
+        result = deps.install('ffmpeg', stage, lambda *_a, **_k: None)
+        assert next(row for row in result['tools'] if row['id'] == 'ffmpeg')['version'] == version
+        assert local_tools.installed_tool('ffprobe')
+    else:
+        with pytest.raises(deps.DependencyError, match='DEPENDENCY_VALIDATION_FAILED'):
+            deps.install('ffmpeg', stage, lambda *_a, **_k: None)
+        assert not (isolated / 'ffmpeg').exists()
 
 
 @pytest.mark.parametrize('failure,code', [('truncated', 'DEPENDENCY_CHECKSUM_MISMATCH'),

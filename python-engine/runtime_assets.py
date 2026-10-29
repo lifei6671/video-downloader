@@ -1,6 +1,8 @@
 """Pinned runtime downloads; provenance and licenses: vendor/UPSTREAM.md."""
 
 FFMPEG_BASE = 'https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/'
+# The release tag is shared, but its Apple Silicon binaries report 6.0.0.
+FFMPEG_VERSIONS = {'win32-x64': '6.1.1', 'darwin-x64': '6.1.1', 'darwin-arm64': '6.0.0'}
 DENO_BASE = 'https://github.com/denoland/deno/releases/download/v2.9.7/'
 # Each tuple is (download size, SHA-256); hashes cover the downloaded archive.
 FFMPEG = {
