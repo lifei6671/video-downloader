@@ -17,6 +17,8 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 pytest 包含 Rust/Python 进程集成测试，必须先构建探针；测试使用隔离 HTTP fixture，不访问真实平台。运行依赖固定 yt-dlp 2026.8.19 与 DTK 5.1.3 白名单切片，协议 v3，具体版本见锁文件。
 
+媒体测试需要可运行的 FFmpeg 与 FFprobe，本地可用 `.venv/Scripts/python.exe scripts/prepare_test_media.py --check` 检查。CI 和 Release 在离线测试前执行 `python scripts/prepare_test_media.py`：优先复用已安装工具，缺少 FFmpeg 时沿用 `runtime_assets.py` 和运行依赖安装器的固定版本、大小及 SHA-256 校验，安装到 `RUNNER_TEMP/yingqu-test-media`，再通过 `GITHUB_PATH` 提供给后续测试。不下载模型，不操作应用资料库；依赖失败直接终止准备步骤，不跳过媒体测试。
+
 ### Windows P1A 隔离原生验收
 
 使用已配置的开发环境和合成视频，不使用日常资料库。先在一个终端运行 `npm run dev`，在另一个 PowerShell 终端执行：

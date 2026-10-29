@@ -67,6 +67,8 @@ jobs:
           & "$pythonDir/python" -m pip install -r python-engine/requirements-dev.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$pythonDir/python" -m pip check
+      - name: Prepare media test dependencies
+        run: python scripts/prepare_test_media.py
       - name: Verify pinned parser slice
         run: python scripts/update_dtk_vendor.py --check
       - name: Offline tests

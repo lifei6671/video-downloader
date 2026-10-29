@@ -4,8 +4,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 fn core(root: &Path, real: bool) -> Arc<Core> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let python = project.join(if cfg!(windows) { ".venv/Scripts/python.exe" } else { ".venv/bin/python" });
+    let check = std::process::Command::new(&python)
+        .arg(project.join("scripts/prepare_test_media.py")).arg("--check").output().unwrap();
+    assert!(check.status.success(), "Media test dependency check failed: {}", String::from_utf8_lossy(&check.stderr));
     Core::open(&root.join("audio.sqlite"), root.join("downloads"),
-        project.join(if cfg!(windows) { ".venv/Scripts/python.exe" } else { ".venv/bin/python" }).to_string_lossy().into(),
+        python.to_string_lossy().into(),
         vec![project.join(if real { "python-engine/bridge.py" } else { "tests/fixtures/desktop_engine.py" }).to_string_lossy().into()], |_| {}).unwrap()
 }
 fn seed(core: &Core, root: &Path, name: &str, real: bool) -> library::ImportedVideo {

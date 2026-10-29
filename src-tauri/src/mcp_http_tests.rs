@@ -83,6 +83,11 @@ fn reaped(started: &Value) {
 }
 #[tokio::test]
 async fn http_disconnect_and_switch_off_reap_audio_processes_and_temporary_files() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let python = project.join(if cfg!(windows) { ".venv/Scripts/python.exe" } else { ".venv/bin/python" });
+    let check = std::process::Command::new(python)
+        .arg(project.join("scripts/prepare_test_media.py")).arg("--check").output().unwrap();
+    assert!(check.status.success(), "Media test dependency check failed: {}", String::from_utf8_lossy(&check.stderr));
     for stop in [false,true] {
         let root = tempfile::tempdir().unwrap(); let (core,item) = core(root.path());
         let url = core.set_mcp_service_enabled_on_port(true,0).await.unwrap().endpoint.unwrap();
