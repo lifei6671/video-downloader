@@ -59,6 +59,9 @@ jobs:
           & "$pythonDir/python" -m pip check
       - name: Prepare media test dependencies
         run: python scripts/prepare_test_media.py
+      - name: Cache cross-platform MCP license sources
+        if: runner.os != 'Windows'
+        run: cargo fetch --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
       - name: Verify pinned parser slice
         run: python scripts/update_dtk_vendor.py --check
       - name: Offline tests
