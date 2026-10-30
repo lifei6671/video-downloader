@@ -1,6 +1,6 @@
 # 运行依赖
 
-2026-10-18 用户授权工具下载，2026-10-23 将语音模型更换为 Fun-ASR-Nano。入口：**系统设置 → 运行依赖**。协议 v3，当前引擎 0.12.0；旧 sidecar 不具备完整能力，必须与应用一起重建分发。
+2026-10-18 用户授权工具下载，2026-10-23 将语音模型更换为 Fun-ASR-Nano。入口：**系统设置 → 运行依赖**。协议 v3，当前分支引擎 0.14.0；旧 sidecar 不具备完整能力，必须与应用一起重建分发。
 
 每次应用启动自动检查一次；前端应用层持有检查结果、错误与正在进行的依赖操作，切换主菜单或设置分类不重新发起检查。自动检查失败后保留错误，由用户点击“重新检测”重试；安装完成后使用后端返回的重新检测结果。仅保留本次运行状态，不将依赖可用状态持久化到下一次启动。
 
@@ -48,3 +48,19 @@ CPU 模型安装在 `<应用数据目录>/runtime/fun-asr-nano/`，CUDA 在 `run
 ## 旧安装保留
 
 原 `runtime/sensevoice/`、`runtime/sensevoice-cuda/` 与 `sensevoice-backend.json` 保留，不自动删除，也不参与新模型可用性判断或后端选择。旧模型不能满足 Nano 依赖，用户需单独下载 Nano；旧文案可继续查看、复制和导出，新提取使用成功安装并选定的 Nano CPU 或 Windows CUDA 版。旧 SenseVoice CUDA 验证见[历史记录](sensevoice-transcription-validation.md)。
+
+
+## 本地预览的跨分支引擎错配修复
+
+2026-10-30 本地预览出现 `ENGINE_PROTOCOL_ERROR`，原因是当前 Rust 要求 `0.14.0`，而忽略目录中的已打包 sidecar 来自其他分支，为 `0.17.0`。依赖检测在握手阶段被拒绝，UI因此只保留独立检测的tdl卡片；不是系统工具或已下载模型丢失。
+
+修改 `scripts/check_packaged_engine.py` 对照 Rust 的 `ENGINE_VERSION` 和 `YTDLP_VERSION`，新增 `scripts/check-desktop-engine.mjs` 与 `package.json` 的 `predesktop:build`，复用项目 `.venv` 和既有资源检查。Windows/macOS分别选择对应解释器和引擎路径，失败阻止后续桌面构建。未修改运行期版本约束来容忍错误产物。
+
+验证：
+
+- 原 `0.17.0` 产物执行 `npm run predesktop:build` 退出1，明确报告预期 `0.14.0`，见 `.local/runtime-engine-stale-check.log`。
+- `.venv/Scripts/python.exe -m PyInstaller --noconfirm --distpath python-engine/dist --workpath python-engine/build python-engine/pyinstaller.spec` 退出0，见 `.local/runtime-engine-rebuild.log`。
+- 重建后 `npm run predesktop:build` 退出0，见 `.local/runtime-engine-preflight.log`；整个新引擎目录复制到 `src-tauri/target/release/video-engine/`，旧生成目录保留于 `.local/runtime-engine-previous-0.17.0/`，未改动用户数据目录。
+- `.venv/Scripts/python.exe scripts/check_packaged_engine.py src-tauri/target/release/video-engine/video-engine.exe` 通过，版本 `0.14.0`、yt-dlp `2026.08.19`。
+- 对release资源中的真实exe发送 `check_dependencies`，使用临时空runtime目录，退出0，返回ffmpeg、javascript、fun-asr-nano三项合法结果。证据 `.local/runtime-engine-detection.json`；空目录中模型未安装属于预期，不代表用户真实模型状态。
+- 独立 CHILD_AGENT 代码审查PASSED，无未解决P0/P1/P2。未操作用户桌面；当前原生页面缓存的失败由用户点击“重新检测”刷新。本次Windows修复不替代macOS和安装包验收。

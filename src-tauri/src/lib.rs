@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod desktop_core;
 pub mod files;
 pub mod naming;

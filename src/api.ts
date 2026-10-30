@@ -14,14 +14,41 @@ export interface ImageMeta { width?: number | null; height?: number | null; qual
 export interface VideoFormat { requires_merge?: boolean; format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
 export interface AuthorProfile { id?: string | null; nickname?: string | null; handle?: string | null; kind: 'user' | 'channel'; avatar_cached?: boolean }
 export interface Video { author_profile?: AuthorProfile; cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
-export interface Task { total_bytes_estimate?: number | null; telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
+export interface Task { asset_id?: string | null; total_bytes_estimate?: number | null; telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
 export interface Profile { http_chunk_size?: number | null; platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
 export interface TdlSettings { enabled: boolean; path: string | null; session_directory?: string | null }
 export interface TdlStatus { path: string; version: string }
 export interface TdlLoginStatus { id: string; phase: 'starting' | 'qr' | 'password' | 'verifying'; qr: boolean[][] | null }
 export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[]; tdl: TdlSettings }
 export interface FilenamePreview { path: string; segments: { text: string; variable: string | null }[] }
+export interface BackupSettings { space_id: string; library_id: string; endpoint: string; bucket: string; prefix: string; role: 'primary' | 'reader'; enabled: boolean; credentials_configured: boolean }
+export interface BackupUpdate { endpoint: string; bucket: string; prefix: string; role: 'primary' | 'reader'; enabled: boolean; credentials?: { access_key_id: string; secret_access_key: string } }
+export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number }; attempt: number; last_error: string | null }
+export interface BackupAsset { asset_id: string; task_id: string | null; metadata: Partial<Video>; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean }
+export interface AssetTranscript { asset_id: string; content_sha256: string | null; text: string; model_revision: string; model_name: string | null; pipeline_revision: string; completed_at: number }
 export const api = {
+  hideAsset: (assetId: string) => invoke<void>('hide_asset_history', { assetId }),
+  releaseAsset: (assetId: string) => invoke<void>('release_local_video', { assetId }),
+  deleteAsset: (spaceId: string, assetId: string) => invoke<void>('delete_asset_and_backup', { spaceId, assetId }),
+  ensureAsset: (assetId: string) => invoke<string>('ensure_local_video', { assetId }),
+  cancelAssetRestore: (assetId: string) => invoke<void>('cancel_asset_restore', { assetId }),
+  assetPlaybackSource: async (assetId: string) => convertFileSrc(await invoke<string>('prepare_asset_playback', { assetId })),
+  playAsset: (assetId: string) => invoke<void>('play_asset', { assetId }),
+  startAssetTranscription: (assetId: string, force = false) => invoke<VideoTranscript>('start_asset_transcription', { assetId, force }),
+  copyAssetTranscript: (assetId: string) => invoke<void>('copy_asset_transcript', { assetId }),
+  exportAssetTranscript: (assetId: string) => invoke<string | null>('export_asset_transcript', { assetId }),
+  backupAssets: (spaceId: string) => invoke<BackupAsset[]>('list_backup_assets', { spaceId }),
+  refreshBackupAssets: (spaceId: string) => invoke<{ imported: number; unchanged: number; rejected: string[] }>('refresh_backup_assets', { spaceId }),
+  assetTranscript: (spaceId: string, assetId: string) => invoke<AssetTranscript | null>('get_asset_transcript', { spaceId, assetId }),
+  assetCover: (spaceId: string, assetId: string) => invoke<ArrayBuffer>('get_asset_cover', { spaceId, assetId }),
+  backupSettings: () => invoke<BackupSettings | null>('get_backup_settings'),
+  saveBackupSettings: (config: BackupUpdate) => invoke<BackupSettings>('save_backup_settings', { config }),
+  backupCredentials: (spaceId: string) => invoke<{ access_key_id: string; secret_access_key: string }>('get_backup_credentials', { spaceId }),
+  testBackupConnection: (config: BackupUpdate) => invoke<void>('test_backup_connection', { config }),
+  backupOperations: () => invoke<BackupOperation[]>('list_backup_operations'),
+  retryBackup: (operationId: string) => invoke<void>('retry_backup_operation', { operationId }),
+  startAssetBackup: (spaceId: string, assetId: string) => invoke<void>('start_asset_backup', { spaceId, assetId }),
+  cancelBackup: (operationId: string) => invoke<void>('cancel_backup_operation', { operationId }),
   transcripts: () => invoke<VideoTranscript[]>('list_video_transcripts'),
   transcript: (taskId: string) => invoke<VideoTranscript | null>('get_video_transcript', {taskId}),
   startTranscription: (taskId: string, force = false) => invoke<VideoTranscript>('start_video_transcription', {taskId, force}),
@@ -128,6 +155,27 @@ const errors: Record<string, string> = {
   UPDATE_NETWORK_ERROR: '无法连接 GitHub，请检查网络或系统代理后重试',
   UPDATE_RATE_LIMITED: 'GitHub 访问受限或请求过于频繁，请稍后重试',
   UPDATE_NO_RELEASE: '未找到正式发行版本，请稍后再试',
+  BACKUP_LOCAL_RELEASED: '本机副本已释放，恢复文件后可重试备份',
+  BACKUP_LOCAL_CHANGED: '本机文件已被替换或修改，请检查后重试',
+  BACKUP_UNSAFE_FILE: '本机路径不是普通文件，未执行删除',
+  BACKUP_SPACE_DISABLED: '备份空间已停用',
+  BACKUP_CLEANUP_PENDING: '远端对象尚未清理完成，请重试',
+  BACKUP_NETWORK_ERROR: '无法连接远端存储，请检查网络后重试',
+  BACKUP_ACCESS_DENIED: '远端存储拒绝访问，请检查凭据和 Bucket 权限',
+  BACKUP_INVALID_ACCESS_KEY: 'Access Key ID 无效，请检查备份设置',
+  BACKUP_SIGNATURE_MISMATCH: '远端认证失败，请检查 Secret Access Key',
+  BACKUP_LIBRARY_NOT_FOUND: '未找到备份库，请检查 Bucket 和前缀',
+  BACKUP_LIBRARY_MISMATCH: '备份库身份不一致，请核对存储空间',
+  BACKUP_WRITER_CHANGED: '主设备身份已变更，请停止写入并检查备份设置',
+  BACKUP_READ_ONLY: '恢复设备仅允许读取远端备份',
+  BACKUP_SPACE_INACTIVE: '此备份空间已停用',
+  BACKUP_CREDENTIALS_MISSING: '请填写备份访问凭据',
+  BACKUP_CHECKSUM_MISMATCH: '远端内容校验失败，请重试或检查主设备备份',
+  BACKUP_OBJECT_NOT_FOUND: '远端文件不存在，请刷新备份列表',
+  BACKUP_ASSET_DELETED: '视频已从云端删除，无法恢复',
+  BACKUP_RATE_LIMITED: '远端请求受限，将稍后重试',
+  BACKUP_SERVICE_UNAVAILABLE: '远端服务暂时不可用，请稍后重试',
+  BACKUP_INVALID_RECORD: '远端记录格式异常，无法导入',
   UPDATE_SERVICE_ERROR: 'GitHub 更新服务暂时不可用，请稍后重试',
   UPDATE_INVALID_RESPONSE: '更新信息格式异常，请稍后重试或查看发行版本',
   UPDATE_INVALID_VERSION: '无法识别当前应用版本，请查看发行版本',

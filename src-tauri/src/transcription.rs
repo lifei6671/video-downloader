@@ -23,7 +23,7 @@ pub struct Source {
     pub mtime_ns: String,
 }
 impl Source {
-    fn read(path: &Path) -> Result<Self> {
+    pub(crate) fn read(path: &Path) -> Result<Self> {
         let path = path.canonicalize().context("FILE_MISSING")?;
         let metadata = path.metadata().context("FILE_MISSING")?;
         if !metadata.is_file() {
@@ -97,8 +97,14 @@ fn load(db: &Connection, id: &str) -> Result<Option<Snapshot>> {
         .transpose()
 }
 fn store(db: &Connection, value: &Snapshot) -> Result<()> {
-    db.execute("INSERT INTO video_transcripts VALUES(?1,?2) ON CONFLICT(task_id) DO UPDATE SET snapshot=excluded.snapshot",
+    let tx = db.unchecked_transaction().context("DATABASE_ERROR")?;
+    tx.execute("INSERT INTO video_transcripts VALUES(?1,?2) ON CONFLICT(task_id) DO UPDATE SET snapshot=excluded.snapshot",
                params![value.task_id, serde_json::to_string(value)?]).context("DATABASE_ERROR")?;
+    // Startup initializes this schema before normal transcript writes.
+    if tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='media_assets')", [], |r| r.get::<_,bool>(0))? {
+        crate::backup::repository::preserve_transcript(&tx, value)?;
+    }
+    tx.commit().context("DATABASE_ERROR")?;
     Ok(())
 }
 pub(super) fn init(db: &Connection) -> Result<()> {
@@ -123,6 +129,26 @@ pub(super) fn init(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn rebind_asset_source(db:&Connection,id:&str,hash:&str,source:&serde_json::Value)->Result<Vec<Snapshot>> {
+    let text:Option<String>=db.query_row("SELECT text FROM asset_transcripts WHERE asset_id=?1 AND content_sha256=?2",params![id,hash],|r|r.get(0)).optional()?;
+    let Some(text)=text else {return Ok(Vec::new());};
+    let mut q=db.prepare("SELECT snapshot FROM video_transcripts WHERE task_id=?1 OR task_id IN (SELECT task_id FROM media_assets WHERE asset_id=?1)")?;
+    let rows=q.query_map([id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;drop(q);
+    let source:Source=serde_json::from_value(source.clone())?;let mut updated=Vec::new();
+    for row in rows {
+        let mut snapshot:Snapshot=serde_json::from_str(&row)?;
+        if let Some(result)=snapshot.result.as_mut().filter(|r|r.text==text) {
+            result.source=source.clone();snapshot.source_changed=false;snapshot.sequence+=1;
+            db.execute("UPDATE video_transcripts SET snapshot=?2 WHERE task_id=?1",params![snapshot.task_id,serde_json::to_string(&snapshot)?])?;updated.push(snapshot);
+        }
+    }
+    if !updated.is_empty() {db.execute("UPDATE asset_transcripts SET source_json=?2 WHERE asset_id=?1",params![id,serde_json::to_string(&source)?])?;}
+    Ok(updated)
+}
+
+fn asset_exists(db:&Connection,id:&str)->Result<bool> {
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM media_assets WHERE asset_id=?)",[id],|r|r.get(0))?)
+}
 impl Core {
     pub fn transcripts(&self) -> Result<Vec<Snapshot>> {
         let inner = self.inner.lock().unwrap();
@@ -150,7 +176,7 @@ impl Core {
     }
     pub fn transcript(&self, id: &str) -> Result<Option<Snapshot>> {
         let inner = self.inner.lock().unwrap();
-        if !inner.tasks.iter().any(|t| t.id == id) {
+        if !inner.tasks.iter().any(|t| t.id == id) && !asset_exists(&inner.db,id)? {
             bail!("TASK_NOT_FOUND");
         }
         let mut value = inner
@@ -169,7 +195,9 @@ impl Core {
         Ok(value)
     }
     pub fn start_transcription(self: &Arc<Self>, id: &str, force: bool) -> Result<Snapshot> {
-        let path = self.playback_path(id)?;
+        let path = if self.list().iter().any(|t|t.id==id) {self.playback_path(id)?} else {
+            self.backup_assets()?.into_iter().find(|a|a.asset_id==id).and_then(|a|a.path).context("FILE_MISSING")?
+        };
         let source = Source::read(&path)?;
         let mut inner = self.inner.lock().unwrap();
         if inner.closing {
@@ -188,6 +216,7 @@ impl Core {
             .tasks
             .iter()
             .any(|t| t.id == id && t.path.as_ref() == Some(&path))
+            && !asset_exists(&inner.db,id)?
         {
             bail!("TASK_NOT_FOUND");
         }
@@ -294,7 +323,7 @@ impl Core {
                     }
                 }
                 value.has_result = value.result.is_some();
-                if inner.tasks.iter().any(|t| t.id == task_id) {
+                if inner.tasks.iter().any(|t| t.id == task_id) || asset_exists(&inner.db,&task_id).unwrap_or(false) {
                     if store(&inner.db, &value).is_err() {
                         value.state = "failed".into(); value.error_code = Some("DATABASE_ERROR".into());
                         // A recognized result is not saved until SQLite commits. Keep
@@ -356,6 +385,11 @@ impl Core {
 }
 
 pub fn export_txt(result: &TranscriptResult, target: &Path) -> Result<()> {
+    export_text(&result.text,Some(&result.source.path),target)
+}
+
+pub fn export_text(text:&str,source:Option<&Path>,target:&Path)->Result<()> {
+    if let Some(source)=source {
     let resolved_target = target
         .parent()
         .context("IO_ERROR")?
@@ -365,26 +399,27 @@ pub fn export_txt(result: &TranscriptResult, target: &Path) -> Result<()> {
     let same_path = if cfg!(windows) {
         resolved_target
             .to_string_lossy()
-            .eq_ignore_ascii_case(&result.source.path.to_string_lossy())
+            .eq_ignore_ascii_case(&source.to_string_lossy())
     } else {
-        resolved_target == result.source.path
+        resolved_target == source
     };
     if same_path {
         bail!("TRANSCRIPTION_EXPORT_SOURCE");
     }
     if target.exists()
-        && result.source.path.exists()
-        && same_file::is_same_file(&result.source.path, target).context("IO_ERROR")?
+        && source.exists()
+        && same_file::is_same_file(source, target).context("IO_ERROR")?
     {
         bail!("TRANSCRIPTION_EXPORT_SOURCE");
+    }
     }
     let parent = target.parent().context("IO_ERROR")?;
     let mut stage = tempfile::NamedTempFile::new_in(parent).context("IO_ERROR")?;
     stage.write_all(b"\xef\xbb\xbf").context("IO_ERROR")?;
     let text = if cfg!(windows) {
-        result.text.replace('\n', "\r\n")
+        text.replace('\n', "\r\n")
     } else {
-        result.text.clone()
+        text.to_owned()
     };
     stage.write_all(text.as_bytes()).context("IO_ERROR")?;
     stage.as_file().sync_all().context("IO_ERROR")?;

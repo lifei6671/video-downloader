@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
     "desktop": "tauri dev --features desktop",
+    "predesktop:build": "node scripts/check-desktop-engine.mjs",
     "desktop:build": "tauri build --features desktop --config src-tauri/tauri.release.conf.json --no-bundle"
   },
   "dependencies": {

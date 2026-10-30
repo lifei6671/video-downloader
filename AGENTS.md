@@ -51,6 +51,7 @@ Before adding complexity for a speculative or vanishingly unlikely race or secur
 - 生产状态来自实际数据；未知值如实展示。保留键盘操作、可见焦点、可访问名称和减少动态效果支持；任务失败原因持续可见，不能仅靠 Toast。
 - 所有可点击的动作都需要有反馈
 - Avoid unnecessary secondary labels and descriptions. Let the layout do the explaining
+- 所有出现title的地方，必须使用tooltip组件实现，且必须考虑组件出现的位置，不能溢出到窗口外部。
 
 ## 6. 验证与交付
 

@@ -35,6 +35,8 @@ pub enum Status {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
+    #[serde(default)]
+    pub asset_id: Option<String>,
     pub revision: u64,
     pub status: Status,
     pub video: Option<Value>,
@@ -169,6 +171,9 @@ struct Active {
     done: watch::Receiver<bool>,
 }
 struct Inner {
+    backup_cancel: watch::Sender<bool>,
+    backup_started: bool,
+    backup_restores: HashMap<String,crate::backup::restore::Shared>,
     db: Connection,
     tasks: Vec<Task>,
     settings: Settings,
@@ -183,6 +188,9 @@ struct Inner {
     tdl_login_control: Option<tdl_bridge::LoginControl>,
 }
 pub struct Core {
+    pub(crate) backup_config_lock: tokio::sync::Mutex<()>,
+    pub(crate) backup_restore_lock: tokio::sync::Mutex<()>,
+    pub(crate) backup_write_lock: tokio::sync::Mutex<()>,
     _instance_lock: std::fs::File,
     inner: Mutex<Inner>,
     program: String,
@@ -258,8 +266,11 @@ fn persist(db: &Connection, task: &Task) -> Result<()> {
     .context("DATABASE_ERROR")?;
     Ok(())
 }
-fn publish(inner: &mut Inner, task: Task, emit: &dyn Fn(TaskEvent)) -> Result<()> {
-    persist(&inner.db, &task)?;
+fn publish(inner: &mut Inner, mut task: Task, emit: &dyn Fn(TaskEvent)) -> Result<()> {
+    let tx = inner.db.transaction().context("DATABASE_ERROR")?;
+    crate::backup::repository::associate(&tx, &mut task)?;
+    persist(&tx, &task)?;
+    tx.commit().context("DATABASE_ERROR")?;
     if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
         *old = task.clone();
     } else {
@@ -301,6 +312,7 @@ impl Core {
             .context("IO_ERROR")?;
         instance_lock.try_lock().context("APP_ALREADY_RUNNING")?;
         let mut db = Connection::open(db_path).context("DATABASE_ERROR")?;
+        db.pragma_update(None, "foreign_keys", true)?;
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);
@@ -320,6 +332,7 @@ impl Core {
         }
         let migrate_cache = parse_cache::init(&db)?;
         transcription::init(&db)?;
+        crate::backup::repository::init(&db)?;
         let settings = settings::load(&db, directory)?;
         let mut tasks = {
             let mut query =
@@ -507,6 +520,13 @@ impl Core {
                 }
             }
         }
+        // Associate metadata only; the enabled backup worker hashes outside startup.
+        for task in &mut tasks {
+            let tx = db.transaction()?;
+            crate::backup::repository::associate(&tx, task)?;
+            persist(&tx, task)?;
+            tx.commit()?;
+        }
         // Clean only recorded task-owned directories; never sweep downloads.
         let staging = {
             let mut query = db.prepare("SELECT task_id,path FROM task_staging")?;
@@ -518,8 +538,14 @@ impl Core {
             cleanup_staging(&db, &id, Path::new(&path))?;
         }
         Ok(Arc::new(Self {
+            backup_config_lock: tokio::sync::Mutex::new(()),
+            backup_restore_lock: tokio::sync::Mutex::new(()),
+            backup_write_lock: tokio::sync::Mutex::new(()),
             _instance_lock: instance_lock,
             inner: Mutex::new(Inner {
+                backup_cancel: watch::channel(false).0,
+                backup_started: false,
+                backup_restores: HashMap::new(),
                 db,
                 tasks,
                 settings,
@@ -553,6 +579,98 @@ impl Core {
                 t
             })
             .collect()
+    }
+
+    pub fn backup_assets(&self) -> Result<Vec<crate::backup::model::Asset>> {
+        crate::backup::repository::list_assets(&self.inner.lock().unwrap().db)
+    }
+
+    pub(crate) fn backup_db<T>(&self, action: impl FnOnce(&Connection)->Result<T>) -> Result<T> {
+        action(&self.inner.lock().unwrap().db)
+    }
+
+    pub fn asset_transcript(&self, id: &str) -> Result<Option<crate::backup::model::AssetTranscript>> {
+        crate::backup::repository::transcript(&self.inner.lock().unwrap().db, id)
+    }
+
+    pub async fn verify_backup_asset(&self, id: &str) -> Result<()> {
+        let (_sender,cancel)=watch::channel(false);
+        self.verify_backup_asset_cancelable(id,cancel).await
+    }
+    pub(crate) async fn verify_backup_asset_cancelable(&self, id: &str, extra:watch::Receiver<bool>) -> Result<()> {
+        let (path, cancel) = {
+            let inner = self.inner.lock().unwrap();
+            let asset = crate::backup::repository::list_assets(&inner.db)?.into_iter().find(|a| a.asset_id == id).context("BACKUP_ASSET_NOT_FOUND")?;
+            (asset.path.context("FILE_MISSING")?, inner.backup_cancel.subscribe())
+        };
+        let (hash, source) = tokio::task::spawn_blocking(move || crate::backup::repository::fingerprint_with_cancel(&path, || *cancel.borrow() || *extra.borrow() || extra.has_changed().is_err())).await??;
+        crate::backup::repository::save_fingerprint(&self.inner.lock().unwrap().db, id, &hash, &source)
+    }
+
+    pub fn start_backup_service(self: &Arc<Self>) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closing || inner.backup_started { return; }
+        inner.backup_started = true;
+        let core = Arc::clone(self);
+        let cancel = inner.backup_cancel.subscribe();
+        inner.workers.push(tokio::spawn(crate::backup::scheduler::run(core, cancel)));
+    }
+    pub(crate) fn backup_cancellation(&self)->watch::Receiver<bool> {self.inner.lock().unwrap().backup_cancel.subscribe()}
+
+    pub async fn ensure_local_video(self:&Arc<Self>,asset_id:&str)->Result<PathBuf> {
+        let mut receiver={
+            let mut inner=self.inner.lock().unwrap();
+            if inner.closing {bail!("CANCELED");}
+            if let Some(shared)=inner.backup_restores.get(asset_id) {shared.result.clone()} else {
+                let (sender,receiver)=watch::channel(None);
+                let (cancel,mut cancellation)=watch::channel(false);
+                inner.backup_restores.insert(asset_id.into(),crate::backup::restore::Shared{result:receiver.clone(),cancel});
+                let core=self.clone();let id=asset_id.to_owned();
+                inner.workers.push(tokio::spawn(async move {
+                    let outcome=tokio::select!{_=cancellation.changed()=>Err(anyhow::anyhow!("CANCELED")),result=crate::backup::restore::ensure_current(&core,&id)=>result}.map_err(|e|e.to_string());
+                    if let Err(error)=&outcome {
+                        let _=core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='blocked',last_error=?2 WHERE asset_id=?1 AND kind='restore' AND state='running'",params![id,error])?;db.execute("UPDATE asset_local_files SET local_state='missing' WHERE asset_id=? AND local_state='restoring'",[&id])?;Ok(())});
+                    }
+                    sender.send_replace(Some(outcome));
+                    core.inner.lock().unwrap().backup_restores.remove(&id);
+                }));receiver
+            }
+        };
+        let result=receiver.wait_for(|r|r.is_some()).await.context("CANCELED")?.clone().context("CANCELED")?;
+        result.map_err(anyhow::Error::msg)
+    }
+
+    pub fn cancel_asset_restore(&self,id:&str)->Result<()> {
+        crate::backup::restore::cancel(self,id)?;
+        if let Some(shared)=self.inner.lock().unwrap().backup_restores.get(id){shared.cancel.send_replace(true);}
+        Ok(())
+    }
+    pub async fn cancel_asset_transcription(&self,id:&str)->Result<()> {
+        let operation={let inner=self.inner.lock().unwrap();inner.transcription.as_ref().filter(|a| a.snapshot.task_id==id || inner.tasks.iter().any(|t|t.id==a.snapshot.task_id && t.asset_id.as_deref()==Some(id))).map(|a|(a.snapshot.task_id.clone(),a.snapshot.operation_id.clone()))};
+        if let Some((task,operation))=operation {self.cancel_transcription(&task,&operation).await?;}
+        Ok(())
+    }
+    pub(crate) fn mark_asset_missing(&self,id:&str)->Result<()> {
+        let mut inner=self.inner.lock().unwrap();
+        let mut tasks:Vec<Task>=inner.tasks.iter().filter(|t|t.asset_id.as_deref()==Some(id)).cloned().collect();
+        let tx=inner.db.unchecked_transaction()?;
+        tx.execute("UPDATE asset_local_files SET local_state='missing',path=NULL WHERE asset_id=?",[id])?;
+        for task in &mut tasks {task.path=None;task.file_missing=true;task.revision+=1;persist(&tx,task)?;}
+        tx.commit()?;
+        for task in tasks {if let Some(old)=inner.tasks.iter_mut().find(|t|t.id==task.id){*old=task.clone();}(self.emit)(TaskEvent::Updated(Box::new(task)));}
+        Ok(())
+    }
+    pub(crate) fn commit_asset_file(&self,id:&str,path:&Path,hash:&str,source:&Value)->Result<()> {
+        let mut inner=self.inner.lock().unwrap();
+        let mut tasks:Vec<Task>=inner.tasks.iter().filter(|t|t.asset_id.as_deref()==Some(id)).cloned().collect();
+        let tx=inner.db.unchecked_transaction()?;
+        tx.execute("UPDATE asset_local_files SET path=?2,bytes=?3,sha256=?4,source_json=?5,local_state='present',verified_at=unixepoch() WHERE asset_id=?1",params![id,path.to_string_lossy(),source["size"].as_i64().context("BACKUP_INVALID_SIZE")?,hash,source.to_string()])?;
+        for task in &mut tasks {task.path=Some(path.to_owned());task.file_missing=false;task.revision+=1;persist(&tx,task)?;}
+        let transcripts=transcription::rebind_asset_source(&tx,id,hash,source)?;
+        tx.commit()?;
+        for snapshot in transcripts {(self.emit)(TaskEvent::Transcription(Box::new(snapshot.summary())));}
+        for task in tasks {if let Some(old)=inner.tasks.iter_mut().find(|t|t.id==task.id){*old=task.clone();}(self.emit)(TaskEvent::Updated(Box::new(task)));}
+        Ok(())
     }
     pub fn settings(&self) -> Settings {
         self.inner.lock().unwrap().settings.clone()
@@ -1027,6 +1145,9 @@ impl Core {
             .collect();
         let tx = inner.db.transaction().context("DATABASE_ERROR")?;
         for id in &ids {
+            tx.execute("INSERT OR IGNORE INTO asset_hidden_history SELECT asset_id FROM media_assets WHERE task_id=?",[id]).context("DATABASE_ERROR")?;
+            tx.execute("UPDATE media_assets SET task_id=NULL WHERE task_id=?", [id])
+                .context("DATABASE_ERROR")?;
             tx.execute("DELETE FROM video_transcripts WHERE task_id=?", [id])
                 .context("DATABASE_ERROR")?;
             tx.execute("DELETE FROM commit_intents WHERE task_id=?", [id])
@@ -1204,6 +1325,7 @@ impl Core {
             settings::snapshot(&inner.settings)?
         };
         let mut task = Task {
+            asset_id: previous.as_ref().and_then(|t| t.asset_id.clone()),
             id: previous
                 .as_ref()
                 .map(|t| t.id.clone())
@@ -1945,6 +2067,7 @@ impl Core {
         let (active, workers) = {
             let mut inner = self.inner.lock().unwrap();
             inner.closing = true;
+            inner.backup_cancel.send_replace(true);
             if let Some(active) = &inner.transcription {
                 let _ = active.cancel.send(true);
             }
@@ -1994,6 +2117,39 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_cancels_an_in_progress_asset_fingerprint() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let path = root.path().join("fingerprint.mp4");
+        std::fs::write(&path, vec![0_u8; 128 * 1024]).unwrap();
+        let cancel = app.inner.lock().unwrap().backup_cancel.subscribe();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (result, finished) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let outcome = tokio::task::spawn_blocking(move || {
+                let started = Mutex::new(Some(started));
+                let checks = std::sync::atomic::AtomicUsize::new(0);
+                crate::backup::repository::fingerprint_with_cancel(&path, || {
+                    // Pause at the second block boundary to make shutdown deterministic.
+                    if checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
+                        started.lock().unwrap().take().unwrap().send(()).unwrap();
+                        while !*cancel.borrow() { std::thread::yield_now(); }
+                    }
+                    *cancel.borrow()
+                })
+            }).await.unwrap();
+            let _ = result.send(outcome.map(|_| ()).map_err(|e|e.to_string()));
+        });
+        app.inner.lock().unwrap().workers.push(worker);
+        ready.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), app.shutdown()).await.unwrap();
+        assert_eq!(finished.await.unwrap().unwrap_err(), "CANCELED");
+        drop(app);
+        let reopened = core(root.path());
+        reopened.shutdown().await;
+    }
 
     #[test]
     fn youtube_speed_samples_aggregate_bytes_instead_of_resetting_hook_rates() {
@@ -3281,6 +3437,7 @@ mod tests {
         std::fs::write(&target, b"complete").unwrap();
         let mut task = Task {
             id: "recover".into(),
+            asset_id: None,
             revision: 1,
             status: Status::Downloading,
             video: None,

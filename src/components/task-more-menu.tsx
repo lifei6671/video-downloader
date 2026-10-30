@@ -13,11 +13,12 @@ export type CoverMenuActions = {
   copy: () => void;
 };
 
-export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, deleteFile, cancel, transcript, coverActions, children, onOpenChange }: {
+export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, deleteFile, deleteBackup, release, cancel, transcript, backupActions, coverActions, children, onOpenChange }: {
   task: Task;
   children?: ReactNode;
   onOpenChange?: (open: boolean) => void;
   transcript?: { label: string; open: (returnFocus: HTMLElement | null) => void };
+  backupActions?: ReactNode;
   cancel?: (returnFocus: HTMLElement | null) => void;
   coverActions?: CoverMenuActions;
   busy: boolean;
@@ -26,6 +27,8 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
   copyPath: () => void;
   remove: () => void;
   deleteFile: () => void;
+  deleteBackup?: boolean;
+  release?: () => void;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const row = useRef<HTMLDivElement>(null);
@@ -41,6 +44,7 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
   const items = <>
       {hasFile && <Item disabled={busy} onSelect={reveal}><FolderOpen />打开文件夹</Item>}
       {transcript && <Item disabled={busy} onSelect={() => transcript.open(context ? row.current : trigger.current)}><FileText />{transcript.label}</Item>}
+      {backupActions}
       {hasLink && <Item disabled={busy} onSelect={copy}><Copy />复制原链接</Item>}
       {task.status === 'completed' && task.path && task.video?.kind !== 'image_album' && <Item disabled={busy} onSelect={copyPath}><Copy />复制本地地址</Item>}
       {coverActions && <>
@@ -51,8 +55,9 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
       {cancel && <Item disabled={busy || task.canceling} onSelect={() => cancel(context ? row.current : trigger.current)}><X />{task.canceling ? '正在取消…' : '取消下载'}</Item>}
       {removable && (hasFile || hasLink || transcript || coverActions) && <Separator />}
       {removable && <Item disabled={busy} onSelect={remove}><ListX />从列表移除</Item>}
-      {hasFile && <Item variant="destructive" disabled={busy} onSelect={deleteFile}>
-        <Trash2 />{task.video?.kind === 'image_album' ? '删除本地图集' : '删除本地视频'}
+      {hasFile && release && <Item disabled={busy} onSelect={release}><Trash2 />仅释放本机副本</Item>}
+      {(hasFile || deleteBackup) && <Item variant="destructive" disabled={busy} onSelect={deleteFile}>
+        <Trash2 />{task.video?.kind === 'image_album' ? '删除本地图集' : deleteBackup ? '删除视频及备份' : '删除本地视频'}
       </Item>}
   </>;
   if (context) return <ContextMenu onOpenChange={open => {

@@ -1,6 +1,10 @@
 # 技术文档
 
 - [开发、验证与发布](development.md)：源码运行、测试、引擎打包、CI 与标签发布。
+- [视频 S3 备份与按需恢复方案](s3-video-backup-plan.md)：Cloudflare R2、本地优先备份、跨设备元数据恢复、视频懒加载与删除联动设计草案。
+- [S3 备份实施任务](s3-backup-implementation.md)：M1–M6 数据、恢复与删除契约。
+- [S3 备份验收记录](s3-backup-validation.md)：离线、浏览器、原生与真实 R2 分开记录。
+- [S3 备份运维与接管](s3-backup-operations.md)：凭据、删除恢复、手动主设备迁移与专用测试。
 - [单视频文案提取](fun-asr-nano.md)：Fun-ASR-Nano CPU / Windows CUDA、模型按需下载、旧结果保留与导出契约。
 - [文案提取验证](nano-cuda-validation.md)：Nano Windows 真实模型、Tauri、回归与跨平台验收边界。
 - [macOS 验证记录](macos-validation.md)：Apple Silicon 安装包、双平台 GUI 下载及正常重启恢复，以及 Intel / 旧系统验收边界。

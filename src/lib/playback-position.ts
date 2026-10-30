@@ -2,7 +2,7 @@ import type { Task } from '@/api';
 
 const key = (id: string) => `yingqu.playback-position.${id}`;
 
-export function readPlaybackPosition(task: Task): number {
+export function readPlaybackPosition(task: Pick<Task, 'id' | 'path' | 'completed_at'>): number {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(key(task.id)) ?? 'null');
     if (!value || typeof value !== 'object') return 0;
@@ -13,7 +13,7 @@ export function readPlaybackPosition(task: Task): number {
   } catch { return 0; }
 }
 
-export function writePlaybackPosition(task: Task, seconds: number) {
+export function writePlaybackPosition(task: Pick<Task, 'id' | 'path' | 'completed_at'>, seconds: number) {
   if (seconds <= 0) localStorage.removeItem(key(task.id));
   else localStorage.setItem(key(task.id), JSON.stringify({ path: task.path, completedAt: task.completed_at, seconds }));
 }

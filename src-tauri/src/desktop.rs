@@ -29,6 +29,96 @@ fn error(error: anyhow::Error) -> String {
         .into()
 }
 #[tauri::command]
+fn hide_asset_history(core:State<AppCore>,asset_id:String)->Result<(),String>{yingqu_core::backup::lifecycle::hide_history(&core,&asset_id).map_err(error)}
+#[tauri::command]
+async fn release_local_video(core:State<'_,AppCore>,asset_id:String)->Result<(),String>{yingqu_core::backup::lifecycle::release(&core,&asset_id).await.map_err(error)}
+#[tauri::command]
+async fn delete_asset_and_backup(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<(),String>{yingqu_core::backup::lifecycle::delete(&core,&space_id,&asset_id).await.map_err(error)}
+#[tauri::command]
+async fn ensure_local_video(core:State<'_,AppCore>,asset_id:String)->Result<String,String>{core.ensure_local_video(&asset_id).await.map(|p|p.to_string_lossy().into_owned()).map_err(error)}
+#[tauri::command]
+fn cancel_asset_restore(core:State<AppCore>,asset_id:String)->Result<(),String>{core.cancel_asset_restore(&asset_id).map_err(error)}
+#[tauri::command]
+async fn prepare_asset_playback(app:tauri::AppHandle,core:State<'_,AppCore>,asset_id:String)->Result<String,String>{
+    let path=core.ensure_local_video(&asset_id).await.map_err(error)?;
+    app.asset_protocol_scope().allow_file(&path).map_err(|_|"PLAYBACK_SOURCE_FAILED".to_string())?;Ok(path.to_string_lossy().into_owned())
+}
+#[tauri::command]
+async fn play_asset(app:tauri::AppHandle,core:State<'_,AppCore>,asset_id:String)->Result<(),String>{
+    let path=yingqu_core::backup::restore::local(&core,&asset_id).await.map_err(error)?.ok_or("FILE_MISSING")?;
+    app.opener().open_path(path.to_string_lossy(),None::<&str>).map_err(|_|"PLAYBACK_OPEN_FAILED".into())
+}
+#[tauri::command]
+async fn start_asset_transcription(core:State<'_,AppCore>,asset_id:String,force:Option<bool>)->Result<yingqu_core::desktop_core::transcription::Snapshot,String>{
+    core.ensure_local_video(&asset_id).await.map_err(error)?;
+    core.start_transcription(&asset_id,force.unwrap_or(false)).map_err(error)
+}
+#[tauri::command]
+fn copy_asset_transcript(app:tauri::AppHandle,core:State<AppCore>,asset_id:String)->Result<(),String>{
+    let value=core.asset_transcript(&asset_id).map_err(error)?.ok_or("TRANSCRIPTION_NOT_FOUND")?;
+    app.clipboard().write_text(value.text).map_err(|_|"CLIPBOARD_ERROR".into())
+}
+#[tauri::command]
+async fn export_asset_transcript(app:tauri::AppHandle,core:State<'_,AppCore>,asset_id:String)->Result<Option<String>,String>{
+    let text=core.asset_transcript(&asset_id).map_err(error)?.ok_or("TRANSCRIPTION_NOT_FOUND")?;
+    let source=core.backup_assets().map_err(error)?.into_iter().find(|a|a.asset_id==asset_id).and_then(|a|a.path);
+    let (tx,rx)=tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("导出视频文案").set_file_name("video-transcript.txt").add_filter("文本文件",&["txt"]).save_file(move |file|{let _=tx.send(file);});
+    let Some(file)=rx.await.map_err(|_|"IO_ERROR")? else {return Ok(None);};let path=file.into_path().map_err(|_|"IO_ERROR")?;
+    yingqu_core::desktop_core::transcription::export_text(&text.text,source.as_deref(),&path).map_err(error)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+#[tauri::command]
+fn list_backup_assets(core:State<AppCore>,space_id:String)->Result<Vec<yingqu_core::backup::reconcile::Entry>,String>{yingqu_core::backup::reconcile::list(&core,&space_id).map_err(error)}
+#[tauri::command]
+async fn refresh_backup_assets(core:State<'_,AppCore>,space_id:String)->Result<yingqu_core::backup::reconcile::Refresh,String>{
+    let client=yingqu_core::backup::settings::client(&core,&space_id).map_err(error)?;
+    yingqu_core::backup::reconcile::refresh(&core,&client).await.map_err(error)
+}
+#[tauri::command]
+async fn get_asset_transcript(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<Option<yingqu_core::backup::model::AssetTranscript>,String>{
+    if let Some(value)=yingqu_core::backup::reconcile::cached_transcript(&core,&space_id,&asset_id).map_err(error)? {return Ok(Some(value));}
+    let client=yingqu_core::backup::settings::client(&core,&space_id).map_err(error)?;
+    yingqu_core::backup::reconcile::transcript(&core,&client,&asset_id).await.map_err(error)
+}
+#[tauri::command]
+async fn get_asset_cover(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<tauri::ipc::Response,String>{
+    let client=yingqu_core::backup::settings::client(&core,&space_id).map_err(error)?;
+    yingqu_core::backup::reconcile::cover(&core,&client,&asset_id).await.map(tauri::ipc::Response::new).map_err(error)
+}
+#[tauri::command]
+fn get_backup_settings(core: State<AppCore>) -> Result<Option<yingqu_core::backup::settings::View>,String> {
+    yingqu_core::backup::settings::get(&core).map_err(error)
+}
+#[tauri::command]
+async fn save_backup_settings(core: State<'_,AppCore>, config: yingqu_core::backup::settings::Update) -> Result<yingqu_core::backup::settings::View,String> {
+    yingqu_core::backup::settings::save(&core,config).await.map_err(error)
+}
+#[tauri::command]
+async fn test_backup_connection(core: State<'_,AppCore>, config: yingqu_core::backup::settings::Update) -> Result<(),String> {
+    yingqu_core::backup::settings::test_draft(&core,config).await.map_err(error)
+}
+#[tauri::command]
+fn get_backup_credentials(core: State<AppCore>, space_id: String) -> Result<yingqu_core::backup::settings::Credentials,String> {
+    yingqu_core::backup::settings::credentials(&core,&space_id,&yingqu_core::backup::settings::SystemVault).map_err(error)
+}
+#[tauri::command]
+fn list_backup_operations(core: State<AppCore>) -> Result<Vec<yingqu_core::backup::scheduler::Operation>,String> {
+    yingqu_core::backup::scheduler::operations(&core).map_err(error)
+}
+#[tauri::command]
+fn retry_backup_operation(core: State<AppCore>, operation_id:String) -> Result<(),String> {
+    yingqu_core::backup::scheduler::retry(&core,&operation_id).map_err(error)
+}
+#[tauri::command]
+fn start_asset_backup(core: State<AppCore>, space_id:String, asset_id:String) -> Result<(),String> {
+    yingqu_core::backup::scheduler::request_upload(&core,&space_id,&asset_id).map_err(error)
+}
+#[tauri::command]
+fn cancel_backup_operation(core: State<AppCore>, operation_id:String) -> Result<(),String> {
+    yingqu_core::backup::scheduler::cancel(&core,&operation_id).map_err(error)
+}
+#[tauri::command]
 fn list_tasks(core: State<AppCore>) -> Vec<Task> {
     core.list()
 }
@@ -353,7 +443,7 @@ fn clear_download_history(
 }
 #[tauri::command]
 async fn delete_local_file(core: State<'_, AppCore>, task_id: String) -> Result<(), String> {
-    core.remove_after_transcription(&task_id, true)
+    yingqu_core::backup::lifecycle::delete_task(&core,&task_id)
         .await
         .map_err(error)
 }
@@ -612,6 +702,8 @@ fn main() {
                     }
                 },
             )?;
+            let backup_core = core.clone();
+            tauri::async_runtime::spawn(async move { backup_core.start_backup_service(); });
             app.manage(core);
             let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出映取", true, None::<&str>)?;
@@ -644,6 +736,9 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            ensure_local_video,cancel_asset_restore,prepare_asset_playback,play_asset,start_asset_transcription,copy_asset_transcript,
+            hide_asset_history,release_local_video,delete_asset_and_backup,export_asset_transcript,list_backup_assets,refresh_backup_assets,get_asset_transcript,get_asset_cover,
+            get_backup_settings,get_backup_credentials,save_backup_settings,test_backup_connection,list_backup_operations,start_asset_backup,retry_backup_operation,cancel_backup_operation,
             list_video_transcripts,
             get_video_transcript,
             start_video_transcription,

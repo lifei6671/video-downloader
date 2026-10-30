@@ -1,14 +1,16 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ExternalLink, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, errorText, type Task } from '@/api';
+import { api, errorText, type Task, type BackupAsset } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { readPlaybackPosition, writePlaybackPosition } from '@/lib/playback-position';
 
-function PlaybackSession({ task, open, close, removedIds }: { task: Task; open: boolean; close: () => void; removedIds: ReadonlySet<string> }) {
+type PlaybackSubject = {id: string; path: string | null; completed_at: number | null; video: {title?: string} | null; asset?: boolean};
+
+function PlaybackSession({ task, open, close, removedIds }: { task: PlaybackSubject; open: boolean; close: () => void; removedIds: ReadonlySet<string> }) {
   const video = useRef<HTMLVideoElement>(null);
   const session = useRef({ active: true, fallback: false, externalPending: false });
   const sourceRequest = useRef<Promise<string> | null>(null);
@@ -50,7 +52,8 @@ function PlaybackSession({ task, open, close, removedIds }: { task: Task; open: 
     releaseVideo();
     setSource(undefined);
     try {
-      await api.play(task.id);
+      if (task.asset) { await api.ensureAsset(task.id); if (!session.current.active) return; await api.playAsset(task.id); }
+      else await api.play(task.id);
       if (session.current.active) {
         toast.info(manual ? '已使用系统播放器打开' : '内置播放不可用，已使用系统播放器打开');
         close();
@@ -91,10 +94,10 @@ function PlaybackSession({ task, open, close, removedIds }: { task: Task; open: 
   useEffect(() => {
     if (!open) return;
     let active = true;
-    sourceRequest.current ??= api.playbackSource(task.id);
+    sourceRequest.current ??= task.asset ? api.assetPlaybackSource(task.id) : api.playbackSource(task.id);
     sourceRequest.current.then(value => {
       if (active && session.current.active && !session.current.fallback) setSource(value);
-    }).catch(() => { if (active) void openExternal(); });
+    }).catch(reason => { if (active) { if (task.asset) { setLoading(false); setFailure(errorText(reason)); } else void openExternal(); } });
     return () => { active = false; };
   }, [task.id, open]);
 
@@ -124,18 +127,19 @@ function PlaybackSession({ task, open, close, removedIds }: { task: Task; open: 
   </>;
 }
 
-export function VideoPlayer({ task, close, returnFocus, fallbackFocus, removedIds }: { task: Task | null; close: () => void; returnFocus: HTMLElement | null; fallbackFocus: () => HTMLElement | null; removedIds: ReadonlySet<string> }) {
+export function VideoPlayer({ task, asset, close, returnFocus, fallbackFocus, removedIds }: { task: Task | null; asset?: BackupAsset | null; close: () => void; returnFocus: HTMLElement | null; fallbackFocus: () => HTMLElement | null; removedIds: ReadonlySet<string> }) {
   const focus = useRef<HTMLElement | null>(null);
-  const lastTask = useRef<Task | null>(null);
-  if (task) { focus.current = returnFocus; lastTask.current = task; }
-  return <Dialog open={!!task} onOpenChange={open => { if (!open) close(); }}>
+  const lastTask = useRef<PlaybackSubject | null>(null);
+  const subject: PlaybackSubject | null = task ?? (asset ? { id: asset.asset_id, path: asset.path, completed_at: null, video: { title: asset.metadata.title }, asset: true } : null);
+  if (subject) { focus.current = returnFocus; lastTask.current = subject; }
+  return <Dialog open={!!subject} onOpenChange={open => { if (!open) close(); }}>
     <DialogContent className="video-player-dialog" onCloseAutoFocus={event => {
       event.preventDefault();
       const target = focus.current;
       (target?.isConnected && !target.closest('[inert]') ? target : fallbackFocus())?.focus({ preventScroll: true });
     }}>
       <DialogHeader className="pr-8"><DialogTitle className="line-clamp-2">{lastTask.current?.video?.title?.trim() || '视频播放'}</DialogTitle><DialogDescription className="sr-only">本地视频播放器</DialogDescription></DialogHeader>
-      {lastTask.current && <PlaybackSession key={lastTask.current.id} task={lastTask.current} open={!!task} close={close} removedIds={removedIds} />}
+      {lastTask.current && <PlaybackSession key={lastTask.current.id} task={lastTask.current} open={!!subject} close={close} removedIds={removedIds} />}
     </DialogContent>
   </Dialog>;
 }

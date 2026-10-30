@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Bug, Check, Code2, Copy, Download, ExternalLink, FolderOpen, Github, Images, Info, Link, PackageOpen, RefreshCw, Square } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -11,7 +11,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { Progress } from '@/components/ui/progress';
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { api, errorText, type ProjectPage, type UpdateCheck, type UpdateDownload } from '@/api';
-import { ReleaseNotes } from '@/components/release-notes';
+const ReleaseNotes = lazy(() => import('@/components/release-notes').then(module => ({ default: module.ReleaseNotes })));
 
 const brandIcon = new URL('../../src-tauri/icons/128x128.png', import.meta.url).href;
 const engineInfo = '引擎 0.7.5，yt-dlp 2026.08.19，DTK 5.1.3';
@@ -143,7 +143,7 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
         </DialogHeader>
         <div className="flex min-h-0 flex-col gap-3 overflow-y-auto pr-3">
           <h3 className="shrink-0 text-sm font-medium">更新说明</h3>
-          <ReleaseNotes content={release.release_notes} openLink={url => void openReleaseNoteLink(url)} />
+          <Suspense fallback={<div role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner aria-hidden="true" />正在加载更新说明…</div>}><ReleaseNotes content={release.release_notes} openLink={url => void openReleaseNoteLink(url)} /></Suspense>
           <p className="shrink-0 break-all text-xs text-muted-foreground">{release.installer ? `已匹配当前系统：${currentDownload?.filename ?? release.installer.name}，${megabytes(currentDownload?.total_bytes ?? release.installer.size)}` : '此版本没有可验证的适用安装包，可前往发行页面手动下载。'}</p>
           {currentDownload && <div className="flex shrink-0 flex-col gap-2 rounded-md border p-3" aria-label="安装包下载状态">
             <p className="flex items-center gap-2 text-sm" role="status">{downloading ? <Spinner aria-hidden="true" /> : currentDownload.phase === 'completed' ? <Check aria-hidden="true" className="size-4" /> : null}{downloadPhases[currentDownload.phase]}</p>
