@@ -25,7 +25,7 @@ async (page) => {
     });
     await preview.route('**/assets/index-*.js', async route => { await entryReady; await route.continue(); });
     await preview.route('**/assets/release-notes-*.js', async route => { await notesReady; await route.continue(); });
-    await preview.goto('http://127.0.0.1:1421/', { waitUntil: 'commit' });
+    await preview.goto(page.url().split('/').slice(0, 3).join('/') + '/', { waitUntil: 'commit' });
     await preview.getByText('正在启动…', { exact: true }).waitFor();
     for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
       await preview.setViewportSize({ width, height });

@@ -15,6 +15,11 @@ use std::{
 
 type Upload = (String, String, BTreeMap<u32, Vec<u8>>);
 
+#[path = "sync_tests.rs"]
+mod sync_tests;
+#[path = "sync_online_tests.rs"]
+mod sync_online_tests;
+
 #[tokio::test]
 #[ignore = "requires explicitly authorized root s3-r2-test.local.json"]
 async fn real_r2_m2_dedicated_prefix() {
@@ -30,6 +35,8 @@ async fn real_r2_m6_multipart_restart_dedicated_prefix() {
 // Test-only transport observation: no keys, URLs, or credentials enter the audit.
 #[derive(Default)]
 struct R2Audit {
+    video_streams: u64,
+    video_writes: u64,
     calls: BTreeMap<&'static str, usize>,
     uploaded_parts: Vec<u32>,
     lose_first_part_response: bool,
@@ -44,6 +51,7 @@ impl ObservedR2 {
     }
 }
 impl ObjectStore for ObservedR2 {
+    fn multipart_sessions(&self,prefix:&str)->StoreFuture<'_,Vec<UploadSession>> {self.count("LIST_UPLOADS");self.inner.multipart_sessions(prefix)}
     fn get(&self, key: &str) -> StoreFuture<'_, Option<Object>> {
         self.count("GET");
         self.inner.get(key)
@@ -63,6 +71,7 @@ impl ObjectStore for ObservedR2 {
         etag: Option<String>,
     ) -> StoreFuture<'_, ObjectStream> {
         self.count("GET");
+        if key.ends_with(".mp4") {self.audit.lock().unwrap().video_streams+=1;}
         self.inner.stream(key, offset, etag)
     }
     fn uploads(&self, key: &str) -> StoreFuture<'_, Vec<String>> {
@@ -75,6 +84,7 @@ impl ObjectStore for ObservedR2 {
     }
     fn write(&self, operation: Write) -> StoreFuture<'_, String> {
         self.count("WRITE");
+        if matches!(&operation,Write::PutFile{key,..}|Write::UploadFilePart{key,..} if key.ends_with(".mp4")) {self.audit.lock().unwrap().video_writes+=1;}
         Box::pin(async move {
             let part = match &operation {
                 Write::UploadFilePart { part, .. } => Some(*part),
@@ -351,10 +361,20 @@ async fn real_r2_scenario(bytes: u64, restart: bool) {
 }
 #[derive(Default)]
 struct State {
+    ignore_conditions: bool,
+    ignore_delete_conditions: bool,
+    edit_during_file: Option<(std::sync::Weak<Core>,String,String,serde_json::Value)>,
+    hold_upload: Option<(Arc<tokio::sync::Notify>,Arc<tokio::sync::Notify>)>,
+    hold_probe: Option<(Arc<tokio::sync::Notify>,Arc<tokio::sync::Notify>)>,
+    hold_list: Option<(Arc<tokio::sync::Notify>,Arc<tokio::sync::Notify>)>,
     objects: BTreeMap<String, (Vec<u8>, Option<String>)>,
     uploads: BTreeMap<String, Upload>,
     writes: usize,
     video_gets: usize,
+    part_writes: Vec<(String,u32)>,
+    part_reads: usize,
+    get_count: usize,
+    head_count: usize,
     stream_offsets: Vec<u64>,
     break_stream: Option<usize>,
     corrupt_stream: bool,
@@ -368,13 +388,21 @@ struct State {
 }
 #[derive(Clone, Default)]
 struct Memory(Arc<Mutex<State>>);
+fn is_video_key(key: &str) -> bool {
+    key.rsplit('/').next().is_some_and(|name| name == "video.mp4" || name.starts_with("video-") && name.ends_with(".mp4"))
+}
 fn tag(body: &[u8]) -> String {
     format!("{:x}", Sha256::digest(body))
 }
 impl ObjectStore for Memory {
+    fn multipart_sessions(&self,prefix:&str)->StoreFuture<'_,Vec<UploadSession>> {
+        let sessions=self.0.lock().unwrap().uploads.iter().filter(|(_,v)|v.0.starts_with(prefix)).map(|(id,v)|UploadSession {key:v.0.clone(),upload_id:id.clone()}).collect();
+        Box::pin(async move {Ok(sessions)})
+    }
     fn get(&self, key: &str) -> StoreFuture<'_, Option<Object>> {
         let mut s = self.0.lock().unwrap();
-        if key.ends_with("video.mp4") {
+        s.get_count+=1;
+        if is_video_key(key) {
             s.video_gets += 1;
         }
         let v = s.objects.get(key).map(|(body, _)| Object {
@@ -384,11 +412,8 @@ impl ObjectStore for Memory {
         Box::pin(async move { Ok(v) })
     }
     fn head(&self, key: &str) -> StoreFuture<'_, Option<ObjectInfo>> {
-        let v = self
-            .0
-            .lock()
-            .unwrap()
-            .objects
+        let mut state=self.0.lock().unwrap();state.head_count+=1;
+        let v = state.objects
             .get(key)
             .map(|(b, h)| ObjectInfo {
                 key: key.into(),
@@ -399,6 +424,7 @@ impl ObjectStore for Memory {
         Box::pin(async move { Ok(v) })
     }
     fn list(&self, prefix: &str, token: Option<String>) -> StoreFuture<'_, Page> {
+        let gate=self.0.lock().unwrap().hold_list.take();
         if self.0.lock().unwrap().fail_list {
             return Box::pin(async { bail!("BACKUP_NETWORK_ERROR") });
         }
@@ -419,7 +445,7 @@ impl ObjectStore for Memory {
         let offset = token.and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
         let next = (offset + 1 < all.len()).then(|| (offset + 1).to_string());
         let objects = all.into_iter().skip(offset).take(1).collect();
-        Box::pin(async move { Ok(Page { objects, next }) })
+        Box::pin(async move {if let Some((started,release))=gate {started.notify_one();release.notified().await;} Ok(Page { objects, next }) })
     }
     fn stream(
         &self,
@@ -431,7 +457,7 @@ impl ObjectStore for Memory {
         let store = self.clone();
         Box::pin(async move {
             let mut s = store.0.lock().unwrap();
-            s.video_gets += 1;
+            if is_video_key(&key) {s.video_gets += 1;}
             s.stream_offsets.push(offset);
             let broken = s.break_stream.take();
             let corrupt = s.corrupt_stream;
@@ -484,6 +510,7 @@ impl ObjectStore for Memory {
         Box::pin(async move { Ok(ids) })
     }
     fn parts(&self, _key: &str, id: &str) -> StoreFuture<'_, Vec<Part>> {
+        self.0.lock().unwrap().part_reads += 1;
         let value = self.0.lock().unwrap().uploads.get(id).map(|v| {
             v.2.iter()
                 .map(|(n, b)| Part {
@@ -496,7 +523,9 @@ impl ObjectStore for Memory {
         Box::pin(async move { value.ok_or_else(|| anyhow::anyhow!("BACKUP_UPLOAD_EXPIRED")) })
     }
     fn write(&self, write: Write) -> StoreFuture<'_, String> {
+        let gate=if matches!(&write,Write::PutFile{..}) {self.0.lock().unwrap().hold_upload.take()} else if matches!(&write,Write::Put{key,..} if key.contains("/probes/")) {self.0.lock().unwrap().hold_probe.take()} else {None};
         Box::pin(async move {
+            if let Some((started,release))=gate {started.notify_one();release.notified().await;}
             let mut s = self.0.lock().unwrap();
             s.writes += 1;
             let (etag, kind) = match write {
@@ -514,8 +543,8 @@ impl ObjectStore for Memory {
                     }
                     let old = s.objects.get(&key);
                     match condition {
-                        Condition::Absent if old.is_some() => bail!("BACKUP_PRECONDITION_FAILED"),
-                        Condition::Match(t) if old.is_none_or(|(b, _)| tag(b) != t) => {
+                        Condition::Absent if old.is_some() && !s.ignore_conditions => bail!("BACKUP_PRECONDITION_FAILED"),
+                        Condition::Match(t) if !s.ignore_conditions && old.is_none_or(|(b, _)| tag(b) != t) => {
                             bail!("BACKUP_PRECONDITION_FAILED")
                         }
                         _ => {}
@@ -544,7 +573,15 @@ impl ObjectStore for Memory {
                     assert_eq!(b.len() as u64, bytes);
                     let t = tag(&b);
                     s.objects.insert(key, (b, Some(sha256)));
+                    if let Some((core,id,field,value))=s.edit_during_file.take() {
+                        core.upgrade().unwrap().backup_db(|db|super::sync_engine::mark_local(db,&id,[(field,value)].into_iter().collect(),false))?;
+                    }
                     (t, "file")
+                }
+                Write::DeleteIfMatch { key, etag } => {
+                    if !s.ignore_delete_conditions && s.objects.get(&key).is_some_and(|(body,_)|tag(body)!=etag) {bail!("BACKUP_PRECONDITION_FAILED");}
+                    s.objects.remove(&key);
+                    (String::new(),"delete")
                 }
                 Write::Delete { key } => {
                     if s.fail_delete {
@@ -566,6 +603,7 @@ impl ObjectStore for Memory {
                     bytes,
                     ..
                 } => {
+                    s.part_writes.push((upload_id.clone(),part));
                     let mut f = std::fs::File::open(path)?;
                     f.seek(std::io::SeekFrom::Start(offset))?;
                     let mut b = Vec::new();

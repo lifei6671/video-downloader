@@ -33,7 +33,7 @@ fn hide_asset_history(core:State<AppCore>,asset_id:String)->Result<(),String>{yi
 #[tauri::command]
 async fn release_local_video(core:State<'_,AppCore>,asset_id:String)->Result<(),String>{yingqu_core::backup::lifecycle::release(&core,&asset_id).await.map_err(error)}
 #[tauri::command]
-async fn delete_asset_and_backup(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<(),String>{yingqu_core::backup::lifecycle::delete(&core,&space_id,&asset_id).await.map_err(error)}
+async fn delete_asset_and_backup(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<(),String>{yingqu_core::backup::sync_delete::delete(&core,&space_id,&asset_id).await.map_err(error)}
 #[tauri::command]
 async fn ensure_local_video(core:State<'_,AppCore>,asset_id:String)->Result<String,String>{core.ensure_local_video(&asset_id).await.map(|p|p.to_string_lossy().into_owned()).map_err(error)}
 #[tauri::command]
@@ -45,7 +45,7 @@ async fn prepare_asset_playback(app:tauri::AppHandle,core:State<'_,AppCore>,asse
 }
 #[tauri::command]
 async fn play_asset(app:tauri::AppHandle,core:State<'_,AppCore>,asset_id:String)->Result<(),String>{
-    let path=yingqu_core::backup::restore::local(&core,&asset_id).await.map_err(error)?.ok_or("FILE_MISSING")?;
+    let path=core.ensure_local_video(&asset_id).await.map_err(error)?;
     app.opener().open_path(path.to_string_lossy(),None::<&str>).map_err(|_|"PLAYBACK_OPEN_FAILED".into())
 }
 #[tauri::command]
@@ -72,31 +72,34 @@ async fn export_asset_transcript(app:tauri::AppHandle,core:State<'_,AppCore>,ass
 fn list_backup_assets(core:State<AppCore>,space_id:String)->Result<Vec<yingqu_core::backup::reconcile::Entry>,String>{yingqu_core::backup::reconcile::list(&core,&space_id).map_err(error)}
 #[tauri::command]
 async fn refresh_backup_assets(core:State<'_,AppCore>,space_id:String)->Result<yingqu_core::backup::reconcile::Refresh,String>{
-    let client=yingqu_core::backup::settings::client(&core,&space_id).map_err(error)?;
-    yingqu_core::backup::reconcile::refresh(&core,&client).await.map_err(error)
+    let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;
+    let engine=yingqu_core::backup::sync_engine::SyncEngine::new(core.inner().clone(),provider);
+    let imported=engine.pull().await.map_err(error)?;
+    Ok(yingqu_core::backup::reconcile::Refresh{imported,unchanged:0,rejected:vec![]})
 }
 #[tauri::command]
 async fn get_asset_transcript(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<Option<yingqu_core::backup::model::AssetTranscript>,String>{
-    if let Some(value)=yingqu_core::backup::reconcile::cached_transcript(&core,&space_id,&asset_id).map_err(error)? {return Ok(Some(value));}
-    let client=yingqu_core::backup::settings::client(&core,&space_id).map_err(error)?;
-    yingqu_core::backup::reconcile::transcript(&core,&client,&asset_id).await.map_err(error)
+    if let Some(value)=yingqu_core::backup::sync_read::cached_transcript(&core,&space_id,&asset_id).map_err(error)? {return Ok(Some(value));}
+    let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;
+    yingqu_core::backup::sync_read::transcript(&core,provider.as_ref(),&asset_id).await.map_err(error)
 }
 #[tauri::command]
 async fn get_asset_cover(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<tauri::ipc::Response,String>{
-    let client=yingqu_core::backup::settings::client(&core,&space_id).map_err(error)?;
-    yingqu_core::backup::reconcile::cover(&core,&client,&asset_id).await.map(tauri::ipc::Response::new).map_err(error)
+    if let Some(body)=yingqu_core::backup::sync_read::cached_cover(&core,&space_id,&asset_id).map_err(error)? {return Ok(tauri::ipc::Response::new(body));}
+    let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;
+    yingqu_core::backup::sync_read::cover(&core,provider.as_ref(),&asset_id).await.map(tauri::ipc::Response::new).map_err(error)
 }
 #[tauri::command]
-fn get_backup_settings(core: State<AppCore>) -> Result<Option<yingqu_core::backup::settings::View>,String> {
-    yingqu_core::backup::settings::get(&core).map_err(error)
+fn get_backup_settings(core: State<AppCore>) -> Result<Option<yingqu_core::backup::spaces::View>,String> {
+    yingqu_core::backup::spaces::get(&core).map_err(error)
 }
 #[tauri::command]
-async fn save_backup_settings(core: State<'_,AppCore>, config: yingqu_core::backup::settings::Update) -> Result<yingqu_core::backup::settings::View,String> {
-    yingqu_core::backup::settings::save(&core,config).await.map_err(error)
+async fn save_backup_settings(core: State<'_,AppCore>, config: yingqu_core::backup::spaces::Update) -> Result<yingqu_core::backup::spaces::View,String> {
+    yingqu_core::backup::spaces::save(&core,config).await.map_err(error)
 }
 #[tauri::command]
-async fn test_backup_connection(core: State<'_,AppCore>, config: yingqu_core::backup::settings::Update) -> Result<(),String> {
-    yingqu_core::backup::settings::test_draft(&core,config).await.map_err(error)
+async fn test_backup_connection(core: State<'_,AppCore>, config: yingqu_core::backup::spaces::Update) -> Result<(),String> {
+    yingqu_core::backup::spaces::test_draft(&core,config).await.map_err(error)
 }
 #[tauri::command]
 fn get_backup_credentials(core: State<AppCore>, space_id: String) -> Result<yingqu_core::backup::settings::Credentials,String> {
@@ -112,7 +115,37 @@ fn retry_backup_operation(core: State<AppCore>, operation_id:String) -> Result<(
 }
 #[tauri::command]
 fn start_asset_backup(core: State<AppCore>, space_id:String, asset_id:String) -> Result<(),String> {
-    yingqu_core::backup::scheduler::request_upload(&core,&space_id,&asset_id).map_err(error)
+    yingqu_core::backup::sync_engine::request_upload(core.inner(),&space_id,&asset_id).map_err(error)
+}
+#[tauri::command]
+fn list_backup_spaces(core:State<AppCore>)->Result<Vec<yingqu_core::backup::spaces::View>,String>{yingqu_core::backup::spaces::list(&core).map_err(error)}
+#[tauri::command]
+fn get_backup_sync_enabled(core:State<AppCore>)->Result<bool,String>{yingqu_core::backup::spaces::enabled(&core).map_err(error)}
+#[tauri::command]
+async fn set_backup_sync_enabled(core:State<'_,AppCore>,enabled:bool)->Result<bool,String>{yingqu_core::backup::spaces::set_enabled(core.inner(),enabled).await.map_err(error)}
+#[tauri::command]
+fn get_backup_space_usage(core:State<AppCore>,space_id:String)->Result<yingqu_core::backup::spaces::Usage,String>{yingqu_core::backup::spaces::usage(&core,&space_id).map_err(error)}
+#[tauri::command]
+async fn delete_backup_space(core:State<'_,AppCore>,space_id:String,confirmed:bool)->Result<(),String>{yingqu_core::backup::spaces::remove(core.inner(),&space_id,confirmed).await.map_err(error)}
+#[tauri::command]
+fn rename_backup_space(core:State<AppCore>,space_id:String,display_name:String)->Result<yingqu_core::backup::spaces::View,String>{yingqu_core::backup::spaces::rename(&core,&space_id,&display_name).map_err(error)}
+#[tauri::command]
+async fn select_backup_space(core:State<'_,AppCore>,space_id:String)->Result<yingqu_core::backup::spaces::View,String>{yingqu_core::backup::spaces::select(core.inner(),&space_id).await.map_err(error)}
+#[tauri::command]
+fn get_backup_local_data(core:State<AppCore>,space_id:String,asset_id:String)->Result<yingqu_core::backup::conflicts::LocalData,String>{yingqu_core::backup::conflicts::local_data(&core,&space_id,&asset_id).map_err(error)}
+#[tauri::command]
+async fn get_backup_conflict(core:State<'_,AppCore>,space_id:String,asset_id:String,conflict_id:String)->Result<yingqu_core::backup::conflicts::VersionView,String>{let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;yingqu_core::backup::conflicts::detail(&core,provider.as_ref(),&asset_id,&conflict_id).await.map_err(error)}
+#[tauri::command]
+async fn resolve_backup_conflict(core:State<'_,AppCore>,space_id:String,asset_id:String,conflict_id:String,adopt:bool)->Result<(),String>{let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;yingqu_core::backup::conflicts::resolve(core.inner(),provider.as_ref(),&asset_id,&conflict_id,adopt).await.map_err(error)}
+#[tauri::command]
+async fn export_backup_local_data(app:tauri::AppHandle,core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<Option<String>,String>{
+    let value=yingqu_core::backup::conflicts::export_data(&core,&space_id,&asset_id).map_err(error)?;
+    let body=serde_json::to_vec_pretty(&value).map_err(|e|error(e.into()))?;
+    let(tx,rx)=tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("导出本机待处理数据").set_file_name(format!("{asset_id}-local.json")).add_filter("JSON",&["json"]).save_file(move|file|{let _=tx.send(file);});
+    let Some(file)=rx.await.map_err(|_|"IO_ERROR")? else{return Ok(None)};
+    let path=file.into_path().map_err(|_|"IO_ERROR")?;
+    tokio::fs::write(&path,body).await.map_err(|e|error(e.into()))?;Ok(Some(path.to_string_lossy().into_owned()))
 }
 #[tauri::command]
 fn cancel_backup_operation(core: State<AppCore>, operation_id:String) -> Result<(),String> {
@@ -618,6 +651,7 @@ fn cancel_runtime_dependency(core: State<AppCore>) -> Result<(), String> {
     core.cancel_dependency().map_err(error)
 }
 fn show_main_window(app: &tauri::AppHandle) {
+    app.state::<AppCore>().set_backup_foreground(true);
     if app.state::<AtomicBool>().load(Ordering::SeqCst) {
         return;
     }
@@ -738,7 +772,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             ensure_local_video,cancel_asset_restore,prepare_asset_playback,play_asset,start_asset_transcription,copy_asset_transcript,
             hide_asset_history,release_local_video,delete_asset_and_backup,export_asset_transcript,list_backup_assets,refresh_backup_assets,get_asset_transcript,get_asset_cover,
-            get_backup_settings,get_backup_credentials,save_backup_settings,test_backup_connection,list_backup_operations,start_asset_backup,retry_backup_operation,cancel_backup_operation,
+            get_backup_settings,get_backup_credentials,save_backup_settings,test_backup_connection,list_backup_operations,start_asset_backup,retry_backup_operation,cancel_backup_operation,list_backup_spaces,get_backup_sync_enabled,set_backup_sync_enabled,get_backup_space_usage,delete_backup_space,rename_backup_space,select_backup_space,get_backup_local_data,get_backup_conflict,resolve_backup_conflict,export_backup_local_data,
             list_video_transcripts,
             get_video_transcript,
             start_video_transcription,
@@ -797,12 +831,14 @@ fn main() {
                 ..
             } if label == "main" => {
                 api.prevent_close();
+                app.state::<AppCore>().set_backup_foreground(false);
                 if let Some(window) = app.get_webview_window("main") {
                     if let Err(error) = window.hide() {
                         eprintln!("Unable to hide main window: {error}");
                     }
                 }
             }
+            tauri::RunEvent::WindowEvent {label,event:tauri::WindowEvent::Focused(focused),..} if label=="main" => {app.state::<AppCore>().set_backup_foreground(focused);}
             tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
                 api.prevent_exit();
                 request_exit(app);

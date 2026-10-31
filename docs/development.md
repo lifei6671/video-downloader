@@ -124,6 +124,30 @@ npm run desktop
 
 新下载的抖音、TikTok、YouTube 视频仍获取平台可用的最高分辨率封面，与 Telegram 一样经校验后只存现有 SQLite 封面缓存；下载目录只保存视频，不再生成同名 `.cover.jpg/png/webp`。列表沿用受控封面读取命令并支持重启和提交恢复。封面获取或缓存更新失败不影响视频完成，已有预览封面仍可显示。删除本地视频同时删除对应任务、下载记录和提交证据；移除最后一个同身份任务或预览时，同事务清空封面 BLOB，保留解析元数据、别名及本地文件。旧版封面文件保持原样，不自动迁移、删除或联网补处理；图集原图保存方式不变。行尾的复制原链接、本地删除不再收进二级菜单，和播放、文件夹、列表移除一样使用图标及 Tooltip，本地删除默认红色。`tests/task-actions.browser.js` 覆盖三视口、键盘、无确认、复制、失败、pending 和迟到事件；Rust 历史/封面测试覆盖文件删除、数据库记录清理、失败后重试和重启。批量清理历史保留确认，但只清理当前平台 Tab（全部 Tab 覆盖所有平台），不受搜索条件影响；无元数据的 Telegram 任务按链接归类，后端继续保护进行中的任务与独立解析缓存。单条删除不再聚焦顶部搜索框。成功删除/清理的可见项向上淡出并折叠占位，下方条目平滑上移；失败保留行，减少动态效果时立即移除。动画回归入口为 `tests/task-removal-motion.browser.js`。取消任务及重复下载的确认保持现有行为。
 
+## 通知样式与原生 CSP
+
+Sonner 的 `sonner/dist/styles.css` 通过 `src/style.css` 编入正式 CSS。原生 Tauri CSP 会拒绝其运行时注入的 `<style>`；不能只依赖浏览器开发预览，否则 Toast 会失去固定定位并挤开应用外壳。不要为此放宽 CSP。
+
+`src/lib/style-nonce.ts` 从 Tauri 已加 nonce 的启动样式读取当前文档 nonce，使用现有 `get-nonce` 配置 `react-style-singleton`，并传给 Radix Select.Viewport。这样 Dialog、AlertDialog、Sheet、DropdownMenu、ContextMenu 的滚动锁及 Select 的滚动条规则均在原 CSP 下生效。`get-nonce` 沿用锁文件已有的 1.0.1，声明为直接依赖；不生成固定 nonce，不关闭 CSP。审计与原生验证见 [CSP 组件验证](csp-component-validation.md)。
+
+组件测试使用独立入口和输出目录，不随正常桌面程序构建：
+
+```powershell
+node --input-type=module -e "import {build} from 'vite'; await build({configFile:'vite.config.ts',build:{outDir:'.local/csp-audit/dist',rollupOptions:{input:'tests/fixtures/csp-components.html'}}});"
+npm exec vite -- preview --host 127.0.0.1 --port 1427 --strictPort --outDir .local/csp-audit/dist
+# 另一终端打开测试页面后执行：
+playwright-cli --session csp-components open http://127.0.0.1:1427/tests/fixtures/csp-components.html
+playwright-cli --session csp-components run-code --filename tests/csp-components-browser.mjs
+```
+
+`tests/settings-layout-browser.mjs` 在生产预览中设置拒绝内联样式的 CSP，模拟读取备份凭据失败后出现通知，验证远端备份选中时从其他页面返回、三种视口、键盘及长表单滚动。执行：`playwright-cli --session settings-layout run-code --filename tests/settings-layout-browser.mjs`。原生程序仍需单独验证通知位置。
+
+`cargo test --manifest-path src-tauri/Cargo.toml settings_enable -- --test-threads=1` 验证网络写入已接收但不返回时启停仍完成、请求取消、探针超时、凭据/清理记录保留、连接中完成下载的空间关联和停用防止迟到连接重新启用。
+
+`tests/backup-settings-actions-browser.mjs` 使用隔离 IPC 覆盖启停、后台连接中仍可停用、错误重试/成功状态刷新且不覆盖草稿、停用后停止本机轮询、默认空间启用门槛、不迁移历史视频、必填星号与字段错误、三视口按钮过渡及减少动态效果、引用删除确认/取消/失败重试、确认前新引用保护和空配置直接删除。Rust `cargo test --manifest-path src-tauri/Cargo.toml settings_actions -- --test-threads=1` 验证启停持久化、队列断点、配置引用、凭据清理、本机视频和未同步文案保留，以及同目标显式重连。
+
+`tests/backup-space-tabs-browser.mjs` 对生产预览验证空间 Tab、新建后增加 Tab、草稿保留、保存不激活、显式切换及失败保持原默认、三视口键盘、Tab 名称 Tooltip 及无升级弹窗；同时逐项比较与平台账号 Tab 的字号、内边距、颜色及高度。名称覆盖双击/F2 原位编辑、Enter/失焦只保存一次、Esc 取消、输入法选字不提交、失败保留输入并重试、跨 Tab 保存与凭据草稿隔离，以及重新打开后的持久化；只有新建表单显示独立名称输入框。`tests/csp-components-browser.mjs` 在严格 CSP 下验证原位输入框的定位、字号和高度。后端相关回归为 `cargo test --manifest-path src-tauri/Cargo.toml p3_ -- --test-threads=1`；设置页使用向后兼容的 `activate=false` 保存参数。`cargo test --manifest-path src-tauri/Cargo.toml single_protocol -- --test-threads=1` 验证保存/启用直接使用已有凭据、原身份与媒体保留、中断恢复，以及连接测试不改写库。名称通过启动时自动补建的本机 `backup_space_names` 表持久化，不修改现有 v4 表结构或空间身份。
+
 ## 界面构建版本
 
 Logo 区域和关于页版本号在 Vite 构建时注入，优先级为 `APP_VERSION` → GitHub Actions 标签事件的 `GITHUB_REF_NAME`（`GITHUB_REF_TYPE=tag`）→ `package.json` 的 version。标签如 `v1.2.3` 显示为 `1.2.3`，支持预发布版本。普通分支构建不显示分支名。
@@ -229,3 +253,16 @@ CMake 不在 PATH 时使用 `--cmake <绝对路径>`。构建沿用 `.local/sens
 验证入口使用 `.local/nano-verification/runtime/`，不读取平台凭据或更改用户安装。`--download-models` 下载三份约 1.2 GiB 权重，SHA-256 校验后执行真实加载/推理；短视频使用 Matroska 与 PCM16 无损音轨，避免 AAC 二次编码改变参考样本。`--long-seconds 600` 可单独测试合成长期音频，不替代自然视频准确率验证。
 
 前端检查 `npm run build`。浏览器 IPC 隔离回归为 `tests/nano-cuda.browser.js`、`tests/transcription.browser.js`、`tests/transcription-model.browser.js`、`tests/transcript-overflow.browser.js` 与 `tests/runtime-dependencies.browser.js`，覆盖模型名称、旧 CPU/CUDA 结果、下载取消、长文本和三个视口。真实 Tauri 单独验证，不以 mock 替代。完整记录见[集成与验收](fun-asr-nano.md)。
+
+## 多设备云端同步
+
+提供商配置、空间切换、连接初始化与隔离在线用例见[多设备同步维护](multi-device-sync-operations.md)。本轮实际结果见[验证记录](r2-sync-validation.md)，R2、通用 S3、浏览器和原生结果分别记录。
+
+删除记录清理回归：`cargo test --manifest-path src-tauri/Cargo.toml retention_ -- --test-threads=1`。使用两个独立数据库、设备ID、本地目录和Memory对象库验证保留期限、无时间记录、索引CAS并发/失败、删除结果未知、活动记录保护、保留本机未同步文案后重新上传、旧删除任务停止、策略隔离、后台维护与空间切换取消/恢复。`cargo test --manifest-path src-tauri/Cargo.toml content_type_tests -- --test-threads=1` 使用localhost HTTP fixture直接观察AWS SDK的普通PUT、文件PUT、分片创建Content-Type以及条件删除If-Match请求头；不访问真实云端。MKV使用IANA注册的`video/matroska`（[RFC 9559](https://www.rfc-editor.org/rfc/rfc9559.html#section-27.18)）。浏览器Tab用例同时验证清理默认关闭、非法保留天数不提交、草稿/空间隔离和保存；多设备浏览器验证保留本机视频可以显式重新上传。
+
+
+### 个人备份浅层目录验证
+
+新媒体统一使用`media/<asset_id>/<kind>-<SHA256>.<ext>`，视频、封面和文案共用目录；删除后重新上传的修订标识只进入文件名。当前不承诺多设备同时上传与上传断点续传，大文件仍流式分片，每次重试从第1片开始。历史引用按原键读取、恢复和删除，不做生产数据批量迁移。
+
+`cargo test --locked --manifest-path src-tauri/Cargo.toml flat_ -- --test-threads=1`覆盖同目录布局、相同文案复用、历史深层对象恢复/删除、发布失败保留旧封面和文案、未知CreateMultipart结果、整次重试重传第1片和取消清理。`retention_`继续验证删除与重新上传、旧删除任务、墓碑清理及本机未同步内容保护。在线`p6_real_r2_v2_multipart_restart`改验重启从第1片重传，仍默认ignored，不能读取生产配置运行。实际结果见[验证记录](r2-sync-validation.md)。

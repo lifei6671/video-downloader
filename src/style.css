@@ -2,6 +2,7 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "./assets/fonts/fonts.css";
+@import "sonner/dist/styles.css";
 
 /* Radix Colors light sRGB, frozen in DESIGN.md. */
 :root {
@@ -343,10 +344,22 @@
 .settings-navigation { border-width: 0 0.5px 0 0; }
 /* Lock editing without dimming every field while a settings request is pending. */
 .backup-settings-form[aria-busy="true"] [data-slot="field-group"] :is(input, button, [data-slot="input-group"]) { opacity: 1; }
+.backup-space-name-editor[data-slot="input"] { position: absolute; inset: 0; height: 100%; min-height: 0; padding: 0 16px; border-radius: var(--radius-sm); font-size: 12px; line-height: 18px; }
+.backup-space-name-editor[aria-busy="true"] { padding-right: 28px; }
 .backup-settings-form .backup-save-button[data-variant][data-size] { display: inline-grid; min-width: 112px; }
 .backup-settings-form .backup-save-button[data-variant][data-size]:disabled { opacity: 1; }
 .backup-save-label, .backup-save-progress { grid-area: 1 / 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; opacity: 0; transition: opacity 250ms ease-out; }
 .backup-save-button [data-visible="true"] { opacity: 1; }
+.backup-settings-actions .backup-feedback-button[data-variant][data-size] { display: inline-grid; }
+.backup-feedback-button[aria-busy="true"]:disabled { opacity: 1; }
+.backup-settings-actions button[data-slot][data-slot], .backup-settings-dialog button[data-slot][data-slot] {
+  transition: background-color 250ms ease-out, color 250ms ease-out, border-color 250ms ease-out, opacity 250ms ease-out, transform 250ms ease-out;
+}
+.backup-settings-actions button[data-slot][data-slot]:not(:disabled):active, .backup-settings-dialog button[data-slot][data-slot]:not(:disabled):active {
+  transform: scale(.98);
+}
+.backup-settings-form [data-slot="field-error"] { font-size: 12px; line-height: 18px; }
+.backup-required-mark::after { content: "*"; }
 [data-slot="tabs-trigger"] { font-size: 12px; transition: none; }
 [data-slot="tabs-trigger"][data-state="active"] { color: var(--primary); }
 [data-slot="tabs-trigger"]::after { background: var(--primary); height: 2px; }

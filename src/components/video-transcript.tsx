@@ -40,10 +40,12 @@ export function useVideoTranscripts() {
 }
 
 export function VideoTranscriptDialog({client, tasks, assets = [], runtime}: {client: ReturnType<typeof useVideoTranscripts>; tasks: Task[]; assets?: BackupAsset[]; runtime: ReturnType<typeof useRuntimeDependencies>}) {
-  const asset = assets.find(a => a.asset_id === client.selected);
-  const task = tasks.find(t => t.id === client.selected) ?? (asset ? {id: asset.asset_id, video: {title: asset.metadata.title}, file_missing: asset.asset_state === 'deleted' && !asset.path} : undefined);
+  const asset = client.selected ? assets.find(a => a.asset_id === client.selected || a.task_id === client.selected) : undefined;
+  const originalTask = tasks.find(t => t.id === client.selected);
+  const task = (originalTask && asset ? { ...originalTask, file_missing: asset.remote_deleted && !asset.path } : originalTask) ?? (asset ? {id: asset.asset_id, video: {title: asset.metadata.title}, file_missing: asset.remote_deleted && !asset.path} : undefined);
   const [cloudText, setCloudText] = useState<AssetTranscript | null>(null);
-  const summary = client.selected ? client.values[client.selected] : undefined;
+  const transcriptionId = asset?.asset_id ?? client.selected;
+  const summary = transcriptionId ? client.values[transcriptionId] ?? (client.selected ? client.values[client.selected] : undefined) : undefined;
   const [detail, setDetail] = useState<VideoTranscript | null>(null);
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState('');
@@ -62,14 +64,14 @@ export function VideoTranscriptDialog({client, tasks, assets = [], runtime}: {cl
     setDetail(null); setCloudText(null); setNotice('');
     if (client.selected) {
       setReading(true);
-      void api.transcript(client.selected).then(async value => { if (!disposed) setDetail(value); if (asset && (asset.has_transcript || value?.has_result)) { const text = await api.assetTranscript(asset.space_id, asset.asset_id); if (!disposed) setCloudText(text); } })
+      void api.transcript(transcriptionId!).then(async value => { if (!disposed) setDetail(value); if (asset && (asset.has_transcript || value?.has_result)) { const text = await api.assetTranscript(asset.space_id, asset.asset_id); if (!disposed) setCloudText(text); } })
         .catch(e => { if (!disposed) client.setError(String(e)); }).finally(() => { if (!disposed) setReading(false); });
     }
     return () => { disposed = true; };
-  }, [client.selected, summary?.state === 'running' ? null : summary?.sequence]);
+  }, [client.selected, summary?.state === 'running' ? null : summary?.sequence, asset?.remote_revision]);
   const state = summary ?? detail;
   const running = state?.state === 'running';
-  const other = Object.values(client.values).find(v => v.state === 'running' && v.task_id !== task?.id);
+  const other = Object.values(client.values).find(v => v.state === 'running' && v.task_id !== transcriptionId);
   const model = runtime.status?.tools.find(t => t.id === 'fun-asr-nano');
   const ffmpeg = runtime.status?.tools.find(t => t.id === 'ffmpeg');
   const ready = model?.available && ffmpeg?.available;
@@ -80,7 +82,7 @@ export function VideoTranscriptDialog({client, tasks, assets = [], runtime}: {cl
   const progress = runtime.progress;
   const percent = progress && progress.total_bytes > 0 ? Math.floor(progress.downloaded_bytes / progress.total_bytes * 100) : null;
   const installing = runtime.installing !== null;
-  const text = detail?.result?.text ?? cloudText?.text;
+  const text = cloudText?.text ?? detail?.result?.text;
   const backend = running ? state.backend : detail?.result ? detail.result.backend ?? 'cpu' : model?.provider;
   const modelName = running || !detail?.result ? 'Fun-ASR-Nano' : detail.result.model_name ?? 'SenseVoiceSmall';
   const recognized = state?.phase === 'recognizing' && state.total_segments != null && state.total_segments > 0;
@@ -101,7 +103,7 @@ export function VideoTranscriptDialog({client, tasks, assets = [], runtime}: {cl
         {/* Keep the rotating spinner's bounds out of the surrounding scroll area. */}
         {running && <div className="flex flex-col gap-2" role="status">{recognized && <Progress aria-label="文案识别进度" value={recognitionPercent} />}<p className="flex flex-wrap items-center gap-2 overflow-clip text-xs text-muted-foreground"><Spinner aria-hidden="true" />{state.phase === 'extracting_audio' ? '正在提取音频…' : state.phase === 'segmenting' ? '正在检测语音片段…' : state.phase === 'loading_model' ? '正在加载语音模型…' : recognized ? `已识别 ${state.completed_segments ?? 0} / ${state.total_segments} 段，${recognitionPercent}%` : '正在完成文案提取…'}关闭此窗口后仍会继续处理。</p></div>}
         {reading && <p role="status" className="flex items-center gap-2 overflow-clip text-xs text-muted-foreground"><Spinner />正在读取文案…</p>}
-        {text && <><Textarea readOnly aria-label="识别文案" value={text} className="min-h-40 min-w-0 resize-none overflow-y-auto [overflow-wrap:anywhere] rounded-md border-[0.5px] bg-background p-4 text-sm leading-relaxed" /><p className="text-xs text-muted-foreground">提取时间：{new Date((detail?.result?.completed_at ?? cloudText?.completed_at ?? 0) * 1000).toLocaleString('zh-CN')}{state?.state !== 'completed' ? '，上次成功保存的文案' : ''}</p></>}
+        {text && <><Textarea readOnly aria-label="识别文案" value={text} className="min-h-40 min-w-0 resize-none overflow-y-auto [overflow-wrap:anywhere] rounded-md border-[0.5px] bg-background p-4 text-sm leading-relaxed" /><p className="text-xs text-muted-foreground">提取时间：{new Date((cloudText?.completed_at ?? detail?.result?.completed_at ?? 0) * 1000).toLocaleString('zh-CN')}{state?.state !== 'completed' ? '，上次成功保存的文案' : ''}</p></>}
         {!running && !ready && !task?.file_missing && <div className="flex flex-col gap-3"><p className="text-xs text-muted-foreground">首次使用需要下载所选模型及缺失的 FFmpeg；下载后可离线提取文案。</p>
           {!runtime.status && <Button variant="outline" disabled={runtime.busy} onClick={() => void runtime.check()}>检测运行依赖</Button>}
           {model && !model.available && <div className="flex flex-wrap items-center gap-2"><ModelVersionSelect runtime={runtime} disabled={!!other} /><Button variant="outline" disabled={runtime.busy || !!other || !model.can_install} onClick={() => void runtime.install('fun-asr-nano')}><Download />下载或修复语音模型</Button></div>}
@@ -127,7 +129,7 @@ export function VideoTranscriptDialog({client, tasks, assets = [], runtime}: {cl
           </span>
         </Button>
         <Button variant="outline" disabled={pending || !text} onClick={() => void act(async () => { const path = await (asset ? api.exportAssetTranscript(asset.asset_id) : api.exportTranscript(task!.id)); if (path) setNotice(`已导出：${path}`); })}><Download />导出 TXT</Button>
-        {running ? <Button variant="outline" disabled={pending} onClick={() => void act(async () => { await api.cancelTranscription(task!.id, state.operation_id); })}><Square />取消提取</Button> :
+        {running ? <Button variant="outline" disabled={pending} onClick={() => void act(async () => { await api.cancelTranscription(transcriptionId!, state.operation_id); })}><Square />取消提取</Button> :
           <Button disabled={pending || reading || !ready || runtime.busy || !!other || task?.file_missing} onClick={() => void act(async () => { client.merge(await (asset ? api.startAssetTranscription(asset.asset_id, !!state || !!cloudText) : api.startTranscription(task!.id, !!state))); })}>{state ? <RotateCcw /> : <FileText />}{state ? '重新提取' : '开始提取'}</Button>}
       </DialogFooter>
     </DialogContent>

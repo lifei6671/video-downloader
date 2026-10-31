@@ -173,6 +173,7 @@ struct Active {
 struct Inner {
     backup_cancel: watch::Sender<bool>,
     backup_started: bool,
+    backup_wake: Arc<tokio::sync::Notify>,
     backup_restores: HashMap<String,crate::backup::restore::Shared>,
     db: Connection,
     tasks: Vec<Task>,
@@ -188,6 +189,9 @@ struct Inner {
     tdl_login_control: Option<tdl_bridge::LoginControl>,
 }
 pub struct Core {
+    pub(crate) backup_wake: Arc<tokio::sync::Notify>,
+    pub(crate) backup_foreground: std::sync::atomic::AtomicBool,
+    pub(crate) backup_active_probes: Mutex<HashSet<String>>,
     pub(crate) backup_config_lock: tokio::sync::Mutex<()>,
     pub(crate) backup_restore_lock: tokio::sync::Mutex<()>,
     pub(crate) backup_write_lock: tokio::sync::Mutex<()>,
@@ -271,6 +275,7 @@ fn publish(inner: &mut Inner, mut task: Task, emit: &dyn Fn(TaskEvent)) -> Resul
     crate::backup::repository::associate(&tx, &mut task)?;
     persist(&tx, &task)?;
     tx.commit().context("DATABASE_ERROR")?;
+    if task.status==Status::Completed {inner.backup_wake.notify_waiters();}
     if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
         *old = task.clone();
     } else {
@@ -537,7 +542,11 @@ impl Core {
         for (id, path) in staging {
             cleanup_staging(&db, &id, Path::new(&path))?;
         }
+        let backup_wake=Arc::new(tokio::sync::Notify::new());
         Ok(Arc::new(Self {
+            backup_wake:backup_wake.clone(),
+            backup_foreground:std::sync::atomic::AtomicBool::new(true),
+            backup_active_probes:Mutex::new(HashSet::new()),
             backup_config_lock: tokio::sync::Mutex::new(()),
             backup_restore_lock: tokio::sync::Mutex::new(()),
             backup_write_lock: tokio::sync::Mutex::new(()),
@@ -545,6 +554,7 @@ impl Core {
             inner: Mutex::new(Inner {
                 backup_cancel: watch::channel(false).0,
                 backup_started: false,
+                backup_wake,
                 backup_restores: HashMap::new(),
                 db,
                 tasks,
@@ -613,8 +623,10 @@ impl Core {
         inner.backup_started = true;
         let core = Arc::clone(self);
         let cancel = inner.backup_cancel.subscribe();
-        inner.workers.push(tokio::spawn(crate::backup::scheduler::run(core, cancel)));
+        inner.workers.push(tokio::spawn(crate::backup::sync_engine::run(core, cancel)));
     }
+    pub fn wake_backup(&self) {self.backup_wake.notify_waiters();}
+    pub fn set_backup_foreground(&self,foreground:bool) {self.backup_foreground.store(foreground,std::sync::atomic::Ordering::Relaxed);if foreground {self.wake_backup();}}
     pub(crate) fn backup_cancellation(&self)->watch::Receiver<bool> {self.inner.lock().unwrap().backup_cancel.subscribe()}
 
     pub async fn ensure_local_video(self:&Arc<Self>,asset_id:&str)->Result<PathBuf> {

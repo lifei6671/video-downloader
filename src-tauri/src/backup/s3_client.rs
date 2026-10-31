@@ -2,7 +2,7 @@
 use super::{
     model::Space,
     store::{
-        Condition, Object, ObjectInfo, ObjectStore, ObjectStream, Page, Part, StoreFuture, Write,
+        Condition, Object, ObjectInfo, ObjectStore, ObjectStream, Page, Part, StoreFuture, Write,UploadSession,
     },
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -50,13 +50,29 @@ pub fn validate_target(endpoint: &str, bucket: &str, prefix: &str) -> Result<()>
     {
         bail!("BACKUP_INVALID_ENDPOINT");
     }
+    if bucket.contains('.') {bail!("BACKUP_INVALID_BUCKET");}
+    validate_namespace(bucket,prefix)
+}
+
+pub fn validate_s3_target(endpoint:&str,bucket:&str,prefix:&str)->Result<()> {
+    let url=url::Url::parse(endpoint).context("BACKUP_INVALID_ENDPOINT")?;
+    if url.scheme()!="https"||url.host_str().is_none()||!url.username().is_empty()||url.password().is_some()
+        ||url.query().is_some()||url.fragment().is_some()||url.path()!="/" {
+        bail!("BACKUP_INVALID_ENDPOINT");
+    }
+    validate_namespace(bucket,prefix)
+}
+
+fn validate_namespace(bucket:&str,prefix:&str)->Result<()> {
     if bucket.len() < 3
         || bucket.len() > 63
         || !bucket
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        || bucket.starts_with('-')
-        || bucket.ends_with('-')
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b,b'-'|b'.'))
+        || !bucket.as_bytes()[0].is_ascii_alphanumeric()
+        || !bucket.as_bytes()[bucket.len()-1].is_ascii_alphanumeric()
+        || bucket.contains("..")
+        || bucket.parse::<std::net::Ipv4Addr>().is_ok()
     {
         bail!("BACKUP_INVALID_BUCKET");
     }
@@ -78,14 +94,20 @@ pub fn validate_target(endpoint: &str, bucket: &str, prefix: &str) -> Result<()>
 impl S3Store {
     pub fn new(space: &Space, access_key: &str, secret: &str) -> Result<Self> {
         validate_target(&space.endpoint, &space.bucket, &space.prefix)?;
+        Self::configured(space,access_key,secret,"auto",true)
+    }
+
+    pub fn configured(space:&Space,access_key:&str,secret:&str,region:&str,path_style:bool)->Result<Self> {
+        validate_s3_target(&space.endpoint,&space.bucket,&space.prefix)?;
+        if region.is_empty()||region.len()>128||!region.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-') {bail!("BACKUP_INVALID_REGION");}
         if access_key.is_empty() || secret.is_empty() {
             bail!("BACKUP_CREDENTIALS_MISSING");
         }
         let config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::latest())
-            .region(Region::new("auto"))
+            .region(Region::new(region.to_owned()))
             .endpoint_url(&space.endpoint)
-            .force_path_style(true)
+            .force_path_style(path_style)
             .credentials_provider(Credentials::new(
                 access_key,
                 secret,
@@ -111,6 +133,27 @@ impl S3Store {
     }
 }
 
+fn content_type(key: &str) -> &'static str {
+    match key
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "json" => "application/json",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mkv" => "video/matroska",
+        "webm" => "video/webm",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+
 fn error<E: ProvideErrorMetadata>(error: SdkError<E>) -> anyhow::Error {
     let code = error.as_service_error().and_then(|e| e.code());
     let status = error.raw_response().map(|r| r.status().as_u16());
@@ -121,6 +164,7 @@ fn error<E: ProvideErrorMetadata>(error: SdkError<E>) -> anyhow::Error {
         (Some("NoSuchBucket"), _) => "BACKUP_BUCKET_NOT_FOUND",
         (Some("NoSuchUpload"), _) => "BACKUP_UPLOAD_EXPIRED",
         (_, Some(412)) => "BACKUP_PRECONDITION_FAILED",
+        (_, Some(409)) => "BACKUP_CONCURRENT_UPDATE",
         (_, Some(403)) => "BACKUP_ACCESS_DENIED",
         (_, Some(429)) | (Some("SlowDown"), _) => "BACKUP_RATE_LIMITED",
         (_, Some(500..=599)) => "BACKUP_SERVICE_UNAVAILABLE",
@@ -131,8 +175,8 @@ fn error<E: ProvideErrorMetadata>(error: SdkError<E>) -> anyhow::Error {
 }
 
 impl ObjectStore for S3Store {
-    fn uploads(&self, key: &str) -> StoreFuture<'_, Vec<String>> {
-        let key = key.to_owned();
+    fn multipart_sessions(&self, prefix: &str) -> StoreFuture<'_, Vec<UploadSession>> {
+        let key = prefix.to_owned();
         Box::pin(async move {
             let mut ids = Vec::new();
             let mut marker = None;
@@ -151,13 +195,10 @@ impl ObjectStore for S3Store {
                 for item in page
                     .uploads()
                     .iter()
-                    .filter(|u| u.key() == Some(key.as_str()))
                 {
-                    ids.push(
-                        item.upload_id()
-                            .context("BACKUP_INVALID_UPLOAD")?
-                            .to_owned(),
-                    );
+                    let object_key=item.key().context("BACKUP_INVALID_UPLOAD")?;
+                    if !object_key.starts_with(&key) {bail!("BACKUP_INVALID_UPLOAD");}
+                    ids.push(UploadSession {key:object_key.into(),upload_id:item.upload_id().context("BACKUP_INVALID_UPLOAD")?.into()});
                 }
                 if page.is_truncated() != Some(true) {
                     break;
@@ -172,6 +213,9 @@ impl ObjectStore for S3Store {
             }
             Ok(ids)
         })
+    }
+    fn uploads(&self,key:&str)->StoreFuture<'_,Vec<String>> {
+        let key=key.to_owned();Box::pin(async move {Ok(self.multipart_sessions(&key).await?.into_iter().filter(|s|s.key==key).map(|s|s.upload_id).collect())})
     }
 
     fn get(&self, key: &str) -> StoreFuture<'_, Option<Object>> {
@@ -198,13 +242,7 @@ impl ObjectStore for S3Store {
             }
             let etag = result.e_tag().context("BACKUP_ETAG_MISSING")?.to_owned();
             let mut body = Vec::new();
-            result
-                .body
-                .into_async_read()
-                .take(MAX_METADATA_BYTES + 1)
-                .read_to_end(&mut body)
-                .await
-                .context("BACKUP_NETWORK_ERROR")?;
+            tokio::time::timeout(Duration::from_secs(30), result.body.into_async_read().take(MAX_METADATA_BYTES + 1).read_to_end(&mut body)).await.context("BACKUP_TIMEOUT")?.context("BACKUP_NETWORK_ERROR")?;
             if body.len() as u64 > MAX_METADATA_BYTES {
                 bail!("BACKUP_METADATA_TOO_LARGE");
             }
@@ -344,6 +382,7 @@ impl ObjectStore for S3Store {
                     let mut request = self
                         .client
                         .put_object()
+                        .content_type(content_type(&key))
                         .bucket(&self.bucket)
                         .key(key)
                         .body(ByteStream::from(body));
@@ -373,6 +412,7 @@ impl ObjectStore for S3Store {
                     Ok(self
                         .client
                         .put_object()
+                        .content_type(content_type(&key))
                         .bucket(&self.bucket)
                         .key(key)
                         .if_none_match("*")
@@ -396,9 +436,14 @@ impl ObjectStore for S3Store {
                         .map_err(error)?;
                     Ok(String::new())
                 }
+                Write::DeleteIfMatch { key, etag } => {
+                    self.client.delete_object().bucket(&self.bucket).key(key).if_match(etag).send().await.map_err(error)?;
+                    Ok(String::new())
+                }
                 Write::CreateMultipart { key, sha256 } => Ok(self
                     .client
                     .create_multipart_upload()
+                    .content_type(content_type(&key))
                     .metadata("sha256", sha256)
                     .bucket(&self.bucket)
                     .key(key)
@@ -477,6 +522,7 @@ impl ObjectStore for S3Store {
                     Ok(self
                         .client
                         .complete_multipart_upload()
+                        .if_none_match("*")
                         .bucket(&self.bucket)
                         .key(key)
                         .upload_id(upload_id)
@@ -527,6 +573,12 @@ mod tests {
             assert!(validate_target(valid, "test-bucket", prefix).is_err());
         }
     }
+    #[test]
+    fn generic_s3_accepts_dotted_bucket_names_without_relaxing_r2(){
+        assert!(validate_s3_target("https://s3.example.com","my.video.archive","sync/").is_ok());
+        assert!(validate_target("https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com","my.video.archive","sync/").is_err());
+        for bucket in [".abc","abc.","abc..def","127.0.0.1"] {assert!(validate_s3_target("https://s3.example.com",bucket,"sync/").is_err());}
+    }
 }
 
 fn observed_body(body: ByteStream, progress: Option<Arc<AtomicU64>>) -> ByteStream {
@@ -557,5 +609,164 @@ mod progress_tests {
         let bytes = body.collect().await.unwrap().into_bytes();
         assert_eq!(bytes.as_ref(), vec![7u8; 1234]);
         assert_eq!(progress.load(Ordering::Relaxed), 1234);
+    }
+}
+
+#[cfg(test)]
+mod content_type_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn content_types_match_supported_video_image_and_json_formats() {
+        for (extension, expected) in [
+            ("json", "application/json"),
+            ("mp4", "video/mp4"),
+            ("mov", "video/quicktime"),
+            ("mkv", "video/matroska"),
+            ("webm", "video/webm"),
+            ("jpg", "image/jpeg"),
+            ("jpeg", "image/jpeg"),
+            ("png", "image/png"),
+            ("webp", "image/webp"),
+            ("unknown", "application/octet-stream"),
+            ("MP4", "video/mp4"),
+        ] {
+            assert_eq!(
+                content_type(&format!("prefix/media/asset/file.{extension}")),
+                expected
+            );
+        }
+        assert_eq!(
+            content_type("prefix/probes/conditional"),
+            "application/octet-stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn sdk_sends_content_type_on_put_file_and_multipart_and_match_on_delete() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..5 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let end = loop {
+                    let mut part = [0; 4096];
+                    let count = socket.read(&mut part).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&part[..count]);
+                    if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..end].to_vec())
+                    .unwrap()
+                    .to_ascii_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length:")
+                            .map(|v| v.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < end + length {
+                    let mut part = [0; 4096];
+                    let count = socket.read(&mut part).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&part[..count]);
+                }
+                let body = if headers.starts_with("post ") {
+                    "<InitiateMultipartUploadResult><Bucket>fixture</Bucket><Key>media/a/video.webm</Key><UploadId>fixture-upload</UploadId></InitiateMultipartUploadResult>"
+                } else {
+                    ""
+                };
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nETag: \"fixture-etag\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                requests.push(headers);
+            }
+            requests
+        });
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .endpoint_url(endpoint)
+            .force_path_style(true)
+            .credentials_provider(Credentials::new(
+                "fixture-key",
+                "fixture-secret",
+                None,
+                None,
+                "test",
+            ))
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(1))
+            .build();
+        let store = S3Store {
+            client: aws_sdk_s3::Client::from_conf(config),
+            bucket: "fixture".into(),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("video.mp4");
+        std::fs::write(&file, b"fixture-video").unwrap();
+        let work = async {
+            store
+                .write(Write::Put {
+                    key: "records/a.json".into(),
+                    body: b"{}".to_vec(),
+                    condition: Condition::Absent,
+                })
+                .await
+                .unwrap();
+            store
+                .write(Write::Put {
+                    key: "media/a/cover.png".into(),
+                    body: vec![1, 2, 3],
+                    condition: Condition::Absent,
+                })
+                .await
+                .unwrap();
+            store
+                .write(Write::PutFile {
+                    key: "media/a/video.mp4".into(),
+                    path: file,
+                    bytes: 13,
+                    sha256: "a".repeat(64),
+                    progress: None,
+                })
+                .await
+                .unwrap();
+            store
+                .write(Write::CreateMultipart {
+                    key: "media/a/video.webm".into(),
+                    sha256: "b".repeat(64),
+                })
+                .await
+                .unwrap();
+            store
+                .write(Write::DeleteIfMatch {
+                    key: "records/a.json".into(),
+                    etag: "fixture-version".into(),
+                })
+                .await
+                .unwrap();
+            server.await.unwrap()
+        };
+        let requests = tokio::time::timeout(Duration::from_secs(10), work)
+            .await
+            .unwrap();
+        for (headers, expected) in requests.iter().take(4).zip([
+            "application/json",
+            "image/png",
+            "video/mp4",
+            "video/webm",
+        ]) {
+            assert!(
+                headers.contains(&format!("content-type: {expected}\r\n")),
+                "{expected} header absent"
+            );
+        }
+        assert!(requests[4].contains("if-match: fixture-version\r\n"));
     }
 }

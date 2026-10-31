@@ -21,10 +21,12 @@ export interface TdlStatus { path: string; version: string }
 export interface TdlLoginStatus { id: string; phase: 'starting' | 'qr' | 'password' | 'verifying'; qr: boolean[][] | null }
 export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[]; tdl: TdlSettings }
 export interface FilenamePreview { path: string; segments: { text: string; variable: string | null }[] }
-export interface BackupSettings { space_id: string; library_id: string; endpoint: string; bucket: string; prefix: string; role: 'primary' | 'reader'; enabled: boolean; credentials_configured: boolean }
-export interface BackupUpdate { endpoint: string; bucket: string; prefix: string; role: 'primary' | 'reader'; enabled: boolean; credentials?: { access_key_id: string; secret_access_key: string } }
+export interface BackupUpdate { cleanup_deleted_records?: boolean; deleted_record_retention_days?: number; display_name?: string; provider_type: 's3' | 'telegram'; profile: 'r2' | 's3' | 'telegram'; endpoint: string; bucket: string; prefix: string; region: string; path_style: boolean; enabled: boolean; credentials?: { access_key_id: string; secret_access_key: string } }
+export interface BackupSettings extends Omit<BackupUpdate, 'credentials'> { space_id: string; library_id: string; credentials_configured: boolean; connection_pending?: boolean; last_error: string | null }
+export interface BackupConflict { image: number[] | null; id: string; field: string; value: string; device_id: string; can_adopt: boolean }
+export interface BackupLocalData { title: string; transcript: string | null; pending: boolean; remote_deleted: boolean; conflicts: BackupConflict[] }
 export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number }; attempt: number; last_error: string | null }
-export interface BackupAsset { asset_id: string; task_id: string | null; metadata: Partial<Video>; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean }
+export interface BackupAsset { asset_id: string; task_id: string | null; metadata: Partial<Video>; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean; remote_revision: number; remote_deleted: boolean; has_pending_local_changes: boolean; conflict_count: number }
 export interface AssetTranscript { asset_id: string; content_sha256: string | null; text: string; model_revision: string; model_name: string | null; pipeline_revision: string; completed_at: number }
 export const api = {
   hideAsset: (assetId: string) => invoke<void>('hide_asset_history', { assetId }),
@@ -41,8 +43,19 @@ export const api = {
   refreshBackupAssets: (spaceId: string) => invoke<{ imported: number; unchanged: number; rejected: string[] }>('refresh_backup_assets', { spaceId }),
   assetTranscript: (spaceId: string, assetId: string) => invoke<AssetTranscript | null>('get_asset_transcript', { spaceId, assetId }),
   assetCover: (spaceId: string, assetId: string) => invoke<ArrayBuffer>('get_asset_cover', { spaceId, assetId }),
+  backupSpaces: () => invoke<BackupSettings[]>('list_backup_spaces'),
+  backupSyncEnabled: () => invoke<boolean>('get_backup_sync_enabled'),
+  setBackupSyncEnabled: (enabled: boolean) => invoke<boolean>('set_backup_sync_enabled', { enabled }),
+  backupSpaceUsage: (spaceId: string) => invoke<{ assets: number; operations: number }>('get_backup_space_usage', { spaceId }),
+  deleteBackupSpace: (spaceId: string, confirmed = false) => invoke<void>('delete_backup_space', { spaceId, confirmed }),
+  renameBackupSpace: (spaceId: string, displayName: string) => invoke<BackupSettings>('rename_backup_space', { spaceId, displayName }),
+  selectBackupSpace: (spaceId: string) => invoke<BackupSettings>('select_backup_space', { spaceId }),
+  backupLocalData: (spaceId: string, assetId: string) => invoke<BackupLocalData>('get_backup_local_data', { spaceId, assetId }),
+  backupConflict: (spaceId: string, assetId: string, conflictId: string) => invoke<BackupConflict>('get_backup_conflict', { spaceId, assetId, conflictId }),
+  resolveBackupConflict: (spaceId: string, assetId: string, conflictId: string, adopt: boolean) => invoke<void>('resolve_backup_conflict', { spaceId, assetId, conflictId, adopt }),
+  exportBackupLocalData: (spaceId: string, assetId: string) => invoke<string | null>('export_backup_local_data', { spaceId, assetId }),
   backupSettings: () => invoke<BackupSettings | null>('get_backup_settings'),
-  saveBackupSettings: (config: BackupUpdate) => invoke<BackupSettings>('save_backup_settings', { config }),
+  saveBackupSettings: (config: BackupUpdate, activate = true) => invoke<BackupSettings>('save_backup_settings', { config: { ...config, activate } }),
   backupCredentials: (spaceId: string) => invoke<{ access_key_id: string; secret_access_key: string }>('get_backup_credentials', { spaceId }),
   testBackupConnection: (config: BackupUpdate) => invoke<void>('test_backup_connection', { config }),
   backupOperations: () => invoke<BackupOperation[]>('list_backup_operations'),
@@ -155,22 +168,46 @@ const errors: Record<string, string> = {
   UPDATE_NETWORK_ERROR: '无法连接 GitHub，请检查网络或系统代理后重试',
   UPDATE_RATE_LIMITED: 'GitHub 访问受限或请求过于频繁，请稍后重试',
   UPDATE_NO_RELEASE: '未找到正式发行版本，请稍后再试',
+  BACKUP_PROVIDER_NOT_IMPLEMENTED: '此备份提供商尚未实现',
+  BACKUP_PROVIDER_UNAVAILABLE: '此备份提供商尚未实现',
+  BACKUP_UNSUPPORTED_PROVIDER: '此备份提供商尚未实现',
+  BACKUP_UPGRADE_REQUIRED: '请保存配置以校验备份存储',
+  BACKUP_STORAGE_NOT_VALIDATED: '请保存配置以校验备份存储',
+  BACKUP_MIGRATION_IN_PROGRESS: '备份存储正在初始化，请稍后重试',
+  BACKUP_ATOMIC_WRITES_UNSUPPORTED: '此 S3 服务不支持原子条件写入，无法启用多设备同步',
+  BACKUP_CONDITIONAL_WRITE_UNSUPPORTED: '此 S3 服务不支持原子条件写入，无法启用多设备同步',
+  BACKUP_LOCAL_CHANGES_PENDING: '本机还有未同步变更，请等待确认后再处理冲突',
+  BACKUP_CONFLICT_CHANGED: '此冲突已变化，请重新打开版本列表',
+  BACKUP_PUBLICATION_UNCONFIRMED: '远端已接收，仍在等待同步确认',
+  BACKUP_LEGACY_REVIEW_REQUIRED: '此备份操作的提交结果待确认',
+  BACKUP_LEGACY_OUTCOME_UNKNOWN: '此备份操作结果未能确认，请保留原数据',
+  BACKUP_PROBE_CLEANUP_FAILED: '连接测试的临时对象尚未清理，将在后台重试',
   BACKUP_LOCAL_RELEASED: '本机副本已释放，恢复文件后可重试备份',
   BACKUP_LOCAL_CHANGED: '本机文件已被替换或修改，请检查后重试',
   BACKUP_UNSAFE_FILE: '本机路径不是普通文件，未执行删除',
   BACKUP_SPACE_DISABLED: '备份空间已停用',
   BACKUP_CLEANUP_PENDING: '远端对象尚未清理完成，请重试',
+  BACKUP_REUPLOAD_STALE: '删除状态已更新，请重新上传',
+  BACKUP_CONDITIONAL_DELETE_UNSUPPORTED: '该存储不支持按版本清理记录，已停止清理',
+  BACKUP_INVALID_RETENTION_DAYS: '保留天数须为1到3650之间的整数',
+  BACKUP_INVALID_DELETION_INDEX: '删除索引无法校验，清理已停止',
+  BACKUP_CLEANUP_UNSUPPORTED: '该提供商暂不支持自动清理记录',
+  BACKUP_TIMEOUT: '连接备份存储超时，请检查网络后重试',
+  BACKUP_BUSY: '备份存储正在连接，请稍后重试或先停用',
   BACKUP_NETWORK_ERROR: '无法连接远端存储，请检查网络后重试',
   BACKUP_ACCESS_DENIED: '远端存储拒绝访问，请检查凭据和 Bucket 权限',
   BACKUP_INVALID_ACCESS_KEY: 'Access Key ID 无效，请检查备份设置',
+  BACKUP_INVALID_SPACE_NAME: '空间名称不能超过 64 个字符或包含控制字符',
   BACKUP_SIGNATURE_MISMATCH: '远端认证失败，请检查 Secret Access Key',
   BACKUP_LIBRARY_NOT_FOUND: '未找到备份库，请检查 Bucket 和前缀',
   BACKUP_LIBRARY_MISMATCH: '备份库身份不一致，请核对存储空间',
   BACKUP_WRITER_CHANGED: '主设备身份已变更，请停止写入并检查备份设置',
   BACKUP_READ_ONLY: '恢复设备仅允许读取远端备份',
   BACKUP_SPACE_INACTIVE: '此备份空间已停用',
+  BACKUP_SYNC_DISABLED: '请先启用远端备份',
+  BACKUP_SPACE_REFERENCED: '此配置仍有视频或任务引用，请确认后删除',
   BACKUP_CREDENTIALS_MISSING: '请填写备份访问凭据',
-  BACKUP_CHECKSUM_MISMATCH: '远端内容校验失败，请重试或检查主设备备份',
+  BACKUP_CHECKSUM_MISMATCH: '远端内容校验失败，请重试或检查原备份',
   BACKUP_OBJECT_NOT_FOUND: '远端文件不存在，请刷新备份列表',
   BACKUP_ASSET_DELETED: '视频已从云端删除，无法恢复',
   BACKUP_RATE_LIMITED: '远端请求受限，将稍后重试',

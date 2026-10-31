@@ -9,6 +9,7 @@ use std::path::PathBuf;
 pub enum Role {
     Primary,
     Reader,
+    Member,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

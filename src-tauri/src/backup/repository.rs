@@ -9,29 +9,77 @@ use std::{fs, io::Read, path::Path, time::UNIX_EPOCH};
 use uuid::Uuid;
 
 pub fn init(db: &Connection) -> Result<()> {
+    if !db.is_autocommit() { bail!("BACKUP_MIGRATION_REQUIRES_AUTOCOMMIT"); }
+    // SQLite table rebuild follows its documented generalized ALTER TABLE procedure.
+    db.pragma_update(None, "foreign_keys", false)?;
+    let result = init_schema(db);
     db.pragma_update(None, "foreign_keys", true)?;
+    result
+}
+
+fn init_schema(db: &Connection) -> Result<()> {
     let tx = db.unchecked_transaction()?;
     tx.execute_batch(include_str!("schema.sql"))?;
     let version: i64 = tx.query_row("SELECT version FROM backup_schema WHERE id=1", [], |r| {
         r.get(0)
     })?;
-    if !(1..=3).contains(&version) {
+    if !(1..=4).contains(&version) {
         bail!("BACKUP_UNSUPPORTED_SCHEMA");
     }
-    if version < 3 {
-        tx.execute("UPDATE backup_schema SET version=3 WHERE id=1", [])?;
+    tx.execute_batch(include_str!("sync-schema.sql"))?;
+    if version < 4 {
+        tx.execute_batch("CREATE TABLE backup_spaces_v4(
+            space_id TEXT PRIMARY KEY,library_id TEXT NOT NULL,endpoint TEXT NOT NULL,bucket TEXT NOT NULL,prefix TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('primary','reader','member')),writer_device_id TEXT NOT NULL,writer_epoch INTEGER NOT NULL CHECK(writer_epoch>0),credential_ref TEXT,enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),UNIQUE(endpoint,bucket,prefix));
+            INSERT INTO backup_spaces_v4 SELECT * FROM backup_spaces;
+            DROP TABLE backup_spaces;
+            ALTER TABLE backup_spaces_v4 RENAME TO backup_spaces;")?;
+        // Legacy transport rows remain byte-for-byte intact until an explicit remote upgrade.
+        tx.execute("INSERT OR IGNORE INTO backup_provider_config(space_id,provider_type,profile) SELECT space_id,'s3','r2' FROM backup_spaces", [])?;
+        tx.execute("INSERT OR IGNORE INTO backup_space_assets(space_id,remote_asset_id,local_asset_id,remote_deleted,cloud_visible) SELECT space_id,asset_id,asset_id,remote_state IN ('deleted','pending_delete'),remote_state NOT IN ('deleted','pending_delete') FROM asset_remote_objects", [])?;
+        isolate_legacy_memberships(&tx)?;
+        tx.execute("UPDATE media_assets SET asset_state='active' WHERE EXISTS(SELECT 1 FROM backup_space_assets m WHERE m.local_asset_id=media_assets.asset_id)",[])?;
+        tx.execute("UPDATE backup_schema SET version=4 WHERE id=1", [])?;
     }
     tx.execute(
         "INSERT OR IGNORE INTO backup_device(id,device_id) VALUES(1,?)",
         [Uuid::new_v4().to_string()],
     )?;
+    if tx.prepare("PRAGMA foreign_key_check")?.query([])?.next()?.is_some() {
+        bail!("BACKUP_MIGRATION_FOREIGN_KEY_ERROR");
+    }
     // A running operation has an uncertain external outcome after restart.
     tx.execute("UPDATE backup_operations SET state='pending',last_error='BACKUP_RECONCILE_REQUIRED',updated_at=unixepoch() WHERE state='running'", [])?;
+    // Completed v2 deletes are rechecked once on the next boot for late in-flight objects.
+    tx.execute("UPDATE backup_operations SET state='pending',phase='cleanup_verify',next_retry_at=NULL,attempt=0 WHERE operation_id IN (
+        SELECT o.operation_id FROM backup_operations o WHERE o.kind='delete' AND o.state='completed' AND o.asset_id IS NOT NULL AND json_extract(o.payload_json,'$.scope.protocol')=2
+        AND NOT EXISTS(SELECT 1 FROM backup_operations active WHERE active.space_id=o.space_id AND active.asset_id=o.asset_id AND active.kind='delete' AND active.state NOT IN ('completed','canceled'))
+        AND o.rowid=(SELECT MAX(latest.rowid) FROM backup_operations latest WHERE latest.space_id=o.space_id AND latest.asset_id=o.asset_id AND latest.kind='delete' AND latest.state='completed' AND json_extract(latest.payload_json,'$.scope.protocol')=2))",[])?;
     tx.execute(
         "UPDATE asset_local_files SET local_state='missing' WHERE local_state='restoring'",
         [],
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+fn isolate_legacy_memberships(db: &Connection) -> Result<()> {
+    let mut query=db.prepare("SELECT space_id,remote_asset_id,local_asset_id FROM backup_space_assets ORDER BY space_id,remote_asset_id")?;
+    let rows=query.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut used=std::collections::HashSet::new();
+    for (space,remote,old) in rows {
+        if used.insert(old.clone()) { continue; }
+        let new=Uuid::new_v4().to_string();
+        // Task ownership stays with the first local row; each library gets independent user data.
+        db.execute("INSERT INTO media_assets SELECT ?1,NULL,metadata_json,original_filename,content_sha256,content_bytes,'active' FROM media_assets WHERE asset_id=?2",params![new,old])?;
+        db.execute("INSERT INTO asset_local_files SELECT ?1,path,bytes,sha256,source_json,verified_at,local_state FROM asset_local_files WHERE asset_id=?2",params![new,old])?;
+        db.execute("INSERT INTO asset_transcripts SELECT ?1,content_sha256,text,model_revision,model_name,pipeline_revision,completed_at,source_json FROM asset_transcripts WHERE asset_id=?2",params![new,old])?;
+        db.execute("INSERT INTO asset_covers SELECT ?1,body FROM asset_covers WHERE asset_id=?2",params![new,old])?;
+        for table in ["asset_remote_objects","asset_remote_records","backup_asset_versions","backup_owned_objects","backup_operations"] {
+            db.execute(&format!("UPDATE {table} SET asset_id=?1 WHERE space_id=?2 AND asset_id=?3"),params![new,space,old])?;
+        }
+        db.execute("UPDATE backup_space_assets SET local_asset_id=?1 WHERE space_id=?2 AND remote_asset_id=?3",params![new,space,remote])?;
+    }
     Ok(())
 }
 
@@ -41,6 +89,23 @@ pub fn device_id(db: &Connection) -> Result<String> {
             r.get(0)
         })?,
     )
+}
+
+/// A remote identity is always resolved within its owning space, never globally.
+pub fn local_asset_id(db: &Connection, space: &str, remote: &str) -> Result<Option<String>> {
+    Ok(db.query_row("SELECT local_asset_id FROM backup_space_assets WHERE space_id=?1 AND remote_asset_id=?2", params![space,remote], |r|r.get(0)).optional()?)
+}
+
+/// Bind an imported identity; a collision in another library gets a fresh local UUID.
+pub fn bind_remote_asset(db: &Connection, space: &str, remote: &str) -> Result<String> {
+    if let Some(id) = local_asset_id(db, space, remote)? { return Ok(id); }
+    uuid::Uuid::parse_str(remote).context("BACKUP_INVALID_RECORD")?;
+    let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM media_assets WHERE asset_id=?)", [remote], |r|r.get(0))?;
+    let id = if exists { Uuid::new_v4().to_string() } else { remote.to_owned() };
+    db.execute("INSERT INTO media_assets VALUES(?1,NULL,'{}','',NULL,1,'active')", [&id])?;
+    db.execute("INSERT INTO asset_local_files(asset_id,bytes,local_state) VALUES(?1,0,'missing')", [&id])?;
+    db.execute("INSERT INTO backup_space_assets(space_id,remote_asset_id,local_asset_id) VALUES(?1,?2,?3)",params![space,remote,id])?;
+    Ok(id)
 }
 
 pub fn spaces(db: &Connection) -> Result<Vec<Space>> {
@@ -110,6 +175,7 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
         return Ok(());
     }
     let asset_id = task.asset_id.clone().unwrap_or_else(|| task.id.clone());
+    let is_new:bool=!db.query_row("SELECT EXISTS(SELECT 1 FROM media_assets WHERE asset_id=?)",[&asset_id],|r|r.get::<_,bool>(0))?;
     let filename = path
         .file_name()
         .and_then(|v| v.to_str())
@@ -158,8 +224,12 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
         )
         .optional()?;
     if let Some(raw) = transcript {
-        preserve_transcript(db, &serde_json::from_str(&raw)?)?;
+        let id=task.asset_id.as_deref().context("BACKUP_ASSET_NOT_FOUND")?;
+        if self::transcript(db,id)?.is_none() {
+            persist_transcript(db, &serde_json::from_str(&raw)?,false)?;
+        }
     }
+    if is_new {super::sync_engine::register_download(db,&task.asset_id.clone().context("BACKUP_ASSET_NOT_FOUND")?)?;}
     Ok(())
 }
 
@@ -258,6 +328,9 @@ pub fn save_fingerprint(db: &Connection, id: &str, hash: &str, source: &Value) -
 }
 
 pub fn preserve_transcript(db: &Connection, snapshot: &Snapshot) -> Result<()> {
+    persist_transcript(db,snapshot,true)
+}
+fn persist_transcript(db:&Connection,snapshot:&Snapshot,local_change:bool)->Result<()> {
     let Some(result) = snapshot.result.as_ref() else {
         return Ok(());
     };
@@ -267,6 +340,7 @@ pub fn preserve_transcript(db: &Connection, snapshot: &Snapshot) -> Result<()> {
     let Some((id, hash, source)) = asset else {
         return Ok(());
     };
+    let previous=transcript(db,&id)?;
     let source_json = serde_json::to_value(&result.source)?.to_string();
     let verified_hash = if source.as_deref() == Some(&source_json) {
         hash
@@ -275,6 +349,9 @@ pub fn preserve_transcript(db: &Connection, snapshot: &Snapshot) -> Result<()> {
     };
     db.execute("INSERT INTO asset_transcripts(asset_id,content_sha256,text,model_revision,model_name,pipeline_revision,completed_at,source_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(asset_id) DO UPDATE SET content_sha256=excluded.content_sha256,text=excluded.text,model_revision=excluded.model_revision,model_name=excluded.model_name,pipeline_revision=excluded.pipeline_revision,completed_at=excluded.completed_at,source_json=excluded.source_json",
         params![id,verified_hash,result.text,result.model_revision,result.model_name,result.pipeline_revision,i64::try_from(result.completed_at)?,source_json])?;
+    if local_change&&serde_json::to_value(previous)?!=serde_json::to_value(transcript(db,&id)?)? {
+        super::sync_engine::mark_local(db,&id,Default::default(),true)?;
+    }
     Ok(())
 }
 
@@ -345,6 +422,7 @@ pub fn save_space(db: &Connection, space: &Space) -> Result<()> {
     }
     db.execute("INSERT INTO backup_spaces(space_id,library_id,endpoint,bucket,prefix,role,writer_device_id,writer_epoch,credential_ref,enabled) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(space_id) DO UPDATE SET role=excluded.role,writer_device_id=excluded.writer_device_id,writer_epoch=excluded.writer_epoch,credential_ref=excluded.credential_ref,enabled=excluded.enabled",
         params![space.space_id,space.library_id,space.endpoint,space.bucket,space.prefix,serde_json::to_value(space.role)?.as_str().context("BACKUP_INVALID_ROLE")?,space.writer_device_id,i64::try_from(space.writer_epoch)?,space.credential_ref,space.enabled])?;
+    db.execute("INSERT OR IGNORE INTO backup_provider_config(space_id,provider_type,profile) VALUES(?,'s3','r2')",[&space.space_id])?;
     Ok(())
 }
 

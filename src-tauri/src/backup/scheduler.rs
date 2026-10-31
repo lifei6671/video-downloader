@@ -657,6 +657,8 @@ pub async fn run(core: Arc<Core>, mut cancel: watch::Receiver<bool>) {
         }
         let result=async {
             settings::cleanup_credentials(&core,&settings::SystemVault)?;
+            let legacy:bool=core.backup_db(|db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM backup_spaces s LEFT JOIN backup_provider_config c USING(space_id) WHERE s.enabled=1 AND COALESCE(c.protocol,1)<>2)",[],|r|r.get(0))?))?;
+            if legacy { return Ok(()); }
             enqueue(&core)?;
             for op in cleanup_candidates(&core)? {
                 let result=match settings::client(&core,&op.space_id) {

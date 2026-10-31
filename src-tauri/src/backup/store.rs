@@ -25,6 +25,8 @@ pub struct Part {
     pub etag: String,
     pub bytes: u64,
 }
+#[derive(Clone,Debug)]
+pub struct UploadSession {pub key:String,pub upload_id:String}
 
 pub struct Page {
     pub objects: Vec<ObjectInfo>,
@@ -71,6 +73,10 @@ pub enum Write {
     Delete {
         key: String,
     },
+    DeleteIfMatch {
+        key: String,
+        etag: String,
+    },
     CreateMultipart {
         key: String,
         sha256: String,
@@ -94,6 +100,9 @@ pub enum Write {
 
 /// Transport methods are called only by the authorized backup client.
 pub trait ObjectStore: Send + Sync {
+    fn multipart_sessions(&self,_prefix:&str)->StoreFuture<'_,Vec<UploadSession>> {
+        Box::pin(async {bail!("BACKUP_MULTIPART_UNSUPPORTED")})
+    }
     fn uploads(&self, key: &str) -> StoreFuture<'_, Vec<String>>;
     fn get(&self, key: &str) -> StoreFuture<'_, Option<Object>>;
     fn write(&self, operation: Write) -> StoreFuture<'_, String>;
@@ -214,6 +223,7 @@ impl<S: ObjectStore> Client<S> {
             | Write::UploadFilePart { key, .. }
             | Write::Put { key, .. }
             | Write::Delete { key }
+            | Write::DeleteIfMatch { key, .. }
             | Write::CreateMultipart { key, .. }
             | Write::UploadPart { key, .. }
             | Write::CompleteMultipart { key, .. }
@@ -363,6 +373,7 @@ mod tests {
                 condition: Condition::Absent,
             },
             Write::Delete { key: key.clone() },
+            Write::DeleteIfMatch { key: key.clone(), etag: "unchanged".into() },
             Write::CreateMultipart {
                 key: key.clone(),
                 sha256: "a".repeat(64),

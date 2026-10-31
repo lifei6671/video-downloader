@@ -30,6 +30,7 @@ python-engine/asr/
 .local/
 # Private credentials for the dedicated S3/R2 test environment.
 /s3-r2-test.local.json
+/s3-sync-test.local.json
 tests/douyin.txt
 tests/TikTok.txt
 node_modules/

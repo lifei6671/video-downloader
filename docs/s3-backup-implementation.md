@@ -1,5 +1,7 @@
 # S3 备份实施任务与验收
 
+> 本文是现有单主写版本 M1–M6 的历史实施任务。下一阶段使用 [多设备同步方案](r2-multi-device-sync-plan.md) 和 [P1–P6 任务](r2-multi-device-sync-implementation.md)，不要将下方旧总任务当作新模式的执行指令。
+
 适用项目：`D:/wx_lifeilin/github.com/lifei6671/video-downloader`\
 基线分支：`codex/s3-video-backup`，方案以当前代码为准\
 产品模式：**单设备主写、多设备只读恢复**\

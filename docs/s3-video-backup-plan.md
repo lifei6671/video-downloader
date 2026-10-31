@@ -1,5 +1,7 @@
 # 视频 S3 备份与按需恢复方案
 
+> 本文保留当前单主写版本的实现基线。后续多设备双向同步改造以 [新方案](r2-multi-device-sync-plan.md) 和 [P1–P6 任务](r2-multi-device-sync-implementation.md) 为准；新方案尚未实施，旧验收不证明新版行为。
+
 日期：2026-10-30\
 状态：M1–M5 实现与离线验收通过，M6 真实 R2 核心闭环及分片重启续传通过；接管与跨平台等验收未完成，见[验证记录](s3-backup-validation.md)\
 代码基线：`codex/s3-video-backup`，基于 `v1.9.1`（`2d32959`）\

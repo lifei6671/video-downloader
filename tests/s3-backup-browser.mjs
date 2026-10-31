@@ -7,8 +7,8 @@ async (page) => {
     localStorage.setItem('yingqu.task-view','list');
     window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:()=>{}};
     window.backupCalls=[];window.backupOffline=false;window.coverFails=true;
-    window.backupSettings={space_id:'space-1',library_id:'library-1',endpoint:'https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com',bucket:'test-bucket',prefix:'test/',role:'primary',enabled:true,credentials_configured:true};
-    window.assets=Array.from({length:4},(_,i)=>({asset_id:`asset-${i}`,task_id:i<3?`local-${i}`:null,metadata:{title:i<3?`本机视频 ${i}`:'云端测试视频',author:'测试作者',platform:'youtube'},original_filename:'test.mp4',content_sha256:'a'.repeat(64),content_bytes:100,asset_state:'active',path:i<3?'C:/fixture/video.mp4':null,local_state:i<3?'present':'missing',space_id:'space-1',remote_state:i<2?'pending':'backed_up',has_cover:i===3,has_transcript:true}));
+    window.backupSettings={space_id:'space-1',library_id:'library-1',endpoint:'https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com',bucket:'test-bucket',prefix:'test/',provider_type:'s3',profile:'r2',region:'auto',path_style:true,protocol:2,last_error:null,enabled:true,credentials_configured:true};
+    window.assets=Array.from({length:4},(_,i)=>({asset_id:`asset-${i}`,task_id:i<3?`local-${i}`:null,metadata:{title:i<3?`本机视频 ${i}`:'云端测试视频',author:'测试作者',platform:'youtube'},original_filename:'test.mp4',content_sha256:'a'.repeat(64),content_bytes:100,asset_state:'active',path:i<3?'C:/fixture/video.mp4':null,local_state:i<3?'present':'missing',space_id:'space-1',remote_state:i<2?'pending':'backed_up',has_cover:i===3,has_transcript:true,remote_revision:1,remote_deleted:false,has_pending_local_changes:false,conflict_count:0}));
     window.ops=[{operation_id:'op-0',space_id:'space-1',asset_id:'asset-0',kind:'upload',state:'blocked',phase:'queued',payload:{},attempt:5,last_error:'BACKUP_SERVICE_UNAVAILABLE'},{operation_id:'op-1',space_id:'space-1',asset_id:'asset-1',kind:'upload',state:'running',phase:'uploading_media',payload:{completed_bytes:50},attempt:0,last_error:null}];
     window.tasks=window.assets.slice(0,3).map((a,i)=>({id:a.task_id,asset_id:a.asset_id,revision:1,status:'completed',video:{...a.metadata,video_id:'12345678901',kind:'video',canonical_url:'https://www.youtube.com/watch?v=12345678901',resolver:'yt-dlp',duration_ms:1000,width:1920,height:1080},bytes:100,total_bytes:100,speed_bps:null,error:null,path:a.path,created_at:3-i,completed_at:4,file_missing:false,canceling:false,download_requested:true,cover_cached:false,files:[]}));
     window.tasks[2].video.title='长标题'.repeat(1500);
@@ -19,10 +19,13 @@ async (page) => {
       if(command==='list_video_transcripts')return [];
       if(command==='list_backup_operations')return window.ops;
       if(command==='get_settings')return {download_directory:'C:/fixture',filename_template:'{title}',max_downloads:2,profiles:[],tdl:{enabled:false,path:null}};
+      if(command==='list_backup_spaces')return [window.backupSettings];
+      if(command==='select_backup_space')return window.backupSettings;
+      if(command==='get_backup_sync_enabled')return true;
       if(command==='get_backup_settings')return window.backupSettings;
       if(command==='get_backup_credentials')return {access_key_id:'saved-key',secret_access_key:'saved-secret'};
       if(command==='test_backup_connection'){window.testDraft=args.config;return new Promise((resolve,reject)=>{window.finishTest=()=>resolve();window.failTest=()=>reject('BACKUP_NETWORK_ERROR');});}
-      if(command==='save_backup_settings'){const {credentials,...config}=args.config;const save=()=>{window.backupSettings={...window.backupSettings,...config};return window.backupSettings;};if(window.holdSave)return new Promise((resolve,reject)=>{window.finishSave=()=>resolve(save());window.failSave=()=>reject('BACKUP_NETWORK_ERROR');});return save();}
+      if(command==='save_backup_settings'||command==='rename_backup_space'){const {credentials,...config}=command==='save_backup_settings'?args.config:{display_name:args.displayName};const save=()=>{window.backupSettings={...window.backupSettings,...config};return window.backupSettings;};if(window.holdSave)return new Promise((resolve,reject)=>{window.finishSave=()=>resolve(save());window.failSave=()=>reject('BACKUP_NETWORK_ERROR');});return save();}
       if(command==='list_backup_assets')return window.assets;
       if(command==='refresh_backup_assets'){if(window.backupOffline)throw 'BACKUP_NETWORK_ERROR';return {imported:0,unchanged:4,rejected:[]};}
       if(command==='get_asset_cover'){if(window.coverFails)throw 'BACKUP_NETWORK_ERROR';return Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j7mQAAAAASUVORK5CYII='),c=>c.charCodeAt(0)).buffer;}
@@ -30,7 +33,7 @@ async (page) => {
       if(command==='ensure_local_video'){window.assets.find(a=>a.asset_id===args.assetId).local_state='restoring';window.ops.unshift({operation_id:'restore',space_id:'space-1',asset_id:args.assetId,kind:'restore',state:'running',phase:'downloading',payload:{completed_bytes:25},attempt:0,last_error:null});return new Promise((resolve,reject)=>{window.cancelRestore=()=>{window.assets.find(a=>a.asset_id===args.assetId).local_state='missing';window.ops[0].state='canceled';reject('CANCELED');};});}
       if(command==='cancel_asset_restore'){window.cancelRestore?.();return;}
       if(command==='prepare_asset_playback')return new Promise(resolve=>{window.completeRestore=()=>resolve('C:/fixture/restored.mp4');});
-      if(command==='delete_asset_and_backup'){const a=window.assets.find(a=>a.asset_id===args.assetId);a.asset_state='deleted';a.remote_state='pending_delete';window.ops.unshift({operation_id:'delete',space_id:'space-1',asset_id:args.assetId,kind:'delete',state:'retry_wait',phase:'tombstone',payload:{},attempt:1,last_error:'BACKUP_NETWORK_ERROR'});return;}
+      if(command==='delete_asset_and_backup'){const a=window.assets.find(a=>a.asset_id===args.assetId);a.remote_deleted=true;a.remote_state='pending_delete';window.ops.unshift({operation_id:'delete',space_id:'space-1',asset_id:args.assetId,kind:'delete',state:'retry_wait',phase:'tombstone',payload:{},attempt:1,last_error:'BACKUP_NETWORK_ERROR'});return;}
       if(command==='start_asset_backup'){window.lastUpload=args;const start=()=>{const op=window.ops.find(o=>o.asset_id===args.assetId);if(op){op.state='pending';op.last_error=null;op.attempt=0;}};if(window.holdUpload)return new Promise(resolve=>{window.finishUpload=()=>{start();resolve();};});start();return;}
       if(command==='cancel_backup_operation'){window.ops.find(o=>o.operation_id===args.operationId).state='canceled';return;}
       if(command==='retry_backup_operation'){const op=window.ops.find(o=>o.operation_id===args.operationId);op.state='pending';op.last_error=null;return;}
@@ -210,7 +213,7 @@ async (page) => {
   if(await done.locator('.backup-sync-glyph').evaluate(el=>getComputedStyle(el).transform)!=='none')throw new Error('backup hover ignores reduced motion');
   if(!await done.locator('.task-title-backup button').isDisabled())throw new Error('completed status became actionable');
   await page.mouse.move(0,0);
-  await page.screenshot({path:'.local/s3-feed-icons-fixed.png'});
+  await page.screenshot({path:'output/playwright/s3-feed-icons-fixed.png'});
   await page.getByRole('button',{name:'切换为列表',exact:true}).click();
   for(const row of [pending,remote]) {
     const title=await row.locator('.task-row-title').boundingBox(),icon=await row.locator('.task-title-backup').boundingBox();
@@ -238,8 +241,9 @@ async (page) => {
       });if(!clear)throw new Error('focused input outline clipped');
     }
   }
-  await page.screenshot({path:'.local/s3-settings-focus-fixed.png'});
+  await page.screenshot({path:'output/playwright/s3-settings-focus-fixed.png'});
   await page.getByLabel('Bucket',{exact:true}).fill('unsaved-bucket');
+  await page.getByLabel('Access Key ID',{exact:true}).fill('fixture-key');await page.getByLabel('Secret Access Key',{exact:true}).fill('fixture-secret');
   await page.getByRole('button',{name:'测试连接',exact:true}).click();
   const testing=page.getByRole('button',{name:'测试中…',exact:true});await testing.waitFor();
   if(await testing.getAttribute('aria-busy')!=='true'||!await testing.isDisabled()||!await testing.locator('[data-slot="spinner"]').count())throw new Error('test loading feedback missing');
@@ -248,13 +252,19 @@ async (page) => {
   if(await page.locator('form[aria-label="远端备份设置"] [role="alert"]').count())throw new Error('inline feedback present');
   await page.getByRole('button',{name:'测试连接',exact:true}).click();await page.waitForFunction(()=>document.querySelector('[aria-busy="true"]'));
   await page.evaluate(()=>window.failTest());await page.locator('[data-sonner-toast]').filter({hasText:'无法连接远端存储'}).first().waitFor();
-  await page.getByRole('combobox',{name:'本机角色'}).click();await page.getByRole('option',{name:'恢复设备（只读）'}).click();
+  if(await page.getByRole('combobox',{name:'本机角色'}).count())throw new Error('legacy role selector remains');
   await page.getByLabel('Access Key ID',{exact:true}).fill('fixture-key');await page.getByLabel('Secret Access Key',{exact:true}).fill('fixture-secret');
+  // Saving a new target intentionally removes its creation-only name field.
+  await page.getByRole('textbox',{name:'空间名称',exact:true}).waitFor();
+  await page.getByRole('button',{name:'新建配置',exact:true}).click();
+  await page.getByRole('button',{name:'保存中…',exact:true}).waitFor();
+  await page.getByRole('button',{name:'保存配置',exact:true}).waitFor();
+  if(await page.getByRole('textbox',{name:'空间名称',exact:true}).count())throw new Error('saved space retains creation-only name field');
   await page.emulateMedia({reducedMotion:'no-preference'});
   await page.evaluate(()=>{window.holdSave=true;});
   for(const [width,height]of [[1440,900],[1280,800],[1024,680]]) {
     await page.setViewportSize({width,height});
-    await page.getByRole('button',{name:'保存设置',exact:true}).scrollIntoViewIfNeeded();
+    await page.getByRole('button',{name:'保存配置',exact:true}).scrollIntoViewIfNeeded();
     const snapshot=async()=>page.evaluate(()=>{
       const form=document.querySelector('form[aria-label="远端备份设置"]');
       const button=form.querySelector('.backup-save-button'),input=form.querySelector('#backup-bucket'),group=form.querySelector('[data-slot="input-group"]');
@@ -263,43 +273,43 @@ async (page) => {
     });
     await page.evaluate(()=>{window.savedFormNode=document.querySelector('form[aria-label="远端备份设置"]');window.savedInputNode=document.querySelector('#backup-bucket');});
     const before=await snapshot();
-    await page.getByRole('button',{name:'保存设置',exact:true}).click();
+    await page.getByRole('button',{name:'保存配置',exact:true}).click();
     const saving=page.getByRole('button',{name:'保存中…',exact:true});await saving.waitFor();
     if(await saving.getAttribute('aria-busy')!=='true'||!await saving.isDisabled()||!await saving.locator('[data-slot="spinner"]').count())throw new Error('save loading feedback missing');
     const during=await snapshot();
     if(JSON.stringify(before)!==JSON.stringify(during))throw new Error(`save dims fields or shifts layout: ${JSON.stringify({before,during})}`);
     await page.evaluate(()=>window.finishSave());
-    await page.getByRole('button',{name:'保存设置',exact:true}).waitFor();
+    await page.getByRole('button',{name:'保存配置',exact:true}).waitFor();
     if(JSON.stringify(before)!==JSON.stringify(await snapshot()))throw new Error('save completion shifts layout');
     if(!await page.evaluate(()=>window.savedFormNode===document.querySelector('form[aria-label="远端备份设置"]')&&window.savedInputNode===document.querySelector('#backup-bucket')))throw new Error('save remounted form');
   }
   await page.getByText('备份设置已保存',{exact:true}).first().waitFor();
-  if(await page.locator('.backup-save-label').evaluate(el=>getComputedStyle(el).transitionDuration)!=='0.25s')throw new Error('save fade missing');
-  await page.getByRole('button',{name:'保存设置',exact:true}).click();
+  if(await page.locator('.backup-settings-form button[type="submit"] .backup-save-label').evaluate(el=>getComputedStyle(el).transitionDuration)!=='0.25s')throw new Error('save fade missing');
+  await page.getByRole('button',{name:'保存配置',exact:true}).click();
   await page.getByRole('button',{name:'保存中…',exact:true}).waitFor();
   await page.evaluate(()=>window.failSave());
-  await page.getByRole('button',{name:'保存设置',exact:true}).waitFor();
+  await page.getByRole('button',{name:'保存配置',exact:true}).waitFor();
   await page.locator('[data-sonner-toast]').filter({hasText:'无法连接远端存储'}).first().waitFor();
   if(await page.locator('form[aria-label="远端备份设置"] [role="alert"]').count())throw new Error('save failure rendered inline');
   await page.emulateMedia({reducedMotion:'reduce'});
-  if(await page.locator('.backup-save-label').evaluate(el=>getComputedStyle(el).transitionDuration)!=='0s')throw new Error('save ignores reduced motion');
+  if(await page.locator('.backup-settings-form button[type="submit"] .backup-save-label').evaluate(el=>getComputedStyle(el).transitionDuration)!=='0s')throw new Error('save ignores reduced motion');
   if(await secretInput.inputValue()!=='fixture-secret'||await secretInput.getAttribute('type')!=='password')throw new Error('saved secret not masked and retained');
   await page.getByRole('button',{name:'下载任务',exact:true}).click();
-  if(!await pending.getByRole('button',{name:'上传备份',exact:true}).isDisabled()||!await remote.getByRole('button',{name:'下载到本机',exact:true}).isEnabled())throw new Error('reader action permissions incorrect');
+  if(!await pending.getByRole('button',{name:'上传备份',exact:true}).isEnabled()||!await remote.getByRole('button',{name:'下载到本机',exact:true}).isEnabled())throw new Error('reader action permissions incorrect');
   await pending.click({button:'right'});
-  if(await page.getByRole('menuitem',{name:'上传云端',exact:true}).getAttribute('aria-disabled')!=='true')throw new Error('reader menu allows upload');
+  if(await page.getByRole('menuitem',{name:'上传云端',exact:true}).getAttribute('aria-disabled')==='true')throw new Error('equal member menu blocks upload');
   await page.keyboard.press('Escape');
   await remote.click({button:'right'});
   if(await page.getByRole('menuitem',{name:'从远端下载',exact:true}).getAttribute('aria-disabled')==='true')throw new Error('reader menu blocks restore');
   await page.keyboard.press('Escape');
   await remote.getByRole('button',{name:'更多操作',exact:true}).click();
-  if(await page.getByRole('menuitem',{name:'删除视频及备份',exact:true}).count())throw new Error('reader delete visible');await page.keyboard.press('Escape');
+  if(!await page.getByRole('menuitem',{name:'从当前同步库删除',exact:true}).count())throw new Error('equal member delete missing');await page.keyboard.press('Escape');
   await page.evaluate(()=>{window.backupOffline=true;});await page.getByRole('button',{name:'刷新备份',exact:true}).click();await page.locator('[data-sonner-toast]').filter({hasText:'无法连接远端存储'}).first().waitFor();await remote.waitFor();
   await page.evaluate(()=>{window.backupOffline=false;window.ops.find(o=>o.asset_id==='asset-1').last_error='BACKUP_SERVICE_UNAVAILABLE';});
   const serviceToast=page.locator('[data-sonner-toast]').filter({hasText:'远端服务暂时不可用'});await serviceToast.waitFor();
   if(await page.getByRole('alert').filter({hasText:'远端服务暂时不可用'}).count())throw new Error('remote error rendered inline');
   await serviceToast.waitFor({state:'hidden',timeout:10000});
-  await page.emulateMedia({reducedMotion:'reduce'});await page.screenshot({path:'.local/s3-task-icons-1024.png'});
+  await page.emulateMedia({reducedMotion:'reduce'});await page.screenshot({path:'output/playwright/s3-task-icons-1024.png'});
   page.off('pageerror',onError);if(errors.length)throw new Error(errors.join('\n'));
   return {result:'PASS',viewports:3,views:2,uploadPercent:50,restorePercent:[25,75],browsingVideoRequests:0};
 }

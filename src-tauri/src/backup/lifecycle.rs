@@ -4,7 +4,6 @@ use super::{
     record::{Deleted, Record},
     repository, restore,
     scheduler::{self, Operation},
-    settings,
     store::{Client, Condition, ObjectStore, Write},
 };
 use crate::desktop_core::Core;
@@ -25,7 +24,10 @@ async fn stop_readers(core: &Core, id: &str) -> Result<()> {
     core.cancel_asset_transcription(id).await
 }
 
-async fn remove_local(core: &Core, id: &str) -> Result<()> {
+pub(crate) async fn remove_local(core: &Core, id: &str) -> Result<()> {
+    remove_local_checked(core,id,|_|Ok(())).await
+}
+pub(crate) async fn remove_local_checked(core:&Core,id:&str,check:impl Fn(&rusqlite::Connection)->Result<()>)->Result<()> {
     // Before the first content hash exists, retain the source captured at registration.
     let registered: (Option<String>, Option<String>, Option<String>) = core.backup_db(|db| {
         Ok(db.query_row(
@@ -45,7 +47,12 @@ async fn remove_local(core: &Core, id: &str) -> Result<()> {
     }
     // local() verifies the registered source and content before unlinking it.
     if let Some(path) = restore::local(core, id).await? {
-        std::fs::remove_file(path).context("IO_ERROR")?;
+        core.backup_db(|db|{
+            check(db)?;
+            let shared:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM asset_local_files WHERE asset_id<>?1 AND path=?2)",params![id,path.to_string_lossy()],|r|r.get(0))?;
+            if !shared {std::fs::remove_file(&path).context("IO_ERROR")?;}
+            Ok(())
+        })?;
     }
     cleanup_restore_files(core, id).await?;
     core.mark_asset_missing(id)
@@ -102,6 +109,7 @@ async fn cleanup_restore_files(core: &Core, id: &str) -> Result<()> {
 }
 
 pub async fn release(core: &Arc<Core>, id: &str) -> Result<()> {
+    if super::spaces::get(core)?.is_some_and(|s|s.protocol==2) {return super::sync_delete::release(core,id).await;}
     core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='blocked',last_error='BACKUP_LOCAL_RELEASED' WHERE asset_id=? AND kind='upload' AND state IN ('pending','running','retry_wait','canceled')",[id])?;Ok(())})?;
     stop_readers(core, id).await?;
     let _writer = core.backup_write_lock.lock().await;
@@ -365,13 +373,22 @@ pub async fn delete_task(core: &Arc<Core>, task_id: &str) -> Result<()> {
         .find(|t| t.id == task_id)
         .context("TASK_NOT_FOUND")?;
     if let Some(id) = &task.asset_id {
-        if let Some(current) = settings::get(core)?.filter(|s| s.enabled && s.role == Role::Primary)
-        {
-            delete(core, &current.space_id, id).await?;
-        } else {
-            release(core, id).await?;
+        if let Some(current)=super::spaces::get(core)?.filter(|s|s.protocol==2) {
+            let member:bool=core.backup_db(|db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2)",params![current.space_id,id],|r|r.get(0))?))?;
+            if current.enabled&&member {super::sync_delete::delete(core,&current.space_id,id).await?;}
+            else {
+                stop_readers(core,id).await?;
+                let _writer=core.backup_write_lock.lock().await;let _restore=core.backup_restore_lock.lock().await;
+                remove_local(core,id).await?;
+            }
+            return core.remove_after_transcription(task_id,false).await;
         }
-        core.remove_after_transcription(task_id, false).await
+        // An unupgraded or unselected library cannot publish through the legacy writer path.
+        stop_readers(core,id).await?;
+        let _writer=core.backup_write_lock.lock().await;
+        let _restore=core.backup_restore_lock.lock().await;
+        remove_local(core,id).await?;
+        core.remove_after_transcription(task_id,false).await
     } else {
         core.remove_after_transcription(task_id, true).await
     }

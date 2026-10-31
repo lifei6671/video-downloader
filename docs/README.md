@@ -1,8 +1,11 @@
 # 技术文档
 
 - [开发、验证与发布](development.md)：源码运行、测试、引擎打包、CI 与标签发布。
-- [视频 S3 备份与按需恢复方案](s3-video-backup-plan.md)：Cloudflare R2、本地优先备份、跨设备元数据恢复、视频懒加载与删除联动设计草案。
-- [S3 备份实施任务](s3-backup-implementation.md)：M1–M6 数据、恢复与删除契约。
+- [CSP 组件验证](csp-component-validation.md)：动态样式、浮层滚动锁、SVG 与远端备份初始化通知的审计及回归。
+- [R2 多设备双向同步改造方案](r2-multi-device-sync-plan.md)：下一阶段目标，所有设备平等读写、冲突合并、删除传播与视频懒加载；尚未实施。
+- [R2 多设备同步实施任务](r2-multi-device-sync-implementation.md)：P1–P6 顺序、改造范围、测试与阶段验收要求；仅规划。
+- [视频 S3 备份与按需恢复方案](s3-video-backup-plan.md)：当前单主写版本的设计与实现基线，后续改造以多设备同步方案为准。
+- [S3 备份实施任务](s3-backup-implementation.md)：现有单主写版本 M1–M6 数据、恢复与删除契约。
 - [S3 备份验收记录](s3-backup-validation.md)：离线、浏览器、原生与真实 R2 分开记录。
 - [S3 备份运维与接管](s3-backup-operations.md)：凭据、删除恢复、手动主设备迁移与专用测试。
 - [单视频文案提取](fun-asr-nano.md)：Fun-ASR-Nano CPU / Windows CUDA、模型按需下载、旧结果保留与导出契约。
@@ -27,3 +30,5 @@
 - [TikTok 视频规格选择在线验收](tiktok-video-format-validation.md)
 
 - [Fun-ASR-Nano Windows CUDA](cuda-acceleration.md)：独立 VAD、版本选择与下载边界；[本轮验证](nano-cuda-validation.md)。
+
+- [多设备同步使用与维护](multi-device-sync-operations.md)：空间、冲突、删除、v1 升级与隔离验证；[本轮记录](r2-sync-validation.md)。

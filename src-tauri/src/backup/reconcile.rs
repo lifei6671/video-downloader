@@ -18,6 +18,10 @@ pub struct Entry {
     pub remote_state: String,
     pub has_cover: bool,
     pub has_transcript: bool,
+    pub remote_deleted:bool,
+    pub has_pending_local_changes:bool,
+    pub conflict_count:usize,
+    pub remote_revision:u64,
 }
 #[derive(Serialize, Default)]
 pub struct Refresh {
@@ -27,6 +31,7 @@ pub struct Refresh {
 }
 
 pub fn list(core: &Core, space_id: &str) -> Result<Vec<Entry>> {
+    if super::spaces::config(core,space_id)?.protocol==2 {return super::sync_read::list(core,space_id);}
     let mut entries = Vec::new();
     for asset in core.backup_assets()? {
         let hidden: bool = core.backup_db(|db| {
@@ -48,6 +53,7 @@ pub fn list(core: &Core, space_id: &str) -> Result<Vec<Entry>> {
                 remote_state,
                 has_cover,
                 has_transcript,
+                remote_deleted:false,has_pending_local_changes:false,conflict_count:0,remote_revision:0,
             });
         }
     }

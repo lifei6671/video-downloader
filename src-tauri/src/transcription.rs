@@ -97,11 +97,14 @@ fn load(db: &Connection, id: &str) -> Result<Option<Snapshot>> {
         .transpose()
 }
 fn store(db: &Connection, value: &Snapshot) -> Result<()> {
+    persist_snapshot(db,value,false)
+}
+fn persist_snapshot(db:&Connection,value:&Snapshot,new_result:bool)->Result<()> {
     let tx = db.unchecked_transaction().context("DATABASE_ERROR")?;
     tx.execute("INSERT INTO video_transcripts VALUES(?1,?2) ON CONFLICT(task_id) DO UPDATE SET snapshot=excluded.snapshot",
                params![value.task_id, serde_json::to_string(value)?]).context("DATABASE_ERROR")?;
     // Startup initializes this schema before normal transcript writes.
-    if tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='media_assets')", [], |r| r.get::<_,bool>(0))? {
+    if new_result&&tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='media_assets')", [], |r| r.get::<_,bool>(0))? {
         crate::backup::repository::preserve_transcript(&tx, value)?;
     }
     tx.commit().context("DATABASE_ERROR")?;
@@ -324,7 +327,7 @@ impl Core {
                 }
                 value.has_result = value.result.is_some();
                 if inner.tasks.iter().any(|t| t.id == task_id) || asset_exists(&inner.db,&task_id).unwrap_or(false) {
-                    if store(&inner.db, &value).is_err() {
+                    if persist_snapshot(&inner.db, &value,value.state=="completed").is_err() {
                         value.state = "failed".into(); value.error_code = Some("DATABASE_ERROR".into());
                         // A recognized result is not saved until SQLite commits. Keep
                         // this failure queryable without losing the prior saved text.
@@ -335,6 +338,7 @@ impl Core {
                     (core.emit)(TaskEvent::Transcription(Box::new(value.summary())));
                 }
                 inner.transcription = None;
+                core.wake_backup();
             }
             let _ = done.send(true);
         }));

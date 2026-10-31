@@ -55,9 +55,9 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
       {cancel && <Item disabled={busy || task.canceling} onSelect={() => cancel(context ? row.current : trigger.current)}><X />{task.canceling ? '正在取消…' : '取消下载'}</Item>}
       {removable && (hasFile || hasLink || transcript || coverActions) && <Separator />}
       {removable && <Item disabled={busy} onSelect={remove}><ListX />从列表移除</Item>}
-      {hasFile && release && <Item disabled={busy} onSelect={release}><Trash2 />仅释放本机副本</Item>}
+      {hasFile && release && <Item disabled={busy} onSelect={release}><Trash2 />释放本机空间</Item>}
       {(hasFile || deleteBackup) && <Item variant="destructive" disabled={busy} onSelect={deleteFile}>
-        <Trash2 />{task.video?.kind === 'image_album' ? '删除本地图集' : deleteBackup ? '删除视频及备份' : '删除本地视频'}
+        <Trash2 />{task.video?.kind === 'image_album' ? '删除本地图集' : deleteBackup ? '从当前同步库删除' : '删除本地视频'}
       </Item>}
   </>;
   if (context) return <ContextMenu onOpenChange={open => {

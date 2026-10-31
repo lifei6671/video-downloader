@@ -44,7 +44,7 @@ pub(crate) fn regular(path: &Path) -> Result<Option<std::fs::Metadata>> {
     Ok(Some(meta))
 }
 
-async fn fingerprint(
+pub(crate) async fn fingerprint(
     path: PathBuf,
     cancel: watch::Receiver<bool>,
     stop: watch::Receiver<bool>,
@@ -117,6 +117,10 @@ pub async fn local(core: &Core, id: &str) -> Result<Option<PathBuf>> {
 pub async fn ensure_current(core: &Arc<Core>, id: &str) -> Result<PathBuf> {
     if let Some(path) = local(core, id).await? {
         return Ok(path);
+    }
+    if let Some(space)=super::spaces::get(core)?.filter(|s|s.enabled&&s.protocol==2) {
+        let provider=super::spaces::provider(core,&space.space_id)?;
+        return super::sync_read::ensure(core,provider.as_ref(),id).await;
     }
     let mut shutdown = core.backup_cancellation();
     let _slot = tokio::select! {_=shutdown.changed()=>bail!("CANCELED"),slot=core.backup_restore_lock.lock()=>slot};
