@@ -23,51 +23,83 @@ pub(super) fn in_use(target: &Target, projected: &Projection, message: i32) -> b
                 .any(|r| target.message_id(r).ok() == Some(message))
         })
 }
-pub(super) async fn reconcile<'a>(
-    transport: &'a impl Transport,
-    target: &'a Target,
-    asset: &'a str,
-    io: &'a Io,
-    project: impl Fn() -> ProviderFuture<'a, Projection> + Send + Sync,
-) -> Result<()> {
+pub(super) trait OwnedMessageRemoval: Transport {
+    fn read_owned_ids(&self, groups: &[(i32, Vec<RemoteDocument>)], io: &Io)
+        -> impl std::future::Future<Output = Result<Vec<i32>>> + Send;
+    fn delete_verified_ids(&self, ids: &[i32]) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn confirm_ids_gone(&self, ids: &[i32]) -> impl std::future::Future<Output = Result<()>> + Send;
+}
+
+/// Validate every group before sending the first deletion, even when the asset spans multiple batches.
+pub(super) async fn reconcile_snapshot(
+    transport: &impl OwnedMessageRemoval,
+    target: &Target,
+    asset: &str,
+    io: &Io,
+    projected: &Projection,
+    media: Vec<RemoteDocument>,
+    archived: Vec<(i32, Vec<RemoteDocument>)>,
+) -> Result<usize> {
     if !transport.can_delete() {
         bail!("BACKUP_DELETE_UNSUPPORTED");
     }
-    let projected = project().await?;
     let deletion = projected
         .assets
         .get(asset)
         .filter(|s| s.deleted)
         .context("BACKUP_TOMBSTONE_REQUIRED")?
         .revision;
-    for document in io.run(transport.media(io)).await? {
+    let mut groups: std::collections::BTreeMap<i32, Vec<RemoteDocument>> =
+        archived.into_iter().collect();
+    for document in media {
+        io.check()?;
         let known = projected
             .references
             .get(asset)
             .into_iter()
             .flatten()
-            .find(|r| target.message_id(r).ok() == Some(document.message_id)
-                && r.document_id()==Some(document.document_id)
-                && r.bytes==document.bytes && serde_json::from_str::<Envelope>(&document.caption).is_ok_and(|e|e.sha256==r.sha256&&e.container==r.container));
+            .find(|r| {
+                target.message_id(r).ok() == Some(document.message_id)
+                    && r.document_id() == Some(document.document_id)
+                    && r.bytes == document.bytes
+                    && serde_json::from_str::<Envelope>(&document.caption)
+                        .is_ok_and(|e| e.sha256 == r.sha256 && e.container == r.container)
+            });
         let Some(reference) = candidate(target, asset, deletion, &document, known)? else {
             continue;
         };
-        let fresh = project().await?;
-        if !fresh
-            .assets
-            .get(asset)
-            .is_some_and(|s| s.deleted && s.revision == deletion)
-        {
-            bail!("BACKUP_REUPLOAD_STALE");
-        }
-        if in_use(target, &fresh, document.message_id) {
+        if in_use(target, projected, document.message_id) {
             bail!("BACKUP_MEDIA_IN_USE");
         }
-        if known.is_none() { verify(transport,target,&reference,io).await?; }
-        remove(transport, target, &reference, io).await?;
+        if known.is_none() {
+            verify(transport, target, &reference, io).await?;
+        }
+        groups
+            .entry(document.message_id)
+            .or_default()
+            .push(document);
     }
-    Ok(())
+    if groups.keys().any(|&id| in_use(target, projected, id)) {
+        bail!("BACKUP_MEDIA_IN_USE");
+    }
+    let groups: Vec<_> = groups.into_iter().collect();
+    let mut verified = Vec::new();
+    const BATCH_SIZE: usize = 100;
+    for batch in groups.chunks(BATCH_SIZE) {
+        let _read = super::delete_timing::setup_span("read_owned_message");
+        verified.extend(io.run(transport.read_owned_ids(batch, io)).await?);
+    }
+    for batch in verified.chunks(BATCH_SIZE) {
+        {
+            let _delete = super::delete_timing::setup_span("delete_message");
+            io.run(transport.delete_verified_ids(batch)).await?;
+        }
+        let _confirm = super::delete_timing::setup_span("confirm_message_gone");
+        io.run(transport.confirm_ids_gone(batch)).await?;
+    }
+    Ok(groups.len())
 }
+
 pub(super) async fn cancel(
     transport: &impl Transport,
     target: &Target,

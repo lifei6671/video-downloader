@@ -22,3 +22,14 @@ CREATE TABLE IF NOT EXISTS telegram_space_labels (
  space_id TEXT PRIMARY KEY REFERENCES backup_spaces(space_id),
  channel_title TEXT NOT NULL
 );
+
+-- The channel update position and the message rows it covers are committed together.
+CREATE TABLE IF NOT EXISTS telegram_message_map (
+ space_id TEXT PRIMARY KEY REFERENCES backup_spaces(space_id) ON DELETE CASCADE,
+ target_json TEXT NOT NULL, pts INTEGER NOT NULL, high_water INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS telegram_mapped_documents (
+ space_id TEXT NOT NULL REFERENCES telegram_message_map(space_id) ON DELETE CASCADE,
+ message_id INTEGER NOT NULL, document_json TEXT NOT NULL, revision INTEGER, index_body BLOB
+);
+CREATE INDEX IF NOT EXISTS telegram_mapped_message ON telegram_mapped_documents(space_id,message_id);

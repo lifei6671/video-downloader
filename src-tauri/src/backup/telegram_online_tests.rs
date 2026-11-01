@@ -330,7 +330,7 @@ async fn telegram_streaming_live_original_video_flag_and_hash() -> Result<()> {
         },rx.clone()).await?;
         let MediaLocation::TelegramMessage {message_id,..}=&receipt.reference.location else {bail!("Telegram reference required");};
         let message_id=i32::try_from(*message_id)?;
-        let streaming=core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.with_transport(&core,&id,run.target.clone(),rx.clone(),None,move |_,transport,io|Box::pin(async move {io.run(transport.streaming_video_flag(message_id)).await})).await?;
+        let streaming=core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.with_transport(&core,&id,run.target.clone(),rx.clone(),("test_probe", None),move |_,transport,io|Box::pin(async move {io.run(transport.streaming_video_flag(message_id)).await})).await?;
         if !streaming {bail!("server document has no streaming video flag");}
         let destination=config.work_directory.join("restored-original.mp4");
         if !destination.exists() {

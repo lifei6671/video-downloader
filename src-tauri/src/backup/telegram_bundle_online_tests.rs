@@ -82,7 +82,7 @@ async fn shape(
     let (_stop, rx) = tokio::sync::watch::channel(false);
     let docs = core
         .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
-        .with_transport(core, &id, target, rx, None, move |_, t, _| {
+        .with_transport(core, &id, target, rx, ("test_probe", None), move |_, t, _| {
             Box::pin(async move { t.bundle_documents(message).await })
         })
         .await?;
@@ -108,7 +108,7 @@ async fn stage(core: &Arc<Core>, cfg: &Config, mode: &str) -> Result<()> {
         let (_stop, rx) = tokio::sync::watch::channel(false);
         let report = core
             .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
-            .with_transport(core, &login, target, rx, None, |_, t, io| {
+            .with_transport(core, &login, target, rx, ("test_probe", None), |_, t, io| {
                 Box::pin(async move { t.recent_rich_shapes(io).await })
             })
             .await?;

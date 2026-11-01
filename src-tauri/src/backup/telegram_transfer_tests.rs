@@ -844,42 +844,56 @@ async fn telegram_uncertain_send_does_not_probe_or_require_the_local_video_again
 }
 
 #[tokio::test]
-async fn telegram_video_probe_cancels_without_waiting_for_its_timeout() {
+async fn telegram_video_probe_respects_canceled_io_before_launch() {
+    let root=tempfile::tempdir().unwrap();
+    let core=crate::desktop_core::Core::open(&root.path().join("qa.sqlite"),root.path().join("downloads"),"python-must-not-run".into(),vec![],|_|{}).unwrap();
+    let mut source=source(root.path(),"video",b"original bytes");source.video=None;
+    let (cancel,_stop,io)=io();cancel.send_replace(true);
+    assert_eq!(prepare_video(&core,&mut source,&io).await.unwrap_err().to_string(),"TELEGRAM_TRANSFER_CANCELED");
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn delete_index_transfer_timings_follow_parent_and_skip_reused_uploads() {
+    use crate::{backup::delete_timing::IndexTiming, desktop_core::Core};
     let root = tempfile::tempdir().unwrap();
-    let marker = root.path().join("probe-started");
-    let dtk: serde_json::Value =
-        serde_json::from_str(include_str!("../../../vendor/dtk/manifest.json")).unwrap();
-    let ready = serde_json::json!({"protocol_version":3,"type":"ready","engine_version":crate::python_bridge::ENGINE_VERSION,"yt_dlp_version":crate::python_bridge::YTDLP_VERSION,"dtk_version":dtk["upstream_version"],"dtk_commit":dtk["upstream_commit"]});
-    let script = root.path().join("probe.py");
-    std::fs::write(&script,format!("import json,sys,time\nfrom pathlib import Path\nprint({},flush=True)\nrequest=json.loads(sys.stdin.readline())\nassert request['method']=='probe_video'\nPath(sys.argv[1]).write_text('started')\ntime.sleep(60)\n",serde_json::to_string(&ready.to_string()).unwrap())).unwrap();
-    let core = crate::desktop_core::Core::open(
-        &root.path().join("qa.sqlite"),
-        root.path().join("downloads"),
-        std::env::var("PYTHON").unwrap_or_else(|_| "python".into()),
-        vec![
-            script.to_string_lossy().into_owned(),
-            marker.to_string_lossy().into_owned(),
-        ],
-        |_| {},
-    )
-    .unwrap();
-    let mut source = source(root.path(), "video", b"original bytes");
-    source.video = None;
-    let (cancel, _stop, io) = io();
-    let probing = prepare_video(&core, &mut source, &io);
-    tokio::pin!(probing);
-    tokio::select! {
-        _=async {while !marker.exists(){tokio::time::sleep(Duration::from_millis(10)).await;}}=>{},
-        result=&mut probing=>panic!("probe ended before cancellation: {result:?}"),
-        _=tokio::time::sleep(Duration::from_secs(5))=>panic!("probe never started"),
+    let core = Core::open(&root.path().join("core.sqlite"), root.path().join("downloads"), "unused".into(), vec![], |_| {}).unwrap();
+    core.backup_db(|db| {
+        db.execute("INSERT INTO backup_spaces(space_id,library_id,endpoint,bucket,prefix,enabled) VALUES('qa','library','','','',0)", [])?;
+        db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES('deletion','qa','delete','running','objects','{}')", [])?;
+        Ok(())
+    }).unwrap();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let net = Mock::new();
+    let (_cancel, _stop, io) = io();
+    for (kind, stage) in [("event", "publish"), ("library", "archive")] {
+        let source = source(root.path(), kind, b"{}");
+        let timing = IndexTiming::new(&core, "deletion", stage);
+        upload_with_timing(&net, &journal, &target(), source.clone(), &io, timing).await.unwrap();
+        let read = || core.backup_db(|db| {
+            let raw: String = db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id='deletion'", [], |r| r.get(0))?;
+            Ok(serde_json::from_str::<serde_json::Value>(&raw)?)
+        }).unwrap();
+        let first = read();
+        for step in ["upload", "send", "receipt"] {
+            let metric = &first["timings"]["foreground"][format!("{stage}_{step}")];
+            assert_eq!(metric["outcome"], "ok");
+            assert!(metric["elapsed_ms"].is_u64());
+        }
+        core.backup_db(|db| {
+            db.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.local_cleanup_done',json('true')) WHERE operation_id='deletion'", [])?;
+            Ok(())
+        }).unwrap();
+        upload_with_timing(&net, &journal, &target(), source, &io, timing).await.unwrap();
+        let retry = read();
+        let maintenance = &retry["timings"]["maintenance"];
+        assert_eq!(maintenance[format!("{stage}_receipt")]["outcome"], "ok");
+        assert!(maintenance.get(format!("{stage}_upload")).is_none());
+        assert!(maintenance.get(format!("{stage}_send")).is_none());
+        core.backup_db(|db| {
+            db.execute("UPDATE backup_operations SET payload_json=json_remove(payload_json,'$.local_cleanup_done') WHERE operation_id='deletion'", [])?;
+            Ok(())
+        }).unwrap();
     }
-    cancel.send_replace(true);
-    let result = tokio::time::timeout(Duration::from_secs(3), &mut probing)
-        .await
-        .unwrap();
-    assert_eq!(
-        result.unwrap_err().to_string(),
-        "TELEGRAM_TRANSFER_CANCELED"
-    );
     core.shutdown().await;
 }

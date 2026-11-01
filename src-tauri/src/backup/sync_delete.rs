@@ -62,7 +62,7 @@ pub fn intent(core: &Core, space: &str, local: &str) -> Result<String> {
 }
 pub async fn delete(core: &Arc<Core>, space: &str, local: &str) -> Result<()> {
     intent(core, space, local)?;
-    core.wake_backup();
+    core.delete_queue_wake.notify_one();
     core.cancel_asset_restore(local)?;
     core.cancel_asset_transcription(local).await?;
     Ok(())
@@ -80,7 +80,21 @@ async fn finish_local(core: &Arc<Core>, op: &scheduler::Operation) -> Result<()>
     core.finish_asset_deletion(local, &op.operation_id)
 }
 
-pub async fn execute(
+pub async fn execute(core:&Arc<Core>,provider:&dyn BackupProvider,operation:&str)->Result<()> {
+    super::delete_timing::timed(core, operation, "total", super::telegram_session::with_delete_config(async {
+        let result = execute_inner(core, provider, operation).await;
+        if let Err(error) = &result {
+            if provider.scope().provider_type == ProviderType::Telegram
+                && super::telegram_provider::discard_mismatched_map(core, provider.scope(), error)?
+            {
+                // Resume at the durable phase after rebuilding; retain all upload and delete receipts.
+                return execute_inner(core, provider, operation).await;
+            }
+        }
+        result
+    })).await
+}
+async fn execute_inner(
     core: &Arc<Core>,
     provider: &dyn BackupProvider,
     operation: &str,
@@ -116,9 +130,9 @@ pub async fn execute(
     };
     core.cancel_asset_restore(local)?;
     core.cancel_asset_transcription(local).await?;
-    let _writer = core.backup_write_lock.lock().await;
+    let _writer = super::delete_timing::timed(core,operation,"wait_writer",async {Ok(core.backup_write_lock.lock().await)}).await?;
     if matches!(op.phase.as_str(), "local_cleanup" | "finalizing") {
-        finish_local(core, &op).await?;
+        super::delete_timing::timed(core,operation,"local_cleanup",finish_local(core,&op)).await?;
         return finish_pass(core, &op);
     }
     let change = AssetChange {
@@ -146,7 +160,7 @@ pub async fn execute(
             asset: Box::new(asset),
         }
     } else {
-        sync_engine::publish(provider, change).await?
+        super::delete_timing::timed_setup(core,operation,"publish",sync_engine::publish(provider,change)).await?
     } {
         PublishReceipt::Converged { asset } => asset,
         PublishReceipt::Accepted { .. } => bail!("BACKUP_PUBLICATION_UNCONFIRMED"),
@@ -166,7 +180,7 @@ pub async fn execute(
         tx.commit()?;
         Ok(())
     })?;
-    if let Err(error) = provider.reconcile_deleted_asset(&remote, operation).await {
+    if let Err(error) = super::delete_timing::timed_setup(core,operation,"remote_cleanup",provider.reconcile_deleted_asset(&remote, operation)).await {
         if provider
             .read_asset(&remote)
             .await?
@@ -182,7 +196,7 @@ pub async fn execute(
             db.execute("UPDATE backup_operations SET phase='local_cleanup',last_error=NULL WHERE operation_id=?",[operation])?;
             Ok(())
         })?;
-        finish_local(core, &op).await?;
+        super::delete_timing::timed(core,operation,"local_cleanup",finish_local(core,&op)).await?;
     }
     finish_pass(core, &op)
 }

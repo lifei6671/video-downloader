@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS backup_conflicts(
 CREATE TABLE IF NOT EXISTS backup_sync_checkpoints(
  space_id TEXT PRIMARY KEY REFERENCES backup_spaces(space_id),checkpoint_json TEXT,
  last_success_at INTEGER,last_error TEXT);
+CREATE TABLE IF NOT EXISTS backup_window_sync(
+ space_id TEXT PRIMARY KEY REFERENCES backup_sync_checkpoints(space_id) ON DELETE CASCADE,
+ last_success_ms INTEGER NOT NULL,last_skipped_ms INTEGER);
 CREATE TABLE IF NOT EXISTS backup_probe_cleanup(
  operation_id TEXT PRIMARY KEY,target_json TEXT NOT NULL,credential_ref TEXT NOT NULL,last_error TEXT);
 CREATE TABLE IF NOT EXISTS backup_tombstones(

@@ -114,7 +114,7 @@ async fn telegram_rich_live_four_original_attachments() -> Result<()> {
         if run.target.account_id!=account.id || run.target.channel_id!=matching[0].id {bail!("validation target changed");}
         save(&path,&run)?;
         let (_cancel,rx)=tokio::sync::watch::channel(false);
-        let report=core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.with_transport(&core,&id,run.target.clone(),rx,None,move |_,transport,io|Box::pin(async move {
+        let report=core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.with_transport(&core,&id,run.target.clone(),rx,("test_probe", None),move |_,transport,io|Box::pin(async move {
             let mut originals=BTreeMap::<String,(tl::types::Document,Envelope)>::new();
             let video=io.run(transport.message(cfg.video_message_id)).await?;
             let mut history=transport.client.iter_messages(transport.peer).limit(500);

@@ -31,3 +31,6 @@ mod telegram_lifecycle;
 mod telegram_online_tests;
 #[cfg(test)]
 mod tests;
+
+mod delete_timing;
+mod pull_timing;

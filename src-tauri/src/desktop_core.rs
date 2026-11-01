@@ -189,6 +189,9 @@ struct Inner {
 pub struct Core {
     pub telegram_accounts: crate::telegram_accounts::TelegramAccounts,
     pub(crate) backup_wake: Arc<tokio::sync::Notify>,
+    pub(crate) backup_window_wake: tokio::sync::Notify,
+    pub(crate) delete_queue_wake: tokio::sync::Notify,
+    pub(crate) deferred_pulls: crate::backup::sync_engine::DeferredPulls,
     pub(crate) backup_foreground: std::sync::atomic::AtomicBool,
     pub(crate) backup_active_probes: Mutex<HashSet<String>>,
     pub(crate) backup_config_lock: tokio::sync::Mutex<()>,
@@ -201,6 +204,8 @@ pub struct Core {
     runtime_directory: PathBuf,
     #[cfg(test)]
     pub(crate) telegram_source: Mutex<Option<telegram_download::Factory>>,
+    #[cfg(test)]
+    pub(crate) local_media_fixture: Mutex<Option<crate::local_media::Fixture>>,
     emit: Arc<dyn Fn(TaskEvent) + Send + Sync>,
 }
 
@@ -544,6 +549,9 @@ impl Core {
         Ok(Arc::new(Self {
             telegram_accounts,
             backup_wake:backup_wake.clone(),
+            backup_window_wake:Default::default(),
+            delete_queue_wake:tokio::sync::Notify::new(),
+            deferred_pulls:Default::default(),
             backup_foreground:std::sync::atomic::AtomicBool::new(true),
             backup_active_probes:Mutex::new(HashSet::new()),
             backup_config_lock: tokio::sync::Mutex::new(()),
@@ -571,6 +579,8 @@ impl Core {
             runtime_directory: db_path.parent().context("IO_ERROR")?.join("runtime"),
             #[cfg(test)]
             telegram_source: Mutex::new(None),
+            #[cfg(test)]
+            local_media_fixture: Mutex::new(None),
             emit: Arc::new(emit),
         }))
     }
@@ -722,7 +732,7 @@ impl Core {
     }
 
     pub fn wake_backup(&self) {self.backup_wake.notify_waiters();}
-    pub fn set_backup_foreground(&self,foreground:bool) {self.backup_foreground.store(foreground,std::sync::atomic::Ordering::Relaxed);if foreground {self.wake_backup();}}
+    pub fn set_backup_foreground(&self,foreground:bool) {self.backup_foreground.store(foreground,std::sync::atomic::Ordering::Relaxed);if foreground {self.backup_window_wake.notify_waiters();}}
     pub(crate) fn backup_cancellation(&self)->watch::Receiver<bool> {self.inner.lock().unwrap().backup_cancel.subscribe()}
 
     pub(crate) async fn probe_video_metadata(
@@ -731,17 +741,25 @@ impl Core {
         operation: &str,
         cancel: impl std::future::Future<Output = ()>,
     ) -> Result<serde_json::Value> {
-        crate::python_bridge::PythonBridge::operation_cancellable(
-            &self.program,
-            &self.args,
-            operation,
-            "probe_video",
-            serde_json::json!({"source":source,"runtime_directory":self.runtime_directory}),
-            |_| {},
-            cancel,
-        )
-        .await
+        let _ = operation;
+        #[cfg(test)]
+        if let Some(fixture) = self.local_media_fixture.lock().unwrap().clone() {
+            return fixture("probe", source);
+        }
+        crate::local_media::probe(source, &self.runtime_directory, cancel).await
     }
+    async fn extract_telegram_cover(
+        &self,
+        source: &Path,
+        cancel: impl std::future::Future<Output = ()>,
+    ) -> Result<Value> {
+        #[cfg(test)]
+        if let Some(fixture) = self.local_media_fixture.lock().unwrap().clone() {
+            return fixture("cover", source);
+        }
+        crate::local_media::extract(source, &self.runtime_directory, cancel).await
+    }
+
     pub async fn ensure_local_video(self:&Arc<Self>,asset_id:&str)->Result<PathBuf> {
         let mut receiver={
             let mut inner=self.inner.lock().unwrap();
@@ -1903,12 +1921,7 @@ impl Core {
                             }
                             if result["cover_filename"].is_string() { Ok(result) } else {
                             let mut cover_cancel = cancellation.clone();
-                            let cover = PythonBridge::operation_cancellable(
-                                &core.program, &core.args, &id, "extract_cover",
-                                json!({"runtime_directory":core.runtime_directory,
-                                    "staging_dir":media,"filename":result["filename"]}),
-                                |_| {}, async { let _ = cover_cancel.wait_for(|v| *v).await; },
-                            ).await;
+                            let cover = core.extract_telegram_cover(&media.join(result["filename"].as_str().context("INVALID_ENGINE_RESULT")?), async { let _ = cover_cancel.wait_for(|v| *v).await; }).await;
                             match cover {
                                 Err(error) if error.to_string() == "CANCELED" => Err(error),
                                 cover => {

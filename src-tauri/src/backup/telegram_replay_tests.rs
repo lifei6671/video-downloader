@@ -66,6 +66,11 @@ async fn telegram_message_updates_replay_latest_transcript_and_preserve_history(
 }
 #[derive(Default)]
 struct Remote {
+    pulls: AtomicUsize,
+    removed_groups:Mutex<Vec<Vec<RemoteDocument>>>,
+    group_only:AtomicBool,
+    delete_batches: Mutex<Vec<Vec<i32>>>,
+    keep_message: std::sync::atomic::AtomicI32,
     data: Mutex<Memory>,
     accepted: AtomicBool,
     lost: AtomicBool,
@@ -115,6 +120,7 @@ impl BackupProvider for Provider {
     }
     fn pull_changes(&self, c: Option<Checkpoint>) -> ProviderFuture<'_, ChangeBatch> {
         Box::pin(async move {
+            self.remote.pulls.fetch_add(1, Ordering::SeqCst);
             let cursor = c.map(|c| serde_json::from_str(&c.value)).transpose()?;
             let p = self.projection(cursor)?;
             Ok(ChangeBatch {
@@ -304,14 +310,11 @@ impl BackupProvider for Provider {
         Box::pin(async move {
             let (_cancel, cancel) = tokio::sync::watch::channel(false);
             let (_stop, stop) = tokio::sync::watch::channel(false);
-            telegram_lifecycle::reconcile(
-                &MemoryTransport(&self.remote),
-                &self.target,
-                &asset,
-                &Io::new(cancel, stop, None),
-                || Box::pin(async { self.projection(None) }),
-            )
-            .await
+            let transport=MemoryTransport(&self.remote);
+            let projected=self.projection(None)?;
+            let media=transport.media(&Io::new(cancel.clone(),stop.clone(),None)).await?;
+            telegram_lifecycle::reconcile_snapshot(&transport,&self.target,&asset,&Io::new(cancel,stop,None),&projected,media,vec![]).await?;
+            Ok(())
         })
     }
 }
@@ -480,6 +483,7 @@ async fn telegram_t4_replaced_document_and_corrupt_index_never_remove_local_or_a
     net.data.lock().unwrap().events[0].1 = b"invalid index".to_vec();
     assert!(p.projection(Some(before)).is_err());
     assert!(engine.pull().await.is_err());
+    assert_eq!(pull_journal(&core).last().unwrap().1, "error");
     assert_eq!(
         core.backup_assets().unwrap()[0].metadata["title"],
         "原始标题"
@@ -780,6 +784,43 @@ impl Transport for MemoryTransport<'_> {
             }
             Ok(())
         })
+    }
+}
+impl telegram_lifecycle::OwnedMessageRemoval for MemoryTransport<'_> {
+    async fn read_owned_ids(&self, groups: &[(i32, Vec<RemoteDocument>)], _: &Io) -> Result<Vec<i32>> {
+        let data = self.0.data.lock().unwrap();
+        let mut ids = Vec::new();
+        for (id, expected) in groups {
+            if self.0.group_only.load(Ordering::SeqCst) {
+                self.0.removed_groups.lock().unwrap().push(expected.clone());
+            } else if let Some(actual) = data.documents.get(id) {
+                if expected.as_slice() != std::slice::from_ref(actual) { bail!("TELEGRAM_MEDIA_CHANGED"); }
+            } else {
+                continue;
+            }
+            ids.push(*id);
+        }
+        Ok(ids)
+    }
+
+    async fn delete_verified_ids(&self, ids: &[i32]) -> Result<()> {
+        self.0.delete_batches.lock().unwrap().push(ids.to_vec());
+        if !self.0.group_only.load(Ordering::SeqCst) {
+            let mut data = self.0.data.lock().unwrap();
+            for id in ids {
+                if self.0.keep_message.load(Ordering::SeqCst) == *id { continue; }
+                data.documents.remove(id);
+                data.media.remove(id);
+            }
+            if self.0.lost_delete.swap(false, Ordering::SeqCst) { bail!("TELEGRAM_CONNECTION_ERROR"); }
+        }
+        Ok(())
+    }
+
+    async fn confirm_ids_gone(&self, ids: &[i32]) -> Result<()> {
+        let data = self.0.data.lock().unwrap();
+        if ids.iter().any(|id| data.documents.contains_key(id)) { bail!("BACKUP_CLEANUP_PENDING"); }
+        Ok(())
     }
 }
 struct Expired {
@@ -1392,6 +1433,180 @@ async fn telegram_t3_provider_reference_expiry_restarts_small_and_video_reads_on
     core.shutdown().await;
 }
 #[tokio::test]
+async fn deletion_only_wakes_the_queue_and_keeps_the_permit_until_claimed() {
+    let root = tempfile::tempdir().unwrap();
+    let core = open(root.path());
+    let provider = setup(&core, Arc::new(Remote::default()), None);
+    let (asset, _) = seed(&core, root.path());
+    let discovery = core.backup_wake.notified();
+    tokio::pin!(discovery);
+    discovery.as_mut().enable();
+    super::super::sync_delete::delete(&core, &provider.scope().space_id, &asset).await.unwrap();
+    tokio::select! { biased;
+        _ = &mut discovery => panic!("deletion woke discovery"),
+        _ = core.delete_queue_wake.notified() => (),
+        _ = std::future::ready(()) => panic!("missing pending queue wakeup"),
+    }
+    core.shutdown().await;
+}
+
+fn pull_journal(core: &Core) -> Vec<(String, String)> {
+    core.backup_db(|db| {
+        let mut stmt = db.prepare("SELECT trigger,outcome,started_at_ms,ended_at_ms FROM backup_pull_runs ORDER BY run_id")?;
+        let mut rows = stmt.query([])?;
+        let mut runs = Vec::new();
+        while let Some(row) = rows.next()? {
+            let start: i64 = row.get(2)?;
+            let end: i64 = row.get(3)?;
+            assert!(start > 0 && start <= end);
+            runs.push((row.get(0)?, row.get(1)?));
+        }
+        Ok(runs)
+    }).unwrap()
+}
+
+#[tokio::test]
+async fn pull_journal_distinguishes_worker_wakes_and_idle_manual_refresh() {
+    let root = tempfile::tempdir().unwrap();
+    let core = open(root.path());
+    let provider = setup(&core, Arc::new(Remote::default()), None);
+    let engine = SyncEngine::new(core.clone(), provider.clone());
+    let (stop, cancel) = tokio::sync::watch::channel(false);
+    let mut worker = Box::pin(sync_engine::run_with(core.clone(), cancel, Arc::new(move |_, _| Ok(provider.clone()))));
+    for source in ["startup", "window_wake", "backup_wake"] {
+        match source {
+            "window_wake" => {
+                core.backup_db(|db| {
+                    db.execute("UPDATE backup_window_sync SET last_success_ms=last_success_ms-30000", [])?;
+                    Ok(())
+                }).unwrap();
+                core.set_backup_foreground(true);
+            }
+            "backup_wake" => core.wake_backup(),
+            _ => {}
+        }
+        tokio::select! { biased; _ = &mut worker => panic!("worker stopped"), _ = std::future::ready(()) => {} }
+    }
+    engine.refresh().await.unwrap();
+    let expected = ["startup", "window_wake", "backup_wake", "manual_refresh"].map(|s| (s.to_owned(), "ok".to_owned()));
+    assert_eq!(pull_journal(&core), expected);
+    stop.send_replace(true);
+    worker.await;
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn recent_window_wakes_keep_the_scheduled_deadline_even_after_manual_refresh() {
+    let root = tempfile::tempdir().unwrap();
+    let core = open(root.path());
+    core.set_backup_foreground(false);
+    let provider = setup(&core, Arc::new(Remote::default()), None);
+    let engine = SyncEngine::new(core.clone(), provider.clone());
+    let (stop, cancel) = tokio::sync::watch::channel(false);
+    let mut worker = Box::pin(sync_engine::run_with(core.clone(), cancel, Arc::new(move |_, _| Ok(provider.clone()))));
+    tokio::select! { biased; _ = &mut worker => panic!("worker stopped"), _ = std::future::ready(()) => {} }
+
+    // Return from background with one second left in the foreground interval.
+    core.backup_db(|db| {
+        db.execute("UPDATE backup_window_sync SET last_success_ms=CAST(unixepoch('subsec')*1000 AS INTEGER)-29000", [])?;
+        Ok(())
+    }).unwrap();
+    core.set_backup_foreground(true);
+    tokio::select! { biased; _ = &mut worker => panic!("worker stopped"), _ = std::future::ready(()) => {} }
+    assert!(core.backup_db(|db| Ok(db.query_row("SELECT last_skipped_ms IS NOT NULL FROM backup_window_sync", [], |r| r.get::<_, bool>(0))?)).unwrap());
+    engine.refresh().await.unwrap();
+    core.set_backup_foreground(true);
+    tokio::select! { biased; _ = &mut worker => panic!("worker stopped"), _ = std::future::ready(()) => {} }
+    assert_eq!(pull_journal(&core).len(), 2);
+    // The second skipped wake must preserve that first deadline, even though the manual refresh is newer.
+    tokio::select! {
+        _ = &mut worker => panic!("worker stopped"),
+        result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pull_journal(&core).len() < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }) => result.expect("window wake postponed scheduled discovery"),
+    }
+    let expected = ["startup", "manual_refresh", "scheduled"].map(|s| (s.to_owned(), "ok".to_owned()));
+    assert_eq!(pull_journal(&core), expected);
+    stop.send_replace(true);
+    worker.await;
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn deferred_refresh_receives_queue_setup_failure_without_consuming_the_delete() {
+    let root = tempfile::tempdir().unwrap();
+    let core = open(root.path());
+    let net = Arc::new(Remote::default());
+    let provider = setup(&core, net.clone(), None);
+    let (asset, _) = seed(&core, root.path());
+    let operation = super::super::sync_delete::intent(&core, &provider.scope().space_id, &asset).unwrap();
+    let engine = SyncEngine::new(core.clone(), provider);
+    let mut refresh = Box::pin(engine.refresh());
+    tokio::select! { biased; _ = &mut refresh => panic!("refresh skipped the delete"), _ = std::future::ready(()) => {} }
+    let (stop, cancel) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(sync_engine::run_with(core.clone(), cancel, Arc::new(|_, _| {
+        anyhow::bail!("BACKUP_ACCESS_DENIED")
+    })));
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), refresh).await.unwrap().unwrap_err();
+    assert_eq!(error.to_string(), "BACKUP_ACCESS_DENIED");
+    let pending = super::super::scheduler::operations(&core).unwrap().into_iter().find(|op| op.operation_id == operation).unwrap();
+    assert_eq!(pending.state, "pending");
+    assert_eq!(pending.attempt, 0);
+    assert_eq!(net.pulls.load(Ordering::SeqCst), 0);
+    stop.send_replace(true);
+    worker.await.unwrap();
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn ready_deletions_drain_before_one_catchup_shared_with_manual_refreshes() {
+    let root = tempfile::tempdir().unwrap();
+    let core = open(root.path());
+    let net = Arc::new(Remote::default());
+    let provider = setup(&core, net.clone(), None);
+    for _ in 0..2 {
+        let (asset, _) = seed(&core, root.path());
+        let scope = provider.scope();
+        let remote = super::super::sync_read::remote_id(&core, &scope.space_id, &asset).unwrap();
+        core.backup_db(|db| {
+            db.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json)
+                VALUES(?1,?2,?3,'delete','pending','superseded',?4)",
+                params![id(),scope.space_id,asset,json!({"scope":scope,"remote_asset_id":remote}).to_string()])?;
+            Ok(())
+        }).unwrap();
+    }
+    let engine = SyncEngine::new(core.clone(), provider.clone());
+    let mut refreshes = Box::pin(async { tokio::join!(engine.refresh(), engine.refresh()) });
+    tokio::select! { biased; _ = &mut refreshes => panic!("refresh skipped the batch"), _ = std::future::ready(()) => {} }
+    assert_eq!(net.pulls.load(Ordering::SeqCst), 0);
+    assert!(pull_journal(&core).is_empty());
+    let (stop, cancel) = tokio::sync::watch::channel(false);
+    let mut worker = Box::pin(sync_engine::run_with(
+        core.clone(), cancel, Arc::new(move |_, _| Ok(provider.clone())),
+    ));
+    // Superseded deletes finish locally. Poll until the worker first needs a wakeup.
+    tokio::select! { biased; _ = &mut worker => panic!("worker stopped"), _ = std::future::ready(()) => {} }
+    let operations = super::super::scheduler::operations(&core).unwrap();
+    assert_eq!(operations.iter().filter(|op| op.kind=="delete" && op.state=="completed").count(), 2);
+    tokio::select! {
+        result = &mut refreshes => { result.0.unwrap(); result.1.unwrap(); }
+        _ = &mut worker => panic!("worker stopped"),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => panic!("catch-up missed batch completion"),
+    }
+    assert_eq!(net.pulls.load(Ordering::SeqCst), 1);
+    core.set_backup_foreground(true);
+    tokio::select! { biased; _ = &mut worker => panic!("worker stopped"), _ = std::future::ready(()) => {} }
+    assert_eq!(pull_journal(&core), [("post_delete".into(), "ok".into())]);
+    assert!(core.backup_db(|db| Ok(db.query_row("SELECT last_skipped_ms >= last_success_ms FROM backup_window_sync", [], |r| r.get::<_, bool>(0))?)).unwrap());
+    assert!(!core.backup_db(|db| Ok(db.query_row("SELECT foreground_delete_busy FROM backup_pull_runs", [], |r| r.get::<_, bool>(0))?)).unwrap());
+    stop.send_replace(true);
+    worker.await;
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn telegram_t3_existing_background_worker_claims_telegram_queue_and_converges() {
     let root = tempfile::tempdir().unwrap();
     let core = open(root.path());
@@ -1423,4 +1638,67 @@ async fn telegram_t3_existing_background_worker_claims_telegram_queue_and_conver
         assert_eq!(data.events.len(), 1);
     }
     core.shutdown().await;
+}
+
+#[tokio::test]
+async fn batched_cleanup_checks_every_group_before_deleting_and_retries_only_survivors() {
+    let root = tempfile::tempdir().unwrap();
+    let core = open(root.path());
+    let net = Arc::new(Remote::default());
+    let provider = setup(&core, net.clone(), None);
+    let engine = SyncEngine::new(core.clone(), provider.clone());
+    let (asset, _) = seed(&core, root.path());
+    engine.execute_upload(&claim(&core, &engine)).await.unwrap();
+    let mut projection = provider.projection(None).unwrap();
+    projection.assets.get_mut(&asset).unwrap().deleted = true;
+    let (_stop, stop) = tokio::sync::watch::channel(false);
+    let io = Io::new(stop.clone(), stop, None);
+    let transport = MemoryTransport(&net);
+    let plan: Vec<_> = {
+        let mut data = net.data.lock().unwrap();
+        let template = data.documents.values().next().unwrap().clone();
+        (1000..1102).map(|id| {
+            let doc = RemoteDocument { message_id: id, ..template.clone() };
+            data.documents.insert(id, doc.clone());
+            (id, vec![doc])
+        }).collect()
+    };
+    let cleanup = |groups| telegram_lifecycle::reconcile_snapshot(
+        &transport, &provider.target, &asset, &io, &projection, vec![], groups);
+    let mut changed = plan.clone();
+    changed.last_mut().unwrap().1[0].bytes += 1;
+    assert_eq!(cleanup(changed).await.unwrap_err().to_string(), "TELEGRAM_MEDIA_CHANGED");
+    assert!(net.delete_batches.lock().unwrap().is_empty());
+
+    net.data.lock().unwrap().documents.remove(&1000);
+    net.keep_message.store(1101, Ordering::SeqCst);
+    assert_eq!(cleanup(plan.clone()).await.unwrap_err().to_string(), "BACKUP_CLEANUP_PENDING");
+    assert_eq!(*net.delete_batches.lock().unwrap(), [(1001..1101).collect::<Vec<_>>(), vec![1101]]);
+    net.keep_message.store(0, Ordering::SeqCst);
+    cleanup(plan.clone()).await.unwrap();
+    assert_eq!(net.delete_batches.lock().unwrap()[2], [1101]);
+    cleanup(plan).await.unwrap();
+    assert_eq!(net.delete_batches.lock().unwrap().len(), 3);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn deletion_groups_media_and_archived_events_by_physical_message_and_checks_cancel_and_ownership() {
+    let root=tempfile::tempdir().unwrap();let core=open(root.path());let net=Arc::new(Remote::default());let p=setup(&core,net.clone(),None);let engine=SyncEngine::new(core.clone(),p.clone());
+    let (asset,_)=seed(&core,root.path());engine.execute_upload(&claim(&core,&engine)).await.unwrap();
+    let mut projected=p.projection(None).unwrap();projected.assets.get_mut(&asset).unwrap().deleted=true;projected.assets.get_mut(&asset).unwrap().revision=1000;
+    let mut media:Vec<_>=net.data.lock().unwrap().documents.values().cloned().collect();assert_eq!(media.len(),3);
+    for document in &mut media {document.message_id=42;}
+    for reference in projected.references.get_mut(&asset).unwrap() {if let MediaLocation::TelegramMessage{message_id,..}=&mut reference.location {*message_id=42;}}
+    let mut event=media[0].clone();event.document_id+=999;event.caption="archived exact event evidence".into();
+    net.group_only.store(true,Ordering::SeqCst);
+    let (cancel_tx,cancel)=tokio::sync::watch::channel(false);let (_stop_tx,stop)=tokio::sync::watch::channel(false);let io=Io::new(cancel,stop,None);let transport=MemoryTransport(&net);
+    let groups=telegram_lifecycle::reconcile_snapshot(&transport,&p.target,&asset,&io,&projected,media.clone(),vec![(42,vec![event.clone()])]).await.unwrap();
+    assert_eq!(groups,1);let sent=net.removed_groups.lock().unwrap().pop().unwrap();assert_eq!(sent.len(),4);assert!(sent.iter().any(|d|d==&event));
+    let mut live=projected.assets[&asset].clone();live.deleted=false;projected.assets.insert("other".into(),live);projected.references.insert("other".into(),projected.references[&asset].clone());
+    assert_eq!(telegram_lifecycle::reconcile_snapshot(&transport,&p.target,&asset,&io,&projected,media.clone(),vec![]).await.unwrap_err().to_string(),"BACKUP_MEDIA_IN_USE");
+    assert!(net.removed_groups.lock().unwrap().is_empty());projected.assets.remove("other");
+    cancel_tx.send_replace(true);
+    assert_eq!(telegram_lifecycle::reconcile_snapshot(&transport,&p.target,&asset,&io,&projected,media,vec![]).await.unwrap_err().to_string(),"TELEGRAM_TRANSFER_CANCELED");
+    assert!(net.removed_groups.lock().unwrap().is_empty());core.shutdown().await;
 }

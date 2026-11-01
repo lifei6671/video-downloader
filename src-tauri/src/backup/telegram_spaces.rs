@@ -128,7 +128,7 @@ pub(super) async fn connect(core: &Arc<Core>, mut update: Update, save: bool) ->
     let probe_target = target(&space, binding.clone());
     probe_target.validate()?;
     let (found, caps, channel_title) = candidate
-        .request(None, move |_, transport, io| {
+        .request("probe_space", None, move |_, transport, io| {
             Box::pin(async move {
                 Ok((
                     TelegramProvider::discover(&probe_target, transport, io).await?,

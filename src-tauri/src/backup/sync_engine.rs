@@ -185,6 +185,8 @@ use super::{
 };
 use crate::desktop_core::Core;
 use rusqlite::{params, Connection, OptionalExtension};
+use std::time::Duration;
+use tokio::time::Instant;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -406,6 +408,34 @@ pub fn mark_local(db: &Connection, local: &str, patch: FieldPatch, transcript: b
     Ok(())
 }
 
+type PullReply = tokio::sync::oneshot::Sender<Result<usize>>;
+
+/// One pending catch-up per space. Manual refreshes during that batch share its actual result.
+#[derive(Default)]
+pub(crate) struct DeferredPulls {
+    pending: std::sync::Mutex<std::collections::HashMap<String, Vec<PullReply>>>,
+    finished: tokio::sync::Notify,
+}
+
+impl DeferredPulls {
+    fn mark(&self, space: &str) {
+        self.pending.lock().unwrap().entry(space.to_owned()).or_default();
+    }
+
+    fn has(&self, space: &str) -> bool {
+        self.pending.lock().unwrap().contains_key(space)
+    }
+
+    fn fail_waiters(&self, space: &str, error: &anyhow::Error) {
+        // Keep the space marked: after the queue recovers it still owes a catch-up.
+        if let Some(replies) = self.pending.lock().unwrap().get_mut(space) {
+            for reply in replies.drain(..) {
+                let _ = reply.send(Err(anyhow::anyhow!(error.to_string())));
+            }
+        }
+    }
+}
+
 pub struct SyncEngine {
     core: Arc<Core>,
     provider: Arc<dyn BackupProvider>,
@@ -417,7 +447,30 @@ impl SyncEngine {
     pub fn provider(&self) -> &dyn BackupProvider {
         self.provider.as_ref()
     }
+    pub async fn refresh(&self) -> Result<usize> {
+        self.check_space()?;
+        let space = &self.provider.scope().space_id;
+        let deferred = self.core.backup_db(|db| {
+            let mut pending = self.core.deferred_pulls.pending.lock().unwrap();
+            if !pending.contains_key(space) && !scheduler::foreground_delete_busy(db, space)? {
+                return Ok(None);
+            }
+            let (reply, result) = tokio::sync::oneshot::channel();
+            pending.entry(space.clone()).or_default().push(reply);
+            Ok(Some(result))
+        })?;
+        if let Some(result) = deferred {
+            let mut cancel = self.core.backup_cancellation();
+            return scoped(self, &mut cancel, async { result.await.context("CANCELED")? }).await;
+        }
+        self.pull().await
+    }
+
     pub async fn pull(&self) -> Result<usize> {
+        self.pull_from("manual_refresh").await
+    }
+
+    async fn pull_from(&self, trigger: &'static str) -> Result<usize> {
         self.check_space()?;
         let space = &self.provider.scope().space_id;
         let raw: Option<String> = self.core.backup_db(|db| {
@@ -435,7 +488,12 @@ impl SyncEngine {
         if *shutdown.borrow() {
             bail!("CANCELED");
         }
-        let batch = scoped(self, &mut shutdown, self.provider.pull_changes(checkpoint)).await?;
+        let batch = scoped(self, &mut shutdown, async {
+            let mut timing = super::pull_timing::Run::start(&self.core, space, trigger);
+            let result = self.provider.pull_changes(checkpoint).await;
+            timing.finish(if result.is_ok() { "ok" } else { "error" });
+            result
+        }).await?;
         self.check_space()?;
         if !batch.complete {
             bail!("BACKUP_INCOMPLETE_DISCOVERY");
@@ -445,6 +503,8 @@ impl SyncEngine {
             let tx=db.unchecked_transaction()?;
             for asset in &batch.assets {import_asset(&tx,self.provider.scope(),asset)?;}
             tx.execute("INSERT INTO backup_sync_checkpoints(space_id,checkpoint_json,last_success_at,last_error) VALUES(?1,?2,unixepoch(),NULL) ON CONFLICT(space_id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json,last_success_at=excluded.last_success_at,last_error=NULL",params![space,serde_json::to_string(&batch.checkpoint)?])?;
+            tx.execute("INSERT INTO backup_window_sync(space_id,last_success_ms) VALUES(?1,CAST(unixepoch('subsec')*1000 AS INTEGER))
+                ON CONFLICT(space_id) DO UPDATE SET last_success_ms=excluded.last_success_ms", [space])?;
             tx.commit()?;Ok(())
         })?;
         Ok(count)
@@ -932,18 +992,43 @@ pub async fn run_with(
         maintenance_loop(core, cancel, resolve)
     );
 }
-async fn pause(core: &Core, cancel: &mut tokio::sync::watch::Receiver<bool>, seconds: u64) {
+const FOREGROUND_SYNC_SECONDS: u32 = 30;
+
+async fn pause_until(core: &Core, cancel: &mut tokio::sync::watch::Receiver<bool>, deadline: Instant) -> Option<&'static str> {
     if *cancel.borrow() {
-        return;
+        return None;
     }
-    tokio::select! {_=cancel.changed()=>{},_=core.backup_wake.notified()=>{},_=tokio::time::sleep(std::time::Duration::from_secs(seconds))=>{}}
+    tokio::select! {
+        _ = cancel.changed() => None,
+        _ = core.backup_window_wake.notified() => Some("window_wake"),
+        _ = core.backup_wake.notified() => Some("backup_wake"),
+        _ = tokio::time::sleep_until(deadline) => Some("scheduled"),
+    }
 }
+// Only window notifications consult this receipt. A delete batch always goes through discovery.
+fn skip_recent_window_wake(core: &Core, space: &str) -> Result<Option<Duration>> {
+    core.backup_db(|db| {
+        if core.deferred_pulls.has(space) || scheduler::foreground_delete_busy(db, space)? {
+            return Ok(None);
+        }
+        let remaining_ms: Option<u32> = db.query_row(
+            "UPDATE backup_window_sync SET last_skipped_ms=CAST(unixepoch('subsec')*1000 AS INTEGER)
+             WHERE space_id=?1 AND space_id=(SELECT space_id FROM backup_current_space WHERE id=1)
+               AND CAST(unixepoch('subsec')*1000 AS INTEGER)-last_success_ms BETWEEN 0 AND ?2-1
+             RETURNING last_success_ms+?2-last_skipped_ms",
+            params![space, FOREGROUND_SYNC_SECONDS * 1000], |r| r.get(0),
+        ).optional()?;
+        Ok(remaining_ms.map(|ms| Duration::from_millis(u64::from(ms))))
+    })
+}
+
 async fn discovery_loop(
     core: Arc<Core>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     resolve: ProviderResolver,
 ) {
     let mut failures = 0u32;
+    let mut trigger = "startup";
     while !*cancel.borrow() {
         let attempted_space = super::spaces::current_id(&core).ok().flatten();
         let result = async {
@@ -952,9 +1037,30 @@ async fn discovery_loop(
             else {
                 return Ok::<_, anyhow::Error>(false);
             };
-            let provider = resolve(&core, &settings.space_id)?;
-            let engine = SyncEngine::new(core.clone(), provider);
-            tokio::select! {_=cancel.changed()=>bail!("CANCELED"),result=engine.pull()=>{result?;}}
+            let replies = core.backup_db(|db| {
+                let mut pending = core.deferred_pulls.pending.lock().unwrap();
+                pending.retain(|space, _| space == &settings.space_id);
+                if scheduler::foreground_delete_busy(db, &settings.space_id)? {
+                    pending.entry(settings.space_id.clone()).or_default();
+                    return Ok(None);
+                }
+                let (source, replies) = match pending.remove(&settings.space_id) {
+                    Some(replies) => ("post_delete", replies),
+                    None => (trigger, Vec::new()),
+                };
+                Ok(Some((source, replies)))
+            })?;
+            if let Some((source, replies)) = replies {
+                let result = async {
+                    let provider = resolve(&core, &settings.space_id)?;
+                    let engine = SyncEngine::new(core.clone(), provider);
+                    tokio::select! {_=cancel.changed()=>bail!("CANCELED"),result=engine.pull_from(source)=>result}
+                }.await;
+                for reply in replies {
+                    let _ = reply.send(result.as_ref().copied().map_err(|e| anyhow::anyhow!(e.to_string())));
+                }
+                result?;
+            }
             Ok(true)
         }
         .await;
@@ -967,7 +1073,7 @@ async fn discovery_loop(
                     .backup_foreground
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    30
+                    u64::from(FOREGROUND_SYNC_SECONDS)
                 } else {
                     180
                 }
@@ -976,7 +1082,7 @@ async fn discovery_loop(
             Err(error) if error.to_string() == "CANCELED" => return,
             Err(error) => {
                 failures = (failures + 1).min(8);
-                if let Some(space) = attempted_space {
+                if let Some(space) = &attempted_space {
                     let _=core.backup_db(|db|{db.execute("INSERT INTO backup_sync_checkpoints(space_id,last_error) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET last_error=excluded.last_error",params![space,error.to_string()])?;Ok(())});
                 }
                 if error.to_string() == "BACKUP_SPACE_INACTIVE" {
@@ -986,24 +1092,55 @@ async fn discovery_loop(
                 }
             }
         };
-        pause(&core, &mut cancel, delay).await;
+        let mut deadline = Instant::now() + Duration::from_secs(delay);
+        loop {
+            tokio::select! {
+                wake = pause_until(&core, &mut cancel, deadline) => {
+                    let Some(source) = wake else { return };
+                    if let ("window_wake", Some(space)) = (source, attempted_space.as_deref()) {
+                        match skip_recent_window_wake(&core, space) {
+                            Ok(Some(remaining)) => {
+                                // A return from background can shorten the timer. Repeated wakes cannot extend it.
+                                deadline = deadline.min(Instant::now() + remaining);
+                                continue;
+                            }
+                            Err(error) => eprintln!("backup window wake freshness: {error}"),
+                            Ok(None) => {}
+                        }
+                    }
+                    trigger = source;
+                    break;
+                }
+                _ = core.deferred_pulls.finished.notified() => {
+                    // A normal wake may already have consumed this batch's catch-up.
+                    if attempted_space.as_deref().is_some_and(|space| core.deferred_pulls.has(space)) {
+                        trigger = "backup_wake";
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
+const CLAIM_OPERATION_SQL: &str = "UPDATE backup_operations SET state='running',payload_json=CASE WHEN kind='delete' AND attempt=0 THEN json_set(payload_json,CASE WHEN COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)=1 THEN '$.timings.maintenance.queue' ELSE '$.timings.foreground.queue' END,json_object('elapsed_ms',max(0,unixepoch()-created_at)*1000,'outcome','ok','at',unixepoch(),'attempt',1)) ELSE payload_json END,attempt=attempt+1 WHERE operation_id=?";
 async fn queue_loop(
     core: Arc<Core>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     resolve: ProviderResolver,
 ) {
     while !*cancel.borrow() {
+        let mut queue_space = None;
         let result=async {
             settings_cleanup(&core)?;
-            if !super::spaces::enabled(&core)? {return Ok::<_,anyhow::Error>(());}
-            let Some(mut settings)=super::spaces::get(&core)? else {return Ok(());};
+            if !super::spaces::enabled(&core)? {return Ok::<_,anyhow::Error>(false);}
+            let Some(mut settings)=super::spaces::get(&core)? else {return Ok(false);};
+            queue_space = Some(settings.space_id.clone());
             if settings.connection_pending || !settings.enabled {
                 super::spaces::prepare_current(&core).await?;
                 settings=super::spaces::get(&core)?.context("BACKUP_SPACE_NOT_FOUND")?;
+                queue_space = Some(settings.space_id.clone());
             }
-            if !settings.enabled {return Ok(());}
+            if !settings.enabled {return Ok(false);}
             let provider=resolve(&core,&settings.space_id)?;
             let engine=SyncEngine::new(core.clone(),provider);
             engine.enqueue()?;
@@ -1021,8 +1158,12 @@ async fn queue_loop(
                 if due.as_ref().is_some_and(|(_,foreground_delete)|*foreground_delete) {break;}
             }
             }
-            let Some((operation,_))=due else {return Ok(());};
-            core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='running',attempt=attempt+1 WHERE operation_id=?",[&operation])?;Ok(())})?;
+            let Some((operation,foreground_delete))=due else {return Ok(false);};
+            core.backup_db(|db|{
+                db.execute(CLAIM_OPERATION_SQL,[&operation])?;
+                if foreground_delete { core.deferred_pulls.mark(&settings.space_id); }
+                Ok(())
+            })?;
             let kind:String=core.backup_db(|db|Ok(db.query_row("SELECT kind FROM backup_operations WHERE operation_id=?",[&operation],|r|r.get(0))?))?;
             let work=async {if kind=="delete" {super::sync_delete::execute(&core,engine.provider.as_ref(),&operation).await} else {engine.execute_upload(&operation).await}};tokio::pin!(work);
             let result=loop {
@@ -1032,6 +1173,7 @@ async fn queue_loop(
                     _=tokio::time::sleep(std::time::Duration::from_millis(100))=>{if let Err(error)=engine.check(&operation) {break Err(error);}}
                 }
             };
+            let succeeded = result.is_ok();
             if let Err(error)=result {
                 let op=scheduler::operations(&core)?.into_iter().find(|o|o.operation_id==operation).ok_or_else(||anyhow::anyhow!("BACKUP_INVALID_OPERATION"))?;
                 let reason=error.to_string();
@@ -1041,19 +1183,32 @@ async fn queue_loop(
                     Ok(())
                 })?;
             }
-            Ok(())
+            if foreground_delete && !core.backup_db(|db| scheduler::foreground_delete_busy(db, &settings.space_id))? {
+                core.deferred_pulls.finished.notify_one();
+            }
+            Ok(succeeded)
         }.await;
+        // Drain due work after success. An empty queue or failure still uses the normal pause.
+        if matches!(result, Ok(true)) {
+            continue;
+        }
         let connection_error = result.is_err()
             && super::spaces::get(&core)
                 .ok()
                 .flatten()
                 .is_some_and(|s| s.connection_pending);
         if let Err(error) = result {
+            if let Some(space) = queue_space.or_else(|| super::spaces::current_id(&core).ok().flatten()) {
+                core.deferred_pulls.fail_waiters(&space, &error);
+            }
             if error.to_string() != "CANCELED" {
                 eprintln!("backup sync: {error}");
             }
         }
-        pause(&core, &mut cancel, if connection_error { 60 } else { 2 }).await;
+        tokio::select! {
+            _ = core.delete_queue_wake.notified() => {},
+            _ = pause_until(&core, &mut cancel, Instant::now() + Duration::from_secs(if connection_error { 60 } else { 2 })) => {},
+        }
     }
 }
 fn settings_cleanup(core: &Core) -> Result<()> {
@@ -1101,7 +1256,7 @@ async fn maintenance_loop(
                 eprintln!("backup probe maintenance: {error}");
             }
         }
-        pause(&core, &mut cancel, 30).await;
+        pause_until(&core, &mut cancel, Instant::now() + Duration::from_secs(30)).await;
     }
 }
 
@@ -1164,4 +1319,45 @@ pub fn request_upload_with(
     engine.enqueue()?;
     core.wake_backup();
     Ok(())
+}
+
+#[cfg(test)]
+mod claim_timing_tests {
+    use super::*;
+    #[test]
+    fn maintenance_retry_preserves_foreground_queue_timing_and_upload_payload() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER)").unwrap();
+        let original = serde_json::json!({"local_cleanup_done":true,"timings":{"foreground":{"queue":{"elapsed_ms":1234}}}});
+        db.execute("INSERT INTO backup_operations VALUES('maintenance','delete','retry_wait',0,?1,unixepoch()-10)",[original.to_string()]).unwrap();
+        db.execute(CLAIM_OPERATION_SQL, ["maintenance"]).unwrap();
+        let (state,attempt,payload):(String,i64,String)=db.query_row("SELECT state,attempt,payload_json FROM backup_operations WHERE operation_id='maintenance'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(state, "running");
+        assert_eq!(attempt, 1);
+        assert_eq!(
+            payload["timings"]["foreground"]["queue"],
+            original["timings"]["foreground"]["queue"]
+        );
+        assert!(
+            payload["timings"]["maintenance"]["queue"]["elapsed_ms"]
+                .as_u64()
+                .unwrap()
+                >= 10000
+        );
+        db.execute(
+            "INSERT INTO backup_operations VALUES('upload','upload','pending',0,'{}',unixepoch())",
+            [],
+        )
+        .unwrap();
+        db.execute(CLAIM_OPERATION_SQL, ["upload"]).unwrap();
+        let raw: String = db
+            .query_row(
+                "SELECT payload_json FROM backup_operations WHERE operation_id='upload'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, "{}");
+    }
 }

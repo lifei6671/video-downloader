@@ -5,6 +5,8 @@ mod rich_tests;
 #[cfg(test)]
 #[path = "telegram_index_tests.rs"]
 mod index_tests;
+#[path = "telegram_message_map.rs"]
+mod message_map;
 #[path = "telegram_bundle.rs"]
 mod bundle;
 use super::{
@@ -50,9 +52,9 @@ fn uploaded_media(uploaded: Uploaded, video: Option<&VideoAttributes>, thumb: Op
         mime_type,attributes,stickers:None,video_cover:None,video_timestamp:None,ttl_seconds:None,
     }.into())
 }
-struct OriginalDocument(tl::types::Document);
+struct OriginalDocument<'a>(&'a tl::types::Document);
 pub(super) struct PreparedUpload { file: Uploaded, thumbnail: Option<tl::enums::InputFile> }
-impl grammers_client::media::Downloadable for OriginalDocument {
+impl grammers_client::media::Downloadable for OriginalDocument<'_> {
     fn to_raw_input_location(&self) -> Option<tl::enums::InputFileLocation> {
         Some(tl::types::InputDocumentFileLocation {id:self.0.id,access_hash:self.0.access_hash,file_reference:self.0.file_reference.clone(),thumb_size:String::new()}.into())
     }
@@ -81,6 +83,7 @@ async fn read_index_body(
     cache: &IndexBodyCache,
     expected: RemoteDocument,
     io: &Io,
+    mut scanned: Option<Box<dyn AsyncRead + Unpin + Send>>,
 ) -> Result<Vec<u8>> {
     io.check()?;
     if let Some(bytes) = cache
@@ -96,7 +99,11 @@ async fn read_index_body(
         serde_json::from_str(&expected.caption).context("TELEGRAM_INDEX_INVALID")?;
     for attempt in 0..2 {
         let result = async {
-            let mut reader = io.run(transport.download(expected.clone())).await?;
+            let _body = super::delete_timing::refresh_span("index_download");
+            let mut reader = match scanned.take() {
+                Some(reader) => reader,
+                None => io.run(transport.download(expected.clone())).await?,
+            };
             let mut bytes = vec![];
             let mut buffer = vec![0; 65536];
             loop {
@@ -144,11 +151,77 @@ pub(super) struct GrammersTransport {
     can_delete: bool,
     channel_title: String,
     preferred_message:Option<i32>,
+    new_delete_operation: Option<String>,
     bundle_heading: Option<String>,
     video_thumbnail: Option<Vec<u8>>,
 }
-pub(super) struct IndexDocument {pub revision:i64,pub document:RemoteDocument}
+#[derive(Clone)]
+pub(super) struct IndexDocument {
+    pub revision: i64,
+    pub document: RemoteDocument,
+    source: IndexSource,
+}
+#[derive(Clone)]
+enum IndexSource {
+    Scanned(std::sync::Arc<tl::types::Document>),
+    Verified(std::sync::Arc<Vec<u8>>),
+}
+#[derive(Default)]
+pub(super) struct ChannelSnapshot {pub high:i64,pub indexes:Vec<IndexDocument>,pub media:Vec<RemoteDocument>}
+impl ChannelSnapshot {
+    fn order(&mut self) {
+        self.indexes.sort_by_key(|index| index.revision);
+        self.media.sort_by_key(|document| document.message_id);
+        self.high = self.high.max(self.indexes.last().map_or(0, |index| index.revision));
+    }
+}
+
+// The cached reference supplies only the address. Membership and permissions come from this reply.
+async fn cached_channel(
+    client: &Client, session: &super::telegram_vault::VaultSession, id: i64, io: &Io,
+) -> Result<Option<grammers_client::peer::Channel>> {
+    use grammers_session::{Session, types::{PeerId, PeerInfo}};
+    let id = PeerId::channel(id).context("TELEGRAM_CHANNEL_FORBIDDEN")?;
+    let Some(peer) = session.peer_ref(id).await? else { return Ok(None) };
+    let _by_id = super::delete_timing::setup_span("channel_by_id");
+    let reply = io.run(async {
+        match client.invoke(&tl::functions::channels::GetChannels { id: vec![peer.into()] }).await {
+            Ok(reply) => Ok(Some(reply)),
+            Err(InvocationError::Rpc(e)) if matches!(e.name.as_str(), "CHANNEL_INVALID" | "PEER_ID_INVALID" | "ACCESS_HASH_INVALID") => Ok(None),
+            Err(e) => Err(rpc_error(e)),
+        }
+    }).await?;
+    let Some(reply) = reply else { return Ok(None) };
+    let chats = match reply {
+        tl::enums::messages::Chats::Chats(result) => result.chats,
+        tl::enums::messages::Chats::Slice(result) => result.chats,
+    };
+    let Some(raw) = checked_channel_reply(id.bare_id_unchecked(), chats)? else { return Ok(None) };
+    if raw.access_hash.is_some() {
+        session.cache_peer(PeerInfo::from(&raw)).await?;
+    }
+    Ok(Some(grammers_client::peer::Channel::from_raw(client, raw.into())))
+}
+
+fn checked_channel_reply(id: i64, mut chats: Vec<tl::enums::Chat>) -> Result<Option<tl::types::Channel>> {
+    if chats.is_empty() { return Ok(None); }
+    if chats.len() != 1 { bail!("TELEGRAM_CHANNEL_FORBIDDEN"); }
+    match chats.pop() {
+        Some(tl::enums::Chat::Channel(channel)) if channel.id == id && channel.broadcast => {
+            Ok((!channel.min).then_some(channel))
+        }
+        Some(tl::enums::Chat::Empty(empty)) if empty.id == id => Ok(None),
+        _ => bail!("TELEGRAM_CHANNEL_FORBIDDEN"),
+    }
+}
+
 impl GrammersTransport {
+    pub(super) fn for_new_delete(&self, operation: &str) -> Self {
+        let mut value = self.clone();
+        value.new_delete_operation = Some(operation.to_owned());
+        value
+    }
+
     pub(super) fn with_thumbnail(&self, body: Vec<u8>) -> Self {
         let mut value = self.clone();
         value.video_thumbnail = Some(body);
@@ -204,59 +277,107 @@ impl GrammersTransport {
     }
     /// Read one fixed high-water prefix; gaps in unrelated message IDs are legal.
     pub(super) async fn indexes(&self, io: &Io) -> Result<(i64, Vec<IndexDocument>)> {
-        self.documents(io, false).await
+        let snapshot = self.scan(io).await?;
+        Ok((snapshot.high, snapshot.indexes))
     }
-    async fn documents(&self, io: &Io, media: bool) -> Result<(i64, Vec<IndexDocument>)> {
-        let mut newest = self.client.iter_messages(self.peer).limit(1);
-        let high = io
-            .run(async { newest.next().await.map_err(rpc_error) })
-            .await?
-            .map_or(0, |m| m.id());
-        let mut history = self
-            .client
-            .iter_messages(self.peer)
-            .offset_id(high.checked_add(1).context("TELEGRAM_INDEX_INVALID")?);
-        let mut result = vec![];
+    pub(super) async fn scan(&self, io: &Io) -> Result<ChannelSnapshot> {
+        // History pages descend from the first response and continue below its last ID.
+        let mut history = self.client.iter_messages(self.peer);
+        let mut high = None;
+        let mut snapshot = ChannelSnapshot::default();
         while let Some(message) = io
             .run(async { history.next().await.map_err(rpc_error) })
             .await?
         {
             io.touch();
-            if message.id() > high {
+            if message.id() > *high.get_or_insert(message.id()) {
                 continue;
             }
-            let message=io.run(self.complete_message(message)).await?;
-            if let Some(documents)=bundle::documents(&message)? {
-                for (evidence,_) in documents {
-                    let envelope:Envelope=serde_json::from_str(&evidence.caption).context("TELEGRAM_INDEX_INVALID")?;
-                    if envelope.kind=="event" && !media || envelope.kind!="event" && media {
-                        result.push(IndexDocument {revision:if envelope.kind=="event" {bundle::event_revision(&message,&envelope)?} else {i64::from(message.id())},document:evidence});
-                    }
-                }
-                continue;
-            }
-            let Ok(raw) = serde_json::from_str::<serde_json::Value>(message.text()) else {
-                continue;
-            };
-            if raw["yingqu_media"] != 2 || raw["kind"] != "library" || media
-            {
-                continue;
-            }
-            let envelope: Envelope =
-                serde_json::from_value(raw).context("TELEGRAM_INDEX_INVALID")?;
-            let evidence = document(&message)?.0;
-            if evidence.bytes != envelope.bytes
-                || !media && (envelope.container != "json" || evidence.bytes > 16 * 1024 * 1024)
-            {
-                bail!("TELEGRAM_INDEX_INVALID");
-            }
-            result.push(IndexDocument {revision:i64::from(evidence.message_id),document:evidence});
+            self.collect_message(message, io, &mut snapshot).await?;
         }
-        result.sort_by_key(|d| d.revision);
-        Ok((result.iter().map(|d|d.revision).max().unwrap_or(0).max(i64::from(high)), result))
+        snapshot.high = i64::from(high.unwrap_or(0));
+        snapshot.order();
+        Ok(snapshot)
     }
-    pub(super) async fn index_body(&self, expected: RemoteDocument, io: &Io) -> Result<Vec<u8>> {
-        read_index_body(self, &self.index_bodies, expected, io).await
+
+    async fn collect_message(
+        &self,
+        message: grammers_client::message::Message,
+        io: &Io,
+        snapshot: &mut ChannelSnapshot,
+    ) -> Result<()> {
+        let message = io.run(self.complete_message(message)).await?;
+        if let Some(documents) = bundle::documents(&message)? {
+            for (evidence, original) in documents {
+                let envelope: Envelope = serde_json::from_str(&evidence.caption)
+                    .context("TELEGRAM_INDEX_INVALID")?;
+                if matches!(envelope.kind.as_str(), "event" | "library") {
+                    snapshot.indexes.push(IndexDocument {
+                        revision: if envelope.kind == "event" {
+                            bundle::event_revision(&message, &envelope)?
+                        } else {
+                            i64::from(message.id())
+                        },
+                        document: evidence,
+                        source: IndexSource::Scanned(original.into()),
+                    });
+                } else {
+                    snapshot.media.push(evidence);
+                }
+            }
+            return Ok(());
+        }
+        let Ok(raw) = serde_json::from_str::<serde_json::Value>(message.text()) else {
+            return Ok(());
+        };
+        if raw["yingqu_media"] != 2 || raw["kind"] != "library" {
+            return Ok(());
+        }
+        let envelope: Envelope =
+            serde_json::from_value(raw).context("TELEGRAM_INDEX_INVALID")?;
+        let (evidence, Media::Document(attachment)) = document(&message)? else {
+            bail!("TELEGRAM_MEDIA_CHANGED");
+        };
+        let Some(tl::enums::Document::Document(original)) = attachment.raw.document else {
+            bail!("TELEGRAM_MEDIA_MISSING");
+        };
+        if evidence.bytes != envelope.bytes
+            || (envelope.container != "json" || evidence.bytes > 16 * 1024 * 1024)
+        {
+            bail!("TELEGRAM_INDEX_INVALID");
+        }
+        snapshot.indexes.push(IndexDocument {
+            revision: i64::from(evidence.message_id),
+            document: evidence,
+            source: IndexSource::Scanned(original.into()),
+        });
+        Ok(())
+    }
+
+    pub(super) async fn index_body(&self, index: &IndexDocument, io: &Io) -> Result<Vec<u8>> {
+        io.check()?;
+        let reader = match &index.source {
+            IndexSource::Verified(body) => return Ok(body.as_ref().clone()),
+            IndexSource::Scanned(document) => self.original_reader(document),
+        };
+        read_index_body(self, &self.index_bodies, index.document.clone(), io, Some(reader)).await
+    }
+
+    pub(super) async fn confirm_archive(&self, document: &RemoteDocument, expected: &[u8], io: &Io) -> Result<()> {
+        let bytes = read_index_body(self, &IndexBodyCache::default(), document.clone(), io, None).await?;
+        if bytes != expected {
+            bail!("BACKUP_PUBLICATION_UNCONFIRMED");
+        }
+        Ok(())
+    }
+
+    fn original_reader(&self, document: &tl::types::Document) -> Box<dyn AsyncRead + Unpin + Send> {
+        Box::new(DownloadReader {
+            iter: Some(self.client.iter_download(&OriginalDocument(document))),
+            next: None,
+            buffer: vec![],
+            offset: 0,
+        })
     }
     pub(super) async fn media_reader(
         &self,
@@ -284,60 +405,57 @@ impl GrammersTransport {
     pub(super) async fn connect(
         client: Client,
         target: &Target,
-        premium: bool,
+        session: Option<&super::telegram_vault::VaultSession>,
+        upload_limit: impl Future<Output = Result<u64>>,
         io: &Io,
     ) -> Result<Self> {
         target.validate()?;
-        let mut dialogs = client.iter_dialogs();
-        let mut found = None;
-        while let Some(dialog) = io
-            .run(async { dialogs.next().await.map_err(rpc_error) })
-            .await?
-        {
-            if let Peer::Channel(channel) = dialog.peer() {
-                if channel.id().bare_id_unchecked().to_string() != target.channel_id {
-                    continue;
-                }
-                let has_public_alias = channel.raw.usernames.as_ref().is_some_and(|names| {
-                    names.iter().any(|name| {
-                        let tl::enums::Username::Username(name) = name;
-                        name.active
-                    })
-                });
-                if channel.raw.left || channel.username().is_some() || has_public_alias {
-                    bail!("TELEGRAM_CHANNEL_FORBIDDEN");
-                }
-                let rights = channel.raw.admin_rights.as_ref().map(|r| {
-                    let tl::enums::ChatAdminRights::Rights(r) = r;
-                    r
-                });
-                let can_post = channel.raw.creator || rights.is_some_and(|r| r.post_messages);
-                let can_delete = channel.raw.creator || rights.is_some_and(|r| r.delete_messages);
-                let peer = channel
-                    .to_ref()
-                    .await
-                    .map_err(|_| anyhow::anyhow!("TELEGRAM_CHANNEL_FORBIDDEN"))?
-                    .context("TELEGRAM_CHANNEL_FORBIDDEN")?;
-                found = Some((peer, can_post, can_delete, channel.title().to_owned()));
-                break;
-            }
-        }
-        let (peer, can_post, can_delete, channel_title) = found.context("TELEGRAM_CHANNEL_FORBIDDEN")?;
-        let mut history = client.iter_messages(peer).limit(1);
-        io.run(async { history.next().await.map_err(rpc_error) })
-            .await?;
-        let config = io
-            .run(async {
-                client
-                    .invoke(&tl::functions::help::GetAppConfig { hash: 0 })
-                    .await
-                    .map_err(rpc_error)
-            })
-            .await?;
-        let tl::enums::help::AppConfig::Config(config) = config else {
-            bail!("TELEGRAM_LIMIT_UNAVAILABLE");
+        let lookup = super::delete_timing::setup_span("channel_lookup");
+        let id = target.channel_id.parse::<i64>()?;
+        let cached = if let Some(session) = session {
+            cached_channel(&client, session, id, io).await?
+        } else {
+            None
         };
-        let max_bytes = limit(&config.config, premium)?;
+        let channel = match cached {
+            Some(channel) => channel,
+            None => {
+                let _scan = super::delete_timing::setup_span("channel_dialogs");
+                let mut dialogs = client.iter_dialogs();
+                loop {
+                    let dialog = io.run(async { dialogs.next().await.map_err(rpc_error) }).await?
+                        .context("TELEGRAM_CHANNEL_FORBIDDEN")?;
+                    if let Peer::Channel(channel) = dialog.peer() {
+                        if channel.raw.id == id { break channel.clone(); }
+                    }
+                }
+            }
+        };
+        let has_public_alias = channel.raw.usernames.as_ref().is_some_and(|names| {
+            names.iter().any(|name| {
+                let tl::enums::Username::Username(name) = name;
+                name.active
+            })
+        });
+        if channel.raw.left || channel.username().is_some() || has_public_alias {
+            bail!("TELEGRAM_CHANNEL_FORBIDDEN");
+        }
+        let rights = channel.raw.admin_rights.as_ref().map(|r| {
+            let tl::enums::ChatAdminRights::Rights(rights) = r;
+            rights
+        });
+        let can_post = channel.raw.creator || rights.is_some_and(|r| r.post_messages);
+        let can_delete = channel.raw.creator || rights.is_some_and(|r| r.delete_messages);
+        let peer = channel.to_ref().await.map_err(|_| anyhow::anyhow!("TELEGRAM_CHANNEL_FORBIDDEN"))?
+            .context("TELEGRAM_CHANNEL_FORBIDDEN")?;
+        let channel_title = channel.title().to_owned();
+        drop(lookup);
+        {
+            let _access = super::delete_timing::setup_span("channel_read_probe");
+            let mut history = client.iter_messages(peer).limit(1);
+            io.run(async { history.next().await.map_err(rpc_error) }).await?;
+        }
+        let max_bytes = upload_limit.await?;
         Ok(Self {
             index_bodies: std::sync::Arc::default(),
             client,
@@ -347,6 +465,7 @@ impl GrammersTransport {
             can_delete,
             channel_title,
             preferred_message:None,
+            new_delete_operation: None,
             bundle_heading: None,
             video_thumbnail: None,
         })
@@ -386,6 +505,16 @@ fn check_presence(message: &tl::enums::Message) -> Result<()> {
     }
     Ok(())
 }
+pub(super) async fn fetch_upload_limit(client: &Client, premium: bool, io: &Io) -> Result<u64> {
+    let config = io.run(async {
+        client.invoke(&tl::functions::help::GetAppConfig { hash: 0 }).await.map_err(rpc_error)
+    }).await?;
+    let tl::enums::help::AppConfig::Config(config) = config else {
+        bail!("TELEGRAM_LIMIT_UNAVAILABLE");
+    };
+    limit(&config.config, premium)
+}
+
 fn limit(config: &tl::enums::Jsonvalue, premium: bool) -> Result<u64> {
     let tl::enums::Jsonvalue::JsonObject(object) = config else {
         bail!("TELEGRAM_LIMIT_UNAVAILABLE");
@@ -450,27 +579,29 @@ impl Transport for GrammersTransport {
     fn can_delete(&self) -> bool {
         self.can_delete
     }
+    #[cfg(test)]
     fn media<'a>(&'a self, io: &'a Io) -> ProviderFuture<'a, Vec<RemoteDocument>> {
-        Box::pin(async move { Ok(self.documents(io, true).await?.1.into_iter().map(|d|d.document).collect()) })
+        Box::pin(async move { Ok(self.scan(io).await?.media) })
     }
     fn remove(&self, expected: RemoteDocument) -> ProviderFuture<'_, ()> {
         Box::pin(async move {
             if !self.can_delete {
                 bail!("BACKUP_DELETE_UNSUPPORTED");
             }
-            match self.remove_bundle_attachment(&expected).await {
-                Ok(true)=>return Ok(()),
-                Err(e) if e.to_string()=="TELEGRAM_MEDIA_MISSING"=>return Ok(()),
-                Err(e)=>return Err(e),
-                Ok(false)=>{},
-            }
-            let envelope:Envelope=serde_json::from_str(&expected.caption).context("TELEGRAM_INDEX_INVALID")?;
-            if envelope.kind!="library" {bail!("TELEGRAM_INDEX_INVALID");}
-            let actual = match self.message(expected.message_id).await {
-                Ok(message) => document(&message)?.0,
+            let message = match self.message(expected.message_id).await {
+                Ok(message) => message,
                 Err(e) if e.to_string() == "TELEGRAM_MEDIA_MISSING" => return Ok(()),
                 Err(e) => return Err(e),
             };
+            match self.remove_bundle_attachment(&expected, &message).await {
+                Ok(true) => return Ok(()),
+                Err(e) if e.to_string() == "TELEGRAM_MEDIA_MISSING" => return Ok(()),
+                Err(e) => return Err(e),
+                Ok(false) => {}
+            }
+            let envelope:Envelope=serde_json::from_str(&expected.caption).context("TELEGRAM_INDEX_INVALID")?;
+            if envelope.kind!="library" {bail!("TELEGRAM_INDEX_INVALID");}
+            let actual = document(&message)?.0;
             if actual != expected {
                 bail!("TELEGRAM_MEDIA_CHANGED");
             }
@@ -612,12 +743,7 @@ impl Transport for GrammersTransport {
             if actual != expected {
                 bail!("TELEGRAM_MEDIA_CHANGED");
             }
-            Ok(Box::new(DownloadReader {
-                iter: Some(self.client.iter_download(&OriginalDocument(document))),
-                next: None,
-                buffer: vec![],
-                offset: 0,
-            }) as Box<dyn AsyncRead + Unpin + Send>)
+            Ok(self.original_reader(&document))
         })
     }
 }

@@ -103,7 +103,7 @@ fn list_backup_assets(core:State<AppCore>,space_id:String)->Result<Vec<yingqu_co
 async fn refresh_backup_assets(core:State<'_,AppCore>,space_id:String)->Result<yingqu_core::backup::reconcile::Refresh,String>{
     let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;
     let engine=yingqu_core::backup::sync_engine::SyncEngine::new(core.inner().clone(),provider);
-    let imported=engine.pull().await.map_err(error)?;
+    let imported=engine.refresh().await.map_err(error)?;
     Ok(yingqu_core::backup::reconcile::Refresh{imported,unchanged:0,rejected:vec![]})
 }
 #[tauri::command]

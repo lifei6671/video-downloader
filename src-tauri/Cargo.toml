@@ -57,7 +57,7 @@ required-features = ["desktop"]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Security"] }
 
 [patch.crates-io]
 grammers-mtsender = { path = "../vendor/grammers-mtsender" }

@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use rusqlite::OptionalExtension;
 
+/// Delayed retries and background verification leave the foreground available for discovery.
+pub(super) fn foreground_delete_busy(db: &rusqlite::Connection, space: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM backup_operations WHERE space_id=?1 AND kind='delete'
+         AND COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)<>1
+         AND (state='running' OR (state IN ('pending','retry_wait')
+              AND (next_retry_at IS NULL OR next_retry_at<=unixepoch()))))",
+        [space], |row| row.get(0),
+    )?)
+}
+
 /// Select due work without promoting delayed retries or completed local cleanup.
 pub(super) fn next_sync_operation(
     db: &rusqlite::Connection,

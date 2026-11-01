@@ -38,7 +38,7 @@ async fn presentation(core: &Arc<Core>, target: Target, message: i32) -> Result<
         .context("QA login missing")?;
     let (_stop, rx) = tokio::sync::watch::channel(false);
     core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
-        .with_transport(core, &login, target, rx, None, move |_, t, _| {
+        .with_transport(core, &login, target, rx, ("test_probe", None), move |_, t, _| {
             Box::pin(async move { t.bundle_presentation(message).await })
         })
         .await
@@ -350,7 +350,7 @@ async fn lifecycle_stage(
         let (_stop, rx) = tokio::sync::watch::channel(false);
         let docs = core
             .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
-            .with_transport(core, &login, target, rx, None, move |_, t, _| {
+            .with_transport(core, &login, target, rx, ("test_probe", None), move |_, t, _| {
                 Box::pin(async move { t.bundle_documents(message).await })
             })
             .await?;

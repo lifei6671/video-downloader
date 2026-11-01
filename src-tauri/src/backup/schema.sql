@@ -5,6 +5,9 @@ CREATE TABLE IF NOT EXISTS backup_spaces(
  space_id TEXT PRIMARY KEY,library_id TEXT NOT NULL,endpoint TEXT NOT NULL,bucket TEXT NOT NULL,prefix TEXT NOT NULL,
  credential_ref TEXT,enabled INTEGER NOT NULL CHECK(enabled IN (0,1)));
 CREATE UNIQUE INDEX IF NOT EXISTS backup_s3_target ON backup_spaces(endpoint,bucket,prefix) WHERE endpoint<>'';
+CREATE TABLE IF NOT EXISTS backup_pull_runs(
+ run_id INTEGER PRIMARY KEY AUTOINCREMENT,space_id TEXT NOT NULL REFERENCES backup_spaces(space_id) ON DELETE CASCADE,
+ trigger TEXT NOT NULL,foreground_delete_busy INTEGER NOT NULL,started_at_ms INTEGER NOT NULL,ended_at_ms INTEGER,outcome TEXT);
 CREATE TABLE IF NOT EXISTS backup_current_space(id INTEGER PRIMARY KEY CHECK(id=1),space_id TEXT NOT NULL REFERENCES backup_spaces(space_id));
 CREATE TABLE IF NOT EXISTS media_assets(
  asset_id TEXT PRIMARY KEY,task_id TEXT UNIQUE,metadata_json TEXT NOT NULL,original_filename TEXT NOT NULL,

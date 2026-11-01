@@ -360,14 +360,7 @@ fn app(root: &Path, fixture: &Arc<Fixture>) -> Arc<Core> {
     let app = Core::open(
         &root.join("tasks.sqlite"),
         root.join("downloads"),
-        project
-            .join(if cfg!(windows) {
-                ".venv/Scripts/python.exe"
-            } else {
-                ".venv/bin/python"
-            })
-            .to_string_lossy()
-            .into_owned(),
+        "python-must-not-run".into(),
         vec![project
             .join("tests/fixtures/desktop_engine.py")
             .to_string_lossy()
@@ -375,6 +368,18 @@ fn app(root: &Path, fixture: &Arc<Fixture>) -> Arc<Core> {
         |_| {},
     )
     .unwrap();
+    let fixture_root = root.to_path_buf();
+    *app.local_media_fixture.lock().unwrap() = Some(Arc::new(move |operation, source| {
+        if operation == "probe" {
+            std::fs::write(fixture_root.join("metadata-probed"), "ready")?;
+            Ok(json!({"width":1920,"height":1080,"duration_ms":2500}))
+        } else {
+            std::fs::write(fixture_root.join("cover-started"), "ready")?;
+            let body=b"\x89PNG\r\n\x1a\nfixture";
+            std::fs::write(source.parent().unwrap().join("cover"),body)?;
+            Ok(json!({"cover_filename":"cover","cover_bytes":body.len()}))
+        }
+    }));
     let fixture = fixture.clone();
     *app.telegram_source.lock().unwrap() = Some(Arc::new(move || {
         Box::new(Fake {

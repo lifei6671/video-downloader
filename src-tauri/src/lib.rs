@@ -9,5 +9,6 @@ pub mod settings;
 pub mod telegram_accounts;
 pub mod telegram_download;
 mod telegram_cover;
+mod local_media;
 pub mod update_download;
 pub mod updates;

@@ -3353,6 +3353,8 @@ fn deletion_queue_prioritizes_foreground_work_and_preserves_retry_deadlines() {
         [],
     )
     .unwrap();
+    assert!(scheduler::foreground_delete_busy(&db, "space").unwrap());
+    assert!(!scheduler::foreground_delete_busy(&db, "other-space").unwrap());
     assert_eq!(
         scheduler::next_sync_operation(&db, "space").unwrap(),
         Some(("fresh".into(), true))
@@ -3362,6 +3364,7 @@ fn deletion_queue_prioritizes_foreground_work_and_preserves_retry_deadlines() {
         [],
     )
     .unwrap();
+    assert!(!scheduler::foreground_delete_busy(&db, "space").unwrap());
     assert_eq!(
         scheduler::next_sync_operation(&db, "space").unwrap(),
         Some(("upload".into(), false))
@@ -3380,11 +3383,14 @@ fn deletion_queue_prioritizes_foreground_work_and_preserves_retry_deadlines() {
         [],
     )
     .unwrap();
+    assert!(scheduler::foreground_delete_busy(&db, "space").unwrap());
     assert_eq!(
         scheduler::next_sync_operation(&db, "space").unwrap(),
         Some(("later".into(), true)),
         "due deletion failures retain foreground priority"
     );
+    db.execute("UPDATE backup_operations SET state='running' WHERE operation_id='later'", []).unwrap();
+    assert!(scheduler::foreground_delete_busy(&db, "space").unwrap());
     db.execute(
         "UPDATE backup_operations SET state='completed' WHERE operation_id='later'",
         [],

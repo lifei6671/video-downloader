@@ -368,10 +368,57 @@ fn rich_input(loaded: &Loaded) -> Result<tl::enums::InputRichMessage> {
     }
     .into())
 }
-fn archived_event_remainder(loaded: &Loaded, archived: &[RemoteDocument]) -> bool {
-    !archived.is_empty() && loaded.bundle.attachments.len() == archived.len()
-        && loaded.bundle.attachments.iter().all(|attachment| attachment.envelope.kind == "event"
-            && archived.iter().any(|expected| expected.document_id == attachment.document_id && expected.bytes == attachment.envelope.bytes && attachment.envelope.caption().ok().as_deref() == Some(expected.caption.as_str())))
+fn owned_message_matches(loaded: &Loaded, expected: &[RemoteDocument]) -> bool {
+    !expected.is_empty()
+        && loaded.bundle.attachments.len() == expected.len()
+        && loaded.bundle.attachments.iter().all(|attachment| {
+            expected.iter().any(|document| {
+                document.document_id == attachment.document_id
+                    && document.bytes == attachment.envelope.bytes
+                    && attachment.envelope.caption().ok().as_deref()
+                        == Some(document.caption.as_str())
+            })
+        })
+}
+
+impl crate::backup::telegram_lifecycle::OwnedMessageRemoval for GrammersTransport {
+    async fn read_owned_ids(&self, groups: &[(i32, Vec<RemoteDocument>)], io: &Io) -> Result<Vec<i32>> {
+        let ids: Vec<_> = groups.iter().map(|(id, _)| *id).collect();
+        let messages = self.client.get_messages_by_id(self.peer, &ids).await.map_err(rpc_error)?;
+        let mut verified = Vec::new();
+        // grammers returns one slot for each requested ID, in request order.
+        for ((id, expected), message) in groups.iter().zip(messages) {
+            let Some(message) = message else { continue };
+            if matches!(message.raw, tl::enums::Message::Empty(_)) {
+                continue;
+            }
+            let complete = match io.run(self.complete_message(message)).await {
+                Ok(message) => message,
+                // A partial rich message can disappear between the batch read and its follow-up.
+                Err(error) if error.to_string() == "TELEGRAM_MEDIA_MISSING" => continue,
+                Err(error) => return Err(error),
+            };
+            let loaded = read(&complete)?.context("TELEGRAM_MEDIA_CHANGED")?;
+            if expected.iter().any(|d| d.message_id != *id) || !owned_message_matches(&loaded, expected) {
+                bail!("TELEGRAM_MEDIA_CHANGED");
+            }
+            verified.push(*id);
+        }
+        Ok(verified)
+    }
+
+    async fn delete_verified_ids(&self, ids: &[i32]) -> Result<()> {
+        self.client.delete_messages(self.peer, ids).await.map_err(rpc_error)?;
+        Ok(())
+    }
+
+    async fn confirm_ids_gone(&self, ids: &[i32]) -> Result<()> {
+        let messages = self.client.get_messages_by_id(self.peer, ids).await.map_err(rpc_error)?;
+        if messages.into_iter().flatten().any(|m| !matches!(m.raw, tl::enums::Message::Empty(_))) {
+            bail!("BACKUP_CLEANUP_PENDING");
+        }
+        Ok(())
+    }
 }
 
 impl GrammersTransport {
@@ -428,7 +475,13 @@ impl GrammersTransport {
         video: Option<VideoAttributes>,
         io: &Io,
     ) -> Result<Option<i32>> {
-        let existing = self.operation_bundle(&envelope, io).await?;
+        let existing = if envelope.kind == "event"
+            && self.new_delete_operation.as_deref() == Some(&envelope.operation_id)
+        {
+            None
+        } else {
+            self.operation_bundle(&envelope, io).await?
+        };
         let existing = match (existing, self.preferred_message) {
             (Some(existing), _) => Some(existing),
             (None, Some(id)) => {
@@ -551,27 +604,8 @@ impl GrammersTransport {
             Ok(sent_id(updates, random_id))
         }
     }
-    // Only the exact event-only remainder can be removed after its immutable bytes were archived.
-    pub(in crate::backup) async fn remove_archived_event_message(&self, message_id: i32, archived: &[RemoteDocument]) -> Result<()> {
-        if !self.can_delete { bail!("BACKUP_DELETE_UNSUPPORTED"); }
-        if archived.iter().any(|document| document.message_id != message_id) { bail!("TELEGRAM_MEDIA_CHANGED"); }
-        let message = match self.message(message_id).await {
-            Err(error) if error.to_string() == "TELEGRAM_MEDIA_MISSING" => return Ok(()),
-            value => value?,
-        };
-        let loaded = read(&message)?.context("TELEGRAM_MEDIA_CHANGED")?;
-        if !archived_event_remainder(&loaded, archived) { bail!("TELEGRAM_MEDIA_CHANGED"); }
-        self.client.delete_messages(self.peer, &[message_id]).await.map_err(rpc_error)?;
-        match self.message(message_id).await {
-            Err(error) if error.to_string() == "TELEGRAM_MEDIA_MISSING" => Ok(()),
-            Err(error) => Err(error),
-            Ok(_) => bail!("BACKUP_CLEANUP_PENDING"),
-        }
-    }
-
-    pub(super) async fn remove_bundle_attachment(&self, expected: &RemoteDocument) -> Result<bool> {
-        let message = self.message(expected.message_id).await?;
-        let Some(mut loaded) = read(&message)? else {
+    pub(super) async fn remove_bundle_attachment(&self, expected: &RemoteDocument, message: &grammers_client::message::Message) -> Result<bool> {
+        let Some(mut loaded) = read(message)? else {
             return Ok(false);
         };
         let Some(a) = loaded.bundle.attachments.iter().find(|a| {
@@ -925,16 +959,15 @@ mod tests {
     }
 
     #[test]
-    fn archived_message_removal_requires_the_exact_event_only_remainder() {
-        let mut loaded = fixture();
-        let event = &loaded.bundle.attachments[3];
-        let expected = RemoteDocument {message_id:10,document_id:event.document_id,bytes:event.envelope.bytes,caption:event.envelope.caption().unwrap()};
-        assert!(!archived_event_remainder(&loaded,std::slice::from_ref(&expected)),"a message containing video or other attachments cannot be removed wholesale");
-        loaded.bundle.attachments.retain(|attachment| attachment.envelope.kind == "event");
-        loaded.documents.retain(|document| document.id == expected.document_id);
-        assert!(archived_event_remainder(&loaded,std::slice::from_ref(&expected)));
-        let mut changed = expected; changed.document_id += 1;
-        assert!(!archived_event_remainder(&loaded,&[changed]),"matching envelope text cannot replace exact document ownership");
-        assert!(!archived_event_remainder(&loaded,&[]));
+    fn whole_message_removal_requires_all_exact_archived_and_media_documents() {
+        let loaded=fixture();
+        let expected:Vec<_>=loaded.bundle.attachments.iter().map(|a|RemoteDocument {message_id:10,document_id:a.document_id,bytes:a.envelope.bytes,caption:a.envelope.caption().unwrap()}).collect();
+        assert!(owned_message_matches(&loaded,&expected));
+        assert!(!owned_message_matches(&loaded,&expected[1..]),"must not delete unlisted attachments");
+        let mut changed=expected.clone();changed[0].document_id+=100;
+        assert!(!owned_message_matches(&loaded,&changed));
+        let mut changed=expected.clone();changed[0].caption.push(' ');
+        assert!(!owned_message_matches(&loaded,&changed));
+        assert!(!owned_message_matches(&loaded,&[]));
     }
 }

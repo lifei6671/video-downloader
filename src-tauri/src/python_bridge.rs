@@ -81,7 +81,7 @@ impl Drop for PythonBridge {
 }
 
 #[cfg(windows)]
-async fn reap_job(job: &std::os::windows::io::OwnedHandle) -> Result<()> {
+pub(crate) async fn reap_job(job: &std::os::windows::io::OwnedHandle) -> Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::JobObjects::*;
     // Kill-on-close alone is asynchronous. Native ASR descendants can still hold

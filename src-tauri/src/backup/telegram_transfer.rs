@@ -174,6 +174,7 @@ pub(super) trait Transport: Send + Sync {
     fn can_delete(&self) -> bool {
         false
     }
+    #[cfg(test)]
     fn media<'a>(&'a self, _io: &'a Io) -> ProviderFuture<'a, Vec<RemoteDocument>> {
         Box::pin(async { bail!("BACKUP_DELETE_UNSUPPORTED") })
     }
@@ -459,6 +460,17 @@ pub(super) async fn upload(
     source: MediaSource,
     io: &Io,
 ) -> Result<UploadReceipt> {
+    upload_with_timing(transport, journal, target, source, io, Default::default()).await
+}
+
+pub(super) async fn upload_with_timing(
+    transport: &impl Transport,
+    journal: &impl Journal,
+    target: &Target,
+    source: MediaSource,
+    io: &Io,
+    timing: super::delete_timing::IndexTiming<'_>,
+) -> Result<UploadReceipt> {
     allowed(journal, target)?;
     io.check()?;
     let envelope = Envelope::source(target, &source)?;
@@ -475,22 +487,25 @@ pub(super) async fn upload(
     }
     let result = async {
         if entry.state == SendState::Confirmed {
-            let document = io
-                .run(
-                    transport.inspect_envelope(
-                        entry
-                            .document
-                            .as_ref()
-                            .context("TELEGRAM_SEND_EVIDENCE_INVALID")?
-                            .message_id,
-                        &entry.envelope,
-                    ),
-                )
-                .await?;
-            document.check(&entry.envelope)?;
-            if Some(&document) != entry.document.as_ref() {
-                bail!("TELEGRAM_MEDIA_CHANGED");
-            }
+            let document = timing.run("receipt", async {
+                let document = io
+                    .run(
+                        transport.inspect_envelope(
+                            entry
+                                .document
+                                .as_ref()
+                                .context("TELEGRAM_SEND_EVIDENCE_INVALID")?
+                                .message_id,
+                            &entry.envelope,
+                        ),
+                    )
+                    .await?;
+                document.check(&entry.envelope)?;
+                if Some(&document) != entry.document.as_ref() {
+                    bail!("TELEGRAM_MEDIA_CHANGED");
+                }
+                Ok(document)
+            }).await?;
             return Ok(receipt(target, &entry, &document));
         }
         let mut sent_message = None;
@@ -519,13 +534,11 @@ pub(super) async fn upload(
                 bytes: 0,
                 progress: source.control.as_ref().map(|control| control.progress.as_ref()),
             };
-            let uploaded = io
-                .run(transport.upload(
+            let uploaded = timing.run("upload", io.run(transport.upload(
                     &mut reader,
                     source.bytes,
                     format!("yingqu-{}.{}", source.kind, source.container),
-                ))
-                .await?;
+                ))).await?;
             if reader.bytes != source.bytes
                 || format!("{:x}", reader.hash.finalize()) != source.sha256
             {
@@ -538,9 +551,7 @@ pub(super) async fn upload(
             io.check()?;
             entry.state = SendState::Sending;
             journal.save(&entry)?;
-            match io
-                .run(transport.send(uploaded, entry.envelope.caption()?, entry.random_id, video, io))
-                .await
+            match timing.run("send", io.run(transport.send(uploaded, entry.envelope.caption()?, entry.random_id, video, io))).await
             {
                 Ok(message) => sent_message = message,
                 Err(error) => {
@@ -562,19 +573,22 @@ pub(super) async fn upload(
             }
         }
         // Sending also covers a response lost before a crash/cancel. Never retransmit without evidence.
-        let document = if let Some(id) = sent_message {
-            io.run(transport.inspect_envelope(id,&entry.envelope)).await?
-        } else {
-            io.run(transport.find(&entry.envelope, io))
-                .await?
-                .context("TELEGRAM_SEND_UNCONFIRMED")?
-        };
-        document.check(&entry.envelope)?;
-        let readback = io.run(transport.inspect_envelope(document.message_id,&entry.envelope)).await?;
-        readback.check(&entry.envelope)?;
-        if readback != document {
-            bail!("TELEGRAM_MEDIA_CHANGED");
-        }
+        let document = timing.run("receipt", async {
+            let document = if let Some(id) = sent_message {
+                io.run(transport.inspect_envelope(id,&entry.envelope)).await?
+            } else {
+                io.run(transport.find(&entry.envelope, io))
+                    .await?
+                    .context("TELEGRAM_SEND_UNCONFIRMED")?
+            };
+            document.check(&entry.envelope)?;
+            let readback = io.run(transport.inspect_envelope(document.message_id,&entry.envelope)).await?;
+            readback.check(&entry.envelope)?;
+            if readback != document {
+                bail!("TELEGRAM_MEDIA_CHANGED");
+            }
+            Ok(document)
+        }).await?;
         io.check()?;
         entry.state = SendState::Confirmed;
         entry.document = Some(document.clone());
