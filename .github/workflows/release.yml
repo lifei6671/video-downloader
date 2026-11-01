@@ -86,6 +86,8 @@ jobs:
           python scripts/check_packaged_engine.py $engine
       - name: Build installer
         env:
+          YINGQU_TELEGRAM_API_ID: ${{ secrets.YINGQU_TELEGRAM_API_ID }}
+          YINGQU_TELEGRAM_API_HASH: ${{ secrets.YINGQU_TELEGRAM_API_HASH }}
           # Windows is unsigned; macOS uses ad-hoc signing per the product decision.
           APPLE_SIGNING_IDENTITY: '-'
         run: npm run tauri -- build --features desktop --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundles }} -- --locked

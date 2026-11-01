@@ -110,6 +110,9 @@ Windows 桌面主程序的 Debug 和 Release 构建均使用 GUI 子系统，启
 
 前端检查：`npm run build`。完整桌面编译：`npm run desktop:build`（不生成安装器）。该命令先使用项目 `.venv` 执行打包引擎检查，对照当前 Rust 的引擎及 yt-dlp 版本；切换分支后若提示 sidecar 版本不匹配，先按本文 PyInstaller 命令重建整个 `python-engine/dist/video-engine/`，再编译桌面程序，不复用其他分支的忽略产物。Rust 桌面门禁：`cargo test --manifest-path src-tauri/Cargo.toml`、`cargo clippy --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings`。
 
+桌面 release 构建必须设置 `YINGQU_TELEGRAM_API_ID`（正 `i32` 整数）和 `YINGQU_TELEGRAM_API_HASH`（32 位 ASCII 十六进制字符串），否则 Rust 构建检查直接失败。`telegram-app.local.json` 仅用于 debug，不会自动用于 release 预览；本机打包需在构建进程环境中显式提供身份，不能把值写入命令行或日志。应用身份的来源与存储约定见 [Telegram 构建配置](telegram-storage-implementation.md#构建与本机应用身份)。CI 和 Release 工作流的桌面打包步骤从同名 GitHub Actions Secrets 注入这两个变量；缺失 Secrets 会阻止生成可交付应用，不使用测试身份代替。无需身份的核心离线测试和 debug 开发仍可运行。
+
+
 在设置页分别保存两平台 Cookie、User-Agent 与 HTTP/SOCKS5 代理，再粘贴作品链接。Cookie 直接存本机应用数据目录的 SQLite，在设置页多行文本框回显；含密码的代理存系统凭据。下载目录默认为系统下载目录下的 Yingqu，可通过系统目录选择器修改。解析最多同时一个，下载默认同时 2 个、可在设置调整为 1–3 个，超出名额按提交顺序等待；提高上限立即补位，降低不打断已有下载。取消等待进程退出与暂存清理；重启保留记录及已解析预览，解析中/排队/下载中标记中断，不自动恢复下载。可复用缓存和封面/图集字节保存在 SQLite，命中时不请求详情，下载时仍重新解析；见 [解析缓存](parse-cache-validation.md)。
 
 并发队列、手动重试、移除历史及删除本地作品已实现。按 2026-10-21 用户要求，单条移除记录和本地删除均直接执行、不二次确认；本地删除同时移除下载任务和数据库下载记录。重试复用原任务记录，保留 ID、创建时间、实际 resolver 与所选规格，清空上次进度和错误，以最新设置重新解析并从头下载；解析失败且无作品信息时需重新粘贴链接。Debug 开发可执行文件依赖仓库内的打包引擎目录；Release 从应用资源目录加载完整引擎。Windows 干净环境与 macOS 验收在 M3 完成。[M2 单任务验证](m2-validation.md) · [并发与队列验证](m2-queue-validation.md) · [重试与历史管理验证](m2-history-validation.md)。
