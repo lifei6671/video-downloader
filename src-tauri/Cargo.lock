@@ -6904,6 +6904,7 @@ dependencies = [
  "http-body-util",
  "keyring",
  "libc",
+ "mime_guess",
  "qrcode",
  "reqwest",
  "rusqlite",

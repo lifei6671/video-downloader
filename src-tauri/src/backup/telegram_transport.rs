@@ -24,6 +24,7 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
 fn document_attributes(name: String, video: Option<&VideoAttributes>) -> (String, Vec<tl::enums::DocumentAttribute>) {
+    let mime = mime_guess::from_path(&name).first_or_octet_stream().to_string();
     let mut attributes = vec![tl::types::DocumentAttributeFilename { file_name: name }.into()];
     if let Some(video) = video {
         attributes.push(tl::types::DocumentAttributeVideo {
@@ -31,7 +32,7 @@ fn document_attributes(name: String, video: Option<&VideoAttributes>) -> (String
             duration: video.duration_ms as f64 / 1000.0, w: video.width as i32, h: video.height as i32,
             preload_prefix_size: None, video_start_ts: None, video_codec: None,
         }.into());
-        ("video/mp4".into(), attributes)
+        (mime, attributes)
     } else { ("application/octet-stream".into(), attributes) }
 }
 fn uploaded_media(uploaded: Uploaded, video: Option<&VideoAttributes>) -> Result<tl::enums::InputMedia> {
@@ -42,7 +43,7 @@ fn uploaded_media(uploaded: Uploaded, video: Option<&VideoAttributes>) -> Result
     };
     let (mime_type, attributes) = document_attributes(name, video);
     Ok(tl::types::InputMediaUploadedDocument {
-        nosound_video:false,force_file:video.is_none(),spoiler:false,file:uploaded.raw,thumb:None,
+        nosound_video:video.is_some(),force_file:video.is_none(),spoiler:false,file:uploaded.raw,thumb:None,
         mime_type,attributes,stickers:None,video_cover:None,video_timestamp:None,ttl_seconds:None,
     }.into())
 }
@@ -78,9 +79,15 @@ pub(super) struct GrammersTransport {
     can_delete: bool,
     channel_title: String,
     preferred_message:Option<i32>,
+    bundle_heading: Option<String>,
 }
 pub(super) struct IndexDocument {pub revision:i64,pub document:RemoteDocument}
 impl GrammersTransport {
+    pub(super) fn with_heading(&self, title: Option<&str>, filename: Option<&str>) -> Self {
+        let mut value = self.clone();
+        value.bundle_heading = bundle::display_heading(title, filename);
+        value
+    }
     pub(super) fn for_message(&self,message:Option<i32>)->Self {let mut value=self.clone();value.preferred_message=message;value}
     pub(super) fn channel_title(&self) -> &str { &self.channel_title }
     #[cfg(test)]
@@ -107,7 +114,7 @@ impl GrammersTransport {
         while let Some(message)=io.run(async {history.next().await.map_err(rpc_error)}).await? {
             let tl::enums::Message::Message(raw)=&message.raw else {continue;};
             let (count,part,blocks)=match &raw.rich_message {Some(tl::enums::RichMessage::Message(r))=>(r.documents.len(),r.part,r.blocks.len()),_ =>(0,false,0)};
-            rows.push(serde_json::json!({"text_is_json":serde_json::from_str::<serde_json::Value>(message.text()).is_ok(),"text_is_heading":message.text()=="映取备份","rich_documents":count,"rich_part":part,"rich_blocks":blocks,"legacy_media":raw.media.is_some()}));
+            rows.push(serde_json::json!({"text_is_json":serde_json::from_str::<serde_json::Value>(message.text()).is_ok(),"text_chars":message.text().chars().count(),"rich_documents":count,"rich_part":part,"rich_blocks":blocks,"legacy_media":raw.media.is_some()}));
         }
         Ok(serde_json::json!(rows))
     }
@@ -291,6 +298,7 @@ impl GrammersTransport {
             can_delete,
             channel_title,
             preferred_message:None,
+            bundle_heading: None,
         })
     }
     async fn message(&self, id: i32) -> Result<grammers_client::message::Message> {
@@ -462,7 +470,7 @@ impl Transport for GrammersTransport {
             };
             let (mime_type, attributes) = document_attributes(name, video.as_ref());
             let media = tl::types::InputMediaUploadedDocument {
-                nosound_video: false,
+                nosound_video: video.is_some(),
                 force_file: video.is_none(),
                 spoiler: false,
                 file: uploaded.raw,
@@ -674,6 +682,60 @@ mod tests {
         assert_eq!(mime, "application/octet-stream");
         assert_eq!(attributes.len(), 1);
         assert!(VideoAttributes::from_metadata(&serde_json::json!({"duration_ms":1,"width":null,"height":1})).is_none());
+    }
+    #[test]
+    fn video_presentation_uses_the_original_container_mime_and_disables_force_file() {
+        let video = VideoAttributes::from_metadata(
+            &serde_json::json!({"duration_ms":2500,"width":1280,"height":720}),
+        )
+        .unwrap();
+        for (name, mime) in [
+            ("clip.mp4", "video/mp4"),
+            ("clip.mov", "video/quicktime"),
+            ("clip.webm", "video/webm"),
+            ("clip.mkv", "video/x-matroska"),
+            ("clip.avi", "video/x-msvideo"),
+        ] {
+            let uploaded = Uploaded::from_raw(
+                tl::types::InputFileBig {
+                    id: 1,
+                    parts: 1,
+                    name: name.into(),
+                }
+                .into(),
+            );
+            let tl::enums::InputMedia::UploadedDocument(media) =
+                uploaded_media(uploaded, Some(&video)).unwrap()
+            else {
+                panic!("wrong media")
+            };
+            assert_eq!(media.mime_type, mime);
+            assert!(!media.force_file);
+            assert!(media.nosound_video);
+            assert!(media.attributes.iter().any(|a|matches!(a,tl::enums::DocumentAttribute::Video(v) if v.w==1280 && v.h==720 && v.duration==2.5)));
+            assert!(media
+                .attributes
+                .iter()
+                .any(|a| matches!(a,tl::enums::DocumentAttribute::Filename(v) if v.file_name==name)));
+        }
+        let uploaded = Uploaded::from_raw(
+            tl::types::InputFileBig {
+                id: 1,
+                parts: 1,
+                name: "transcript.json".into(),
+            }
+            .into(),
+        );
+        let tl::enums::InputMedia::UploadedDocument(media) = uploaded_media(uploaded, None).unwrap()
+        else {
+            panic!("wrong media")
+        };
+        assert!(media.force_file);
+        assert!(!media.nosound_video);
+        assert!(!media
+            .attributes
+            .iter()
+            .any(|a| matches!(a, tl::enums::DocumentAttribute::Video(_))));
     }
     #[test]
     fn telegram_t4_empty_channel_message_is_missing_after_delete() {

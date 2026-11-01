@@ -23,7 +23,7 @@ export interface BackupUpdate { telegram?: { account_id: string; channel_id: str
 export interface BackupSettings extends Omit<BackupUpdate, 'credentials' | 'create_library'> { telegram_channel_title?: string | null; can_delete_owned_media?: boolean; space_id: string; library_id: string; credentials_configured: boolean; connection_pending?: boolean; last_error: string | null }
 export interface BackupConflict { image: number[] | null; id: string; field: string; value: string; device_id: string; can_adopt: boolean }
 export interface BackupLocalData { title: string; transcript: string | null; pending: boolean; remote_deleted: boolean; conflicts: BackupConflict[] }
-export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number }; attempt: number; last_error: string | null }
+export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number; transfer_started?: boolean }; attempt: number; last_error: string | null }
 export interface BackupLocation { space_id: string; profile: 'r2' | 's3' | 'telegram'; display_name: string; channel_title: string | null }
 export interface BackupAsset { in_current_space?: boolean; backup_locations?: BackupLocation[]; asset_id: string; task_id: string | null; metadata: Partial<Video>; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean; remote_revision: number; remote_deleted: boolean; has_pending_local_changes: boolean; conflict_count: number }
 export interface AssetTranscript { asset_id: string; content_sha256: string | null; text: string; model_revision: string; model_name: string | null; pipeline_revision: string; completed_at: number }
@@ -269,6 +269,8 @@ const errors: Record<string, string> = {
   UPDATE_INSTALLER_OPEN_FAILED: '无法打开安装包，请稍后重试',
   INVALID_INPUT: '请粘贴抖音、TikTok 或 YouTube 的视频分享链接',
   UNSUPPORTED_PLATFORM: '请粘贴抖音、TikTok 或 YouTube 的视频分享链接',
+  FFPROBE_UNAVAILABLE: '读取视频属性需要 FFprobe，请在系统设置的运行依赖中安装 FFmpeg。',
+  VIDEO_METADATA_UNAVAILABLE: '无法读取视频时长和尺寸，请检查本地视频是否完整。',
   FFMPEG_UNAVAILABLE: '此高清规格需要合并音视频，请在系统设置的运行依赖中检测并下载 FFmpeg。',
   JS_RUNTIME_UNAVAILABLE: 'YouTube 解析需要 Node.js 22+ 或 Deno 2.3+，请在系统设置的运行依赖中检测并下载。',
   BROWSER_COOKIES_UNAVAILABLE: '未从系统默认浏览器读取到此平台的可用 Cookie。请确认已登录；若浏览器被占用或加密不支持，可关闭后重试，或在设置中粘贴 Cookie。',

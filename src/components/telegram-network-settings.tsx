@@ -1,42 +1,58 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { api, errorText, type Profile, type Settings } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Field, FieldLabel } from '@/components/ui/field';
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Field, FieldGroup, FieldLabel, FieldSet } from '@/components/ui/field';
+import { Spinner } from '@/components/ui/spinner';
+import { Separator } from '@/components/ui/separator';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { toast } from 'sonner';
 
-export function TelegramNetworkSettings({ profile, saved, disabled }: { profile: Profile; saved: (value: Settings) => void; disabled: boolean }) {
+export function TelegramNetworkSettings({ profile, saved, disabled, children }: { profile: Profile; saved: (value: Settings) => void; disabled: boolean; children: ReactNode }) {
   const [proxy, setProxy] = useState(''), [direct, setDirect] = useState(!profile.proxy);
+  const [savedProxy, setSavedProxy] = useState('');
   const [loaded, setLoaded] = useState(false), [busy, setBusy] = useState(false);
-  const [error, setError] = useState(''), [notice, setNotice] = useState(''), [retry, setRetry] = useState(0);
+  const [error, setError] = useState(''), [retry, setRetry] = useState(0);
+  const value = direct ? '' : proxy.trim();
+  const changed = value !== savedProxy;
   useEffect(() => {
     let live = true;
     setLoaded(false); setError('');
     void api.proxy('telegram').then(value => {
-      if (live) { setProxy(value ?? ''); setDirect(!value); setLoaded(true); }
+      if (live) { setProxy(value ?? ''); setDirect(!value); setSavedProxy(value?.trim() ?? ''); setLoaded(true); }
     }).catch(error => { if (live) setError(errorText(error)); });
     return () => { live = false; };
   }, [retry]);
   async function save() {
-    if (disabled || busy || !loaded) return;
-    setBusy(true); setError(''); setNotice('');
+    if (disabled || busy || !loaded || !changed || !direct && !value) return;
+    setBusy(true); setError('');
     try {
-      saved(await api.save({ platform: 'telegram', user_agent: profile.user_agent, cookie: null, proxy: direct ? '' : proxy.trim() }));
-      setNotice('代理配置已保存');
+      saved(await api.save({ platform: 'telegram', user_agent: profile.user_agent, cookie: null, proxy: value }));
+      setSavedProxy(value);
+      toast.success('代理配置已保存');
     } catch (error) { setError(errorText(error)); }
     finally { setBusy(false); }
   }
-  return <form aria-label="Telegram 网络代理" className="space-y-3" onSubmit={event => { event.preventDefault(); void save(); }}>
+  return <Card size="sm" className="flex min-w-0 flex-col [--card-spacing:12px]">
+    <CardHeader><CardTitle className="font-semibold">Telegram</CardTitle></CardHeader>
+    <CardContent className="space-y-4"><form id="profile-telegram" aria-label="Telegram 网络代理" aria-busy={busy} onSubmit={event => { event.preventDefault(); void save(); }}>
+      <FieldSet disabled={disabled || busy || !loaded} className="min-w-0"><FieldGroup className="gap-3">
     <Field><FieldLabel id="telegram-proxy-mode">网络代理</FieldLabel>
-      <ToggleGroup size="sm" type="single" variant="outline" aria-labelledby="telegram-proxy-mode" value={direct ? 'direct' : 'proxy'} disabled={disabled || busy || !loaded} onValueChange={value => { if (value) { setDirect(value === 'direct'); setNotice(''); } }}>
+      <ToggleGroup size="sm" type="single" variant="outline" aria-labelledby="telegram-proxy-mode" value={direct ? 'direct' : 'proxy'} disabled={disabled || busy || !loaded} onValueChange={value => { if (value) setDirect(value === 'direct'); }}>
         <ToggleGroupItem value="direct">直连</ToggleGroupItem><ToggleGroupItem value="proxy">自定义代理</ToggleGroupItem>
       </ToggleGroup>
     </Field>
-    {!direct && <Field><FieldLabel htmlFor="telegram-proxy">SOCKS5 地址</FieldLabel><Input id="telegram-proxy" value={proxy} autoComplete="off" spellCheck={false} disabled={disabled || busy || !loaded} placeholder="socks5://127.0.0.1:7890" onChange={event => { setProxy(event.target.value); setNotice(''); }} /></Field>}
-    <div className="flex gap-2"><Button type="submit" variant="outline" disabled={disabled || busy || !loaded || !direct && !proxy.trim()}>{busy ? '正在保存…' : '保存代理'}</Button>
+    {!direct && <Field><FieldLabel htmlFor="telegram-proxy">SOCKS5 地址</FieldLabel><Input id="telegram-proxy" className="min-h-8" type="text" value={proxy} autoComplete="off" spellCheck={false} disabled={disabled || busy || !loaded} placeholder="socks5://127.0.0.1:7890" onChange={event => setProxy(event.target.value)} /></Field>}
+      </FieldGroup></FieldSet>
+    {error && <p role="alert" className="mt-3 text-xs text-destructive">{error}</p>}
+    </form>
+      <Separator />
+      <div className="space-y-4">{children}</div>
+    </CardContent>
+    <CardFooter className="justify-end py-2">
       {!loaded && error && <Button type="button" variant="outline" onClick={() => setRetry(value => value + 1)}>重新读取代理</Button>}
-    </div>
-    {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-    {notice && <p role="status" className="text-xs text-muted-foreground">{notice}</p>}
-  </form>;
+      <Button type="submit" form="profile-telegram" disabled={disabled || busy || !loaded || !changed || !direct && !value}>{busy && <Spinner aria-hidden="true" data-icon="inline-start" />}{busy ? '保存中…' : '保存代理'}</Button>
+    </CardFooter>
+  </Card>;
 }

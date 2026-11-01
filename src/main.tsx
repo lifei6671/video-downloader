@@ -1,7 +1,7 @@
 import '@/lib/style-nonce';
 import { RefreshCw } from 'lucide-react';
 import { BackupSettingsForm } from '@/components/backup-settings';
-import { BackupTaskStatus, BackupTransferMenuItems, BackupAssetRow, BackupDialogs, useBackupTasks, useBackupDialogs } from '@/components/backup-tasks';
+import { backupAssetStatus, BackupAssetCoverBadge, BackupTaskStatus, BackupTaskError, BackupTransferMenuItems, BackupAssetRow, BackupDialogs, useBackupTasks, useBackupDialogs } from '@/components/backup-tasks';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Download, Play, ListVideo, ListX, CircleCheck, Settings as SettingsIcon, Link, FolderOpen, Film, Eye, EyeOff, Copy, ClipboardPaste, AlertCircle, HardDrive, Search, RotateCcw, Trash2, Info, KeyRound, PackageCheck, Monitor, CalendarClock, Images, X } from 'lucide-react';
@@ -536,9 +536,11 @@ function App() {
   const remoteAssets = backup.assets.filter(a => !tasks.some(t => t.asset_id === a.asset_id) && (a.asset_state === 'active' || !!a.path || a.remote_state === 'pending_delete'));
   const filteredAssets = remoteAssets.filter(a => (taskPlatform === 'all' || a.metadata.platform === taskPlatform) && (!search || `${a.metadata.title ?? ''} ${a.metadata.author ?? ''} ${a.original_filename}`.includes(search)));
   statusCounts.all += filteredAssets.length;
-  statusCounts.completed += filteredAssets.filter(a => a.local_state === 'present').length;
-  statusCounts.downloading += filteredAssets.filter(a => a.local_state === 'restoring').length;
-  const visibleAssets = filteredAssets.filter(a => page !== 'tasks' || taskStatus === 'all' || taskStatus === 'completed' && a.local_state === 'present' || taskStatus === 'downloading' && a.local_state === 'restoring');
+  for (const asset of filteredAssets) {
+    const status = backupAssetStatus(backup, asset);
+    if (status) statusCounts[status]++;
+  }
+  const visibleAssets = filteredAssets.filter(a => page !== 'tasks' || taskStatus === 'all' || backupAssetStatus(backup, a) === taskStatus);
   function showAuthorWorks(task: Task) {
     const query = authorSearch(task.video);
     if (!query) return;
@@ -600,9 +602,10 @@ function App() {
       onPlay={!busy && canPlayTask(task) ? () => { void playTask(task); } : undefined}
       cover={cover} title={<>{task.asset_id && <span className="task-title-backup"><BackupTaskStatus backup={backup} assetId={task.asset_id} /></span>}<Tooltip><TooltipTrigger asChild><span className="task-row-title" tabIndex={0}>{taskTitle(task)}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{taskTitle(task)}</TooltipContent></Tooltip></>}
       metadata={<div className="task-row-byline"><AuthorInfo task={task} compact showId={false} showAvatar={false} onAuthorClick={authorSearch(task.video) ? () => showAuthorWorks(task) : undefined} /><span className="task-row-platform">{platformName(task.video?.platform ?? (task.telegram_link ? 'telegram' : undefined))}</span>{!(taskView === 'feed' && task.status === 'downloading') && <TaskMetadata task={task} compact />}</div>}
+      coverBadge={task.asset_id && backup.assets.some(asset => asset.asset_id === task.asset_id) ? <BackupAssetCoverBadge backup={backup} assetId={task.asset_id} /> : undefined}
       coverActions={taskView === 'feed' ? task.status === 'downloading' ? cancelAction(task, true) : canPlayTask(task) ? playAction(task, true) : task.status === 'completed' && task.video?.kind === 'image_album' && !task.file_missing ? albumAction(task, true) : null : null}
       coverProgress={taskView === 'feed' && task.status === 'downloading' ? <Progress variant="circular" aria-label={task.merging ? '合并进度' : '下载进度'} aria-valuetext={task.merging ? '正在合并音视频' : downloadPercent(task) == null ? '正在下载，大小未知' : undefined} value={task.merging ? null : downloadPercent(task)}>{task.merging ? '合并' : undefined}</Progress> : null}
-      progress={task.status === 'downloading' ? <DownloadProgress task={task} hideIndicator={taskView === 'feed'} /> : null}
+      progress={<>{task.status === 'downloading' && <DownloadProgress task={task} hideIndicator={taskView === 'feed'} />}{task.asset_id && <BackupTaskError backup={backup} assetId={task.asset_id} />}</>}
       queuePosition={queued.findIndex(t => t.id === task.id) + 1} actions={taskActions(task, taskView !== 'feed')}
     />, coverActions)} />} />}
     <BackupDialogs dialogs={backupDialogs} backup={backup} tasks={tasks} runtime={runtimeDependencies} />

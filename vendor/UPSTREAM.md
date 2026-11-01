@@ -86,6 +86,8 @@ yt-dlp 2026.08.19 的 URL-key parser 对该作品 `bytevc1_4k` 未填尺寸；�
 
 Pillow 精确锁定并随 sidecar 分发，PyInstaller 一并收集其许可。引擎 0.13.1、协议仍为 v3，使后续解析不命中旧引擎缓存；已有历史任务封面不自动批量替换。图集、TikTok、YouTube、Telegram、存储及删除语义保持。对应测试为 `tests/test_douyin_cover.py`，升级上游或 Pillow 时核对格式、实际尺寸、同图与不同图及原有回退。
 
+Telegram 视频属性的 MIME 推断复用锁文件中已有的 `mime_guess`，提升为直接依赖，相关 `mime_guess` / `mime` / `unicase` 许可原文并入同一存储清单。缺失时长和尺寸时，复用现有 FFmpeg 分发中的 FFprobe 做本地只读探测，不新增二进制来源或媒体转码。
+
 ## Telegram 平台下载
 
 平台原始视频下载与存储共用已锁定的 grammers 0.11.0，来源、许可与升级约束见本文件首节。取消外部 tdl CLI/HTTP 和伪终端适配，不分发 tdl，也不再依赖 portable-pty / vt100。`zeroize` 仍供 SDK 和凭据处理使用，其声明从原认证桥接清单并入 `telegram-storage-licenses.txt`，原文及来源保留。使用契约见 [Telegram 下载](../docs/telegram-download.md)。

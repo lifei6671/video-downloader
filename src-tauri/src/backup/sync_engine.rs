@@ -478,7 +478,7 @@ impl SyncEngine {
             let previous:Value=serde_json::from_str(&raw)?;
             let mut next=payload.clone();
             for (key,value) in previous.as_object().into_iter().flatten() {
-                if key.starts_with("resume_") || key=="completed_bytes" { next[key]=value.clone(); }
+                if key.starts_with("resume_") || key=="completed_bytes" || key=="transfer_started" { next[key]=value.clone(); }
             }
             db.execute("UPDATE backup_operations SET phase=?2,payload_json=?3,updated_at=unixepoch() WHERE operation_id=?1",params![operation,phase,next.to_string()])?;Ok(())})
     }
@@ -774,13 +774,17 @@ impl SyncEngine {
                 result=&mut upload=>return result,
                 _=timer.tick()=>{
                     self.check(operation)?;
-                    if kind=="video" {self.core.backup_db(|db|{
+                    self.core.backup_db(|db|{
                         let raw:String=db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id=?",[operation],|r|r.get(0))?;
                         let mut value:Value=serde_json::from_str(&raw)?;
-                        let confirmed=value["resume_video"]["value"].as_str().and_then(|raw|serde_json::from_str::<Value>(raw).ok()).and_then(|v|v["completed_bytes"].as_u64()).unwrap_or(0);
-                        value["completed_bytes"]=json!((confirmed+progress.load(std::sync::atomic::Ordering::Relaxed)).min(bytes));
+                        let transferred = progress.load(std::sync::atomic::Ordering::Relaxed);
+                        if transferred > 0 { value["transfer_started"] = json!(true); }
+                        if kind=="video" {
+                            let confirmed=value["resume_video"]["value"].as_str().and_then(|raw|serde_json::from_str::<Value>(raw).ok()).and_then(|v|v["completed_bytes"].as_u64()).unwrap_or(0);
+                            value["completed_bytes"]=json!((confirmed+transferred).min(bytes));
+                        }
                         db.execute("UPDATE backup_operations SET payload_json=?2 WHERE operation_id=?1",params![operation,value.to_string()])?;Ok(())
-                    })?;}
+                    })?;
                 }
             }
         }

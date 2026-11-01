@@ -21,6 +21,8 @@ struct Config {
     work_directory: PathBuf,
     #[serde(default)]
     video_metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    engine: Option<PathBuf>,
 }
 #[derive(Serialize, Deserialize)]
 struct Run {
@@ -55,11 +57,36 @@ async fn telegram_transfer_live_original_bytes_and_restart_recovery() -> Result<
     core.shutdown().await;
     result
 }
+// Validate the local probe setup before opening the Core or reading any session.
+fn engine_program(config: &Config) -> Result<String> {
+    if config
+        .video_metadata
+        .as_ref()
+        .is_some_and(|metadata| VideoAttributes::from_metadata(metadata).is_none())
+    {
+        bail!("video_metadata must provide valid duration and dimensions");
+    }
+    if let Some(engine) = &config.engine {
+        if !engine.is_file() {
+            bail!("engine must name an existing packaged video-engine executable");
+        }
+        return Ok(engine.canonicalize()?.to_string_lossy().into_owned());
+    }
+    if config
+        .video_metadata
+        .as_ref()
+        .and_then(VideoAttributes::from_metadata)
+        .is_none()
+    {
+        bail!("provide engine for automatic video probing, or valid video_metadata with duration and dimensions");
+    }
+    Ok("unused-engine".into())
+}
 fn open(config: &Config) -> Result<Arc<Core>> {
     Core::open(
         &config.data_directory.join("yingqu.sqlite"),
         config.work_directory.clone(),
-        "unused-engine".into(),
+        engine_program(config)?,
         vec![],
         |_| {},
     )
@@ -141,7 +168,7 @@ async fn transfer(core: &Arc<Core>, config: &Config) -> Result<()> {
         let video = if kind == "video" {
             config.video_metadata.as_ref().map(|v| VideoAttributes::from_metadata(v).context("invalid video presentation fixture")).transpose()?
         } else { None };
-        let video_media_requested = video.is_some();
+        let video_media_requested = kind == "video";
         let receipt = core
             .telegram_accounts.binding(yingqu_core::telegram_accounts::Purpose::Backup).session
             .upload_media(
@@ -221,4 +248,35 @@ async fn transfer(core: &Arc<Core>, config: &Config) -> Result<()> {
         serde_json::to_vec_pretty(&reports)?,
     )?;
     Ok(())
+}
+
+#[test]
+fn live_probe_configuration_is_validated_without_reading_a_session() {
+    let mut config = Config {
+        channel_name: "not-used".into(),
+        data_directory: "not-read".into(),
+        work_directory: "not-read".into(),
+        video_metadata: None,
+        engine: None,
+    };
+    assert!(engine_program(&config)
+        .unwrap_err()
+        .to_string()
+        .contains("provide engine"));
+    config.video_metadata = Some(serde_json::json!({"duration_ms":1000,"width":32,"height":24}));
+    assert_eq!(engine_program(&config).unwrap(), "unused-engine");
+    config.video_metadata = Some(serde_json::json!({"duration_ms":0,"width":32,"height":24}));
+    assert!(engine_program(&config).is_err());
+    let root = tempfile::tempdir().unwrap();
+    let engine = root.path().join("video-engine.exe");
+    std::fs::write(&engine, b"offline fixture; not executed").unwrap();
+    config.engine = Some(engine.clone());
+    assert!(engine_program(&config).is_err());
+    config.video_metadata = None;
+    assert_eq!(
+        std::path::PathBuf::from(engine_program(&config).unwrap()),
+        engine.canonicalize().unwrap()
+    );
+    config.engine = Some(root.path().join("missing"));
+    assert!(engine_program(&config).is_err());
 }

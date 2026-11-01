@@ -630,6 +630,23 @@ impl Core {
     pub fn set_backup_foreground(&self,foreground:bool) {self.backup_foreground.store(foreground,std::sync::atomic::Ordering::Relaxed);if foreground {self.wake_backup();}}
     pub(crate) fn backup_cancellation(&self)->watch::Receiver<bool> {self.inner.lock().unwrap().backup_cancel.subscribe()}
 
+    pub(crate) async fn probe_video_metadata(
+        &self,
+        source: &std::path::Path,
+        operation: &str,
+        cancel: impl std::future::Future<Output = ()>,
+    ) -> Result<serde_json::Value> {
+        crate::python_bridge::PythonBridge::operation_cancellable(
+            &self.program,
+            &self.args,
+            operation,
+            "probe_video",
+            serde_json::json!({"source":source,"runtime_directory":self.runtime_directory}),
+            |_| {},
+            cancel,
+        )
+        .await
+    }
     pub async fn ensure_local_video(self:&Arc<Self>,asset_id:&str)->Result<PathBuf> {
         let mut receiver={
             let mut inner=self.inner.lock().unwrap();

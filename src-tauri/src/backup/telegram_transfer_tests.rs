@@ -46,6 +46,7 @@ impl Journal for TestJournal {
 struct Mock {
     documents: Mutex<HashMap<i32, (RemoteDocument, Vec<u8>)>>,
     uploads: AtomicUsize,
+    upload_gate: Mutex<Option<(tokio::sync::oneshot::Sender<()>, Arc<tokio::sync::Notify>)>>,
     sends: AtomicUsize,
     inspects: AtomicUsize,
     downloads: AtomicUsize,
@@ -87,6 +88,14 @@ impl Transport for Mock {
         Box::pin(async move {
             self.uploads.fetch_add(1, Ordering::SeqCst);
             let mut body = vec![];
+            let gate = self.upload_gate.lock().unwrap().take();
+            if let Some((started, release)) = gate {
+                let mut first = [0u8; 1];
+                reader.read_exact(&mut first).await?;
+                body.extend_from_slice(&first);
+                let _ = started.send(());
+                release.notified().await;
+            }
             reader.read_to_end(&mut body).await?;
             if let Some(path) = self.source_edit.lock().unwrap().take() {
                 std::fs::write(path, b"changed during upload")?;
@@ -213,7 +222,7 @@ fn source(root: &Path, kind: &str, body: &[u8]) -> MediaSource {
     let path = root.join(format!("input-{kind}"));
     std::fs::write(&path, body).unwrap();
     MediaSource {
-        video: None,
+        video: (kind == "video").then_some(crate::backup::provider::VideoAttributes { duration_ms:2000, width:640, height:360, supports_streaming:false }),
         base_revision: None,
         recreate_revision: None,
         asset_id: "asset".into(),
@@ -660,4 +669,158 @@ async fn telegram_transfer_idle_timeout_and_abort_drop_the_request() {
         io.run(async { Ok(()) }).await.unwrap_err().to_string(),
         "TELEGRAM_TRANSFER_CANCELED"
     );
+}
+
+#[tokio::test]
+async fn telegram_upload_reports_the_first_byte_before_the_transfer_finishes() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let net = Mock::new();
+    let (started, first_byte) = tokio::sync::oneshot::channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    *net.upload_gate.lock().unwrap() = Some((started, release.clone()));
+    let mut source = source(root.path(), "video", b"original video bytes");
+    let progress = Arc::new(AtomicU64::new(0));
+    source.control = Some(Arc::new(TransferControl {
+        check: Box::new(|| Ok(())),
+        checkpoint: Box::new(|_| Ok(())),
+        progress: progress.clone(),
+    }));
+    let (_cancel, _stop, io) = io();
+    let target = target();
+    let uploading = upload(&net, &journal, &target, source.clone(), &io);
+    tokio::pin!(uploading);
+    tokio::select! {
+        result = first_byte => result.unwrap(),
+        result = &mut uploading => panic!("transfer finished before first-byte observation: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_secs(3)) => panic!("upload never started"),
+    }
+    assert_eq!(progress.load(Ordering::Relaxed), 1);
+    assert_eq!(net.sends.load(Ordering::SeqCst), 0);
+    release.notify_one();
+    let receipt = uploading.await.unwrap();
+    assert_eq!(progress.load(Ordering::Relaxed), source.bytes);
+    assert_eq!(receipt.reference.sha256, source.sha256);
+}
+
+#[tokio::test]
+async fn telegram_all_video_containers_keep_attributes_and_original_bytes() {
+    for container in ["mp4", "mov", "webm", "mkv", "avi", "m4v"] {
+        let root = tempfile::tempdir().unwrap();
+        let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+        let net = Mock::new();
+        let (_cancel, _stop, io) = io();
+        let mut media = source(root.path(), "video", b"original fixture bytes");
+        media.container = container.into();
+        let target = target();
+        let receipt = upload(&net, &journal, &target, media.clone(), &io)
+            .await
+            .unwrap();
+        let attributes = net.video_attributes.lock().unwrap()[0].clone().unwrap();
+        assert_eq!(
+            (attributes.duration_ms, attributes.width, attributes.height),
+            (2000, 640, 360)
+        );
+        assert!(!attributes.supports_streaming);
+        assert_eq!(receipt.reference.container, container);
+        assert_eq!(receipt.reference.sha256, media.sha256);
+        assert_eq!(
+            net.documents.lock().unwrap()[&1].1,
+            b"original fixture bytes"
+        );
+    }
+}
+
+#[tokio::test]
+async fn telegram_missing_video_attributes_fail_instead_of_silently_sending_a_file() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let net = Mock::new();
+    let (_cancel, _stop, io) = io();
+    let mut media = source(root.path(), "video", b"original bytes");
+    media.video = None;
+    assert_eq!(
+        upload(&net, &journal, &target(), media, &io)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "VIDEO_METADATA_UNAVAILABLE"
+    );
+    assert_eq!(net.uploads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn telegram_uncertain_send_does_not_probe_or_require_the_local_video_again() {
+    let root = tempfile::tempdir().unwrap();
+    let core = crate::desktop_core::Core::open(
+        &root.path().join("qa.sqlite"),
+        root.path().join("downloads"),
+        "must-not-start".into(),
+        vec![],
+        |_| {},
+    )
+    .unwrap();
+    let mut source = source(root.path(), "video", b"original bytes");
+    let journal = super::super::telegram_transfer_journal::CoreJournal(&core);
+    let target = target();
+    let envelope = Envelope::source(&target, &source).unwrap();
+    let mut entry = journal
+        .reserve(Entry {
+            target: target.clone(),
+            random_id: envelope.random_id().unwrap(),
+            envelope,
+            state: SendState::Prepared,
+            document: None,
+            last_error: None,
+        })
+        .unwrap();
+    entry.state = SendState::Sending;
+    journal.save(&entry).unwrap();
+    std::fs::remove_file(&source.path).unwrap();
+    source.video = None;
+    let (_cancel, _stop, io) = io();
+    prepare_video(&core, &mut source, &io).await.unwrap();
+    assert!(source.video.is_none());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn telegram_video_probe_cancels_without_waiting_for_its_timeout() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("probe-started");
+    let dtk: serde_json::Value =
+        serde_json::from_str(include_str!("../../../vendor/dtk/manifest.json")).unwrap();
+    let ready = serde_json::json!({"protocol_version":3,"type":"ready","engine_version":crate::python_bridge::ENGINE_VERSION,"yt_dlp_version":crate::python_bridge::YTDLP_VERSION,"dtk_version":dtk["upstream_version"],"dtk_commit":dtk["upstream_commit"]});
+    let script = root.path().join("probe.py");
+    std::fs::write(&script,format!("import json,sys,time\nfrom pathlib import Path\nprint({},flush=True)\nrequest=json.loads(sys.stdin.readline())\nassert request['method']=='probe_video'\nPath(sys.argv[1]).write_text('started')\ntime.sleep(60)\n",serde_json::to_string(&ready.to_string()).unwrap())).unwrap();
+    let core = crate::desktop_core::Core::open(
+        &root.path().join("qa.sqlite"),
+        root.path().join("downloads"),
+        std::env::var("PYTHON").unwrap_or_else(|_| "python".into()),
+        vec![
+            script.to_string_lossy().into_owned(),
+            marker.to_string_lossy().into_owned(),
+        ],
+        |_| {},
+    )
+    .unwrap();
+    let mut source = source(root.path(), "video", b"original bytes");
+    source.video = None;
+    let (cancel, _stop, io) = io();
+    let probing = prepare_video(&core, &mut source, &io);
+    tokio::pin!(probing);
+    tokio::select! {
+        _=async {while !marker.exists(){tokio::time::sleep(Duration::from_millis(10)).await;}}=>{},
+        result=&mut probing=>panic!("probe ended before cancellation: {result:?}"),
+        _=tokio::time::sleep(Duration::from_secs(5))=>panic!("probe never started"),
+    }
+    cancel.send_replace(true);
+    let result = tokio::time::timeout(Duration::from_secs(3), &mut probing)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "TELEGRAM_TRANSFER_CANCELED"
+    );
+    core.shutdown().await;
 }

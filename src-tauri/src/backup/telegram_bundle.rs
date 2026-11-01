@@ -23,6 +23,14 @@ struct Loaded {
     bundle: Bundle,
     documents: Vec<tl::types::Document>,
 }
+pub(super) fn display_heading(title: Option<&str>, filename: Option<&str>) -> Option<String> {
+    [title, filename]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(|value| value.chars().take(300).collect())
+}
 impl Bundle {
     fn validate(&self) -> Result<()> {
         if self.yingqu_bundle != 1
@@ -435,13 +443,16 @@ impl GrammersTransport {
                 Loaded {
                     bundle: Bundle {
                         yingqu_bundle: 1,
-                        heading: "映取备份".into(),
+                        heading: self.bundle_heading.clone().unwrap_or_else(|| "映取备份".into()),
                         attachments: vec![],
                     },
                     documents: vec![],
                 },
             ),
         };
+        if let Some(heading) = &self.bundle_heading {
+            loaded.bundle.heading = heading.clone();
+        }
         if let Some(old) = loaded.bundle.attachments.iter().find(|a| {
             a.envelope.operation_id == envelope.operation_id && a.envelope.kind == envelope.kind
         }) {
@@ -593,6 +604,54 @@ impl GrammersTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn video_heading_prefers_title_and_falls_back_to_filename() {
+        assert_eq!(
+            display_heading(Some("  抖音原视频标题  "), Some("download.mp4")).as_deref(),
+            Some("抖音原视频标题")
+        );
+        for title in [None, Some(""), Some(" \n\t")] {
+            assert_eq!(
+                display_heading(title, Some(" 原始文件.mov ")).as_deref(),
+                Some("原始文件.mov")
+            );
+        }
+        assert_eq!(display_heading(None, Some(" \t")), None);
+        let title = "中文🎬".repeat(150);
+        let heading = display_heading(Some(&title), Some("file.mp4")).unwrap();
+        assert_eq!(heading, title.chars().take(300).collect::<String>());
+    }
+
+    #[test]
+    fn video_title_is_plain_text_and_does_not_change_restore_evidence() {
+        for heading in ["抖音标题 🎬 <b>原文</b> & #标签", "原视频.mov", "映取备份"]
+        {
+            let mut f = fixture();
+            let envelopes = f
+                .bundle
+                .attachments
+                .iter()
+                .map(|a| a.envelope.caption().unwrap())
+                .collect::<Vec<_>>();
+            f.bundle.heading = display_heading(Some(heading), None).unwrap();
+            let rich = received(&f);
+            assert!(rich.blocks.iter().any(|block| matches!(block,
+            tl::enums::PageBlock::Paragraph(p) if matches!(&p.text, tl::enums::RichText::TextPlain(t) if t.text == heading)
+        )));
+            let loaded = load(manifest(&rich).unwrap().unwrap(), &rich, false).unwrap();
+            assert_eq!(loaded.bundle.heading, heading);
+            assert_eq!(
+                loaded
+                    .bundle
+                    .attachments
+                    .iter()
+                    .map(|a| a.envelope.caption().unwrap())
+                    .collect::<Vec<_>>(),
+                envelopes
+            );
+            assert_eq!(loaded.documents[0].id, f.documents[0].id);
+        }
+    }
     fn fixture() -> Loaded {
         let attachments = ["video", "cover", "transcript", "event"]
             .into_iter()

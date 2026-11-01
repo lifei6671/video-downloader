@@ -13,7 +13,7 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex},
     task::{Context as TaskContext, Poll},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -293,6 +293,7 @@ struct SourceReader<'a> {
     io: &'a Io,
     hash: Sha256,
     bytes: u64,
+    progress: Option<&'a AtomicU64>,
 }
 impl AsyncRead for SourceReader<'_> {
     fn poll_read(
@@ -309,6 +310,7 @@ impl AsyncRead for SourceReader<'_> {
             let bytes = &buffer.filled()[before..];
             self.bytes += bytes.len() as u64;
             self.hash.update(bytes);
+            if let Some(progress) = self.progress { progress.store(self.bytes, Ordering::Relaxed); }
             self.io.touch();
         }
         result
@@ -374,7 +376,7 @@ async fn source_unchanged(source: &MediaSource, io: &Io) -> Result<()> {
     result
 }
 
-/// Recognize front-loaded MP4 metadata without rewriting or decoding the original file.
+/// Recognize front-loaded ISO BMFF (MP4/MOV) metadata without rewriting or decoding the original file.
 async fn mp4_has_front_metadata(path: &Path, io: &Io) -> Result<bool> {
     let mut file = tokio::fs::File::open(path).await.context("IO_ERROR")?;
     let total = file.metadata().await.context("IO_ERROR")?.len();
@@ -401,6 +403,39 @@ async fn mp4_has_front_metadata(path: &Path, io: &Io) -> Result<bool> {
         offset += length;
     }
     Ok(false)
+}
+pub(super) async fn prepare_video(
+    core: &crate::desktop_core::Core,
+    source: &mut MediaSource,
+    io: &Io,
+) -> Result<()> {
+    if source.kind != "video" || source.video.is_some() {
+        return Ok(());
+    }
+    io.check()?;
+    if super::telegram_transfer_journal::CoreJournal(core)
+        .get(&source.operation_id, &source.kind)?
+        .is_some_and(|entry| entry.state != SendState::Prepared)
+    {
+        return Ok(());
+    }
+    let result = core
+        .probe_video_metadata(&source.path, &source.operation_id, async {
+            loop {
+                if io.check().is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+    io.check()?;
+    source.video = Some(
+        super::provider::VideoAttributes::from_metadata(&result?)
+            .context("VIDEO_METADATA_UNAVAILABLE")?,
+    );
+    io.touch();
+    Ok(())
 }
 pub(super) async fn upload(
     transport: &impl Transport,
@@ -452,9 +487,12 @@ pub(super) async fn upload(
                 bail!("TELEGRAM_FILE_TOO_LARGE");
             }
             source_unchanged(&source, io).await?;
-            let mut video = source.video.clone().filter(|_| source.kind == "video" && source.container == "mp4");
+            let mut video = if source.kind == "video" {
+                Some(source.video.clone().context("VIDEO_METADATA_UNAVAILABLE")?)
+            } else { None };
             if let Some(video) = &mut video {
-                video.supports_streaming = io.run(mp4_has_front_metadata(&source.path, io)).await?;
+                video.supports_streaming = matches!(source.container.as_str(), "mp4" | "mov" | "m4v" | "3gp" | "3g2" | "mj2")
+                    && io.run(mp4_has_front_metadata(&source.path, io)).await?;
             }
             let file = tokio::fs::File::open(&source.path)
                 .await
@@ -464,6 +502,7 @@ pub(super) async fn upload(
                 io,
                 hash: Sha256::new(),
                 bytes: 0,
+                progress: source.control.as_ref().map(|control| control.progress.as_ref()),
             };
             let uploaded = io
                 .run(transport.upload(

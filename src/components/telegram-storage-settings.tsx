@@ -164,8 +164,7 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
     setPassword(''); setLoginOpen(false);
     if (id && (busy || phase === 'qr' || phase === 'connecting' || phase === 'password')) void cancel();
   }
-  return <section className="max-w-xl space-y-4" aria-label={accountOnly ? "Telegram 账号" : "Telegram 存储账号"} aria-busy={!!busy}>
-    {accountOnly && network && networkSaved && <TelegramNetworkSettings profile={network} saved={networkSaved} disabled={!!busy || ['connecting', 'qr', 'password'].includes(status?.phase ?? '')} />}
+  const contents = <>
     {!status && !error && <p role="status" className="flex items-center gap-2 text-sm"><Spinner />正在读取账号…</p>}
     {status && !status.configured && <p role="status" className="text-sm text-muted-foreground">此构建尚未配置 Telegram 应用身份。</p>}
     {(status?.configured || space) && <>
@@ -214,5 +213,10 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
     </>}
     {!loginOpen && (error || status?.last_error) && <p role="alert" className="text-sm text-destructive">{error || errorText(status?.last_error)}</p>}
     {notice && <p role="status" className="text-xs text-muted-foreground">{notice}</p>}
+  </>;
+  return <section className={accountOnly ? "space-y-4" : "max-w-xl space-y-4"} aria-label={accountOnly ? "Telegram 账号" : "Telegram 存储账号"} aria-busy={!!busy}>
+    {accountOnly && network && networkSaved
+      ? <TelegramNetworkSettings profile={network} saved={networkSaved} disabled={!!busy || ['connecting', 'qr', 'password'].includes(status?.phase ?? '')}>{contents}</TelegramNetworkSettings>
+      : contents}
   </section>;
 }

@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.14.0";
+pub const ENGINE_VERSION: &str = "0.14.1";
 pub const YTDLP_VERSION: &str = "2026.08.19";
 
 async fn cancellation() -> Result<()> {
@@ -139,6 +139,8 @@ fn error_code(value: &Value) -> &'static str {
         Some("INVALID_MEDIA_CONTENT") => "INVALID_MEDIA_CONTENT",
         Some("FORMAT_UNAVAILABLE") => "FORMAT_UNAVAILABLE",
         Some("FFMPEG_UNAVAILABLE") => "FFMPEG_UNAVAILABLE",
+        Some("FFPROBE_UNAVAILABLE") => "FFPROBE_UNAVAILABLE",
+        Some("VIDEO_METADATA_UNAVAILABLE") => "VIDEO_METADATA_UNAVAILABLE",
         Some("JS_RUNTIME_UNAVAILABLE") => "JS_RUNTIME_UNAVAILABLE",
         Some("BROWSER_COOKIES_UNAVAILABLE") => "BROWSER_COOKIES_UNAVAILABLE",
         Some("MEDIA_MERGE_FAILED") => "MEDIA_MERGE_FAILED",
@@ -383,6 +385,7 @@ impl PythonBridge {
                         "resolve_video" => "resolved",
                         "check_dependencies" | "install_dependency" => "dependencies",
                         "extract_cover" => "cover_extracted",
+                        "probe_video" => "video_metadata",
                         "transcribe_video" => "transcribed",
                         _ => "download_finished",
                     }
@@ -453,7 +456,7 @@ impl PythonBridge {
         let result = tokio::select! {
             result = async {
                 if !matches!(method, "download_video" | "transcribe_video") {
-                    let limit = match method { "install_dependency" if params["tool"] == "fun-asr-nano" => 2700, "install_dependency" => 600, "extract_cover" => 20, _ => 80 };
+                    let limit = match method { "install_dependency" if params["tool"] == "fun-asr-nano" => 2700, "install_dependency" => 600, "extract_cover" => 20, "probe_video" => 30, _ => 80 };
                     timeout(Duration::from_secs(limit), bridge.execute(id, method, params, progress))
                         .await.context("TIMEOUT")?
                 } else {

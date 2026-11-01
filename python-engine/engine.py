@@ -32,7 +32,7 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.14.0'
+ENGINE_VERSION = '0.14.1'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.08.19'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -354,6 +354,13 @@ def operate(method, params, emit):
         runtime_dependencies.configure(params.get('runtime_directory'))
         if method == 'transcribe_video':
             emit('transcribed', **transcription.transcribe(params, emit))
+            return
+        if method == 'probe_video':
+            import local_media
+            try:
+                emit('video_metadata', **local_media.probe(params))
+            except local_media.MediaInfoError as error:
+                raise EngineError(str(error), 'media_metadata') from None
             return
         if method == 'extract_cover':
             emit('cover_extracted', **local_cover.extract(params))

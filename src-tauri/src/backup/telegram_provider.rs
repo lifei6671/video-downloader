@@ -8,6 +8,7 @@ use super::{
 };
 use crate::desktop_core::Core;
 use anyhow::{bail, Context, Result};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -24,6 +25,45 @@ pub struct TelegramProvider {
     core: Weak<Core>,
     target: Target,
     capabilities: ProviderCapabilities,
+}
+/// Resolve the remote identity within its space before reading local presentation metadata.
+fn asset_presentation(
+    db: &rusqlite::Connection,
+    space: &str,
+    remote: &str,
+) -> Result<Option<(serde_json::Value, String)>> {
+    let row: Option<(String, String)> = db
+        .query_row(
+            "SELECT a.metadata_json,a.original_filename FROM backup_space_assets b \
+         JOIN media_assets a ON a.asset_id=b.local_asset_id \
+         WHERE b.space_id=?1 AND b.remote_asset_id=?2",
+            rusqlite::params![space, remote],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    row.map(|(metadata, filename)| Ok((serde_json::from_str(&metadata)?, filename)))
+        .transpose()
+}
+
+pub(super) fn for_upload(
+    core: &Core,
+    transport: &GrammersTransport,
+    target: &Target,
+    source: &MediaSource,
+) -> Result<GrammersTransport> {
+    if source.kind != "video" {
+        return Ok(transport.clone());
+    }
+    let presentation =
+        core.backup_db(|db| asset_presentation(db, &target.scope.space_id, &source.asset_id))?;
+    let title = presentation
+        .as_ref()
+        .and_then(|(metadata, _)| metadata["title"].as_str());
+    let filename = presentation
+        .as_ref()
+        .map(|(_, filename)| filename.as_str())
+        .or_else(|| source.path.file_name().and_then(|name| name.to_str()));
+    Ok(transport.with_heading(title, filename))
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -359,7 +399,10 @@ impl BackupProvider for TelegramProvider {
                             projected.assets.get(&change.asset_id),
                             projected.last_deletions.get(&change.asset_id).copied(),
                         )?;
-                        super::sync_engine::merge(&change, projected.assets.get(&change.asset_id))?;
+                        let merged = super::sync_engine::merge(&change, projected.assets.get(&change.asset_id))?;
+                        let mut fields = projected.assets.get(&change.asset_id)
+                            .map(|asset| asset.fields.clone()).unwrap_or_default();
+                        fields.extend(merged.fields);
                         for reference in change
                             .media
                             .iter()
@@ -385,7 +428,10 @@ impl BackupProvider for TelegramProvider {
                             }
                         }
                         let destination=if change.delete {None} else {change.media.as_ref().or_else(||projected.assets.get(&change.asset_id).filter(|s|!s.deleted).and_then(|s|s.media.as_ref())).map(|r|target.message_id(r)).transpose()?};
-                        let destination=transport.for_message(destination);
+                        let destination=transport.for_message(destination).with_heading(
+                            fields.get("title").and_then(serde_json::Value::as_str),
+                            fields.get("original_filename").and_then(serde_json::Value::as_str),
+                        );
                         Self::send_index(
                             core,
                             &destination,
@@ -456,7 +502,8 @@ impl BackupProvider for TelegramProvider {
                     };
                     source.recreate_revision = generation;
                     let destination=if source.kind=="video" {None} else {projected.assets.get(&source.asset_id).filter(|s|!s.deleted).and_then(|s|s.media.as_ref()).map(|r|target.message_id(r)).transpose()?};
-                    let destination=transport.for_message(destination);
+                    let destination=for_upload(core, &transport.for_message(destination), &target, &source)?;
+                    telegram_transfer::prepare_video(core, &mut source, io).await?;
                     telegram_transfer::upload(&destination, &CoreJournal(core), &target, source, io)
                         .await
                 })
@@ -659,5 +706,37 @@ impl AsyncRead for StreamReader {
             }
             other => other,
         }
+    }
+}
+
+#[cfg(test)]
+mod caption_tests {
+    use super::*;
+
+    #[test]
+    fn video_presentation_uses_the_assets_own_space_binding() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(r#"CREATE TABLE media_assets(asset_id TEXT,metadata_json TEXT,original_filename TEXT);
+            CREATE TABLE backup_space_assets(space_id TEXT,remote_asset_id TEXT,local_asset_id TEXT);
+            INSERT INTO media_assets VALUES('local-a','{"title":"抖音原始标题"}','原视频.mp4');
+            INSERT INTO media_assets VALUES('local-b','{"title":"另一个空间"}','另一个视频.mov');
+            INSERT INTO backup_space_assets VALUES('space-a','remote','local-a');
+            INSERT INTO backup_space_assets VALUES('space-b','remote','local-b');"#).unwrap();
+        let (metadata, filename) = asset_presentation(&db, "space-a", "remote")
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata["title"], "抖音原始标题");
+        assert_eq!(filename, "原视频.mp4");
+        let (metadata, filename) = asset_presentation(&db, "space-b", "remote")
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata["title"], "另一个空间");
+        assert_eq!(filename, "另一个视频.mov");
+        assert!(asset_presentation(&db, "unknown-space", "remote")
+            .unwrap()
+            .is_none());
+        assert!(asset_presentation(&db, "space-a", "missing")
+            .unwrap()
+            .is_none());
     }
 }

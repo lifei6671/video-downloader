@@ -104,7 +104,7 @@ async page => {
         const remoteEntries=await menuSnapshot(remote,true);
         check(remoteEntries.some(e=>e.label==='取消下载'&&!e.disabled)&&remoteEntries.some(e=>e.label==='从远端下载'&&e.disabled),'pending restore missing cancel or allows duplicate restore');
         if(view==='list')signatures.set('remote',remoteEntries);else check(JSON.stringify(signatures.get('remote'))===JSON.stringify(remoteEntries),'remote menus differ');
-        for(const [name,hint] of [['播放视频','在应用内播放'],['查看文案','查看文案']]){
+        for(const [name,hint] of view==='list' ? [['播放视频','在应用内播放'],['查看文案','查看文案']] : [['播放视频','在应用内播放']]){
           await p.mouse.move(0,0);await remote.getByRole('button',{name,exact:true}).hover();await p.getByRole('tooltip',{name:hint,exact:true}).waitFor();await p.keyboard.press('Escape');
         }
         const quality=row('completed').getByLabel('清晰度：1080P',{exact:true});await quality.scrollIntoViewIfNeeded();await p.mouse.move(0,0);await quality.focus();await p.getByRole('tooltip',{name:'清晰度：1920 × 1080',exact:true}).waitFor();await p.keyboard.press('Escape');

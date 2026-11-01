@@ -13,7 +13,7 @@ async page => {
         const purpose=args.purpose??'backup',other=purpose==='download'?'backup':'download';
         window.calls.push({command,purpose,otherAccount:args.otherAccount});
         const view=()=>structuredClone(window.pending[purpose]??window.auth[purpose]);
-        if(command==='get_settings')return {download_directory:'C:/fixture',filename_template:'{title}',max_downloads:2,profiles:[]};
+        if(command==='get_settings')return {download_directory:'C:/fixture',filename_template:'{title}',max_downloads:2,profiles:[{platform:'telegram',user_agent:'fixture',proxy:null,cookie_configured:false}]};
         if(command==='get_backup_settings')return null;
         if(command==='get_backup_sync_enabled')return false;
         if(['list_tasks','list_video_transcripts','list_backup_spaces','list_backup_assets','list_backup_operations'].includes(command))return [];
@@ -53,6 +53,12 @@ async page => {
       if(purpose==='download'){await button('平台账号').click();await p.getByRole('tab',{name:'Telegram',exact:true}).click();}
       else {await button('远端备份').click();await p.getByRole('combobox',{name:'备份提供商'}).click();await p.getByRole('option',{name:'Telegram',exact:true}).click();}
       await text(account).waitFor();await idle();
+      const accountCard=p.locator('section[aria-label="Telegram 账号"] [data-slot="card"]');
+      if(purpose==='download') {
+        assert(await accountCard.count()===1,'Telegram account should have one settings card');
+        assert(await accountCard.getByText(account,{exact:true}).isVisible(),'Logged-in account is outside the settings card');
+        assert(await accountCard.getByRole('button',{name:logout,exact:true}).isVisible(),'Logout is outside the settings card');
+      }
       const reads=await p.evaluate(()=>window.channelReads);
       await button('切换其他账号').click();await p.getByRole('img',{name:'Telegram 登录二维码'}).waitFor();
       await p.evaluate(()=>window.failQr(false));await text(account).waitFor();
@@ -85,6 +91,11 @@ async page => {
       assert(await button(logout).isEnabled(),'Failed logout incorrectly removed the active account');
       await p.evaluate(()=>{window.failLogout=false;});await button(logout).click();await button('扫码登录').waitFor();
       assert(await button(logout).count()===0,'Signed-out account exposes logout');
+      if(purpose==='download') {
+        assert(await accountCard.getByRole('button',{name:'扫码登录',exact:true}).isVisible(),'Signed-out controls are outside the settings card');
+        assert(await accountCard.getByRole('button',{name:'恢复登录',exact:true}).isVisible(),'Restore login is outside the settings card');
+      }
+      assert(await p.locator('form form').count()===0,'Nested account/proxy forms');
       assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Horizontal overflow');
       assert(errors.length===0,errors.join('\n'));
       results.push({purpose,width,height,passed:true,flows:['failed-switch-feedback','retry-other-account','background-expiry','background-restore','cancel-after-commit','logout-retry']});

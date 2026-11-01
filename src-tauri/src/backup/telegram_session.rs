@@ -694,9 +694,11 @@ impl TelegramSession {
                 Box::pin(async move {
                     let journal = CoreJournal(core);
                     match job {
-                        Job::Upload(source) => Ok(Output::Uploaded(
-                            transfer::upload(transport, &journal, &bound, source, io).await?,
-                        )),
+                        Job::Upload(mut source) => {
+                            let transport = super::telegram_provider::for_upload(core, transport, &bound, &source)?;
+                            transfer::prepare_video(core, &mut source, io).await?;
+                            Ok(Output::Uploaded(transfer::upload(&transport, &journal, &bound, source, io).await?))
+                        },
                         Job::Restore {
                             reference,
                             destination,

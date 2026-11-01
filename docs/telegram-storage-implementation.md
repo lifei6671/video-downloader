@@ -122,7 +122,7 @@ R2/S3 同样仅保留当前 WireRecord、浅层媒体键及统一 SyncEngine。S
 }
 ```
 
-仅 debug 构建读取该本机文件。正式构建必须由受保护构建配置提供 `YINGQU_TELEGRAM_API_ID` 和 `YINGQU_TELEGRAM_API_HASH`；环境配置优先，不混合两个来源。修改后需要重新编译 Rust。缺失、非正整数 ID 或非 32 位十六进制 hash 会使账号界面显示应用身份未配置，不回退到公共身份。此文件仅放应用身份，不放手机号、验证码、2FA 或用户会话。
+仅 debug 构建读取该本机文件。正式构建必须由受保护构建配置提供 `YINGQU_TELEGRAM_API_ID` 和 `YINGQU_TELEGRAM_API_HASH`；环境配置优先，不混合两个来源。修改后需要重新编译 Rust。桌面 release 构建在 Rust 构建入口强制校验：缺失、非正 `i32` 整数 ID 或非 32 位 ASCII 十六进制 hash 均直接终止编译，错误只列环境变量名和格式要求，不输出身份值；npm、Tauri CLI 与直接 Cargo 编译均受此检查约束。debug 构建仍可不配置身份，此时账号界面显示应用身份未配置；不回退到公共身份。此文件仅放应用身份，不放手机号、验证码、2FA 或用户会话。
 
 `build.rs` 把私有常量写入忽略的 `OUT_DIR/telegram_app.rs` 后编入二进制，不把密钥值作为 `cargo:rustc-env` 输出或前端变量。构建目录和二进制依然可能包含应用身份，不应上传开发构建目录；应用身份不是用户数据访问控制。许可清单通过 release resources 随包分发。
 
