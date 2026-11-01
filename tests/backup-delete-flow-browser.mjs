@@ -52,8 +52,20 @@ async page => {
           check(await p.locator('.task-list > [role=listitem]').count()===1,'deletion creates a second task/asset row');
           if(taskBacked)check(await p.locator('[data-asset-id="asset"]').count()===0,'task is duplicated as a remote asset');
         };
+        const headingIcon=row.locator('.task-title-backup .backup-sync-tooltip');
+        const listLayout=()=>row.evaluate(node=>[node,node.querySelector('.task-row-heading'),node.querySelector('.task-row-byline')].map(el=>{
+          const {x,y,width,height}=el.getBoundingClientRect();return [x,y,width,height];
+        }));
+        const layoutBefore=view==='list'?JSON.stringify(await listLayout()):null;
         const assertStage=async label=>{
-          if(view==='list')await row.getByText(label,{exact:true}).waitFor();
+          if(view==='list') {
+            if(label.includes('失败'))await row.getByText(label,{exact:true}).waitFor();
+            else {
+              await headingIcon.getByRole('button',{name:label,exact:true}).waitFor();
+              check(await row.locator('.task-row-information > [role=status]').count()===0,'list displays duplicate deletion status');
+              check(JSON.stringify(await listLayout())===layoutBefore,'list layout shifted during '+label);
+            }
+          }
           else {
             const progress=row.locator('.task-row-cover').getByRole('progressbar',{name:'删除进度',exact:true});
             await progress.waitFor();await p.waitForFunction(({label,taskBacked})=>document.querySelector((taskBacked?'[data-task-id="task"]':'[data-asset-id="asset"]')+' .task-row-cover [role=progressbar]')?.getAttribute('aria-valuetext')===label,{label,taskBacked});
@@ -82,8 +94,8 @@ async page => {
         };
         await stage('objects');await assertStage('正在删除远端备份');await sameRow();
         await p.evaluate(()=>window.emitActivity({operation_id:'delete-operation',companion:null,step:'archive_identity_check'}));
-        const icon=view==='feed'?row.locator('.backup-delete-progress'):row.getByRole('img',{name:'正在删除远端备份',exact:true});
-        if(view==='feed')await icon.hover();else await icon.focus();
+        const icon=view==='feed'?row.locator('.backup-delete-progress'):headingIcon;
+        if(taskBacked)await icon.hover();else await icon.focus();
         const tip=p.getByRole('tooltip');
         await tip.filter({hasText:'正在按 ID 核对归档附件'}).waitFor();
         await p.evaluate(()=>window.emitActivity({operation_id:'peer',companion:'delete-operation',step:'confirm_message_gone'}));

@@ -114,10 +114,11 @@ export function BackupDeleteProgress({backup, assetId, cover = false}: {backup: 
   const deletion = backupDeletion(backup, assetId);
   if (!deletion) return null;
   if (cover) return <div className="task-feed-progress"><DeleteProgressTooltip deletion={deletion}><div role="status" aria-live="polite" aria-label={deletion.label} tabIndex={0} className="backup-delete-progress"><Progress variant="circular" value={null} aria-label="删除进度" aria-valuetext={deletion.label}>{deletion.failed ? <AlertCircle aria-hidden="true" /> : deletion.phase === 'complete' ? <CircleCheck aria-hidden="true" /> : <Spinner aria-hidden="true" />}</Progress></div></DeleteProgressTooltip></div>;
-  return <div role="status" aria-live="polite" className={`flex flex-wrap items-center gap-2 text-xs ${deletion.failed ? 'text-destructive' : 'text-muted-foreground'}`}>
-    <DeleteProgressTooltip deletion={deletion}><span role="img" aria-label={deletion.label} tabIndex={0} className="inline-flex rounded-sm focus-visible:outline-ring">{deletion.failed ? <AlertCircle aria-hidden="true" className="size-3.5" /> : deletion.phase === 'complete' ? <CircleCheck aria-hidden="true" className="size-3.5 text-success" /> : <Spinner aria-hidden="true" className="size-3.5" />}</span></DeleteProgressTooltip><span>{deletion.label}</span>
+  if (!deletion.failed) return null;
+  return <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
+    <AlertCircle aria-hidden="true" className="size-3.5" /><span>{deletion.label}</span>
     {deletion.error && <span>{deletion.error}</span>}
-    {deletion.failed && <Button size="sm" variant="ghost" className="h-6 px-1 text-xs" disabled={!backup.settings?.enabled || backup.submittingDeletes.has(assetId)} onClick={() => void backup.deleteAsset(assetId)}>重试删除</Button>}
+    <Button size="sm" variant="ghost" className="h-6 px-1 text-xs" disabled={!backup.settings?.enabled || backup.submittingDeletes.has(assetId)} onClick={() => void backup.deleteAsset(assetId)}>重试删除</Button>
   </div>;
 }
 
@@ -297,7 +298,7 @@ export function BackupAssetRow({ asset, backup, dialogs, feed = false }: { asset
     <div className="task-row-information"><CardTitle className="task-row-heading"><span className="task-title-backup"><BackupTaskStatus backup={backup} assetId={asset.asset_id} /></span><Tooltip><TooltipTrigger asChild><span className="task-row-title" tabIndex={0}>{title}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{title}</TooltipContent></Tooltip></CardTitle>
       <div className="task-row-byline">{author && <Tooltip><TooltipTrigger asChild><span className="task-row-author" tabIndex={0}>{author}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{author}</TooltipContent></Tooltip>}<span>{location}</span></div>
       <BackupTaskError backup={backup} assetId={asset.asset_id} />
-      {(!feed || deletion?.failed) && <BackupDeleteProgress backup={backup} assetId={asset.asset_id} />}
+      <BackupDeleteProgress backup={backup} assetId={asset.asset_id} />
     </div>
     {!feed && <div className="task-row-footer"><div className="task-row-controls">
       {playAction}

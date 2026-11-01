@@ -52,7 +52,8 @@ async page => {
         await p.evaluate(()=>{window.asset.remote_deleted=false;window.asset.remote_state='backed_up';});
         await row.getByRole('img',{name:'已备份',exact:true}).waitFor();
         await row.click({ button: 'right' }); await item('从当前同步库删除').click();
-        await row.getByText('等待删除远端备份', { exact: true }).waitFor();
+        await row.locator('.task-title-backup .backup-sync-tooltip').hover();
+        await p.getByRole('tooltip').filter({hasText:'等待删除远端备份'}).waitFor();
         if (!await p.evaluate(() => window.asset.path)) throw new Error('intent prematurely removed local file');
       }
       if (errors.length) throw new Error(errors.join('\n'));

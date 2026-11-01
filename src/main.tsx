@@ -636,7 +636,7 @@ function App() {
       coverBadge={task.asset_id && (backup.assets.some(asset => asset.asset_id === task.asset_id) || backupDeletion(backup, task.asset_id)) ? <BackupAssetCoverBadge backup={backup} assetId={task.asset_id} /> : undefined}
       coverActions={taskView === 'feed' ? canPlayTask(task) ? playAction(task, true) : task.status === 'completed' && task.video?.kind === 'image_album' && !task.file_missing ? albumAction(task, true) : null : null}
       coverProgress={taskView === 'feed' && task.asset_id && backupDeletion(backup, task.asset_id) ? <BackupDeleteProgress backup={backup} assetId={task.asset_id} cover /> : taskView === 'feed' && (task.status === 'queued' || task.status === 'downloading') ? cancelProgress(task) : null}
-      progress={<>{task.status === 'downloading' && <DownloadProgress task={task} hideIndicator={taskView === 'feed'} />}{task.asset_id && <>{(taskView !== 'feed' || backupDeletion(backup, task.asset_id)?.failed) && <BackupDeleteProgress backup={backup} assetId={task.asset_id} />}<BackupTaskError backup={backup} assetId={task.asset_id} /></>}</>}
+      progress={<>{task.status === 'downloading' && <DownloadProgress task={task} hideIndicator={taskView === 'feed'} />}{task.asset_id && <><BackupDeleteProgress backup={backup} assetId={task.asset_id} /><BackupTaskError backup={backup} assetId={task.asset_id} /></>}</>}
       queuePosition={queued.findIndex(t => t.id === task.id) + 1} actions={taskActions(task, taskView !== 'feed')}
     />, coverActions)} />} />}
     <BackupDialogs dialogs={backupDialogs} backup={backup} tasks={tasks} runtime={runtimeDependencies} />
