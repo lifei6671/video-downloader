@@ -28,7 +28,8 @@ async (page) => {
       for (let n = 0; n < 3; n++) {
         await target.locator('#backup-key:not(:disabled)').waitFor();
         if (await target.locator('#backup-key').inputValue() !== 'fixture-key') throw new Error('Credentials lost on mount');
-        if (await target.getByRole('combobox', { name: '备份提供商' }).textContent() !== '通用 S3') throw new Error('Provider cleared by form event');
+        if (await target.getByRole('combobox', { name: '备份提供商' }).count()) throw new Error('Saved provider remains editable');
+        await target.getByText('通用 S3', { exact: true }).waitFor();
         if (await target.locator('[data-sonner-toast]').count()) throw new Error('Unexpected toast while opening saved space');
         await target.getByRole('button', { name: '切换备份表单' }).click();
         await target.getByRole('button', { name: '切换备份表单' }).click();
@@ -40,11 +41,13 @@ async (page) => {
       const inlineStyle = await nameEditor.evaluate(e => ({ position: getComputedStyle(e).position, font: getComputedStyle(e).fontSize, height: e.getBoundingClientRect().height }));
       if (inlineStyle.position !== 'absolute' || inlineStyle.font !== '12px' || inlineStyle.height < 12 || inlineStyle.height > 32) throw new Error('Inline editor CSP styles missing');
       await target.keyboard.press('Escape');
+      await target.getByRole('tab', { name: '新建空间', exact: true }).click();
       await target.getByRole('combobox', { name: '备份提供商', exact: true }).click();
       await target.getByRole('option', { name: '通用 S3', exact: true }).waitFor();
       const select = await target.evaluate(() => ({ scrollbars: getComputedStyle(document.querySelector('[data-radix-select-viewport]')).scrollbarWidth, lock: getComputedStyle(document.body).overflow }));
       if (select.scrollbars !== 'none' || select.lock !== 'hidden') throw new Error(`Select CSP styles missing: ${JSON.stringify(select)}`);
       await target.keyboard.press('Escape');
+      await target.getByRole('tab', { name: 'S3 / space-one', exact: true }).click();
       for (const name of ['Dialog', 'AlertDialog', 'Sheet', 'DropdownMenu', 'ContextMenu']) {
         await target.getByRole('button', { name: `打开 ${name}`, exact: true }).click({ button: name === 'ContextMenu' ? 'right' : 'left' });
         await target.waitForFunction(() => !!document.body.getAttribute('data-scroll-locked'));

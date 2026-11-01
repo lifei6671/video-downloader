@@ -17,5 +17,17 @@ pub mod spaces;
 pub mod sync_read;
 pub mod sync_delete;
 pub mod conflicts;
+pub mod telegram_session;
+mod telegram_vault;
+mod telegram_qr;
+pub mod telegram_transfer;
+mod telegram_transfer_journal;
+mod telegram_transport;
+mod telegram_replay;
+pub mod telegram_provider;
+mod telegram_spaces;
+mod telegram_lifecycle;
+#[cfg(test)]
+mod telegram_online_tests;
 #[cfg(test)]
 mod tests;

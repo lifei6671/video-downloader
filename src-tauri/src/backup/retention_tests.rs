@@ -95,44 +95,26 @@ async fn retention_age_boundary_compacts_only_deleted_records_and_restarts_as_in
 }
 
 #[tokio::test]
-async fn retention_historical_timestamp_is_initialized_once_without_immediate_deletion() {
+async fn retention_rejects_missing_deletion_timestamp_without_rewriting_record() {
     let (f, provider, _, _, remote) = deleted_fixture().await;
     let key = format!("test/records/{}.json", f.id);
     let object = f.store.get(&key).await.unwrap().unwrap();
     let mut wire: Value = serde_json::from_slice(&object.body).unwrap();
     wire.as_object_mut().unwrap().remove("deleted_at");
+    let body = serde_json::to_vec(&wire).unwrap();
     f.store
         .write(Write::Put {
             key: key.clone(),
-            body: serde_json::to_vec(&wire).unwrap(),
+            body: body.clone(),
             condition: Condition::Match(object.etag),
         })
         .await
         .unwrap();
     assert!(provider
-        .compact_deleted_records(vec![remote.clone()], 1, DELETED_AT)
+        .compact_deleted_records(vec![remote], 1, DELETED_AT)
         .await
-        .unwrap()
-        .is_empty());
-    let body = f.store.get(&key).await.unwrap().unwrap().body;
-    assert_eq!(
-        serde_json::from_slice::<Value>(&body).unwrap()["deleted_at"],
-        DELETED_AT
-    );
-    assert!(provider
-        .compact_deleted_records(vec![remote.clone()], 1, DELETED_AT + 600)
-        .await
-        .unwrap()
-        .is_empty());
-    assert_eq!(body, f.store.get(&key).await.unwrap().unwrap().body);
-    assert_eq!(
-        provider
-            .compact_deleted_records(vec![remote], 1, DELETED_AT + 86400)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+        .is_err());
+    assert_eq!(f.store.get(&key).await.unwrap().unwrap().body, body);
 }
 
 #[derive(Clone)]
@@ -856,7 +838,11 @@ async fn retention_old_delete_interleaved_with_reupload_cannot_republish_or_remo
         let MediaLocation::S3Object { locator } = media.location else {
             panic!("expected S3 media");
         };
-        assert!(locator.rsplit('/').next().unwrap().contains(&format!("-r{deleted_revision}-")));
+        assert!(locator
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .contains(&format!("-r{deleted_revision}-")));
         assert!(
             f.store.head(&locator).await.unwrap().is_some(),
             "old cleanup removed reuploaded media at gate {gate_sessions}"
@@ -868,7 +854,11 @@ async fn retention_old_delete_interleaved_with_reupload_cannot_republish_or_remo
             let MediaLocation::S3Object { locator } = &reference.unwrap().location else {
                 panic!("S3 reference expected");
             };
-            assert!(locator.rsplit('/').next().unwrap().contains(&format!("-r{deleted_revision}-")));
+            assert!(locator
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .contains(&format!("-r{deleted_revision}-")));
             assert!(
                 f.store.head(locator).await.unwrap().is_some(),
                 "old cleanup removed subsequent metadata at gate {gate_sessions}"
@@ -879,11 +869,9 @@ async fn retention_old_delete_interleaved_with_reupload_cannot_republish_or_remo
         assert!(f.store.head(&locator).await.unwrap().is_some());
         // An unfinished new upload is protected too. A later explicit deletion still cleans it.
         let protected = format!(
-            "test/media/{}/reuploads/{deleted_revision}/{}/{}/{}/video.mp4",
+            "test/media/{}/video-r{deleted_revision}-{}.mp4",
             f.id,
-            "a".repeat(64),
-            bcore.backup_db(repository::device_id).unwrap(),
-            uuid::Uuid::new_v4()
+            "a".repeat(64)
         );
         let upload_id = f
             .store
@@ -902,6 +890,7 @@ async fn retention_old_delete_interleaved_with_reupload_cannot_republish_or_remo
             .unwrap();
         let mut old_wire: Value = serde_json::from_slice(&active.body).unwrap();
         old_wire["state"] = "deleted".into();
+        old_wire["deleted_at"] = DELETED_AT.into();
         old_wire["record_revision"] = deleted_revision.into();
         old_wire["fields"] = json!({});
         for field in ["media", "cover", "transcript"] {
@@ -979,14 +968,8 @@ async fn retention_reupload_preserves_unresolved_text_and_missing_reference_conf
     let key = format!("test/records/{}.json", f.id);
     let object = f.store.get(&key).await.unwrap().unwrap();
     let mut wire: Value = serde_json::from_slice(&object.body).unwrap();
-    let reference_key = format!(
-        "test/transcripts/{}/{}/{}/{}/transcript.json",
-        f.id,
-        "b".repeat(64),
-        f.core.backup_db(repository::device_id).unwrap(),
-        uuid::Uuid::new_v4()
-    );
     let body = b"{\"text\":\"reference conflict\"}".to_vec();
+    let reference_key = format!("test/media/{}/transcript-{}.json", f.id, tag(&body));
     f.store
         .write(Write::Put {
             key: reference_key.clone(),
@@ -1244,7 +1227,11 @@ async fn retention_reupload_after_a_newer_delete_retries_with_latest_revision() 
     let MediaLocation::S3Object { locator } = remote.snapshot.media.unwrap().location else {
         panic!("expected S3");
     };
-    assert!(locator.rsplit('/').next().unwrap().contains(&format!("-r{newer}-")));
+    assert!(locator
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .contains(&format!("-r{newer}-")));
     assert!(f.store.head(&locator).await.unwrap().is_some());
 }
 
@@ -1294,22 +1281,17 @@ async fn retention_adopting_old_reference_conflicts_uploads_into_current_incarna
     let key = format!("test/records/{}.json", f.id);
     let object = f.store.get(&key).await.unwrap().unwrap();
     let mut wire: Value = serde_json::from_slice(&object.body).unwrap();
-    for (field, folder, extension, body) in [
-        ("transcript", "transcripts", "json", transcript_body),
+    for (field, extension, body) in [
+        ("transcript", "json", transcript_body),
         (
             "cover",
-            "media",
             "png",
             b"\x89PNG\r\n\x1a\nhistorical cover".to_vec(),
         ),
     ] {
         let operation = uuid::Uuid::new_v4().to_string();
         let device = bcore.backup_db(repository::device_id).unwrap();
-        let old_key = format!(
-            "test/{folder}/{}/{}/{device}/{operation}/{field}.{extension}",
-            f.id,
-            tag(&body)
-        );
+        let old_key = format!("test/media/{}/{field}-{}.{}", f.id, tag(&body), extension);
         f.store
             .write(Write::Put {
                 key: old_key.clone(),
@@ -1350,7 +1332,11 @@ async fn retention_adopting_old_reference_conflicts_uploads_into_current_incarna
         let MediaLocation::S3Object { locator } = reference.location else {
             panic!("S3 reference expected");
         };
-        assert!(locator.rsplit('/').next().unwrap().contains(&format!("-r{revision}-")));
+        assert!(locator
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .contains(&format!("-r{revision}-")));
         assert!(f.store.head(&locator).await.unwrap().is_some());
     }
     assert!(conflicts::local_data(&bcore, &b.scope().space_id, &id)
@@ -1440,17 +1426,30 @@ async fn retention_metadata_restart_after_another_recreation_keeps_text() {
     engine.pull().await.unwrap();
     // Whole-transfer retry selects the current destination and discards the previous state.
     engine.execute_upload(&operation).await.unwrap();
-    let retried=scheduler::operations(&f.core).unwrap().into_iter().find(|op|op.operation_id==operation).unwrap();
-    assert_eq!(retried.state,"completed");
-    let previous:serde_json::Value=serde_json::from_str(owned["resume_transcript"]["value"].as_str().unwrap()).unwrap();
+    let retried = scheduler::operations(&f.core)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.operation_id == operation)
+        .unwrap();
+    assert_eq!(retried.state, "completed");
+    let previous: serde_json::Value =
+        serde_json::from_str(owned["resume_transcript"]["value"].as_str().unwrap()).unwrap();
     let current = a.read_asset(&f.id).await.unwrap().unwrap();
     let MediaLocation::S3Object { locator } =
         &current.snapshot.transcript.as_ref().unwrap().location
     else {
         panic!("S3 expected");
     };
-    assert!(locator.rsplit('/').next().unwrap().contains(&format!("-r{current_revision}-")));
-    assert_ne!(locator,previous["key"].as_str().unwrap(),"restarted transfer did not select the current destination");
+    assert!(locator
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .contains(&format!("-r{current_revision}-")));
+    assert_ne!(
+        locator,
+        previous["key"].as_str().unwrap(),
+        "restarted transfer did not select the current destination"
+    );
     assert_eq!(
         sync_read::transcript(&f.core, a.as_ref(), &f.id)
             .await

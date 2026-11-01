@@ -20,6 +20,37 @@ use yingqu_core::{
 };
 
 type AppCore = Arc<Core>;
+type TelegramStorageView = yingqu_core::backup::telegram_session::View;
+#[tauri::command]
+fn telegram_storage_status(core: State<AppCore>) -> TelegramStorageView {
+    core.telegram_storage.status()
+}
+#[tauri::command]
+async fn telegram_storage_resume(core: State<'_, AppCore>) -> Result<TelegramStorageView, String> {
+    let device = core.telegram_storage_device_id().map_err(error)?;
+    core.telegram_storage.resume(device).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn telegram_storage_login_qr(core: State<'_, AppCore>) -> Result<TelegramStorageView, String> {
+    let device = core.telegram_storage_device_id().map_err(error)?;
+    core.telegram_storage.login_qr(device).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn telegram_storage_password(core: State<'_, AppCore>, operation_id: String, password: String) -> Result<TelegramStorageView, String> {
+    core.telegram_storage.submit_password(&operation_id, password).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn telegram_storage_cancel(core: State<'_, AppCore>, operation_id: String) -> Result<TelegramStorageView, String> {
+    core.telegram_storage.cancel(&operation_id).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn telegram_storage_logout(core: State<'_, AppCore>, operation_id: String) -> Result<TelegramStorageView, String> {
+    core.telegram_storage.logout(&operation_id).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn telegram_storage_channels(core: State<'_, AppCore>, operation_id: String) -> Result<Vec<yingqu_core::backup::telegram_session::Channel>, String> {
+    core.telegram_storage.channels(&operation_id).await.map_err(|e| e.to_string())
+}
 fn error(error: anyhow::Error) -> String {
     error
         .to_string()
@@ -69,7 +100,7 @@ async fn export_asset_transcript(app:tauri::AppHandle,core:State<'_,AppCore>,ass
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 #[tauri::command]
-fn list_backup_assets(core:State<AppCore>,space_id:String)->Result<Vec<yingqu_core::backup::reconcile::Entry>,String>{yingqu_core::backup::reconcile::list(&core,&space_id).map_err(error)}
+fn list_backup_assets(core:State<AppCore>,space_id:String)->Result<Vec<yingqu_core::backup::reconcile::DisplayEntry>,String>{yingqu_core::backup::reconcile::list_for_display(&core,&space_id).map_err(error)}
 #[tauri::command]
 async fn refresh_backup_assets(core:State<'_,AppCore>,space_id:String)->Result<yingqu_core::backup::reconcile::Refresh,String>{
     let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;
@@ -770,6 +801,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            telegram_storage_status, telegram_storage_resume, telegram_storage_login_qr, telegram_storage_password, telegram_storage_cancel, telegram_storage_logout, telegram_storage_channels,
             ensure_local_video,cancel_asset_restore,prepare_asset_playback,play_asset,start_asset_transcription,copy_asset_transcript,
             hide_asset_history,release_local_video,delete_asset_and_backup,export_asset_transcript,list_backup_assets,refresh_backup_assets,get_asset_transcript,get_asset_cover,
             get_backup_settings,get_backup_credentials,save_backup_settings,test_backup_connection,list_backup_operations,start_asset_backup,retry_backup_operation,cancel_backup_operation,list_backup_spaces,get_backup_sync_enabled,set_backup_sync_enabled,get_backup_space_usage,delete_backup_space,rename_backup_space,select_backup_space,get_backup_local_data,get_backup_conflict,resolve_backup_conflict,export_backup_local_data,

@@ -189,6 +189,7 @@ struct Inner {
     tdl_login_control: Option<tdl_bridge::LoginControl>,
 }
 pub struct Core {
+    pub telegram_storage: crate::backup::telegram_session::TelegramSession,
     pub(crate) backup_wake: Arc<tokio::sync::Notify>,
     pub(crate) backup_foreground: std::sync::atomic::AtomicBool,
     pub(crate) backup_active_probes: Mutex<HashSet<String>>,
@@ -506,7 +507,10 @@ impl Core {
                     Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
                     Err(_) => bail!("DATABASE_ERROR"),
                 }
-                persist(&db, task)?;
+                let tx=db.transaction()?;
+                crate::backup::repository::associate(&tx,task)?;
+                persist(&tx,task)?;
+                tx.commit()?;
             }
             // Also restore the cache flag if a crash occurred between the video
             // file commit / cover cache write and publishing the completed task.
@@ -525,13 +529,6 @@ impl Core {
                 }
             }
         }
-        // Associate metadata only; the enabled backup worker hashes outside startup.
-        for task in &mut tasks {
-            let tx = db.transaction()?;
-            crate::backup::repository::associate(&tx, task)?;
-            persist(&tx, task)?;
-            tx.commit()?;
-        }
         // Clean only recorded task-owned directories; never sweep downloads.
         let staging = {
             let mut query = db.prepare("SELECT task_id,path FROM task_staging")?;
@@ -544,6 +541,7 @@ impl Core {
         }
         let backup_wake=Arc::new(tokio::sync::Notify::new());
         Ok(Arc::new(Self {
+            telegram_storage: crate::backup::telegram_session::TelegramSession::default(),
             backup_wake:backup_wake.clone(),
             backup_foreground:std::sync::atomic::AtomicBool::new(true),
             backup_active_probes:Mutex::new(HashSet::new()),
@@ -593,6 +591,9 @@ impl Core {
 
     pub fn backup_assets(&self) -> Result<Vec<crate::backup::model::Asset>> {
         crate::backup::repository::list_assets(&self.inner.lock().unwrap().db)
+    }
+    pub fn telegram_storage_device_id(&self) -> Result<String> {
+        self.backup_db(crate::backup::repository::device_id)
     }
 
     pub(crate) fn backup_db<T>(&self, action: impl FnOnce(&Connection)->Result<T>) -> Result<T> {
@@ -2102,6 +2103,7 @@ impl Core {
                 .collect::<Vec<_>>();
             (active, std::mem::take(&mut inner.workers))
         };
+        self.telegram_storage.shutdown().await;
         let cancellations = active
             .iter()
             .map(|(id, _)| {

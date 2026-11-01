@@ -48,7 +48,16 @@ pub async fn latest(
     })?;
     Ok(remote)
 }
-pub async fn small(
+pub async fn small(core:&Core,provider:&dyn BackupProvider,reference:&MediaRef)->Result<Vec<u8>> {
+    for attempt in 0..2 {
+        match small_once(core,provider,reference).await {
+            Err(error) if attempt==0 && provider.scope().provider_type==ProviderType::Telegram && error.to_string()=="TELEGRAM_FILE_REFERENCE_EXPIRED"=>continue,
+            result=>return result,
+        }
+    }
+    unreachable!("bounded small-object refresh always returns")
+}
+async fn small_once(
     core: &Core,
     provider: &dyn BackupProvider,
     reference: &MediaRef,
@@ -206,7 +215,7 @@ pub async fn ensure(
         .map(|o| (o.operation_id, o.payload))
         .unwrap_or_else(|| (uuid::Uuid::new_v4().to_string(), json!({"scope":scope})));
     let owned: Scope = serde_json::from_value(payload["scope"].clone())
-        .context("BACKUP_LEGACY_REVIEW_REQUIRED")?;
+        .context("BACKUP_INVALID_OPERATION")?;
     scope.check(&owned)?;
     core.backup_db(|db|{let tx=db.unchecked_transaction()?;tx.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'restore','running','preparing',?4) ON CONFLICT(operation_id) DO UPDATE SET state='running',last_error=NULL",params![operation,scope.space_id,local,payload.to_string()])?;tx.execute("UPDATE asset_local_files SET local_state='restoring' WHERE asset_id=?",[local])?;tx.commit()?;Ok(())})?;
     let (_stop, cancel) = tokio::sync::watch::channel(false);
@@ -231,7 +240,21 @@ pub async fn ensure(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn transfer(
+async fn transfer(core:&Arc<Core>,provider:&dyn BackupProvider,local:&str,record:&AssetSnapshot,reference:&MediaRef,operation:&str,payload:&mut Value,cancel:tokio::sync::watch::Receiver<bool>)->Result<PathBuf> {
+    for attempt in 0..2 {
+        match transfer_once(core,provider,local,record,reference,operation,payload,cancel.clone()).await {
+            Err(error) if attempt==0 && provider.scope().provider_type==ProviderType::Telegram && error.to_string()=="TELEGRAM_FILE_REFERENCE_EXPIRED"=>{
+                // A newly fetched source message supplies a new file reference. Restart the owned part at zero.
+                payload["reference"]=Value::Null;
+                checkpoint(core,provider.scope(),operation,"refreshing_reference",payload)?;
+            },
+            result=>return result,
+        }
+    }
+    unreachable!("bounded media reference refresh always returns")
+}
+#[allow(clippy::too_many_arguments)]
+async fn transfer_once(
     core: &Arc<Core>,
     provider: &dyn BackupProvider,
     local: &str,
@@ -303,6 +326,10 @@ async fn transfer(
             .await
             {
                 Ok(Ok(n)) => n,
+                Ok(Err(error)) if error.to_string()=="TELEGRAM_FILE_REFERENCE_EXPIRED"=>{
+                    file.flush().await?;file.sync_all().await?;
+                    bail!("TELEGRAM_FILE_REFERENCE_EXPIRED");
+                },
                 _ => {
                     file.flush().await?;
                     file.sync_all().await?;
@@ -459,7 +486,7 @@ pub fn cached_transcript(core: &Core, space: &str, local: &str) -> Result<Option
     let Some(mut value) = core.asset_transcript(local)? else {
         return Ok(None);
     };
-    let deleted:bool=core.backup_db(|db|Ok(db.query_row("SELECT remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![space,local],|r|r.get(0))?))?;
+    let deleted:bool=core.backup_db(|db|Ok(db.query_row("SELECT remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![space,local],|r|r.get(0)).optional()?.unwrap_or(true)))?;
     if deleted {
         return core.asset_transcript(local);
     }

@@ -21,14 +21,24 @@ export interface TdlStatus { path: string; version: string }
 export interface TdlLoginStatus { id: string; phase: 'starting' | 'qr' | 'password' | 'verifying'; qr: boolean[][] | null }
 export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[]; tdl: TdlSettings }
 export interface FilenamePreview { path: string; segments: { text: string; variable: string | null }[] }
-export interface BackupUpdate { cleanup_deleted_records?: boolean; deleted_record_retention_days?: number; display_name?: string; provider_type: 's3' | 'telegram'; profile: 'r2' | 's3' | 'telegram'; endpoint: string; bucket: string; prefix: string; region: string; path_style: boolean; enabled: boolean; credentials?: { access_key_id: string; secret_access_key: string } }
-export interface BackupSettings extends Omit<BackupUpdate, 'credentials'> { space_id: string; library_id: string; credentials_configured: boolean; connection_pending?: boolean; last_error: string | null }
+export interface BackupUpdate { telegram?: { account_id: string; channel_id: string } | null; create_library: boolean; cleanup_deleted_records: boolean; deleted_record_retention_days: number; display_name?: string; provider_type: 's3' | 'telegram'; profile: 'r2' | 's3' | 'telegram'; endpoint: string; bucket: string; prefix: string; region: string; path_style: boolean; enabled: boolean; credentials?: { access_key_id: string; secret_access_key: string } }
+export interface BackupSettings extends Omit<BackupUpdate, 'credentials' | 'create_library'> { telegram_channel_title?: string | null; can_delete_owned_media?: boolean; space_id: string; library_id: string; credentials_configured: boolean; connection_pending?: boolean; last_error: string | null }
 export interface BackupConflict { image: number[] | null; id: string; field: string; value: string; device_id: string; can_adopt: boolean }
 export interface BackupLocalData { title: string; transcript: string | null; pending: boolean; remote_deleted: boolean; conflicts: BackupConflict[] }
 export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number }; attempt: number; last_error: string | null }
-export interface BackupAsset { asset_id: string; task_id: string | null; metadata: Partial<Video>; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean; remote_revision: number; remote_deleted: boolean; has_pending_local_changes: boolean; conflict_count: number }
+export interface BackupLocation { space_id: string; profile: 'r2' | 's3' | 'telegram'; display_name: string; channel_title: string | null }
+export interface BackupAsset { in_current_space?: boolean; backup_locations?: BackupLocation[]; asset_id: string; task_id: string | null; metadata: Partial<Video>; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean; remote_revision: number; remote_deleted: boolean; has_pending_local_changes: boolean; conflict_count: number }
 export interface AssetTranscript { asset_id: string; content_sha256: string | null; text: string; model_revision: string; model_name: string | null; pipeline_revision: string; completed_at: number }
+export interface TelegramStorageStatus { configured: boolean; operation_id: string | null; phase: 'signed_out' | 'connecting' | 'qr' | 'password' | 'ready'; account: { id: string; name: string } | null; last_error: string | null; qr: boolean[][] | null; qr_expires_at: number | null }
+export interface TelegramStorageChannel { id: string; title: string; can_post: boolean; can_delete: boolean }
 export const api = {
+  telegramStorageStatus: () => invoke<TelegramStorageStatus>('telegram_storage_status'),
+  telegramStorageResume: () => invoke<TelegramStorageStatus>('telegram_storage_resume'),
+  telegramStorageLoginQr: () => invoke<TelegramStorageStatus>('telegram_storage_login_qr'),
+  telegramStoragePassword: (operationId: string, password: string) => invoke<TelegramStorageStatus>('telegram_storage_password', { operationId, password }),
+  telegramStorageCancel: (operationId: string) => invoke<TelegramStorageStatus>('telegram_storage_cancel', { operationId }),
+  telegramStorageLogout: (operationId: string) => invoke<TelegramStorageStatus>('telegram_storage_logout', { operationId }),
+  telegramStorageChannels: (operationId: string) => invoke<TelegramStorageChannel[]>('telegram_storage_channels', { operationId }),
   hideAsset: (assetId: string) => invoke<void>('hide_asset_history', { assetId }),
   releaseAsset: (assetId: string) => invoke<void>('release_local_video', { assetId }),
   deleteAsset: (spaceId: string, assetId: string) => invoke<void>('delete_asset_and_backup', { spaceId, assetId }),
@@ -55,9 +65,9 @@ export const api = {
   resolveBackupConflict: (spaceId: string, assetId: string, conflictId: string, adopt: boolean) => invoke<void>('resolve_backup_conflict', { spaceId, assetId, conflictId, adopt }),
   exportBackupLocalData: (spaceId: string, assetId: string) => invoke<string | null>('export_backup_local_data', { spaceId, assetId }),
   backupSettings: () => invoke<BackupSettings | null>('get_backup_settings'),
-  saveBackupSettings: (config: BackupUpdate, activate = true) => invoke<BackupSettings>('save_backup_settings', { config: { ...config, activate } }),
+  saveBackupSettings: (config: BackupUpdate, activate: boolean) => invoke<BackupSettings>('save_backup_settings', { config: { ...config, activate } }),
   backupCredentials: (spaceId: string) => invoke<{ access_key_id: string; secret_access_key: string }>('get_backup_credentials', { spaceId }),
-  testBackupConnection: (config: BackupUpdate) => invoke<void>('test_backup_connection', { config }),
+  testBackupConnection: (config: BackupUpdate) => invoke<void>('test_backup_connection', { config: { ...config, activate: false } }),
   backupOperations: () => invoke<BackupOperation[]>('list_backup_operations'),
   retryBackup: (operationId: string) => invoke<void>('retry_backup_operation', { operationId }),
   startAssetBackup: (spaceId: string, assetId: string) => invoke<void>('start_asset_backup', { spaceId, assetId }),
@@ -134,6 +144,41 @@ export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlyS
   return [...map.values()].sort((a, b) => b.created_at - a.created_at);
 }
 const errors: Record<string, string> = {
+  TELEGRAM_APP_NOT_CONFIGURED: '此构建尚未配置 Telegram 应用身份',
+  TELEGRAM_QR_INVALID: '无法生成登录二维码，请重新扫码',
+  TELEGRAM_QR_TIMEOUT: '扫码登录等待超过 5 分钟，连接已停止，请重新扫码',
+  TELEGRAM_APP_INVALID: 'Telegram 应用身份无效，请检查构建配置',
+  TELEGRAM_SESSION_STORAGE: '无法读写系统凭据中的 Telegram 会话，请检查凭据库权限后重试',
+  TELEGRAM_SESSION_INVALID: 'Telegram 会话不完整，请检查系统凭据库',
+  TELEGRAM_INVALID_PHONE: '请输入带国家代码的有效手机号',
+  TELEGRAM_INVALID_CODE: '验证码无效，请重新输入',
+  TELEGRAM_CODE_EXPIRED: '验证码已过期，请取消连接后重新发送',
+  TELEGRAM_INVALID_PASSWORD: '两步验证密码错误，请重新输入',
+  TELEGRAM_SIGN_UP_REQUIRED: '请先使用 Telegram 官方客户端注册账号',
+  TELEGRAM_AUTH_REQUIRED: 'Telegram 授权已失效，请退出存储账号后重新登录',
+  TELEGRAM_ACCOUNT_MISMATCH: '登录账号与已保存会话不符，请退出后重试',
+  TELEGRAM_CHANNEL_FORBIDDEN: '无法访问频道，请检查频道成员与管理权限',
+  TELEGRAM_CONNECTION_ERROR: 'Telegram 连接失败，请检查网络后重试',
+  TELEGRAM_RPC_ERROR: 'Telegram 拒绝了本次请求，请稍后重试',
+  TELEGRAM_TIMEOUT: 'Telegram 请求超时，连接已停止，请重试',
+  TELEGRAM_CANCELED: 'Telegram 连接已取消',
+  TELEGRAM_STALE_OPERATION: '此登录操作已结束，请刷新账号状态',
+  TELEGRAM_INVALID_PHASE: '登录阶段已变化，请重新连接',
+  TELEGRAM_NOT_CONNECTED: '请先连接 Telegram 存储账号',
+  TELEGRAM_BUSY: 'Telegram 正在处理请求，请稍后重试',
+  TELEGRAM_CLOSED: '应用正在退出，Telegram 连接已停止',
+  TELEGRAM_INDEX_INVALID: 'Telegram 备份索引损坏，已停止同步',
+  TELEGRAM_INDEX_CHANGED: 'Telegram 备份历史被修改或删除，已停止同步',
+  TELEGRAM_OPERATION_MISMATCH: 'Telegram 操作记录不一致，已保留本机数据',
+  TELEGRAM_SEND_UNCONFIRMED: 'Telegram 发送结果尚未确认，请重试',
+  TELEGRAM_MEDIA_CHANGED: 'Telegram 文件信息与备份记录不一致',
+  TELEGRAM_MEDIA_MISSING: 'Telegram 备份文件不存在，本机数据已保留',
+  TELEGRAM_FILE_REFERENCE_EXPIRED: 'Telegram 文件引用已过期，请重新恢复',
+  TELEGRAM_FILE_TOO_LARGE: '文件超过当前 Telegram 账号的上传限制',
+  TELEGRAM_LIMIT_UNAVAILABLE: '暂时无法读取 Telegram 上传限制，请重试',
+  TELEGRAM_TRANSFER_CANCELED: 'Telegram 传输已取消',
+  TELEGRAM_TRANSFER_TIMEOUT: 'Telegram 传输超时，请重试',
+  TELEGRAM_TRANSFER_IO: 'Telegram 文件传输失败，请重试',
   NAMING_INVALID: '请使用相对路径，路径最多 4 段，不含空目录、反斜杠或上级目录',
   TRANSCRIPTION_BUSY: '已有视频正在提取文案，请完成或取消后再开始',
   TRANSCRIPTION_ENGINE_UNAVAILABLE: '语音转录程序不可用，请检查应用安装是否完整',
@@ -171,16 +216,12 @@ const errors: Record<string, string> = {
   BACKUP_PROVIDER_NOT_IMPLEMENTED: '此备份提供商尚未实现',
   BACKUP_PROVIDER_UNAVAILABLE: '此备份提供商尚未实现',
   BACKUP_UNSUPPORTED_PROVIDER: '此备份提供商尚未实现',
-  BACKUP_UPGRADE_REQUIRED: '请保存配置以校验备份存储',
   BACKUP_STORAGE_NOT_VALIDATED: '请保存配置以校验备份存储',
-  BACKUP_MIGRATION_IN_PROGRESS: '备份存储正在初始化，请稍后重试',
   BACKUP_ATOMIC_WRITES_UNSUPPORTED: '此 S3 服务不支持原子条件写入，无法启用多设备同步',
   BACKUP_CONDITIONAL_WRITE_UNSUPPORTED: '此 S3 服务不支持原子条件写入，无法启用多设备同步',
   BACKUP_LOCAL_CHANGES_PENDING: '本机还有未同步变更，请等待确认后再处理冲突',
   BACKUP_CONFLICT_CHANGED: '此冲突已变化，请重新打开版本列表',
   BACKUP_PUBLICATION_UNCONFIRMED: '远端已接收，仍在等待同步确认',
-  BACKUP_LEGACY_REVIEW_REQUIRED: '此备份操作的提交结果待确认',
-  BACKUP_LEGACY_OUTCOME_UNKNOWN: '此备份操作结果未能确认，请保留原数据',
   BACKUP_PROBE_CLEANUP_FAILED: '连接测试的临时对象尚未清理，将在后台重试',
   BACKUP_LOCAL_RELEASED: '本机副本已释放，恢复文件后可重试备份',
   BACKUP_LOCAL_CHANGED: '本机文件已被替换或修改，请检查后重试',
@@ -191,7 +232,10 @@ const errors: Record<string, string> = {
   BACKUP_CONDITIONAL_DELETE_UNSUPPORTED: '该存储不支持按版本清理记录，已停止清理',
   BACKUP_INVALID_RETENTION_DAYS: '保留天数须为1到3650之间的整数',
   BACKUP_INVALID_DELETION_INDEX: '删除索引无法校验，清理已停止',
-  BACKUP_CLEANUP_UNSUPPORTED: '该提供商暂不支持自动清理记录',
+  BACKUP_CLEANUP_UNSUPPORTED: '该提供商暂不支持此删除或清理操作',
+  BACKUP_DELETE_UNSUPPORTED: '当前账号没有清理备份文件的权限，请重新连接后重试',
+  BACKUP_TOMBSTONE_REQUIRED: '尚未确认远端删除记录，清理已停止',
+  BACKUP_MEDIA_IN_USE: '备份文件仍被其他资料引用，清理已停止',
   BACKUP_TIMEOUT: '连接备份存储超时，请检查网络后重试',
   BACKUP_BUSY: '备份存储正在连接，请稍后重试或先停用',
   BACKUP_NETWORK_ERROR: '无法连接远端存储，请检查网络后重试',
@@ -282,4 +326,7 @@ const errors: Record<string, string> = {
   TDL_IDENTITY_MISMATCH: 'tdl 返回的频道或消息身份不匹配，操作已拒绝。',
   TDL_MEDIA_CHANGED: '原始文件大小、类型或文件名已变化，请重新解析后再下载。',
 };
-export const errorText = (error: unknown) => errors[String(error)] ?? '操作失败，请重试';
+export const errorText = (error: unknown) => {
+  const wait = /^TELEGRAM_FLOOD_WAIT:(\d+)$/.exec(String(error));
+  return wait ? `Telegram 请求受限，请在 ${wait[1]} 秒后重试` : errors[String(error)] ?? '操作失败，请重试';
+};

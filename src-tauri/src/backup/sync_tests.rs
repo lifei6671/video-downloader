@@ -1,7 +1,7 @@
-#[path = "retention_tests.rs"]
-mod retention_tests;
 #[path = "flat_upload_tests.rs"]
 mod flat_upload_tests;
+#[path = "retention_tests.rs"]
+mod retention_tests;
 use super::*;
 use crate::backup::conflicts;
 use crate::backup::spaces;
@@ -22,6 +22,94 @@ fn stored_fixture_credentials(f: &Fixture, vault: &Vault) {
         })
         .unwrap();
 }
+
+#[tokio::test]
+async fn discovery_shutdown_does_not_persist_cancellation_or_replace_real_error() {
+    for previous in [None, Some("TELEGRAM_INDEX_CHANGED")] {
+        let (f, _, _) = sync_fixture().await;
+        f.core
+            .backup_db(|db| {
+                // Leave no queue work: this test exercises the discovery worker only.
+                db.execute("DELETE FROM backup_space_assets", [])?;
+                db.execute(
+                    "INSERT INTO backup_sync_checkpoints(space_id,last_error) VALUES(?1,?2)",
+                    params![f.space.space_id, previous],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let (stop, cancel) = tokio::sync::watch::channel(false);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let worker = tokio::spawn(sync_engine::run_with(
+            f.core.clone(),
+            cancel,
+            Arc::new(move |_, _| {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                stop.send_replace(true);
+                bail!("CANCELED")
+            }),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let stored: Option<String> = f
+            .core
+            .backup_db(|db| {
+                Ok(db.query_row(
+                    "SELECT last_error FROM backup_sync_checkpoints WHERE space_id=?",
+                    [&f.space.space_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(stored.as_deref(), previous);
+    }
+}
+
+#[tokio::test]
+async fn space_summary_preserves_persisted_discovery_errors() {
+    let (f, _, _) = sync_fixture().await;
+    for reason in ["CANCELED", "TELEGRAM_INDEX_CHANGED", "BACKUP_NETWORK_ERROR"] {
+        f.core.backup_db(|db| {
+            db.execute("INSERT INTO backup_sync_checkpoints(space_id,last_error) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET last_error=excluded.last_error", params![f.space.space_id, reason])?;
+            Ok(())
+        }).unwrap();
+        let summary = spaces::get(&f.core).unwrap().unwrap();
+        assert_eq!(summary.last_error.as_deref(), Some(reason));
+    }
+}
+
+#[tokio::test]
+async fn discovery_worker_still_persists_real_failure() {
+    let (f, _, _) = sync_fixture().await;
+    f.core
+        .backup_db(|db| {
+            db.execute("DELETE FROM backup_space_assets", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let (stop, cancel) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(sync_engine::run_with(
+        f.core.clone(),
+        cancel,
+        Arc::new(move |_, _| {
+            stop.send_replace(true);
+            bail!("BACKUP_NETWORK_ERROR")
+        }),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        spaces::get(&f.core).unwrap().unwrap().last_error.as_deref(),
+        Some("BACKUP_NETWORK_ERROR")
+    );
+}
+
 // An accepted probe write whose response never arrives exercises cancellation and unknown commits.
 struct HangingProbe {
     inner: Memory,
@@ -221,31 +309,41 @@ async fn settings_enable_pending_connection_keeps_new_download_and_stop_prevents
     assert_eq!(pending, after);
 }
 #[tokio::test]
-async fn single_protocol_invalid_initialization_identity_is_read_only() {
+async fn single_protocol_invalid_library_identity_is_read_only() {
     let f = Fixture::new(24).await;
     let key = format!("{}library.json", f.space.prefix);
     let initial = f.store.get(&key).await.unwrap().unwrap();
-    let marker = serde_json::json!({
-        "schema_version": 2, "library_id": "invalid-identity", "mode": "migrating",
-        "created_at": "2026-01-01T00:00:00Z",
-        "migration": {
-            "operation_id": uuid::Uuid::new_v4().to_string(),
-            "original": serde_json::from_slice::<serde_json::Value>(&initial.body).unwrap(),
-            "next_page": null, "converted": 0
-        }
-    });
-    f.store.write(Write::Put {
-        key: key.clone(), body: serde_json::to_vec(&marker).unwrap(),
-        condition: Condition::Match(initial.etag),
-    }).await.unwrap();
+    let mut marker: serde_json::Value = serde_json::from_slice(&initial.body).unwrap();
+    marker["library_id"] = "invalid-identity".into();
+    f.store
+        .write(Write::Put {
+            key: key.clone(),
+            body: serde_json::to_vec(&marker).unwrap(),
+            condition: Condition::Match(initial.etag),
+        })
+        .await
+        .unwrap();
     let before = f.store.get(&key).await.unwrap().unwrap();
     let writes = f.store.0.lock().unwrap().writes;
     let root = tempfile::tempdir().unwrap();
-    let core = Core::open(&root.path().join("new.sqlite"), root.path().join("downloads"), "unused".into(), vec![], |_| {}).unwrap();
+    let core = Core::open(
+        &root.path().join("new.sqlite"),
+        root.path().join("downloads"),
+        "unused".into(),
+        vec![],
+        |_| {},
+    )
+    .unwrap();
     let vault = Vault::default();
     let mut update = update_for(&f.space.endpoint, &f.space.bucket, &f.space.prefix, "r2");
     update.activate = false;
-    assert_eq!(spaces::save_with(&core, update, &vault, |_,_,_,_| Ok(f.store.clone())).await.unwrap_err().to_string(), "BACKUP_INVALID_LIBRARY");
+    assert_eq!(
+        spaces::save_with(&core, update, &vault, |_, _, _, _| Ok(f.store.clone()))
+            .await
+            .unwrap_err()
+            .to_string(),
+        "BACKUP_INVALID_LIBRARY"
+    );
     let after = f.store.get(&key).await.unwrap().unwrap();
     assert_eq!(before.body, after.body);
     assert_eq!(before.etag, after.etag);
@@ -254,7 +352,7 @@ async fn single_protocol_invalid_initialization_identity_is_read_only() {
     assert!(spaces::list(&core).unwrap().is_empty());
 }
 #[tokio::test]
-async fn single_protocol_enable_initializes_existing_data_with_stored_credentials() {
+async fn single_protocol_enable_preserves_current_data_and_stored_credentials() {
     let f = Fixture::new(24).await;
     f.upload().await.unwrap();
     let vault = Vault::default();
@@ -263,9 +361,7 @@ async fn single_protocol_enable_initializes_existing_data_with_stored_credential
     let before: serde_json::Value =
         serde_json::from_slice(&f.store.get(&record_key).await.unwrap().unwrap().body).unwrap();
     let video_reads = f.store.0.lock().unwrap().video_gets;
-    spaces::set_enabled(&f.core, false)
-    .await
-    .unwrap();
+    spaces::set_enabled(&f.core, false).await.unwrap();
     spaces::set_enabled(&f.core, true).await.unwrap();
     spaces::prepare_current_with(&f.core, &vault, |_, c, _, _| {
         assert_eq!(c.access_key_id, "existing-key");
@@ -282,17 +378,13 @@ async fn single_protocol_enable_initializes_existing_data_with_stored_credential
     let after: serde_json::Value =
         serde_json::from_slice(&f.store.get(&record_key).await.unwrap().unwrap().body).unwrap();
     assert_eq!(after["schema_version"], 2);
-    assert_eq!(before["media"], after["media"]);
+    assert_eq!(before, after);
     assert_eq!(f.store.0.lock().unwrap().video_gets, video_reads);
     assert!(f.root.path().join("video.mp4").is_file());
     assert_eq!(vault.0.lock().unwrap().len(), 1);
     let writes = f.store.0.lock().unwrap().writes;
-    spaces::set_enabled(&f.core, false)
-    .await
-    .unwrap();
-    spaces::set_enabled(&f.core, true)
-    .await
-    .unwrap();
+    spaces::set_enabled(&f.core, false).await.unwrap();
+    spaces::set_enabled(&f.core, true).await.unwrap();
     assert_eq!(f.store.0.lock().unwrap().writes, writes);
 }
 #[tokio::test]
@@ -318,7 +410,7 @@ async fn single_protocol_save_probes_without_confirmation_or_credential_replacem
     let library = f.store.get("test/library.json").await.unwrap().unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&library.body).unwrap()["schema_version"],
-        1
+        2
     );
     f.store.0.lock().unwrap().ignore_conditions = false;
     let saved = spaces::save_with(&f.core, edit(), &vault, |_, c, _, _| {
@@ -362,45 +454,6 @@ async fn single_protocol_readding_configuration_keeps_identity_and_explicit_defa
     assert_eq!(chosen.library_id, f.space.library_id);
     assert!(chosen.enabled);
 }
-#[tokio::test]
-async fn single_protocol_initialization_resumes_after_record_write_failure_without_new_keys() {
-    let f = Fixture::new(24).await;
-    f.upload().await.unwrap();
-    let vault = Vault::default();
-    stored_fixture_credentials(&f, &vault);
-    f.store.0.lock().unwrap().fail_record = true;
-    spaces::set_enabled(&f.core, true).await.unwrap();
-    assert!(
-        spaces::prepare_current_with(&f.core, &vault, |_, _, _, _| Ok(f.store.clone()))
-            .await
-            .is_err()
-    );
-    assert!(!spaces::get(&f.core).unwrap().unwrap().enabled);
-    assert!(spaces::enabled(&f.core).unwrap());
-    assert!(vault.0.lock().unwrap().contains_key("stored-key"));
-    f.store.0.lock().unwrap().fail_record = false;
-    drop(f.core);
-    let restarted = Core::open(
-        &f.root.path().join("app.sqlite"),
-        f.root.path().join("downloads"),
-        "unused".into(),
-        vec![],
-        |_| {},
-    )
-    .unwrap();
-    spaces::prepare_current_with(&restarted, &vault, |_, c, _, _| {
-        assert_eq!(c.access_key_id, "existing-key");
-        Ok(f.store.clone())
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        spaces::get(&restarted).unwrap().unwrap().library_id,
-        f.space.library_id
-    );
-    assert!(spaces::get(&restarted).unwrap().unwrap().enabled);
-}
-
 #[tokio::test]
 async fn single_protocol_test_connection_never_changes_library_or_existing_credentials() {
     let f = Fixture::new(24).await;
@@ -452,7 +505,7 @@ async fn single_protocol_reconnect_preserves_current_baseline_pending_text_and_s
     f.core
         .backup_db(|db| {
             db.execute(
-                "UPDATE backup_provider_config SET protocol=1 WHERE space_id=?",
+                "UPDATE backup_provider_config SET capabilities_json=NULL WHERE space_id=?",
                 [&f.space.space_id],
             )?;
             Ok(())
@@ -468,15 +521,22 @@ async fn single_protocol_reconnect_preserves_current_baseline_pending_text_and_s
         .find(|o| o.operation_id == op)
         .unwrap();
     assert_eq!(before.payload, after.payload);
-    assert_eq!(after.state, "pending");
+    assert_eq!(after.state, before.state);
 }
 
 #[tokio::test]
 async fn settings_actions_delete_old_default_preserves_inherited_global_preference() {
     let (f, _, _) = sync_fixture().await;
-    f.core.backup_db(|db| { db.execute("DELETE FROM backup_sync_preference", [])?; Ok(()) }).unwrap();
+    f.core
+        .backup_db(|db| {
+            db.execute("DELETE FROM backup_sync_preference", [])?;
+            Ok(())
+        })
+        .unwrap();
     assert!(spaces::enabled(&f.core).unwrap());
-    spaces::remove_with(&f.core, &f.space.space_id, true, &Vault::default()).await.unwrap();
+    spaces::remove_with(&f.core, &f.space.space_id, true, &Vault::default())
+        .await
+        .unwrap();
     assert!(spaces::enabled(&f.core).unwrap());
     assert!(spaces::get(&f.core).unwrap().is_none());
     f.core.backup_db(repository::init).unwrap();
@@ -487,12 +547,23 @@ async fn settings_actions_delete_old_default_preserves_inherited_global_preferen
 async fn settings_actions_saving_stale_enable_flag_does_not_override_global_toggle() {
     let (f, _, _) = sync_fixture().await;
     let vault = Vault::default();
-    spaces::save_with(&f.core, update_for(&f.space.endpoint, &f.space.bucket, &f.space.prefix, "r2"), &vault, |_, _, _, _| Ok(f.store.clone())).await.unwrap();
+    spaces::save_with(
+        &f.core,
+        update_for(&f.space.endpoint, &f.space.bucket, &f.space.prefix, "r2"),
+        &vault,
+        |_, _, _, _| Ok(f.store.clone()),
+    )
+    .await
+    .unwrap();
     for enabled in [false, true] {
         spaces::set_enabled(&f.core, enabled).await.unwrap();
         let mut edit = update_for(&f.space.endpoint, &f.space.bucket, &f.space.prefix, "r2");
-        edit.activate = false; edit.enabled = !enabled; edit.credentials = None;
-        let saved = spaces::save_with(&f.core, edit, &vault, |_, _, _, _| Ok(f.store.clone())).await.unwrap();
+        edit.activate = false;
+        edit.enabled = !enabled;
+        edit.credentials = None;
+        let saved = spaces::save_with(&f.core, edit, &vault, |_, _, _, _| Ok(f.store.clone()))
+            .await
+            .unwrap();
         assert_eq!(saved.enabled, enabled);
         assert_eq!(spaces::enabled(&f.core).unwrap(), enabled);
     }
@@ -675,43 +746,8 @@ async fn settings_actions_empty_configuration_can_be_removed_and_explicitly_read
 }
 
 #[tokio::test]
-async fn p6_manual_request_does_not_report_queued_for_legacy_unknown_or_delete_intent() {
+async fn manual_request_rejects_delete_intent() {
     let (f, p, _) = sync_fixture().await;
-    let old = uuid::Uuid::new_v4().to_string();
-    f.core.backup_db(|db|{db.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json,last_error) VALUES(?1,?2,?3,'upload','blocked','unknown','{\"upload_id\":\"old-session\"}','BACKUP_LEGACY_OUTCOME_UNKNOWN')",params![old,f.space.space_id,f.id])?;Ok(())}).unwrap();
-    assert_eq!(
-        sync_engine::request_upload_with(&f.core, p.clone(), &f.id)
-            .unwrap_err()
-            .to_string(),
-        "BACKUP_LEGACY_REVIEW_REQUIRED"
-    );
-    let op = scheduler::operations(&f.core).unwrap().remove(0);
-    assert_eq!(op.state, "blocked");
-    assert_eq!(op.payload["upload_id"], "old-session");
-    f.core
-        .backup_db(|db| {
-            db.execute(
-                "UPDATE backup_operations SET state='canceled' WHERE operation_id=?",
-                [&old],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(
-        sync_engine::request_upload_with(&f.core, p.clone(), &f.id)
-            .unwrap_err()
-            .to_string(),
-        "BACKUP_LEGACY_REVIEW_REQUIRED"
-    );
-    f.core
-        .backup_db(|db| {
-            db.execute(
-                "UPDATE backup_operations SET state='completed' WHERE operation_id=?",
-                [old],
-            )?;
-            Ok(())
-        })
-        .unwrap();
     crate::backup::sync_delete::intent(&f.core, &f.space.space_id, &f.id).unwrap();
     assert_eq!(
         sync_engine::request_upload_with(&f.core, p, &f.id)
@@ -942,91 +978,17 @@ async fn p6_accepted_receipt_cannot_acknowledge_changes_or_prove_uploaded_video(
         1
     );
 }
-use crate::backup::library;
-
-#[test]
-fn p1_v3_migration_preserves_targets_operations_and_unknown_provenance() {
-    let db = rusqlite::Connection::open_in_memory().unwrap();
-    db.execute_batch(include_str!("schema.sql")).unwrap();
-    db.execute("UPDATE backup_schema SET version=3", [])
-        .unwrap();
-    for (space, role) in [("a", "primary"), ("b", "reader")] {
-        db.execute("INSERT INTO backup_spaces VALUES(?1,'library','https://old.example','bucket',?1,?2,'device',1,'secret-ref',1)", params![space,role]).unwrap();
-    }
-    db.execute(
-        "INSERT INTO media_assets VALUES('asset',NULL,'{}','video.mp4',NULL,12,'active')",
-        [],
-    )
-    .unwrap();
-    db.execute("INSERT INTO asset_remote_objects(space_id,asset_id,record_key,remote_state) VALUES('a','asset','old/record','pending_delete')", []).unwrap();
-    db.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES('operation','a','asset','upload','running','completing','{\"upload_id\":\"owned-session\"}')", []).unwrap();
-    repository::init(&db).unwrap();
-    repository::init(&db).unwrap();
-    assert_eq!(
-        db.query_row("SELECT COUNT(*) FROM backup_provider_config", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        2
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT credential_ref FROM backup_spaces WHERE space_id='a'",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        "secret-ref"
-    );
-    let op: (String, String, String) = db
-        .query_row(
-            "SELECT state,phase,payload_json FROM backup_operations",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        op,
-        (
-            "pending".into(),
-            "completing".into(),
-            r#"{"upload_id":"owned-session"}"#.into()
-        )
-    );
-    assert_eq!(
-        db.query_row("SELECT COUNT(*) FROM backup_upload_proofs", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        repository::local_asset_id(&db, "a", "asset")
-            .unwrap()
-            .as_deref(),
-        Some("asset")
-    );
-    assert_eq!(
-        db.query_row("SELECT remote_deleted FROM backup_space_assets", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .unwrap(),
-        1
-    );
-    assert!(db
-        .prepare("PRAGMA foreign_key_check")
-        .unwrap()
-        .query([])
-        .unwrap()
-        .next()
-        .unwrap()
-        .is_none());
-}
 
 #[test]
 fn p1_same_remote_id_in_two_libraries_gets_separate_local_rows() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     repository::init(&db).unwrap();
     for space in ["a", "b"] {
-        db.execute("INSERT INTO backup_spaces VALUES(?1,?1,'https://host','bucket',?1,'reader','device',1,NULL,1)",[space]).unwrap();
+        db.execute(
+            "INSERT INTO backup_spaces VALUES(?1,?1,'https://host','bucket',?1,NULL,1)",
+            [space],
+        )
+        .unwrap();
     }
     let remote = uuid::Uuid::new_v4().to_string();
     let a = repository::bind_remote_asset(&db, "a", &remote).unwrap();
@@ -1049,377 +1011,12 @@ fn p1_same_remote_id_in_two_libraries_gets_separate_local_rows() {
     );
 }
 
-#[tokio::test]
-async fn p1_connection_initialization_is_resumable_and_metadata_only() {
-    let f = Fixture::new(24).await;
-    f.upload().await.unwrap();
-    let op = uuid::Uuid::new_v4().to_string();
-    f.store.0.lock().unwrap().fail_record = true;
-    assert!(
-        library::initialize(&f.store, &f.space.prefix, &f.space.library_id, &op)
-            .await
-            .is_err()
-    );
-    let other = uuid::Uuid::new_v4().to_string();
-    assert_eq!(
-        library::initialize(&f.store, &f.space.prefix, &f.space.library_id, &other)
-            .await
-            .unwrap_err()
-            .to_string(),
-        "BACKUP_MIGRATION_OWNED_BY_OTHER"
-    );
-    f.store.0.lock().unwrap().fail_record = false;
-    let before = f.store.0.lock().unwrap().video_gets;
-    let upgraded = library::initialize(&f.store, &f.space.prefix, &f.space.library_id, &op)
-        .await
-        .unwrap();
-    upgraded.validate().unwrap();
-    assert!(
-        f.client().connect().await.is_err(),
-        "development decoder must reject canonical metadata"
-    );
-    library::initialize(&f.store, &f.space.prefix, &f.space.library_id, &op)
-        .await
-        .unwrap();
-    assert_eq!(f.store.0.lock().unwrap().video_gets, before);
-    let key = format!("{}records/{}.json", f.space.prefix, f.id);
-    let body = f.store.get(&key).await.unwrap().unwrap().body;
-    let record = crate::backup::s3_provider::validate_wire(
-        &body,
-        &f.space.library_id,
-        &f.id,
-        &f.space.prefix,
-    )
-    .unwrap();
-    assert_eq!(record.asset_id, f.id);
-    assert_eq!(
-        record.media.unwrap().key,
-        format!(
-            "{}media/{}/{}/video.mp4",
-            f.space.prefix,
-            f.id,
-            f.core.backup_assets().unwrap()[0]
-                .content_sha256
-                .as_ref()
-                .unwrap()
-        )
-    );
-}
-
-#[test]
-fn p1_migration_splits_existing_cross_library_memberships() {
-    let db = rusqlite::Connection::open_in_memory().unwrap();
-    db.execute_batch(include_str!("schema.sql")).unwrap();
-    db.execute("UPDATE backup_schema SET version=3", [])
-        .unwrap();
-    let id = uuid::Uuid::new_v4().to_string();
-    db.execute(
-        "INSERT INTO media_assets VALUES(?1,NULL,'{}','video.mp4','hash',12,'active')",
-        [&id],
-    )
-    .unwrap();
-    db.execute("INSERT INTO asset_local_files(asset_id,path,bytes,local_state) VALUES(?1,'old-path',12,'present')",[&id]).unwrap();
-    db.execute("INSERT INTO asset_transcripts(asset_id,text,model_revision,pipeline_revision,completed_at) VALUES(?1,'unsynced','m','p',1)",[&id]).unwrap();
-    for space in ["a", "b"] {
-        db.execute("INSERT INTO backup_spaces VALUES(?1,?1,'https://host','bucket',?1,'primary','device',1,NULL,1)",[space]).unwrap();
-        db.execute("INSERT INTO asset_remote_objects(space_id,asset_id,record_key,remote_state) VALUES(?1,?2,'original-key','pending')",params![space,id]).unwrap();
-        db.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?1,?2,'upload','pending','parts','{\"upload_id\":\"original-id\"}')",params![space,id]).unwrap();
-    }
-    repository::init(&db).unwrap();
-    let a = repository::local_asset_id(&db, "a", &id).unwrap().unwrap();
-    let b = repository::local_asset_id(&db, "b", &id).unwrap().unwrap();
-    assert_ne!(a, b);
-    db.execute(
-        "UPDATE asset_transcripts SET text='changed-a' WHERE asset_id=?",
-        [&a],
-    )
-    .unwrap();
-    assert_eq!(
-        repository::transcript(&db, &b).unwrap().unwrap().text,
-        "unsynced"
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT asset_id FROM backup_operations WHERE space_id='b'",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        b
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT payload_json FROM backup_operations WHERE space_id='b'",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        r#"{"upload_id":"original-id"}"#
-    );
-    repository::init(&db).unwrap();
-    assert_eq!(
-        repository::local_asset_id(&db, "b", &id).unwrap().unwrap(),
-        b
-    );
-}
-
-#[derive(Clone)]
-struct UpgradeFault {
-    inner: Memory,
-    lose_key: Arc<Mutex<Option<String>>>,
-    barrier: Option<Arc<tokio::sync::Barrier>>,
-    reads: Arc<std::sync::atomic::AtomicUsize>,
-}
-impl ObjectStore for UpgradeFault {
-    fn get(&self, key: &str) -> StoreFuture<'_, Option<Object>> {
-        let key = key.to_owned();
-        Box::pin(async move {
-            let result = self.inner.get(&key).await?;
-            if key.ends_with("library.json")
-                && self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2
-            {
-                if let Some(barrier) = &self.barrier {
-                    barrier.wait().await;
-                }
-            }
-            Ok(result)
-        })
-    }
-    fn head(&self, key: &str) -> StoreFuture<'_, Option<ObjectInfo>> {
-        self.inner.head(key)
-    }
-    fn list(&self, prefix: &str, token: Option<String>) -> StoreFuture<'_, Page> {
-        self.inner.list(prefix, token)
-    }
-    fn stream(
-        &self,
-        key: &str,
-        offset: u64,
-        etag: Option<String>,
-    ) -> StoreFuture<'_, ObjectStream> {
-        self.inner.stream(key, offset, etag)
-    }
-    fn uploads(&self, key: &str) -> StoreFuture<'_, Vec<String>> {
-        self.inner.uploads(key)
-    }
-    fn parts(&self, key: &str, id: &str) -> StoreFuture<'_, Vec<Part>> {
-        self.inner.parts(key, id)
-    }
-    fn write(&self, operation: Write) -> StoreFuture<'_, String> {
-        Box::pin(async move {
-            let key = match &operation {
-                Write::Put { key, .. } => Some(key.clone()),
-                _ => None,
-            };
-            let result = self.inner.write(operation).await?;
-            let lose = {
-                let mut target = self.lose_key.lock().unwrap();
-                if *target == key && key.is_some() {
-                    target.take();
-                    true
-                } else {
-                    false
-                }
-            };
-            if lose {
-                bail!("BACKUP_NETWORK_ERROR");
-            }
-            Ok(result)
-        })
-    }
-}
-
-#[tokio::test]
-async fn p1_two_upgrade_initiators_cannot_both_acquire_migration() {
-    let f = Fixture::new(24).await;
-    let store = UpgradeFault {
-        inner: f.store.clone(),
-        lose_key: Default::default(),
-        barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
-        reads: Default::default(),
-    };
-    let a = uuid::Uuid::new_v4().to_string();
-    let b = uuid::Uuid::new_v4().to_string();
-    let (a, b) = tokio::join!(
-        library::initialize(&store, &f.space.prefix, &f.space.library_id, &a),
-        library::initialize(&store, &f.space.prefix, &f.space.library_id, &b)
-    );
-    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
-}
-
-#[tokio::test]
-async fn p1_upgrade_unknown_metadata_commit_and_tombstone_remain_recoverable() {
-    for fault_at in ["record", "library"] {
-        let f = Fixture::new(24).await;
-        f.upload().await.unwrap();
-        let deleted = uuid::Uuid::new_v4().to_string();
-        let key = format!("{}records/{deleted}.json", f.space.prefix);
-        f.store.0.lock().unwrap().objects.insert(
-            key,
-            (
-                serde_json::to_vec(&crate::backup::record::Record::Deleted(
-                    crate::backup::record::Deleted {
-                        schema_version: 1,
-                        library_id: f.space.library_id.clone(),
-                        asset_id: deleted.clone(),
-                        record_revision: 2,
-                        writer_epoch: 1,
-                        deleted_at: chrono::Utc::now().to_rfc3339(),
-                        delete_operation_id: uuid::Uuid::new_v4().to_string(),
-                    },
-                ))
-                .unwrap(),
-                None,
-            ),
-        );
-        let lose = if fault_at == "record" {
-            format!("{}records/{}.json", f.space.prefix, f.id)
-        } else {
-            format!("{}library.json", f.space.prefix)
-        };
-        let store = UpgradeFault {
-            inner: f.store.clone(),
-            lose_key: Arc::new(Mutex::new(Some(lose))),
-            barrier: None,
-            reads: Default::default(),
-        };
-        let op = uuid::Uuid::new_v4().to_string();
-        assert!(
-            library::initialize(&store, &f.space.prefix, &f.space.library_id, &op)
-                .await
-                .is_err()
-        );
-        library::initialize(&store, &f.space.prefix, &f.space.library_id, &op)
-            .await
-            .unwrap();
-        let key = format!("{}records/{deleted}.json", f.space.prefix);
-        let object = f.store.get(&key).await.unwrap().unwrap();
-        let record = crate::backup::s3_provider::validate_wire(
-            &object.body,
-            &f.space.library_id,
-            &deleted,
-            &f.space.prefix,
-        )
-        .unwrap();
-        assert_eq!(record.state, "deleted");
-        assert!(record.media.is_none());
-        assert_eq!(f.store.0.lock().unwrap().video_gets, 0);
-    }
-}
-
-#[tokio::test]
-async fn p1_corrupt_converted_record_blocks_migration_completion() {
-    let f = Fixture::new(24).await;
-    f.upload().await.unwrap();
-    let op = uuid::Uuid::new_v4().to_string();
-    let lib = f.store.get("test/library.json").await.unwrap().unwrap();
-    let original: Library = serde_json::from_slice(&lib.body).unwrap();
-    let marker = library::LibraryMetadata {
-        deletion_indexes: false,
-        schema_version: 2,
-        library_id: f.space.library_id.clone(),
-        mode: "migrating".into(),
-        created_at: original.created_at.clone(),
-        migration: Some(library::Migration {
-            operation_id: op.clone(),
-            original,
-            next_page: None,
-            converted: 0,
-        }),
-    };
-    f.store.0.lock().unwrap().objects.insert(
-        "test/library.json".into(),
-        (serde_json::to_vec(&marker).unwrap(), None),
-    );
-    let key = format!("test/records/{}.json", f.id);
-    let object = f.store.get(&key).await.unwrap().unwrap();
-    let old = serde_json::from_slice(&object.body).unwrap();
-    let converted = crate::backup::s3_provider::normalize_record(old, &op).unwrap();
-    let mut raw: serde_json::Value = serde_json::from_slice(&converted).unwrap();
-    raw["fields"]["title"] = serde_json::json!({"bad":"type"});
-    f.store
-        .0
-        .lock()
-        .unwrap()
-        .objects
-        .insert(key, (serde_json::to_vec(&raw).unwrap(), None));
-    assert!(
-        library::initialize(&f.store, &f.space.prefix, &f.space.library_id, &op)
-            .await
-            .is_err()
-    );
-    let lib = f.store.get("test/library.json").await.unwrap().unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&lib.body).unwrap()["mode"],
-        "migrating"
-    );
-}
-
-#[tokio::test]
-async fn p1_legacy_publication_cannot_invent_video_upload_provenance() {
-    let f = Fixture::new(24).await;
-    f.upload().await.unwrap();
-    let op = uuid::Uuid::new_v4().to_string();
-    library::initialize(&f.store, &f.space.prefix, &f.space.library_id, &op)
-        .await
-        .unwrap();
-    library::reconcile_local(&f.core, &f.store, &f.space)
-        .await
-        .unwrap();
-    let proofs = f
-        .core
-        .backup_db(|db| {
-            Ok(
-                db.query_row("SELECT COUNT(*) FROM backup_upload_proofs", [], |r| {
-                    r.get::<_, i64>(0)
-                })?,
-            )
-        })
-        .unwrap();
-    assert_eq!(proofs, 0);
-    library::reconcile_local(&f.core, &f.store, &f.space)
-        .await
-        .unwrap();
-    assert_eq!(
-        f.core
-            .backup_db(|db| Ok(db.query_row(
-                "SELECT COUNT(*) FROM backup_upload_proofs",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?))
-            .unwrap(),
-        0
-    );
-    let mut reader = f.space.clone();
-    reader.writer_device_id = uuid::Uuid::new_v4().to_string();
-    reader.role = Role::Reader;
-    f.core
-        .backup_db(|db| {
-            db.execute("DELETE FROM backup_upload_proofs", [])?;
-            Ok(())
-        })
-        .unwrap();
-    library::reconcile_local(&f.core, &f.store, &reader)
-        .await
-        .unwrap();
-    assert_eq!(
-        f.core
-            .backup_db(|db| Ok(db.query_row(
-                "SELECT COUNT(*) FROM backup_upload_proofs",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?))
-            .unwrap(),
-        0
-    );
-}
-
 use crate::backup::{
     provider::*,
     s3_provider::{probe, S3Provider},
     sync_engine::{self, SyncEngine},
 };
-fn capabilities() -> ProviderCapabilities {
+pub(super) fn capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
         change_coordination: ChangeCoordination::ConditionalWrite,
         incremental_discovery: true,
@@ -1434,9 +1031,12 @@ async fn sync_fixture() -> (Fixture, Arc<S3Provider<Memory>>, SyncEngine) {
     f.store.0.lock().unwrap().objects.clear();
     f.core
         .backup_db(|db| {
-            db.execute("UPDATE backup_provider_config SET protocol=2,capabilities_json=?1", [serde_json::to_string(&capabilities())?])?;
             db.execute(
-                "INSERT INTO backup_current_space VALUES(1,?)",
+                "UPDATE backup_provider_config SET protocol=2,capabilities_json=?1",
+                [serde_json::to_string(&capabilities())?],
+            )?;
+            db.execute(
+                "INSERT OR REPLACE INTO backup_current_space VALUES(1,?)",
                 [&f.space.space_id],
             )?;
             sync_engine::register_download(db, &f.id)
@@ -1451,6 +1051,285 @@ async fn sync_fixture() -> (Fixture, Arc<S3Provider<Memory>>, SyncEngine) {
     provider.open_library(true).await.unwrap();
     let engine = SyncEngine::new(f.core.clone(), provider.clone());
     (f, provider, engine)
+}
+
+#[tokio::test]
+async fn backup_display_preserves_other_space_receipts_without_joining_new_target() {
+    let (f, _, engine) = sync_fixture().await;
+    engine
+        .execute_upload(&claim(&engine, &f.core))
+        .await
+        .unwrap();
+    let mut other = f.space.clone();
+    other.space_id = uuid::Uuid::new_v4().to_string();
+    other.library_id = uuid::Uuid::new_v4().to_string();
+    other.endpoint.clear();
+    other.bucket.clear();
+    other.prefix.clear();
+    other.enabled = false;
+    f.core.backup_db(|db| {
+        repository::save_space(db, &other)?;
+        db.execute("UPDATE backup_provider_config SET provider_type='telegram',profile='telegram',protocol=2,capabilities_json=?2 WHERE space_id=?1", params![other.space_id,serde_json::to_string(&capabilities())?])?;
+        db.execute("INSERT INTO telegram_spaces VALUES(?1,'123','777',0)",[&other.space_id])?;
+        repository::init(db)?;
+        Ok(())
+    }).unwrap();
+    let target = crate::backup::telegram_transfer::Target {
+        scope: Scope {
+            space_id: other.space_id.clone(),
+            library_id: other.library_id.clone(),
+            provider_type: ProviderType::Telegram,
+            protocol: 2,
+        },
+        account_id: "123".into(),
+        channel_id: "777".into(),
+    };
+    for field in ["space", "library", "account", "channel"] {
+        let mut wrong = target.clone();
+        match field {
+            "space" => wrong.scope.space_id = uuid::Uuid::new_v4().to_string(),
+            "library" => wrong.scope.library_id = uuid::Uuid::new_v4().to_string(),
+            "account" => wrong.account_id = "456".into(),
+            _ => wrong.channel_id = "888".into(),
+        }
+        crate::backup::telegram_spaces::remember_channel_title(&f.core, &wrong, "不应写入")
+            .unwrap();
+    }
+    assert!(spaces::list(&f.core)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.space_id == other.space_id)
+        .unwrap()
+        .telegram_channel_title
+        .is_none());
+    crate::backup::telegram_spaces::remember_channel_title(&f.core, &target, "旧频道名称").unwrap();
+    crate::backup::telegram_spaces::remember_channel_title(&f.core, &target, "知识库").unwrap();
+    let entries = crate::backup::reconcile::list_for_display(&f.core, &other.space_id).unwrap();
+    let entry = entries
+        .iter()
+        .find(|v| v.entry.asset.asset_id == f.id)
+        .unwrap();
+    assert!(!entry.in_current_space);
+    assert_eq!(entry.entry.remote_state, "not_backed_up");
+    assert_eq!(entry.entry.space_id, other.space_id);
+    assert_eq!(entry.backup_locations.len(), 1);
+    assert_eq!(entry.backup_locations[0].space_id, f.space.space_id);
+    assert_eq!(
+        entry.backup_locations[0].display_name,
+        format!("R2 / {}", f.space.bucket)
+    );
+    spaces::rename(&f.core, &f.space.space_id, "视频归档").unwrap();
+    let renamed = crate::backup::reconcile::list_for_display(&f.core, &other.space_id).unwrap();
+    assert_eq!(
+        renamed
+            .iter()
+            .find(|v| v.entry.asset.asset_id == f.id)
+            .unwrap()
+            .backup_locations[0]
+            .display_name,
+        "视频归档"
+    );
+    assert_eq!(
+        spaces::list(&f.core)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.space_id == other.space_id)
+            .unwrap()
+            .telegram_channel_title
+            .as_deref(),
+        Some("知识库")
+    );
+    assert!(crate::backup::sync_read::list(&f.core, &other.space_id)
+        .unwrap()
+        .is_empty());
+    let members: i64 = f
+        .core
+        .backup_db(|db| {
+            Ok(db.query_row(
+                "SELECT COUNT(*) FROM backup_space_assets WHERE space_id=?",
+                [&other.space_id],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(members, 0);
+    let current = crate::backup::reconcile::list_for_display(&f.core, &f.space.space_id).unwrap();
+    assert!(
+        current
+            .iter()
+            .find(|v| v.entry.asset.asset_id == f.id)
+            .unwrap()
+            .in_current_space
+    );
+    f.core.backup_db(|db| {
+        db.execute("INSERT INTO asset_transcripts(asset_id,text,model_revision,pipeline_revision,completed_at) VALUES(?1,'本机已有文案','test','test',1)",[&f.id])?;
+        Ok(())
+    }).unwrap();
+    let local_text = crate::backup::sync_read::cached_transcript(&f.core, &other.space_id, &f.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(local_text.text, "本机已有文案");
+    assert!(
+        crate::backup::reconcile::list_for_display(&f.core, &other.space_id)
+            .unwrap()
+            .iter()
+            .find(|v| v.entry.asset.asset_id == f.id)
+            .unwrap()
+            .entry
+            .has_transcript
+    );
+    // This pure local asset has no task row; foreign-only restore targets stay out of this library.
+    std::fs::remove_file(
+        f.core
+            .backup_assets()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.asset_id == f.id)
+            .unwrap()
+            .path
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !crate::backup::reconcile::list_for_display(&f.core, &other.space_id)
+            .unwrap()
+            .iter()
+            .any(|v| v.entry.asset.asset_id == f.id)
+    );
+}
+
+#[test]
+fn backup_author_profile_validates_portable_fields_and_optional_identity() {
+    let mut source =
+        serde_json::json!({"platform":"youtube","video_id":"12345678901","canonical_url":null});
+    let valid = |source: &serde_json::Value| {
+        crate::backup::s3_provider::validate_field("source", source).is_ok()
+    };
+    assert!(valid(&source));
+    source["author_profile"] =
+        serde_json::json!({"id":"123","nickname":"作者","handle":null,"kind":"channel"});
+    assert!(valid(&source));
+    for invalid in [
+        serde_json::json!({"id":1}),
+        serde_json::json!({"nickname":{}}),
+        serde_json::json!({"kind":"group"}),
+        serde_json::json!({"avatar_cached":true}),
+        serde_json::json!([]),
+    ] {
+        source["author_profile"] = invalid;
+        assert!(!valid(&source));
+    }
+}
+
+#[tokio::test]
+async fn backup_metadata_rebuild_retains_title_and_portable_author_identity() {
+    let (f, provider, engine) = sync_fixture().await;
+    let metadata = serde_json::json!({"platform":"youtube","video_id":"12345678901","title":"当前视频标题","author":"作者昵称","author_profile":{"id":"author-123","nickname":"作者昵称","handle":"@author","kind":"user","avatar_cached":true},"duration_ms":2000,"width":1920,"height":1080});
+    f.core
+        .backup_db(|db| {
+            db.execute(
+                "UPDATE media_assets SET metadata_json=?2 WHERE asset_id=?1",
+                params![f.id, metadata.to_string()],
+            )?;
+            db.execute(
+                "DELETE FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",
+                params![f.space.space_id, f.id],
+            )?;
+            sync_engine::register_download(db, &f.id)
+        })
+        .unwrap();
+    engine
+        .execute_upload(&claim(&engine, &f.core))
+        .await
+        .unwrap();
+    let snapshot = provider.read_asset(&f.id).await.unwrap().unwrap().snapshot;
+    assert_eq!(snapshot.fields["title"], "当前视频标题");
+    assert_eq!(snapshot.fields["author"], "作者昵称");
+    assert_eq!(
+        snapshot.fields["source"]["author_profile"]["id"],
+        "author-123"
+    );
+    assert!(snapshot.fields["source"]["author_profile"]
+        .get("avatar_cached")
+        .is_none());
+    let (_root, rebuilt, _, _) = second_device(&f).await;
+    let asset = rebuilt.backup_assets().unwrap().remove(0);
+    assert_eq!(asset.metadata["title"], "当前视频标题");
+    assert_eq!(asset.metadata["author_profile"]["handle"], "@author");
+}
+
+#[tokio::test]
+async fn explicit_upload_joins_new_target_and_keeps_previous_backup_receipt() {
+    let (f, original, engine) = sync_fixture().await;
+    engine
+        .execute_upload(&claim(&engine, &f.core))
+        .await
+        .unwrap();
+    let original_snapshot = original.read_asset(&f.id).await.unwrap().unwrap().snapshot;
+    let mut next = f.space.clone();
+    next.space_id = uuid::Uuid::new_v4().to_string();
+    next.library_id = uuid::Uuid::new_v4().to_string();
+    next.prefix = "second/".into();
+    f.core.backup_db(|db| {
+        repository::save_space(db,&next)?;
+        db.execute("UPDATE backup_provider_config SET protocol=2,capabilities_json=?2 WHERE space_id=?1",params![next.space_id,serde_json::to_string(&capabilities())?])?;
+        spaces::select_local(db,&next.space_id,true)
+    }).unwrap();
+    let provider = Arc::new(S3Provider::new(
+        f.store.clone(),
+        next.clone(),
+        capabilities(),
+        f.core.backup_db(repository::device_id).unwrap(),
+    ));
+    provider.open_library(true).await.unwrap();
+    assert!(crate::backup::sync_read::list(&f.core, &next.space_id)
+        .unwrap()
+        .is_empty());
+    sync_engine::request_upload_with(&f.core, provider.clone(), &f.id).unwrap();
+    sync_engine::request_upload_with(&f.core, provider.clone(), &f.id).unwrap();
+    let next_engine = SyncEngine::new(f.core.clone(), provider.clone());
+    next_engine
+        .execute_upload(&claim(&next_engine, &f.core))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider
+            .read_asset(&f.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .media
+            .as_ref()
+            .unwrap()
+            .sha256,
+        original_snapshot.media.as_ref().unwrap().sha256
+    );
+    assert_eq!(
+        original.read_asset(&f.id).await.unwrap().unwrap().snapshot,
+        original_snapshot
+    );
+    let entries = crate::backup::reconcile::list_for_display(&f.core, &next.space_id).unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .find(|e| e.entry.asset.asset_id == f.id)
+            .unwrap()
+            .backup_locations
+            .len(),
+        2
+    );
+    let count: i64 = f
+        .core
+        .backup_db(|db| {
+            Ok(db.query_row(
+                "SELECT COUNT(*) FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",
+                params![next.space_id, f.id],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 #[tokio::test]
@@ -1607,12 +1486,14 @@ async fn second_device(
     .unwrap();
     let mut space = f.space.clone();
     space.space_id = uuid::Uuid::new_v4().to_string();
-    space.role = Role::Member;
     core.backup_db(|db| {
         repository::save_space(db, &space)?;
-        db.execute("UPDATE backup_provider_config SET protocol=2,capabilities_json=?", [serde_json::to_string(&capabilities())?])?;
         db.execute(
-            "INSERT INTO backup_current_space VALUES(1,?)",
+            "UPDATE backup_provider_config SET protocol=2,capabilities_json=?",
+            [serde_json::to_string(&capabilities())?],
+        )?;
+        db.execute(
+            "INSERT OR REPLACE INTO backup_current_space VALUES(1,?)",
             [&space.space_id],
         )?;
         Ok(())
@@ -1820,6 +1701,8 @@ async fn flat_multipart_retry_restarts_and_cancel_cleans_its_session() {
     let aop = uuid::Uuid::new_v4().to_string();
     let bop = uuid::Uuid::new_v4().to_string();
     let source = |op: &str, device: String, state: Arc<Mutex<Option<ResumeState>>>| MediaSource {
+        video: None,
+        base_revision: None,
         recreate_revision: None,
         asset_id: f.id.clone(),
         kind: "video".into(),
@@ -1852,24 +1735,63 @@ async fn flat_multipart_retry_restarts_and_cancel_cleans_its_session() {
         .is_err());
     assert_eq!(f.store.0.lock().unwrap().uploads.len(), 1);
     let lost_create = astate.lock().unwrap().clone();
-    a.cancel_upload(lost_create.clone().unwrap(), &aop).await.unwrap();
-    assert!(f.store.0.lock().unwrap().uploads.is_empty(), "cancel reported success but left an unknown CreateMultipart session");
+    a.cancel_upload(lost_create.clone().unwrap(), &aop)
+        .await
+        .unwrap();
+    assert!(
+        f.store.0.lock().unwrap().uploads.is_empty(),
+        "cancel reported success but left an unknown CreateMultipart session"
+    );
     f.store.0.lock().unwrap().fail_after = Some("part");
-    assert!(a.upload_media(source(&aop,f.core.backup_db(repository::device_id).unwrap(),astate.clone()),lost_create).await.is_err());
-    assert_eq!(f.store.0.lock().unwrap().uploads.len(),1);
-    let interrupted=astate.lock().unwrap().clone().unwrap();
-    assert!(b.cancel_upload(interrupted.clone(),&aop).await.is_err());
-    assert!(a.cancel_upload(interrupted.clone(),&bop).await.is_err());
-    a.cancel_upload(interrupted.clone(),&aop).await.unwrap();
+    assert!(a
+        .upload_media(
+            source(
+                &aop,
+                f.core.backup_db(repository::device_id).unwrap(),
+                astate.clone()
+            ),
+            lost_create
+        )
+        .await
+        .is_err());
+    assert_eq!(f.store.0.lock().unwrap().uploads.len(), 1);
+    let interrupted = astate.lock().unwrap().clone().unwrap();
+    assert!(b.cancel_upload(interrupted.clone(), &aop).await.is_err());
+    assert!(a.cancel_upload(interrupted.clone(), &bop).await.is_err());
+    a.cancel_upload(interrupted.clone(), &aop).await.unwrap();
     assert!(f.store.0.lock().unwrap().uploads.is_empty());
-    let receipt=a.upload_media(source(&aop,f.core.backup_db(repository::device_id).unwrap(),astate),Some(interrupted)).await.unwrap();
-    assert_eq!(receipt.reference.sha256,hash);
+    let receipt = a
+        .upload_media(
+            source(
+                &aop,
+                f.core.backup_db(repository::device_id).unwrap(),
+                astate,
+            ),
+            Some(interrupted),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.reference.sha256, hash);
     assert!(!a.capabilities().resumable_upload);
-    let store=f.store.0.lock().unwrap();
+    let store = f.store.0.lock().unwrap();
     assert!(store.uploads.is_empty());
-    assert_eq!(store.part_reads,0,"a retry must not read or adopt old parts");
-    assert_eq!(store.part_writes.iter().map(|(_,part)|*part).collect::<Vec<_>>(),vec![1,1,2,3,4,5,6,7],"an interrupted upload must resend part 1");
-    assert_ne!(store.part_writes[0].0,store.part_writes[1].0,"retry reused the previous multipart session");
+    assert_eq!(
+        store.part_reads, 0,
+        "a retry must not read or adopt old parts"
+    );
+    assert_eq!(
+        store
+            .part_writes
+            .iter()
+            .map(|(_, part)| *part)
+            .collect::<Vec<_>>(),
+        vec![1, 1, 2, 3, 4, 5, 6, 7],
+        "an interrupted upload must resend part 1"
+    );
+    assert_ne!(
+        store.part_writes[0].0, store.part_writes[1].0,
+        "retry reused the previous multipart session"
+    );
 }
 
 fn local_text(core: &Core, id: &str, text: &str) {
@@ -1934,7 +1856,10 @@ async fn flat_equal_transcript_content_reuses_one_object_without_conflict() {
             .unwrap()
             .objects
             .keys()
-            .filter(|k| k.rsplit('/').next().is_some_and(|name| name.starts_with("transcript-") && name.ends_with(".json")))
+            .filter(|k| k
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with("transcript-") && name.ends_with(".json")))
             .count(),
         1,
         "equal immutable content should reuse one shallow object"
@@ -2052,6 +1977,8 @@ fn update_for(
     profile: &str,
 ) -> crate::backup::spaces::Update {
     crate::backup::spaces::Update {
+        telegram: None,
+        create_library: false,
         cleanup_deleted_records: false,
         deleted_record_retention_days: 30,
         display_name: None,
@@ -2075,58 +2002,129 @@ fn update_for(
 async fn p3_save_configuration_without_activation_preserves_default_and_queue() {
     let (f, _, engine) = sync_fixture().await;
     let vault = Vault::default();
-    let a = crate::backup::spaces::save_with(&f.core, update_for(&f.space.endpoint, &f.space.bucket, &f.space.prefix, "r2"), &vault, |_, _, _, _| Ok(f.store.clone())).await.unwrap();
+    let a = crate::backup::spaces::save_with(
+        &f.core,
+        update_for(&f.space.endpoint, &f.space.bucket, &f.space.prefix, "r2"),
+        &vault,
+        |_, _, _, _| Ok(f.store.clone()),
+    )
+    .await
+    .unwrap();
     let operation = claim(&engine, &f.core);
-    let before = scheduler::operations(&f.core).unwrap().into_iter().find(|o| o.operation_id == operation).unwrap();
+    let before = scheduler::operations(&f.core)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.operation_id == operation)
+        .unwrap();
     let store = Memory::default();
     let mut edit = update_for("https://s3.example.test", "saved-only", "saved/", "s3");
     edit.activate = false;
-    let b = crate::backup::spaces::save_with(&f.core, edit, &vault, |_, _, _, _| Ok(store.clone())).await.unwrap();
+    let b = crate::backup::spaces::save_with(&f.core, edit, &vault, |_, _, _, _| Ok(store.clone()))
+        .await
+        .unwrap();
     assert!(!b.enabled);
-    assert_eq!(crate::backup::spaces::get(&f.core).unwrap().unwrap().space_id, a.space_id);
+    assert_eq!(
+        crate::backup::spaces::get(&f.core)
+            .unwrap()
+            .unwrap()
+            .space_id,
+        a.space_id
+    );
     let mut edit = update_for(&b.endpoint, &b.bucket, &b.prefix, "s3");
     edit.activate = false;
     edit.enabled = false;
     edit.credentials = None;
-    let same = crate::backup::spaces::save_with(&f.core, edit, &vault, |_, _, _, _| Ok(store.clone())).await.unwrap();
+    let same =
+        crate::backup::spaces::save_with(&f.core, edit, &vault, |_, _, _, _| Ok(store.clone()))
+            .await
+            .unwrap();
     assert_eq!(same.space_id, b.space_id);
-    assert_eq!(crate::backup::spaces::get(&f.core).unwrap().unwrap().space_id, a.space_id);
+    assert_eq!(
+        crate::backup::spaces::get(&f.core)
+            .unwrap()
+            .unwrap()
+            .space_id,
+        a.space_id
+    );
     let mut edit = update_for(&b.endpoint, &b.bucket, &b.prefix, "s3");
     edit.activate = false;
     edit.enabled = false;
     edit.region = "us-west-2".into();
     edit.credentials = None;
-    let changed = crate::backup::spaces::save_with(&f.core, edit, &vault, |_, _, _, _| Ok(store.clone())).await.unwrap();
+    let changed =
+        crate::backup::spaces::save_with(&f.core, edit, &vault, |_, _, _, _| Ok(store.clone()))
+            .await
+            .unwrap();
     assert_eq!(changed.region, "us-west-2");
     assert!(!changed.enabled);
-    assert_eq!(crate::backup::spaces::get(&f.core).unwrap().unwrap().space_id, a.space_id);
-    let after = scheduler::operations(&f.core).unwrap().into_iter().find(|o| o.operation_id == operation).unwrap();
+    assert_eq!(
+        crate::backup::spaces::get(&f.core)
+            .unwrap()
+            .unwrap()
+            .space_id,
+        a.space_id
+    );
+    let after = scheduler::operations(&f.core)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.operation_id == operation)
+        .unwrap();
     assert_eq!(after.state, before.state);
     assert_eq!(after.payload, before.payload);
     assert_eq!(vault.0.lock().unwrap().len(), 2);
-    f.core.backup_db(|db| crate::backup::spaces::select_local(db, &b.space_id, true)).unwrap();
-    assert_eq!(crate::backup::spaces::get(&f.core).unwrap().unwrap().space_id, b.space_id);
-    assert_eq!(scheduler::operations(&f.core).unwrap().into_iter().find(|o| o.operation_id == operation).unwrap().state, "blocked");
+    f.core
+        .backup_db(|db| crate::backup::spaces::select_local(db, &b.space_id, true))
+        .unwrap();
+    assert_eq!(
+        crate::backup::spaces::get(&f.core)
+            .unwrap()
+            .unwrap()
+            .space_id,
+        b.space_id
+    );
+    assert_eq!(
+        scheduler::operations(&f.core)
+            .unwrap()
+            .into_iter()
+            .find(|o| o.operation_id == operation)
+            .unwrap()
+            .state,
+        "blocked"
+    );
 }
 
 #[tokio::test]
 async fn p3_first_saved_configuration_waits_for_explicit_activation() {
     let root = tempfile::tempdir().unwrap();
-    let core = Core::open(&root.path().join("tabs.sqlite"), root.path().join("downloads"), "unused".into(), vec![], |_| {}).unwrap();
+    let core = Core::open(
+        &root.path().join("tabs.sqlite"),
+        root.path().join("downloads"),
+        "unused".into(),
+        vec![],
+        |_| {},
+    )
+    .unwrap();
     let vault = Vault::default();
     let store = Memory::default();
     let mut edit = update_for("https://s3.example.test", "first-saved", "first/", "s3");
     edit.activate = false;
     edit.display_name = Some("个人存储".into());
-    let saved = crate::backup::spaces::save_with(&core, edit, &vault, |_, _, _, _| Ok(store)).await.unwrap();
+    let saved = crate::backup::spaces::save_with(&core, edit, &vault, |_, _, _, _| Ok(store))
+        .await
+        .unwrap();
     assert_eq!(saved.display_name, "个人存储");
     assert!(!saved.enabled);
     assert!(crate::backup::spaces::get(&core).unwrap().is_none());
     assert_eq!(crate::backup::spaces::list(&core).unwrap().len(), 1);
     assert!(scheduler::operations(&core).unwrap().is_empty());
     let mut edit = update_for(&saved.endpoint, &saved.bucket, &saved.prefix, "s3");
-    edit.activate = false; edit.enabled = false; edit.credentials = None;
-    let unchanged = crate::backup::spaces::save_with(&core, edit, &vault, |_, _, _, _| Ok(Memory::default())).await.unwrap();
+    edit.activate = false;
+    edit.enabled = false;
+    edit.credentials = None;
+    let unchanged =
+        crate::backup::spaces::save_with(&core, edit, &vault, |_, _, _, _| Ok(Memory::default()))
+            .await
+            .unwrap();
     assert_eq!(unchanged.display_name, "个人存储");
     assert!(crate::backup::spaces::get(&core).unwrap().is_none());
 }
@@ -2134,40 +2132,94 @@ async fn p3_first_saved_configuration_waits_for_explicit_activation() {
 #[tokio::test]
 async fn p3_space_names_are_local_persistent_and_do_not_change_library_or_queue() {
     let (f, _, engine) = sync_fixture().await;
-    // Initialize the old schema before claiming work: init intentionally recovers running jobs.
-    f.core.backup_db(|db| { db.execute_batch("DROP TABLE backup_space_names")?; repository::init(db)?; repository::init(db) }).unwrap();
+    // Initialization is idempotent and runtime recovery runs before claiming work.
+    f.core
+        .backup_db(|db| {
+            repository::init(db)?;
+            repository::init(db)
+        })
+        .unwrap();
     let operation = claim(&engine, &f.core);
-    let before = scheduler::operations(&f.core).unwrap().into_iter().find(|o| o.operation_id == operation).unwrap();
+    let before = scheduler::operations(&f.core)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.operation_id == operation)
+        .unwrap();
     let writes = f.store.0.lock().unwrap().writes;
-    f.core.backup_db(|db| { db.execute("UPDATE backup_provider_config SET protocol=1 WHERE space_id=?", [&f.space.space_id])?; Ok(()) }).unwrap();
     let value = crate::backup::spaces::rename(&f.core, &f.space.space_id, "  工作素材  ").unwrap();
     assert_eq!(value.display_name, "工作素材");
     assert_eq!(value.library_id, f.space.library_id);
     assert_eq!(value.endpoint, f.space.endpoint);
     assert_eq!(value.bucket, f.space.bucket);
     assert_eq!(value.prefix, f.space.prefix);
-    assert_eq!(value.protocol, 1);
+    assert_eq!(value.protocol, 2);
     assert!(value.enabled);
     let db = rusqlite::Connection::open(f.root.path().join("app.sqlite")).unwrap();
-    assert_eq!(db.query_row("SELECT display_name FROM backup_space_names WHERE space_id=?", [&f.space.space_id], |r| r.get::<_, String>(0)).unwrap(), "工作素材");
-    assert_eq!(db.query_row("SELECT version FROM backup_schema WHERE id=1", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
-    let after = scheduler::operations(&f.core).unwrap().into_iter().find(|o| o.operation_id == operation).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT display_name FROM backup_space_names WHERE space_id=?",
+            [&f.space.space_id],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "工作素材"
+    );
+    assert_eq!(
+        db.query_row("SELECT version FROM backup_schema WHERE id=1", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let after = scheduler::operations(&f.core)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.operation_id == operation)
+        .unwrap();
     assert_eq!(after.state, before.state);
     assert_eq!(after.payload, before.payload);
     assert_eq!(f.store.0.lock().unwrap().writes, writes);
-    assert_eq!(crate::backup::spaces::current_id(&f.core).unwrap().as_deref(), Some(f.space.space_id.as_str()));
-    assert_eq!(crate::backup::spaces::rename(&f.core, &f.space.space_id, &"名".repeat(65)).unwrap_err().to_string(), "BACKUP_INVALID_SPACE_NAME");
-    assert_eq!(crate::backup::spaces::rename(&f.core, &f.space.space_id, "名字\0控制符").unwrap_err().to_string(), "BACKUP_INVALID_SPACE_NAME");
-    assert_eq!(crate::backup::spaces::rename(&f.core, "missing-space", "名称").unwrap_err().to_string(), "BACKUP_SPACE_NOT_FOUND");
-    assert!(crate::backup::spaces::rename(&f.core, &f.space.space_id, "").unwrap().display_name.is_empty());
+    assert_eq!(
+        crate::backup::spaces::current_id(&f.core)
+            .unwrap()
+            .as_deref(),
+        Some(f.space.space_id.as_str())
+    );
+    assert_eq!(
+        crate::backup::spaces::rename(&f.core, &f.space.space_id, &"名".repeat(65))
+            .unwrap_err()
+            .to_string(),
+        "BACKUP_INVALID_SPACE_NAME"
+    );
+    assert_eq!(
+        crate::backup::spaces::rename(&f.core, &f.space.space_id, "名字\0控制符")
+            .unwrap_err()
+            .to_string(),
+        "BACKUP_INVALID_SPACE_NAME"
+    );
+    assert_eq!(
+        crate::backup::spaces::rename(&f.core, "missing-space", "名称")
+            .unwrap_err()
+            .to_string(),
+        "BACKUP_SPACE_NOT_FOUND"
+    );
+    assert!(
+        crate::backup::spaces::rename(&f.core, &f.space.space_id, "")
+            .unwrap()
+            .display_name
+            .is_empty()
+    );
 }
 
 #[test]
-fn p3_save_configuration_activation_flag_is_backward_compatible() {
-    let mut value = serde_json::json!({"provider_type":"s3","profile":"s3","endpoint":"https://s3.example.test","bucket":"fixture","prefix":"fixture/","region":"us-east-1","path_style":true,"enabled":true});
-    assert!(serde_json::from_value::<crate::backup::spaces::Update>(value.clone()).unwrap().activate);
+fn save_configuration_requires_explicit_activation() {
+    let mut value = serde_json::json!({"provider_type":"s3","profile":"s3","endpoint":"https://s3.example.test","bucket":"fixture","prefix":"fixture/","region":"us-east-1","path_style":true,"enabled":true,"create_library":false,"cleanup_deleted_records":false,"deleted_record_retention_days":30});
+    assert!(serde_json::from_value::<crate::backup::spaces::Update>(value.clone()).is_err());
     value["activate"] = false.into();
-    assert!(!serde_json::from_value::<crate::backup::spaces::Update>(value).unwrap().activate);
+    assert!(
+        !serde_json::from_value::<crate::backup::spaces::Update>(value)
+            .unwrap()
+            .activate
+    );
 }
 #[tokio::test]
 async fn p3_switch_preserves_credentials_queue_ids_and_does_not_migrate_history() {
@@ -2889,14 +2941,10 @@ async fn p4_late_upload_after_delete_never_revives_and_initiator_reclaims_it() {
         bcore.asset_transcript(&id).unwrap().unwrap().text,
         "new pending text"
     );
-    assert!(f
-        .store
-        .0
-        .lock()
-        .unwrap()
-        .objects
-        .keys()
-        .any(|k| k.rsplit('/').next().is_some_and(|name|name.starts_with("transcript-") && name.ends_with(".json"))));
+    assert!(f.store.0.lock().unwrap().objects.keys().any(|k| k
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.starts_with("transcript-") && name.ends_with(".json"))));
     delete_pass(&f.core, a.as_ref(), &deletion).await.unwrap();
     assert!(f
         .store
@@ -2905,7 +2953,11 @@ async fn p4_late_upload_after_delete_never_revives_and_initiator_reclaims_it() {
         .unwrap()
         .objects
         .keys()
-        .all(|k| !k.contains("media/") && !k.rsplit('/').next().is_some_and(|name|name.starts_with("transcript-") && name.ends_with(".json"))));
+        .all(|k| !k.contains("media/")
+            && !k
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with("transcript-") && name.ends_with(".json"))));
     assert!(b.read_asset(&f.id).await.unwrap().unwrap().snapshot.deleted);
 }
 #[tokio::test]
@@ -2913,8 +2965,8 @@ async fn p4_cleanup_covers_unindexed_versions_and_part_sessions_but_retains_tomb
     let (f, a, engine) = sync_fixture().await;
     let op = claim(&engine, &f.core);
     engine.execute_upload(&op).await.unwrap();
-    let old = format!("test/media/{}/old/version/video.mp4", f.id);
-    let orphan = format!("test/media/{}/orphan/video.mp4", f.id);
+    let old = format!("test/media/{}/video-{}.mp4", f.id, tag(b"old version"));
+    let orphan = format!("test/media/{}/video-{}.mp4", f.id, "aa".repeat(32));
     {
         let mut s = f.store.0.lock().unwrap();
         s.objects.insert(old, (b"old version".to_vec(), None));
@@ -2979,7 +3031,6 @@ async fn p4_same_remote_id_in_another_space_does_not_receive_deletion_or_cleanup
     other.space_id = uuid::Uuid::new_v4().to_string();
     other.library_id = uuid::Uuid::new_v4().to_string();
     other.prefix = "other/".into();
-    other.role = Role::Member;
     f.core
         .backup_db(|db| {
             repository::save_space(db, &other)?;
@@ -3086,7 +3137,7 @@ async fn p4_completed_delete_rechecks_late_objects_after_restart_with_same_opera
     for _ in 0..3 {
         delete_pass(&f.core, a.as_ref(), &deletion).await.unwrap();
     }
-    let late = format!("test/media/{}/late/video.mp4", f.id);
+    let late = format!("test/media/{}/video-{}.mp4", f.id, tag(b"late object"));
     f.store
         .0
         .lock()
@@ -3223,7 +3274,7 @@ fn p4_restart_with_multiple_terminal_or_active_delete_logs_is_idempotent() {
     for existing_active in [false, true] {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         repository::init(&db).unwrap();
-        db.execute("INSERT INTO backup_spaces VALUES('space','lib','https://example','bucket','prefix/','member','device',1,NULL,1)",[]).unwrap();
+        db.execute("INSERT INTO backup_spaces VALUES('space','lib','https://example','bucket','prefix/',NULL,1)",[]).unwrap();
         db.execute(
             "INSERT INTO media_assets VALUES('asset',NULL,'{}','video.mp4',NULL,1,'active')",
             [],
@@ -3268,5 +3319,127 @@ async fn p4_repeated_explicit_deletion_reuses_original_operation() {
             )?))
             .unwrap(),
         1
+    );
+}
+
+#[tokio::test]
+async fn current_wire_record_enforces_metadata_identity_and_canonical_object_keys() {
+    let (f, _, engine) = sync_fixture().await;
+    engine
+        .execute_upload(&claim(&engine, &f.core))
+        .await
+        .unwrap();
+    let object = f
+        .store
+        .get(&format!("test/records/{}.json", f.id))
+        .await
+        .unwrap()
+        .unwrap();
+    let original: serde_json::Value = serde_json::from_slice(&object.body).unwrap();
+    crate::backup::s3_provider::validate_wire(&object.body, &f.space.library_id, &f.id, "test/")
+        .unwrap();
+    for case in 0..14 {
+        let mut wire = original.clone();
+        match case {
+            0 => wire["schema_version"] = 99.into(),
+            1 => wire["library_id"] = uuid::Uuid::new_v4().to_string().into(),
+            2 => wire["media"]["bytes"] = 0.into(),
+            3 => wire["media"]["sha256"] = "invalid".into(),
+            4 => wire["media"]["container"] = "exe".into(),
+            5 => wire["media"]["key"] = "foreign/media/file.mp4".into(),
+            6 => {
+                wire["media"]["key"] = format!(
+                    "test/media/{}/{}/video.mp4",
+                    f.id,
+                    wire["media"]["sha256"].as_str().unwrap()
+                )
+                .into()
+            }
+            7 => wire["fields"]["source"]["platform"] = "unknown".into(),
+            8 => wire["fields"]["source"]["video_id"] = "".into(),
+            9 => {
+                wire["fields"]["source"]["canonical_url"] =
+                    "https://www.youtube.com/watch?v=12345678901&token=forbidden".into()
+            }
+            10 => wire["fields"]["original_filename"] = "../file.mp4".into(),
+            11 => wire["device_id"] = "".into(),
+            12 => wire["title"] = "obsolete root field".into(),
+            _ => {
+                wire["cover"] = serde_json::json!({"key":format!("test/media/{}/cover-{}.png",f.id,"ab".repeat(32)),"sha256":"ab".repeat(32),"bytes":16*1024*1024+1,"container":"png"})
+            }
+        }
+        assert!(
+            crate::backup::s3_provider::validate_wire(
+                &serde_json::to_vec(&wire).unwrap(),
+                &f.space.library_id,
+                &f.id,
+                "test/"
+            )
+            .is_err(),
+            "accepted invalid wire case {case}"
+        );
+    }
+}
+#[test]
+fn current_sqlite_schema_is_idempotent_and_rejects_other_versions_without_rebuilding() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    repository::init(&db).unwrap();
+    let device = repository::device_id(&db).unwrap();
+    repository::init(&db).unwrap();
+    assert_eq!(repository::device_id(&db).unwrap(), device);
+    assert_eq!(
+        db.query_row("SELECT version FROM backup_schema", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    db.execute("UPDATE backup_schema SET version=99", [])
+        .unwrap();
+    assert_eq!(
+        repository::init(&db).unwrap_err().to_string(),
+        "BACKUP_UNSUPPORTED_SCHEMA"
+    );
+    assert_eq!(repository::device_id(&db).unwrap(), device);
+    assert_eq!(
+        db.query_row("SELECT version FROM backup_schema", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        99
+    );
+}
+#[tokio::test]
+async fn current_restore_rejects_corruption_and_preserves_user_file_then_recovers() {
+    let (f, _, engine) = sync_fixture().await;
+    engine
+        .execute_upload(&claim(&engine, &f.core))
+        .await
+        .unwrap();
+    let (_root, core, provider, _engine) = second_device(&f).await;
+    let id = core.backup_assets().unwrap()[0].asset_id.clone();
+    let directory = core.settings().download_directory;
+    std::fs::create_dir_all(&directory).unwrap();
+    let user = directory.join("video.mp4");
+    std::fs::write(&user, b"user file").unwrap();
+    f.store.0.lock().unwrap().corrupt_stream = true;
+    assert_eq!(
+        crate::backup::sync_read::ensure(&core, provider.as_ref(), &id)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "BACKUP_CHECKSUM_MISMATCH"
+    );
+    assert_eq!(std::fs::read(&user).unwrap(), b"user file");
+    assert!(core.backup_assets().unwrap()[0].path.is_none());
+    f.store.0.lock().unwrap().corrupt_stream = false;
+    let restored = crate::backup::sync_read::ensure(&core, provider.as_ref(), &id)
+        .await
+        .unwrap();
+    assert_ne!(restored, user);
+    assert_eq!(std::fs::read(&user).unwrap(), b"user file");
+    assert_eq!(
+        repository::fingerprint(&restored).unwrap().0,
+        repository::fingerprint(&f.root.path().join("video.mp4"))
+            .unwrap()
+            .0
     );
 }

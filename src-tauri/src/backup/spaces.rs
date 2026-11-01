@@ -1,6 +1,6 @@
 //! Saved provider spaces, capability gates and explicit selection; credentials stay in the vault.
 use super::{
-    model::{Role, Space},
+    model::Space,
     provider::*,
     repository,
     s3_client::S3Store,
@@ -16,22 +16,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-fn default_retention_days() -> u32 {
-    30
-}
-fn default_region() -> String {
-    "auto".into()
-}
-fn default_profile() -> String {
-    "r2".into()
-}
-fn yes() -> bool {
-    true
-}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Update {
-    #[serde(default)]
+    pub telegram: Option<TelegramConfig>,
+    pub create_library: bool,
     pub display_name: Option<String>,
     pub provider_type: ProviderType,
     pub profile: String,
@@ -41,29 +30,28 @@ pub struct Update {
     pub region: String,
     pub path_style: bool,
     pub enabled: bool,
-    /// Existing clients retain save-and-activate; the settings editor saves independently.
-    #[serde(default = "yes")]
     pub activate: bool,
     pub credentials: Option<Credentials>,
-    #[serde(default)]
     pub cleanup_deleted_records: bool,
-    #[serde(default = "default_retention_days")]
     pub deleted_record_retention_days: u32,
 }
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramConfig {pub account_id:String,pub channel_id:String}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub provider_type: ProviderType,
-    #[serde(default = "default_profile")]
     pub profile: String,
-    #[serde(default = "default_region")]
     pub region: String,
-    #[serde(default = "yes")]
     pub path_style: bool,
     pub protocol: u32,
     pub capabilities: Option<ProviderCapabilities>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct View {
+    pub telegram: Option<TelegramConfig>,
+    pub telegram_channel_title: Option<String>,
+    pub can_delete_owned_media:bool,
     pub display_name: String,
     pub space_id: String,
     pub library_id: String,
@@ -101,7 +89,7 @@ pub fn list(core: &Core) -> Result<Vec<View>> {
         .map(|s| {
             let c = config(core, &s.space_id)?;
             let (last_error, display_name) = core.backup_db(|db| {
-                let last_error = db
+                let last_error: Option<String> = db
                     .query_row(
                         "SELECT last_error FROM backup_sync_checkpoints WHERE space_id=?",
                         [&s.space_id],
@@ -114,6 +102,9 @@ pub fn list(core: &Core) -> Result<Vec<View>> {
             })?;
             let (cleanup_deleted_records,deleted_record_retention_days,cleanup_error)=retention(core,&s.space_id)?;
             Ok(View {
+                telegram: super::telegram_spaces::binding(core,&s.space_id)?.map(|(target,_)|target),
+                telegram_channel_title: core.backup_db(|db| Ok(db.query_row("SELECT channel_title FROM telegram_space_labels WHERE space_id=?", [&s.space_id], |r| r.get(0)).optional()?))?,
+                can_delete_owned_media: c.capabilities.as_ref().is_some_and(|c|c.can_delete_owned_media),
                 display_name,
                 space_id: s.space_id,
                 library_id: s.library_id,
@@ -127,7 +118,7 @@ pub fn list(core: &Core) -> Result<Vec<View>> {
                 enabled: s.enabled,
                 credentials_configured: s.credential_ref.is_some(),
                 protocol: c.protocol,
-                connection_pending: c.protocol != 2 || c.capabilities.is_none(),
+                connection_pending: c.capabilities.is_none(),
                 last_error: last_error.or(cleanup_error),
                 cleanup_deleted_records,
                 deleted_record_retention_days,
@@ -168,12 +159,12 @@ pub fn current_id(core: &Core) -> Result<Option<String>> {
             .optional()?)
     })
 }
-fn normalized_name(name: &str) -> Result<String> {
+pub(super) fn normalized_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.chars().count() > 64 || name.chars().any(char::is_control) { bail!("BACKUP_INVALID_SPACE_NAME"); }
     Ok(name.into())
 }
-fn write_name(db: &rusqlite::Connection, id: &str, name: &str) -> Result<()> {
+pub(super) fn write_name(db: &rusqlite::Connection, id: &str, name: &str) -> Result<()> {
     db.execute("INSERT INTO backup_space_names(space_id,display_name) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET display_name=excluded.display_name", params![id,name])?;
     Ok(())
 }
@@ -219,7 +210,6 @@ pub async fn set_enabled(core: &Arc<Core>, enabled: bool) -> Result<bool> {
     core.backup_db(|db| {
         let tx = db.unchecked_transaction()?;
         let current: Option<(String,String,bool)> = tx.query_row("SELECT s.space_id,p.provider_type,p.protocol=2 AND p.capabilities_json IS NOT NULL FROM backup_current_space c JOIN backup_spaces s USING(space_id) JOIN backup_provider_config p USING(space_id) WHERE c.id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        if enabled && current.as_ref().is_some_and(|(_,provider,_)|provider!="s3") { bail!("BACKUP_PROVIDER_NOT_IMPLEMENTED"); }
         tx.execute("INSERT INTO backup_sync_preference VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled", [enabled])?;
         if let Some((id,_,ready))=current {
             select_in_transaction(&tx,&id,enabled && ready)?;
@@ -231,6 +221,12 @@ pub async fn set_enabled(core: &Arc<Core>, enabled: bool) -> Result<bool> {
     Ok(enabled)
 }
 pub async fn prepare_current(core: &Arc<Core>) -> Result<()> {
+    if let Some(id)=current_id(core)? {
+        if enabled(core)? && config(core,&id)?.provider_type==ProviderType::Telegram {
+            if config(core,&id)?.capabilities.is_none() {await_preparation(core,&id,super::telegram_spaces::prepare(core,&id)).await?;} else {core.backup_db(|db|select_local(db,&id,true))?;}
+            return Ok(());
+        }
+    }
     prepare_current_with(core, &SystemVault, |s, c, region, path_style| {
         S3Store::configured(
             s,
@@ -254,7 +250,6 @@ pub async fn prepare_current_with<S: ObjectStore>(
     if !enabled(core)? {
         return Ok(());
     }
-    let mut shutdown = core.backup_cancellation();
     let work = async {
         let _guard = core.backup_config_lock.lock().await;
         if !enabled(core)? || current_id(core)?.as_deref() != Some(&id) {
@@ -272,6 +267,11 @@ pub async fn prepare_current_with<S: ObjectStore>(
             .context("BACKUP_SPACE_NOT_FOUND")?;
         Ok(())
     };
+    await_preparation(core,&id,work).await
+}
+pub(super) async fn await_preparation<T>(core:&Arc<Core>,id:&str,work:impl std::future::Future<Output=Result<T>>)->Result<T> {
+    let mut shutdown=core.backup_cancellation();
+    if *shutdown.borrow() || !enabled(core)? || current_id(core)?.as_deref()!=Some(id) {bail!("CANCELED");}
     tokio::pin!(work);
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(120));
     tokio::pin!(deadline);
@@ -281,14 +281,14 @@ pub async fn prepare_current_with<S: ObjectStore>(
             _=&mut deadline=>break Err(anyhow::anyhow!("BACKUP_TIMEOUT")),
             _=shutdown.changed()=>break Err(anyhow::anyhow!("CANCELED")),
             _=tokio::time::sleep(std::time::Duration::from_millis(100))=>{
-                if !enabled(core)? || current_id(core)?.as_deref()!=Some(&id) {break Err(anyhow::anyhow!("CANCELED"));}
+                if !enabled(core)? || current_id(core)?.as_deref()!=Some(id) {break Err(anyhow::anyhow!("CANCELED"));}
             }
         }
     };
     if let Err(error) = &result {
         if error.to_string() != "CANCELED"
             && enabled(core)?
-            && current_id(core)?.as_deref() == Some(&id)
+            && current_id(core)?.as_deref() == Some(id)
         {
             core.backup_db(|db|{db.execute("INSERT INTO backup_sync_checkpoints(space_id,last_error) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET last_error=excluded.last_error",params![id,error.to_string()])?;Ok(())})?;
         }
@@ -302,6 +302,8 @@ fn saved_update(core: &Core, id: &str, enabled: bool) -> Result<Update> {
         .find(|s| s.space_id == id)
         .context("BACKUP_SPACE_NOT_FOUND")?;
     Ok(Update {
+        telegram: value.telegram,
+        create_library: false,
         display_name: None,
         provider_type: value.provider_type,
         profile: value.profile,
@@ -363,7 +365,7 @@ pub async fn remove_with(
     settings::cleanup_credentials(core, vault)
 }
 
-pub fn provider(core: &Core, id: &str) -> Result<Arc<dyn BackupProvider>> {
+pub fn provider(core: &Arc<Core>, id: &str) -> Result<Arc<dyn BackupProvider>> {
     let space = saved_space(core, id)?;
     let cfg = config(core, id)?;
     cfg.provider_type.require_implemented()?;
@@ -373,6 +375,7 @@ pub fn provider(core: &Core, id: &str) -> Result<Arc<dyn BackupProvider>> {
     if !space.enabled || current_id(core)?.as_deref() != Some(id) {
         bail!("BACKUP_SPACE_INACTIVE");
     }
+    if cfg.provider_type==ProviderType::Telegram {return super::telegram_spaces::provider(core,&space,cfg);}
     let credentials = settings::credentials(core, id, &SystemVault)?;
     let store = S3Store::configured(
         &space,
@@ -398,7 +401,7 @@ pub fn select_local(db: &rusqlite::Connection, id: &str, enabled: bool) -> Resul
     tx.commit()?;
     Ok(())
 }
-fn select_in_transaction(tx: &rusqlite::Connection, id: &str, enabled: bool) -> Result<()> {
+pub(super) fn select_in_transaction(tx: &rusqlite::Connection, id: &str, enabled: bool) -> Result<()> {
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM backup_spaces WHERE space_id=?)",
         [id],
@@ -419,6 +422,16 @@ fn select_in_transaction(tx: &rusqlite::Connection, id: &str, enabled: bool) -> 
     Ok(())
 }
 pub async fn select(core: &Arc<Core>, id: &str) -> Result<View> {
+    if config(core,id)?.provider_type==ProviderType::Telegram {
+        let _guard=core.backup_config_lock.lock().await;
+        if !enabled(core)? {bail!("BACKUP_SYNC_DISABLED");}
+        let space=saved_space(core,id)?;
+        let provider=super::telegram_spaces::provider(core,&space,config(core,id)?)?;
+        provider.open_library(false).await?;
+        core.backup_db(|db|select_local(db,id,true))?;
+        core.wake_backup();
+        return get(core)?.context("BACKUP_SPACE_NOT_FOUND");
+    }
     select_with(core, id, &SystemVault, |s, c, region, path_style| {
         S3Store::configured(
             s,
@@ -444,7 +457,7 @@ pub async fn select_with<S: ObjectStore>(
     let mut space = saved_space(core, id)?;
     let cfg = config(core, id)?;
     cfg.provider_type.require_implemented()?;
-    if cfg.protocol != 2 || cfg.capabilities.is_none() {
+    if cfg.capabilities.is_none() {
         return connect_locked(core, saved_update(core, id, true)?, vault, make, true)
             .await?
             .context("BACKUP_SPACE_NOT_FOUND");
@@ -494,6 +507,7 @@ fn normalize(update: &mut Update) -> Result<()> {
 }
 
 pub async fn save(core: &Arc<Core>, update: Update) -> Result<View> {
+    if update.provider_type==ProviderType::Telegram {return super::telegram_spaces::connect(core,update,true).await;}
     save_with(core, update, &SystemVault, |s, c, region, path_style| {
         S3Store::configured(
             s,
@@ -506,6 +520,7 @@ pub async fn save(core: &Arc<Core>, update: Update) -> Result<View> {
     .await
 }
 pub async fn test_draft(core: &Arc<Core>, update: Update) -> Result<()> {
+    if update.provider_type==ProviderType::Telegram {super::telegram_spaces::connect(core,update,false).await?;return Ok(());}
     test_with(core, update, &SystemVault, |s, c, region, path_style| {
         S3Store::configured(
             s,
@@ -607,54 +622,20 @@ async fn connect_locked<S: ObjectStore>(
         endpoint: update.endpoint.clone(),
         bucket: update.bucket.clone(),
         prefix: update.prefix.clone(),
-        role: Role::Member,
-        writer_device_id: device.clone(),
-        writer_epoch: 1,
+
+
+
         credential_ref: None,
         enabled: true,
     };
     let store = make(&space, &credentials, &update.region, update.path_style)?;
     let library_key = format!("{}library.json", space.prefix);
     let existing = tokio::select! {_=shutdown.changed()=>bail!("CANCELED"),result=store.get(&library_key)=>result?};
-    let mut initialize = false;
-    let mut initialization_id = None;
-    if let Some(object) = &existing {
-        let raw: serde_json::Value =
-            serde_json::from_slice(&object.body).context("BACKUP_INVALID_LIBRARY")?;
-        let library_id = if raw["schema_version"] == 1 {
-            if let Some(old) = &old {
-                if config(core, &old.space_id)?.protocol == 2 {
-                    bail!("BACKUP_INVALID_LIBRARY");
-                }
-            }
-            let library: super::model::Library =
-                serde_json::from_value(raw).context("BACKUP_INVALID_LIBRARY")?;
-            library.validate()?;
-            initialize = true;
-            library.library_id
-        } else {
-            let library: LibraryMetadata =
-                serde_json::from_value(raw).context("BACKUP_INVALID_LIBRARY")?;
-            if library.schema_version == 2 && library.mode == "migrating" {
-                initialize = true;
-                initialization_id = Some(
-                    library
-                        .migration
-                        .as_ref()
-                        .context("BACKUP_INVALID_LIBRARY")?
-                        .operation_id
-                        .clone(),
-                );
-            } else {
-                library.validate()?;
-            }
-            library.library_id
-        };
-        uuid::Uuid::parse_str(&library_id).context("BACKUP_INVALID_LIBRARY")?;
-        if old.as_ref().is_some_and(|s| s.library_id != library_id) {
-            bail!("BACKUP_LIBRARY_MISMATCH");
-        }
-        space.library_id = library_id;
+    if let Some(object)=&existing {
+        let library:LibraryMetadata=serde_json::from_slice(&object.body).context("BACKUP_INVALID_LIBRARY")?;
+        library.validate()?;
+        if old.as_ref().is_some_and(|s|s.library_id!=library.library_id){bail!("BACKUP_LIBRARY_MISMATCH");}
+        space.library_id=library.library_id;
     }
     let reference = uuid::Uuid::new_v4().to_string();
     vault.write(
@@ -711,35 +692,6 @@ async fn connect_locked<S: ObjectStore>(
         finish_probe(core, &operation, &reference, vault, false)?;
         return Ok(None);
     }
-    let local_unprepared = old
-        .as_ref()
-        .map(|s| config(core, &s.space_id))
-        .transpose()?
-        .is_some_and(|c| c.protocol != 2);
-    if existing.is_some() && (initialize || local_unprepared) {
-        let id = initialization_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        if let Some(old) = &old {
-            let sync_enabled = enabled(core)?;
-            core.backup_db(|db| { let tx = db.unchecked_transaction()?;
-                // Stop scoped work while connecting development data, preserving every resume token.
-                tx.execute("INSERT OR IGNORE INTO backup_sync_preference VALUES(1,?)", [sync_enabled])?;
-                tx.execute("UPDATE backup_spaces SET enabled=0 WHERE space_id=?", [&old.space_id])?;
-                tx.execute("UPDATE backup_operations SET state='blocked',last_error='BACKUP_SPACE_INACTIVE' WHERE space_id=? AND state IN ('pending','running','retry_wait')", [&old.space_id])?;
-                tx.commit()?; Ok(())
-            })?;
-        }
-        let prepared = tokio::select! {_=shutdown.changed()=>Err(anyhow::anyhow!("CANCELED")), result=super::library::initialize(&store,&space.prefix,&space.library_id,&id)=>result};
-        if let Err(error) = prepared {
-            finish_probe(core, &operation, &reference, vault, false)?;
-            return Err(error);
-        }
-        if let Some(old) = &old {
-            if let Err(error) = super::library::reconcile_local(core, &store, old).await {
-                finish_probe(core, &operation, &reference, vault, false)?;
-                return Err(error);
-            }
-        }
-    }
     let provider = S3Provider::new(store, space.clone(), capabilities.clone(), device);
     let opened = tokio::select! {_=shutdown.changed()=>Err(anyhow::anyhow!("CANCELED")),result=provider.open_library(existing.is_none())=>result};
     if let Err(error) = opened {
@@ -758,7 +710,7 @@ async fn connect_locked<S: ObjectStore>(
         tx.execute("DELETE FROM backup_removed_spaces WHERE space_id=?",[&space.space_id])?;
         if update.activate {tx.execute("INSERT INTO backup_sync_preference VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled",[update.enabled])?;}
         if let Some(name)=&update.display_name {write_name(&tx,&space.space_id,name)?;}
-        tx.execute("UPDATE backup_provider_config SET provider_type='s3',profile=?2,region=?3,path_style=?4,capabilities_json=?5,protocol=2,migration_json=NULL WHERE space_id=?1",params![space.space_id,update.profile,update.region,update.path_style,serde_json::to_string(&capabilities)?])?;
+        tx.execute("UPDATE backup_provider_config SET provider_type='s3',profile=?2,region=?3,path_style=?4,capabilities_json=?5,protocol=2 WHERE space_id=?1",params![space.space_id,update.profile,update.region,update.path_style,serde_json::to_string(&capabilities)?])?;
         tx.execute("DELETE FROM backup_probe_cleanup WHERE operation_id=?",[&operation])?;
         tx.execute("UPDATE backup_sync_checkpoints SET last_error=NULL WHERE space_id=?",[&space.space_id])?;
         if let Some(old)=old.as_ref().and_then(|s|s.credential_ref.as_ref()) {tx.execute("INSERT OR IGNORE INTO backup_credential_cleanup VALUES(?)",[old])?;}

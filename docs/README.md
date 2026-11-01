@@ -4,6 +4,7 @@
 - [CSP 组件验证](csp-component-validation.md)：动态样式、浮层滚动锁、SVG 与远端备份初始化通知的审计及回归。
 - [R2 多设备双向同步改造方案](r2-multi-device-sync-plan.md)：下一阶段目标，所有设备平等读写、冲突合并、删除传播与视频懒加载；尚未实施。
 - [R2 多设备同步实施任务](r2-multi-device-sync-implementation.md)：P1–P6 顺序、改造范围、测试与阶段验收要求；仅规划。
+- [Telegram 存储技术方案](telegram-storage-plan.md)：grammers 直接接入 Rust；应用身份、独立会话、私有频道、事件确认与按需恢复边界。T1–T3 已验证 Windows 合成媒体、新库重建和按需恢复；T4 已接入安全删除、重新上传和本机释放，真实复验、打包与各平台验收边界见 [实施记录](telegram-storage-implementation.md)。
 - [视频 S3 备份与按需恢复方案](s3-video-backup-plan.md)：当前单主写版本的设计与实现基线，后续改造以多设备同步方案为准。
 - [S3 备份实施任务](s3-backup-implementation.md)：现有单主写版本 M1–M6 数据、恢复与删除契约。
 - [S3 备份验收记录](s3-backup-validation.md)：离线、浏览器、原生与真实 R2 分开记录。

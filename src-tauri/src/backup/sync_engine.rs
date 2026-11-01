@@ -114,7 +114,6 @@ pub fn merge(change: &AssetChange, remote: Option<&AssetSnapshot>) -> Result<Ass
     Ok(merged)
 }
 
-
 fn add_conflict(
     conflicts: &mut Vec<ConflictVersion>,
     field: &str,
@@ -154,6 +153,9 @@ fn conflict_content(value: &Value) -> Option<Value> {
 pub async fn publish(provider: &dyn BackupProvider, change: AssetChange) -> Result<PublishReceipt> {
     change.validate_scope(provider.scope())?;
     provider.capabilities().require_multi_writer()?;
+    if provider.capabilities().change_coordination == ChangeCoordination::EventReplay {
+        return provider.publish_change(change, None).await;
+    }
     for _ in 0..5 {
         let current = provider.read_asset(&change.asset_id).await?;
         if change.delete && current.as_ref().is_some_and(|r| r.snapshot.deleted) {
@@ -192,7 +194,6 @@ use std::sync::Arc;
 pub struct FieldEdit {
     pub value: Value,
     pub revision: u64,
-    #[serde(default)]
     pub base: FieldBaseline,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -223,7 +224,9 @@ impl PendingChanges {
                 .any(|c| c.adopt && c.conflict.field == "transcript")
     }
     pub fn is_empty(&self) -> bool {
-        !self.recreate && self.retained_conflicts.is_empty() && self.fields.is_empty()
+        !self.recreate
+            && self.retained_conflicts.is_empty()
+            && self.fields.is_empty()
             && self.choices.is_empty()
             && self.media.is_none()
             && self.cover.is_none()
@@ -253,6 +256,15 @@ pub fn fields(asset: &Asset) -> FieldPatch {
         .into_iter()
         .map(|k| (k.into(), m[k].clone()))
         .collect();
+    let mut source = json!({"platform":m["platform"],"video_id":m["video_id"],"canonical_url":m["canonical_url"]});
+    // Avatar cache flags are local state; preserve the portable author identity only.
+    if let Some(profile) = m["author_profile"].as_object() {
+        let profile: serde_json::Map<String, Value> = ["id", "nickname", "handle", "kind"]
+            .into_iter()
+            .filter_map(|key| profile.get(key).map(|v| (key.into(), v.clone())))
+            .collect();
+        source["author_profile"] = Value::Object(profile);
+    }
     let completed = m["completed_at"]
         .as_i64()
         .and_then(|v| chrono::DateTime::from_timestamp(v, 0))
@@ -263,13 +275,13 @@ pub fn fields(asset: &Asset) -> FieldPatch {
         "original_filename".into(),
         asset.original_filename.clone().into(),
     );
-    fields.insert("source".into(),json!({"platform":m["platform"],"video_id":m["video_id"],"canonical_url":m["canonical_url"]}));
+    fields.insert("source".into(), source);
     fields
 }
 
 /// Only a newly completed local download joins the selected space. Imports never call this.
 pub fn register_download(db: &Connection, local: &str) -> Result<()> {
-    let current:Option<String>=db.query_row("SELECT s.space_id FROM backup_current_space c JOIN backup_spaces s USING(space_id) JOIN backup_provider_config p USING(space_id) WHERE c.id=1 AND COALESCE((SELECT enabled FROM backup_sync_preference WHERE id=1),s.enabled)=1 AND p.provider_type='s3'",[],|r|r.get(0)).optional()?;
+    let current:Option<String>=db.query_row("SELECT s.space_id FROM backup_current_space c JOIN backup_spaces s USING(space_id) JOIN backup_provider_config p USING(space_id) WHERE c.id=1 AND COALESCE((SELECT enabled FROM backup_sync_preference WHERE id=1),s.enabled)=1 AND p.provider_type IN ('s3','telegram')",[],|r|r.get(0)).optional()?;
     let Some(space) = current else {
         return Ok(());
     };
@@ -285,12 +297,17 @@ pub fn register_download(db: &Connection, local: &str) -> Result<()> {
         .into_iter()
         .find(|a| a.asset_id == local)
         .ok_or_else(|| anyhow::anyhow!("BACKUP_ASSET_NOT_FOUND"))?;
+    join_asset(db, &space, &asset)
+}
+
+fn join_asset(db: &Connection, space: &str, asset: &Asset) -> Result<()> {
+    let local = &asset.asset_id;
     let pending = PendingChanges {
         recreate: false,
         recreate_revision: None,
         retained_conflicts: vec![],
         choices: vec![],
-        fields: fields(&asset)
+        fields: fields(asset)
             .into_iter()
             .map(|(k, value)| {
                 (
@@ -452,7 +469,7 @@ impl SyncEngine {
     }
     fn check_space(&self) -> Result<()> {
         let scope = self.provider.scope();
-        self.core.backup_db(|db|{let valid:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM backup_spaces s JOIN backup_current_space c USING(space_id) JOIN backup_provider_config p USING(space_id) WHERE s.space_id=?1 AND s.library_id=?2 AND s.enabled=1 AND p.provider_type='s3' AND p.protocol=2)",params![scope.space_id,scope.library_id],|r|r.get(0))?;if !valid {bail!("BACKUP_SPACE_INACTIVE");}Ok(())})
+        self.core.backup_db(|db|{let valid:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM backup_spaces s JOIN backup_current_space c USING(space_id) JOIN backup_provider_config p USING(space_id) WHERE s.space_id=?1 AND s.library_id=?2 AND s.enabled=1 AND p.provider_type IN ('s3','telegram') AND p.protocol=2 AND p.provider_type=?3)",params![scope.space_id,scope.library_id,serde_json::to_value(scope.provider_type)?.as_str()],|r|r.get(0))?;if !valid {bail!("BACKUP_SPACE_INACTIVE");}Ok(())})
     }
     fn save_payload(&self, operation: &str, phase: &str, payload: &Value) -> Result<()> {
         self.check(operation)?;
@@ -476,8 +493,8 @@ impl SyncEngine {
         let local = op.asset_id.as_deref().context("BACKUP_INVALID_OPERATION")?;
         let scope = self.provider.scope();
         let mut payload = op.payload.clone();
-        let saved_scope: Scope = serde_json::from_value(payload["scope"].clone())
-            .context("BACKUP_LEGACY_REVIEW_REQUIRED")?;
+        let saved_scope: Scope =
+            serde_json::from_value(payload["scope"].clone()).context("BACKUP_INVALID_OPERATION")?;
         scope.check(&saved_scope)?;
         let capture: Capture = if payload.get("capture").is_some() {
             serde_json::from_value(payload["capture"].clone())?
@@ -501,6 +518,9 @@ impl SyncEngine {
                         if !conflicts.contains(&conflict) {conflicts.push(conflict);}
                     }
                 }
+                let baseline=if pending.recreate && scope.provider_type==ProviderType::Telegram {
+                    Some(db.query_row("SELECT record_json FROM backup_tombstones WHERE space_id=?1 AND remote_asset_id=?2",params![scope.space_id,remote],|r|r.get::<_,String>(0))?)
+                } else {baseline};
                 Ok(Capture{remote,revision,pending,baseline:baseline.map(|v|serde_json::from_str(&v)).transpose()?,asset,transcript,cover,conflicts})
             })?;
             payload["capture"] = serde_json::to_value(&capture)?;
@@ -576,6 +596,7 @@ impl SyncEngine {
                 .upload_source(
                     operation,
                     "video",
+                    VideoAttributes::from_metadata(&capture.asset.metadata),
                     path,
                     capture.asset.content_bytes,
                     hash,
@@ -635,6 +656,7 @@ impl SyncEngine {
                 .upload_source(
                     operation,
                     kind,
+                    None,
                     temporary.path().to_owned(),
                     body.len() as u64,
                     format!("{:x}", Sha256::digest(&body)),
@@ -685,6 +707,7 @@ impl SyncEngine {
         &self,
         operation: &str,
         kind: &str,
+        video: Option<VideoAttributes>,
         path: std::path::PathBuf,
         bytes: u64,
         sha256: String,
@@ -729,6 +752,8 @@ impl SyncEngine {
         };
         let upload = self.provider.upload_media(
             MediaSource {
+                video,
+                base_revision: payload["capture"]["baseline"]["revision"].as_u64(),
                 recreate_revision: payload["capture"]["pending"]["recreate_revision"].as_u64(),
                 asset_id: remote.into(),
                 kind: kind.into(),
@@ -771,7 +796,6 @@ struct Capture {
     asset: Asset,
     transcript: Option<AssetTranscript>,
     cover: Option<Vec<u8>>,
-    #[serde(default)]
     conflicts: Vec<ConflictVersion>,
 }
 
@@ -780,7 +804,7 @@ fn check_operation(core: &Core, scope: &Scope, operation: &str) -> Result<()> {
         bail!("CANCELED");
     }
     core.backup_db(|db|{
-        let valid:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM backup_operations o JOIN backup_spaces s USING(space_id) JOIN backup_provider_config p USING(space_id) JOIN backup_current_space c USING(space_id) LEFT JOIN backup_space_assets m ON m.space_id=o.space_id AND m.local_asset_id=o.asset_id WHERE o.operation_id=?1 AND o.space_id=?2 AND o.state='running' AND s.enabled=1 AND s.library_id=?3 AND p.protocol=2 AND p.provider_type='s3' AND c.id=1 AND (m.remote_deleted=0 OR COALESCE(json_extract(m.pending_json,'$.recreate'),0)=1 OR o.kind='delete') AND (o.kind='delete' OR NOT EXISTS(SELECT 1 FROM backup_operations d WHERE d.space_id=o.space_id AND d.asset_id=o.asset_id AND d.kind='delete' AND d.state NOT IN ('completed','canceled'))))",params![operation,scope.space_id,scope.library_id],|r|r.get(0))?;
+        let valid:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM backup_operations o JOIN backup_spaces s USING(space_id) JOIN backup_provider_config p USING(space_id) JOIN backup_current_space c USING(space_id) LEFT JOIN backup_space_assets m ON m.space_id=o.space_id AND m.local_asset_id=o.asset_id WHERE o.operation_id=?1 AND o.space_id=?2 AND o.state='running' AND s.enabled=1 AND s.library_id=?3 AND p.protocol=2 AND p.provider_type IN ('s3','telegram') AND p.provider_type=?4 AND c.id=1 AND (m.remote_deleted=0 OR COALESCE(json_extract(m.pending_json,'$.recreate'),0)=1 OR o.kind='delete') AND (o.kind='delete' OR NOT EXISTS(SELECT 1 FROM backup_operations d WHERE d.space_id=o.space_id AND d.asset_id=o.asset_id AND d.kind='delete' AND d.state NOT IN ('completed','canceled'))))",params![operation,scope.space_id,scope.library_id,serde_json::to_value(scope.provider_type)?.as_str()],|r|r.get(0))?;
         if !valid {bail!("CANCELED");}Ok(())
     })
 }
@@ -799,7 +823,6 @@ pub fn import_asset(db: &Connection, scope: &Scope, remote: &RemoteAsset) -> Res
     if previous
         .as_ref()
         .is_some_and(|p| p.revision > snapshot.revision)
-
     {
         bail!("BACKUP_RECORD_ROLLBACK");
     }
@@ -807,11 +830,19 @@ pub fn import_asset(db: &Connection, scope: &Scope, remote: &RemoteAsset) -> Res
     // A tombstone must not turn unresolved local versions into a disposable remote projection.
     // These versions stay pending across discovery, restarts and explicit retry captures.
     if snapshot.deleted || pending.recreate {
-        let mut q=db.prepare("SELECT value_json FROM backup_conflicts WHERE space_id=?1 AND remote_asset_id=?2")?;
-        let values=q.query_map(params![scope.space_id,snapshot.asset_id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut q = db.prepare(
+            "SELECT value_json FROM backup_conflicts WHERE space_id=?1 AND remote_asset_id=?2",
+        )?;
+        let values = q
+            .query_map(params![scope.space_id, snapshot.asset_id], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         for raw in values {
-            let conflict:ConflictVersion=serde_json::from_str(&raw)?;
-            if !pending.retained_conflicts.contains(&conflict) {pending.retained_conflicts.push(conflict);}
+            let conflict: ConflictVersion = serde_json::from_str(&raw)?;
+            if !pending.retained_conflicts.contains(&conflict) {
+                pending.retained_conflicts.push(conflict);
+            }
         }
     }
     let known: Option<i64> = db
@@ -821,7 +852,10 @@ pub fn import_asset(db: &Connection, scope: &Scope, remote: &RemoteAsset) -> Res
             |r| r.get(0),
         )
         .optional()?;
-    if known.is_some_and(|r| r as u64 > snapshot.revision || deleted && !snapshot.deleted && r as u64 >= snapshot.revision) {
+    if known.is_some_and(|r| {
+        r as u64 > snapshot.revision
+            || deleted && !snapshot.deleted && r as u64 >= snapshot.revision
+    }) {
         bail!("BACKUP_RECORD_ROLLBACK");
     }
     if !snapshot.deleted {
@@ -853,12 +887,15 @@ pub fn import_asset(db: &Connection, scope: &Scope, remote: &RemoteAsset) -> Res
     } else {
         db.execute("INSERT INTO asset_remote_records VALUES(?1,?2,?3) ON CONFLICT(space_id,asset_id) DO UPDATE SET record_json=excluded.record_json",params![scope.space_id,local,serde_json::to_string(snapshot)?])?;
     }
-    db.execute("INSERT INTO asset_remote_objects(space_id,asset_id,record_key,record_revision,remote_state) VALUES(?1,?2,'provider',?3,?4) ON CONFLICT(space_id,asset_id) DO UPDATE SET record_revision=excluded.record_revision,remote_state=CASE WHEN remote_state='pending_delete' THEN remote_state ELSE excluded.remote_state END",params![scope.space_id,local,i64::try_from(snapshot.revision)?,if snapshot.deleted {"deleted"} else if pending_raw!="{}"&&!pending.is_empty() {"pending"} else {"backed_up"}])?;
+    db.execute("INSERT INTO asset_remote_objects(space_id,asset_id,record_revision,remote_state) VALUES(?1,?2,?3,?4) ON CONFLICT(space_id,asset_id) DO UPDATE SET record_revision=excluded.record_revision,remote_state=CASE WHEN remote_state='pending_delete' THEN remote_state ELSE excluded.remote_state END",params![scope.space_id,local,i64::try_from(snapshot.revision)?,if snapshot.deleted {"deleted"} else if pending_raw!="{}"&&!pending.is_empty() {"pending"} else {"backed_up"}])?;
     if snapshot.deleted && !pending.recreate {
         db.execute("UPDATE backup_operations SET state='blocked',last_error='BACKUP_ASSET_DELETED' WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state NOT IN ('completed','canceled')",params![scope.space_id,local])?;
     }
     if !snapshot.deleted {
-        db.execute("DELETE FROM backup_tombstones WHERE space_id=?1 AND remote_asset_id=?2",params![scope.space_id,snapshot.asset_id])?;
+        db.execute(
+            "DELETE FROM backup_tombstones WHERE space_id=?1 AND remote_asset_id=?2",
+            params![scope.space_id, snapshot.asset_id],
+        )?;
         db.execute(
             "DELETE FROM backup_conflicts WHERE space_id=?1 AND remote_asset_id=?2",
             params![scope.space_id, snapshot.asset_id],
@@ -879,7 +916,7 @@ pub async fn run(core: Arc<Core>, cancel: tokio::sync::watch::Receiver<bool>) {
     run_with(core, cancel, Arc::new(super::spaces::provider)).await;
 }
 pub type ProviderResolver =
-    Arc<dyn Fn(&Core, &str) -> Result<Arc<dyn BackupProvider>> + Send + Sync>;
+    Arc<dyn Fn(&Arc<Core>, &str) -> Result<Arc<dyn BackupProvider>> + Send + Sync>;
 pub async fn run_with(
     core: Arc<Core>,
     cancel: tokio::sync::watch::Receiver<bool>,
@@ -931,6 +968,8 @@ async fn discovery_loop(
                     180
                 }
             }
+            // Stopping the worker is control flow, not a persistent space failure.
+            Err(error) if error.to_string() == "CANCELED" => return,
             Err(error) => {
                 failures = (failures + 1).min(8);
                 if let Some(space) = attempted_space {
@@ -989,16 +1028,24 @@ async fn queue_loop(
                 let op=scheduler::operations(&core)?.into_iter().find(|o|o.operation_id==operation).ok_or_else(||anyhow::anyhow!("BACKUP_INVALID_OPERATION"))?;
                 let reason=error.to_string();
                 core.backup_db(|db|{
-                    let state=if op.attempt>=5||matches!(reason.as_str(),"BACKUP_ACCESS_DENIED"|"BACKUP_ASSET_DELETED"|"BACKUP_SOURCE_CHANGED"|"BACKUP_LEGACY_REVIEW_REQUIRED"|"BACKUP_REUPLOAD_STALE") {"blocked"} else {"retry_wait"};
-                    db.execute("UPDATE backup_operations SET state=?2,last_error=?3,next_retry_at=unixepoch()+?4 WHERE operation_id=?1 AND state='running'",params![operation,state,reason,(2i64.pow(op.attempt.min(8) as u32)).min(300)])?;
+                    let state=if op.attempt>=5 || (engine.provider.scope().provider_type==ProviderType::Telegram && reason=="BACKUP_CHECKSUM_MISMATCH") || matches!(reason.as_str(),"BACKUP_ACCESS_DENIED"|"BACKUP_ASSET_DELETED"|"BACKUP_SOURCE_CHANGED"|"BACKUP_INVALID_OPERATION"|"BACKUP_REUPLOAD_STALE"|"BACKUP_DELETE_UNSUPPORTED"|"BACKUP_MEDIA_IN_USE"|"BACKUP_TOMBSTONE_REQUIRED"|"TELEGRAM_MEDIA_CHANGED"|"TELEGRAM_MEDIA_MISSING"|"TELEGRAM_AUTH_REQUIRED"|"TELEGRAM_ACCOUNT_MISMATCH"|"TELEGRAM_CHANNEL_FORBIDDEN"|"TELEGRAM_INDEX_INVALID"|"TELEGRAM_INDEX_CHANGED"|"TELEGRAM_OPERATION_MISMATCH"|"TELEGRAM_FILE_TOO_LARGE") {"blocked"} else {"retry_wait"};
+                    db.execute("UPDATE backup_operations SET state=?2,last_error=?3,next_retry_at=unixepoch()+?4 WHERE operation_id=?1 AND state='running'",params![operation,state,reason,reason.strip_prefix("TELEGRAM_FLOOD_WAIT:").and_then(|v|v.parse::<u32>().ok()).map(i64::from).unwrap_or_else(||(2i64.pow(op.attempt.min(8) as u32)).min(300))])?;
                     Ok(())
                 })?;
             }
             Ok(())
         }.await;
-        let connection_error=result.is_err() && super::spaces::get(&core).ok().flatten().is_some_and(|s|s.connection_pending);
-        if let Err(error) = result { if error.to_string()!="CANCELED" {eprintln!("backup sync: {error}");} }
-        pause(&core, &mut cancel, if connection_error {60} else {2}).await;
+        let connection_error = result.is_err()
+            && super::spaces::get(&core)
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.connection_pending);
+        if let Err(error) = result {
+            if error.to_string() != "CANCELED" {
+                eprintln!("backup sync: {error}");
+            }
+        }
+        pause(&core, &mut cancel, if connection_error { 60 } else { 2 }).await;
     }
 }
 fn settings_cleanup(core: &Core) -> Result<()> {
@@ -1030,10 +1077,17 @@ pub async fn maintenance_once(
     }
     tokio::select! {_=cancel.changed()=>bail!("CANCELED"),result=work=>result}
 }
-async fn maintenance_loop(core: Arc<Core>, mut cancel: tokio::sync::watch::Receiver<bool>, resolve: ProviderResolver) {
+async fn maintenance_loop(
+    core: Arc<Core>,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+    resolve: ProviderResolver,
+) {
     while !*cancel.borrow() {
-        if let Err(error) =
-            maintenance_once(&mut cancel, async { super::spaces::cleanup_probes(&core).await?; super::sync_delete::compact_current(&core,resolve.clone()).await }).await
+        if let Err(error) = maintenance_once(&mut cancel, async {
+            super::spaces::cleanup_probes(&core).await?;
+            super::sync_delete::compact_current(&core, resolve.clone()).await
+        })
+        .await
         {
             if error.to_string() != "CANCELED" {
                 eprintln!("backup probe maintenance: {error}");
@@ -1058,7 +1112,15 @@ pub fn request_upload_with(
     core.backup_db(|db|{
         let tx=db.unchecked_transaction()?;
         let db=&tx;
-        let deleted:bool=db.query_row("SELECT remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![space,local],|r|r.get(0)).optional()?.ok_or_else(||anyhow::anyhow!("BACKUP_ASSET_NOT_IN_SPACE"))?;
+        let member:Option<bool>=db.query_row("SELECT remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![space,local],|r|r.get(0)).optional()?;
+        let deleted = if let Some(deleted) = member { deleted } else {
+            let asset=repository::list_assets(db)?.into_iter().find(|a|a.asset_id==local).context("BACKUP_ASSET_NOT_FOUND")?;
+            if asset.asset_state != "active" { bail!("BACKUP_ASSET_DELETED"); }
+            if !asset.path.as_ref().is_some_and(|p|p.is_file()) { bail!("FILE_MISSING"); }
+            // Only this explicit upload request joins an existing video to another target.
+            join_asset(db, space, &asset)?;
+            false
+        };
         let deleting:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='delete' AND state NOT IN ('completed','canceled'))",params![space,local],|r|r.get(0))?;
         if deleted {
             let asset=repository::list_assets(db)?.into_iter().find(|a|a.asset_id==local).context("BACKUP_ASSET_NOT_FOUND")?;
@@ -1082,8 +1144,10 @@ pub fn request_upload_with(
                 db.execute("UPDATE backup_space_assets SET pending_json=?3 WHERE space_id=?1 AND local_asset_id=?2",params![space,local,serde_json::to_string(&pending)?])?;
             }
         }
-        let legacy:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state<>'completed' AND COALESCE(json_extract(payload_json,'$.scope.protocol'),0)<>2)",params![space,local],|r|r.get(0))?;
-        if legacy {bail!("BACKUP_LEGACY_REVIEW_REQUIRED");}
+        if engine.provider.scope().provider_type==ProviderType::Telegram {
+            // Cleanup can have removed confirmed messages: a resumed request needs fresh send identities.
+            db.execute("UPDATE backup_operations SET state=CASE WHEN phase='cancel_cleaned' THEN 'completed' ELSE state END,phase=CASE WHEN phase='cancel_cleaned' THEN phase ELSE 'superseded' END WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state='canceled'",params![space,local])?;
+        }
         // A changed incarnation cannot resume the previous immutable object path.
         // Keep its private upload state for owned-session cleanup, then capture a fresh operation.
         db.execute("UPDATE backup_operations SET state='canceled',phase='superseded',last_error=NULL WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state IN ('blocked','retry_wait') AND last_error IN ('BACKUP_REUPLOAD_STALE','BACKUP_SOURCE_CHANGED') AND json_extract(payload_json,'$.scope.protocol')=2",params![space,local])?;

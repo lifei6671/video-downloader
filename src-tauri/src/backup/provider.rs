@@ -15,9 +15,6 @@ pub enum ProviderType {
 
 impl ProviderType {
     pub fn require_implemented(self) -> Result<()> {
-        if self == Self::Telegram {
-            bail!("BACKUP_PROVIDER_NOT_IMPLEMENTED");
-        }
         Ok(())
     }
 }
@@ -31,7 +28,6 @@ pub struct Scope {
 }
 impl Scope {
     pub fn check(&self, other: &Self) -> Result<()> {
-        self.provider_type.require_implemented()?;
         if self != other || self.protocol != 2 {
             bail!("BACKUP_SCOPE_MISMATCH");
         }
@@ -59,6 +55,7 @@ pub enum MediaLocation {
         account_id: String,
         channel_id: String,
         message_id: i64,
+        document_id: i64,
     },
 }
 
@@ -71,11 +68,15 @@ pub struct MediaRef {
     pub container: String,
 }
 impl MediaRef {
+    pub(crate) fn document_id(&self) -> Option<i64> {
+        match &self.location { MediaLocation::TelegramMessage {document_id,..}=>Some(*document_id), _=>None }
+    }
     pub fn validate_scope(&self, scope: &Scope) -> Result<()> {
         scope.check(&self.scope)?;
         if !matches!(
             (&self.location, scope.provider_type),
             (MediaLocation::S3Object { .. }, ProviderType::S3)
+                | (MediaLocation::TelegramMessage { .. }, ProviderType::Telegram)
         ) {
             bail!("BACKUP_MEDIA_PROVIDER_MISMATCH");
         }
@@ -172,26 +173,20 @@ pub struct AssetSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssetChange {
-    #[serde(default)]
     pub recreate: bool,
     pub asset_id: String,
     pub base: Option<AssetSnapshot>,
     pub fields: FieldPatch,
     /// Per-edit bases survive acknowledgements of unrelated in-flight changes.
-    #[serde(default)]
     pub field_bases: std::collections::BTreeMap<String, FieldBaseline>,
     pub media: Option<MediaRef>,
-    #[serde(default)]
     pub cover: ReferenceChange<MediaRef>,
-    #[serde(default)]
     pub transcript: ReferenceChange<MediaRef>,
     pub delete: bool,
     pub device_id: String,
     pub operation_id: String,
-    #[serde(default)]
     pub conflicts: Vec<ConflictVersion>,
     /// Explicit user choices remove only these exact versions; concurrent alternatives survive.
-    #[serde(default)]
     pub resolved_conflicts: Vec<ConflictVersion>,
 }
 
@@ -269,6 +264,9 @@ pub struct MediaStream {
 }
 #[derive(Clone)]
 pub struct MediaSource {
+    pub video: Option<VideoAttributes>,
+    /// Revision observed when the edit was captured; Telegram uses it to reject an old incarnation.
+    pub base_revision: Option<u64>,
     pub recreate_revision: Option<u64>,
     pub asset_id: String,
     pub kind: String,
@@ -279,6 +277,22 @@ pub struct MediaSource {
     pub operation_id: String,
     pub device_id: String,
     pub control: Option<std::sync::Arc<TransferControl>>,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct VideoAttributes {
+    pub duration_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    /// Set from the original file layout by the Telegram sender, never assumed from its extension.
+    pub supports_streaming: bool,
+}
+impl VideoAttributes {
+    pub fn from_metadata(metadata: &serde_json::Value) -> Option<Self> {
+        let duration_ms = metadata["duration_ms"].as_u64().filter(|v| *v > 0)?;
+        let width = u32::try_from(metadata["width"].as_u64()?).ok().filter(|v| *v > 0 && *v <= i32::MAX as u32)?;
+        let height = u32::try_from(metadata["height"].as_u64()?).ok().filter(|v| *v > 0 && *v <= i32::MAX as u32)?;
+        Some(Self { duration_ms, width, height, supports_streaming: false })
+    }
 }
 
 pub struct TransferControl {
@@ -344,7 +358,7 @@ mod tests {
         wrong = scope.clone();
         wrong.provider_type = ProviderType::Telegram;
         assert!(scope.check(&wrong).is_err());
-        assert!(ProviderType::Telegram.require_implemented().is_err());
+        assert!(ProviderType::Telegram.require_implemented().is_ok());
         let receipt: PublishReceipt =
             serde_json::from_str(r#"{"status":"accepted","operation_id":"op"}"#).unwrap();
         assert!(matches!(receipt, PublishReceipt::Accepted { .. }));

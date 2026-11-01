@@ -3,8 +3,7 @@ CREATE TABLE IF NOT EXISTS backup_provider_config(
  provider_type TEXT NOT NULL CHECK(provider_type IN ('s3','telegram')),
  profile TEXT NOT NULL CHECK(profile IN ('r2','s3','telegram')),
  region TEXT NOT NULL DEFAULT 'auto',path_style INTEGER NOT NULL DEFAULT 1,
- capabilities_json TEXT,protocol INTEGER NOT NULL DEFAULT 1,
- migration_json TEXT);
+ capabilities_json TEXT,protocol INTEGER NOT NULL DEFAULT 2 CHECK(protocol=2));
 CREATE TABLE IF NOT EXISTS backup_space_names(
  space_id TEXT PRIMARY KEY REFERENCES backup_spaces(space_id) ON DELETE CASCADE,
  display_name TEXT NOT NULL);

@@ -26,7 +26,7 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
   copy: () => void;
   copyPath: () => void;
   remove: () => void;
-  deleteFile: () => void;
+  deleteFile?: () => void;
   deleteBackup?: boolean;
   release?: () => void;
 }) {
@@ -56,7 +56,7 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
       {removable && (hasFile || hasLink || transcript || coverActions) && <Separator />}
       {removable && <Item disabled={busy} onSelect={remove}><ListX />从列表移除</Item>}
       {hasFile && release && <Item disabled={busy} onSelect={release}><Trash2 />释放本机空间</Item>}
-      {(hasFile || deleteBackup) && <Item variant="destructive" disabled={busy} onSelect={deleteFile}>
+      {deleteFile && (hasFile || deleteBackup) && <Item variant="destructive" disabled={busy} onSelect={deleteFile}>
         <Trash2 />{task.video?.kind === 'image_album' ? '删除本地图集' : deleteBackup ? '从当前同步库删除' : '删除本地视频'}
       </Item>}
   </>;

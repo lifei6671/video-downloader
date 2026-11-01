@@ -44,9 +44,7 @@ impl<S: ObjectStore> S3Provider<S> {
                 bail!("BACKUP_INVALID_DELETION_INDEX");
             }
             uuid::Uuid::parse_str(&entry.operation_id).context("BACKUP_INVALID_DELETION_INDEX")?;
-            if !entry.device_id.is_empty() {
-                uuid::Uuid::parse_str(&entry.device_id).context("BACKUP_INVALID_DELETION_INDEX")?;
-            }
+            uuid::Uuid::parse_str(&entry.device_id).context("BACKUP_INVALID_DELETION_INDEX")?;
         }
         Ok(index)
     }
@@ -289,7 +287,7 @@ impl<S: ObjectStore> S3Provider<S> {
                 }
                 continue;
             };
-            let mut wire = validate_wire(
+            let wire = validate_wire(
                 &object.body,
                 &self.scope.library_id,
                 asset,
@@ -298,24 +296,7 @@ impl<S: ObjectStore> S3Provider<S> {
             if wire.state != "deleted" {
                 continue;
             }
-            let Some(deleted_at) = wire.deleted_at else {
-                // Historical records have no reliable deletion clock. Begin retention when first observed.
-                wire.deleted_at = Some(now);
-                match self
-                    .store
-                    .write(Write::Put {
-                        key,
-                        body: serde_json::to_vec(&wire)?,
-                        condition: Condition::Match(object.etag),
-                    })
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(e) if e.to_string() == "BACKUP_PRECONDITION_FAILED" => {}
-                    Err(e) => return Err(e),
-                }
-                continue;
-            };
+            let deleted_at = wire.deleted_at.context("BACKUP_INVALID_RECORD")?;
             if now < deleted_at || now - deleted_at < u64::from(days) * 86400 {
                 continue;
             }

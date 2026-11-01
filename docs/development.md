@@ -146,7 +146,7 @@ playwright-cli --session csp-components run-code --filename tests/csp-components
 
 `tests/backup-settings-actions-browser.mjs` 使用隔离 IPC 覆盖启停、后台连接中仍可停用、错误重试/成功状态刷新且不覆盖草稿、停用后停止本机轮询、默认空间启用门槛、不迁移历史视频、必填星号与字段错误、三视口按钮过渡及减少动态效果、引用删除确认/取消/失败重试、确认前新引用保护和空配置直接删除。Rust `cargo test --manifest-path src-tauri/Cargo.toml settings_actions -- --test-threads=1` 验证启停持久化、队列断点、配置引用、凭据清理、本机视频和未同步文案保留，以及同目标显式重连。
 
-`tests/backup-space-tabs-browser.mjs` 对生产预览验证空间 Tab、新建后增加 Tab、草稿保留、保存不激活、显式切换及失败保持原默认、三视口键盘、Tab 名称 Tooltip 及无升级弹窗；同时逐项比较与平台账号 Tab 的字号、内边距、颜色及高度。名称覆盖双击/F2 原位编辑、Enter/失焦只保存一次、Esc 取消、输入法选字不提交、失败保留输入并重试、跨 Tab 保存与凭据草稿隔离，以及重新打开后的持久化；只有新建表单显示独立名称输入框。`tests/csp-components-browser.mjs` 在严格 CSP 下验证原位输入框的定位、字号和高度。后端相关回归为 `cargo test --manifest-path src-tauri/Cargo.toml p3_ -- --test-threads=1`；设置页使用向后兼容的 `activate=false` 保存参数。`cargo test --manifest-path src-tauri/Cargo.toml single_protocol -- --test-threads=1` 验证保存/启用直接使用已有凭据、原身份与媒体保留、中断恢复，以及连接测试不改写库。名称通过启动时自动补建的本机 `backup_space_names` 表持久化，不修改现有 v4 表结构或空间身份。
+`tests/backup-space-tabs-browser.mjs` 对生产预览验证空间 Tab、新建后增加 Tab、草稿保留、保存不激活、显式切换及失败保持原默认、三视口键盘、Tab 名称 Tooltip 及无升级弹窗；同时逐项比较与平台账号 Tab 的字号、内边距、颜色及高度。名称覆盖双击/F2 原位编辑、Enter/失焦只保存一次、Esc 取消、输入法选字不提交、失败保留输入并重试、跨 Tab 保存与凭据草稿隔离，以及重新打开后的持久化；只有新建表单显示独立名称输入框。`tests/csp-components-browser.mjs` 在严格 CSP 下验证原位输入框的定位、字号和高度。后端相关回归为 `cargo test --manifest-path src-tauri/Cargo.toml p3_ -- --test-threads=1`；设置页显式提交必填 `activate=false`、建库与清理策略参数。`cargo test --manifest-path src-tauri/Cargo.toml single_protocol -- --test-threads=1` 验证保存/启用直接使用已有凭据、原身份与媒体保留、中断恢复，以及连接测试不改写库。名称通过随备份 schema v1 首次创建的本机 `backup_space_names` 表持久化，不为旧表补结构或回填数据。保留天数清空后关闭自动清理，会恢复有效默认值 30，保存仍显式提交完整策略参数。
 
 ## 界面构建版本
 

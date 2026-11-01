@@ -1,3 +1,4 @@
+import { TelegramLoginQr } from '@/components/telegram-login-qr';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, FolderOpen, QrCode } from 'lucide-react';
 import { toast } from 'sonner';
@@ -152,7 +153,7 @@ export function TdlAccountCard({ settings, saved, busy, setBusy }: TdlCardProps)
     <AlertDialog open={confirm} onOpenChange={setConfirm}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>启用 Telegram 实验模式？</AlertDialogTitle><AlertDialogDescription>当前 tdl 服务会对所有网络接口监听，且缺少访问令牌和请求消息范围限制。其他可连接此端口的设备可能访问已登录账号有权限的媒体。随机端口、隐藏链接及访问 127.0.0.1 均不能保证隔离。请确认网络可信，并由系统防火墙限制外部访问。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>暂不启用</AlertDialogCancel><AlertDialogAction onClick={() => setEnabled(true)}>我已了解风险，启用</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     <Dialog open={loginOpen} onOpenChange={open => { if (!open) closeLogin(); }}><DialogContent className="tdl-login-dialog max-h-[85dvh] overflow-y-auto" showCloseButton={false}><DialogHeader><DialogTitle>登录 Telegram</DialogTitle><DialogDescription>使用 Telegram 的“设置 → 设备 → 连接桌面设备”扫描二维码。本次创建独立会话，保留已有登录。</DialogDescription></DialogHeader>
       {loggingIn && (!loginStatus || loginStatus.phase === 'starting') && <p role="status" className="flex items-center gap-2"><Spinner />正在连接 Telegram…</p>}
-      {loggingIn && qr && <div className="mx-auto w-full max-w-64 rounded-lg bg-white p-2"><svg role="img" aria-label="Telegram 登录二维码" className="block aspect-square w-full" viewBox={`0 0 ${qr.length} ${qr.length}`} shapeRendering="crispEdges"><rect width={qr.length} height={qr.length} fill="white" /><path fill="black" d={qr.flatMap((row, y) => row.flatMap((black, x) => black ? [`M${x} ${y}h1v1h-1z`] : [])).join('')} /></svg></div>}
+      {loggingIn && qr && <TelegramLoginQr qr={qr} />}
       {loggingIn && loginStatus?.phase === 'password' && !submitting && <form id="tdl-password-form" onSubmit={event => void submitPassword(event)}><Field><FieldLabel htmlFor="tdl-2fa-password">两步验证密码</FieldLabel><Input autoFocus id="tdl-2fa-password" type="password" autoComplete="off" value={password} onChange={event => setPassword(event.target.value)} /><FieldDescription>输入你在 Telegram 设置的两步验证密码。密码仅临时传给本次 tdl 登录进程，不保存到配置或日志。</FieldDescription></Field></form>}
       {loggingIn && (submitting || loginStatus?.phase === 'verifying') && <p role="status" className="flex items-center gap-2"><Spinner />正在验证，请稍候…</p>}
       {!loggingIn && !loginError && <p role="status">tdl 登录成功，独立会话已保存。</p>}

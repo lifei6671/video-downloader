@@ -17,9 +17,6 @@ fn scope(core: &Core, space: &str) -> Result<Scope> {
         .filter(|s| s.space_id == space && s.enabled)
         .context("BACKUP_SPACE_INACTIVE")?;
     current.provider_type.require_implemented()?;
-    if current.protocol != 2 {
-        bail!("BACKUP_UPGRADE_REQUIRED");
-    }
     Ok(Scope {
         space_id: space.into(),
         library_id: current.library_id,
@@ -29,22 +26,37 @@ fn scope(core: &Core, space: &str) -> Result<Scope> {
 }
 pub fn intent(core: &Core, space: &str, local: &str) -> Result<String> {
     let scope = scope(core, space)?;
+    if scope.provider_type == ProviderType::Telegram
+        && !spaces::config(core, space)?
+            .capabilities
+            .is_some_and(|c| c.can_delete_owned_media)
+    {
+        bail!("BACKUP_DELETE_UNSUPPORTED");
+    }
+    let base: Option<AssetSnapshot> = if scope.provider_type == ProviderType::Telegram {
+        core.backup_db(|db| {
+        let raw:Option<String>=db.query_row("SELECT record_json FROM asset_remote_records WHERE space_id=?1 AND asset_id=?2",params![space,local],|r|r.get(0)).optional()?;
+        raw.map(|raw|serde_json::from_str(&raw).map_err(anyhow::Error::from)).transpose()
+    })?
+    } else {
+        None
+    };
     let remote = sync_read::remote_id(core, space, local)?;
     core.backup_db(|db|{
         let tx=db.unchecked_transaction()?;
         let previous:Option<(String,String,String)>=tx.query_row("SELECT operation_id,state,payload_json FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='delete' AND state<>'canceled' ORDER BY CASE WHEN state='completed' THEN 1 ELSE 0 END,rowid DESC LIMIT 1",params![space,local],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        if let Some((id,state,raw))=previous {
+        if let Some((id,state,raw))=previous.filter(|(_,state,_)|!(scope.provider_type==ProviderType::Telegram && state=="completed")) {
             let mut payload:Value=serde_json::from_str(&raw)?;
             if state=="completed" {payload["cleanup_pass"]=0.into();}
             if let Some(saved)=payload.get("scope") {scope.check(&serde_json::from_value(saved.clone())?)?;}
             payload["scope"]=serde_json::to_value(&scope)?;payload["remote_asset_id"]=remote.clone().into();
             tx.execute("UPDATE backup_operations SET state=CASE WHEN state='running' THEN state ELSE 'pending' END,phase=CASE WHEN ?2 THEN 'local' ELSE phase END,next_retry_at=NULL,last_error=NULL,attempt=0,payload_json=?3 WHERE operation_id=?1",params![id,state=="completed",payload.to_string()])?;
         } else {
-            tx.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'delete','pending','local',?4)",params![uuid::Uuid::new_v4().to_string(),space,local,json!({"scope":scope,"remote_asset_id":remote,"cleanup_pass":0}).to_string()])?;
+            tx.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'delete','pending','local',?4)",params![uuid::Uuid::new_v4().to_string(),space,local,json!({"scope":scope,"remote_asset_id":remote,"cleanup_pass":0,"base":base}).to_string()])?;
         }
         let operation:String=tx.query_row("SELECT operation_id FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='delete' AND state NOT IN ('completed','canceled')",params![space,local],|r|r.get(0))?;
         tx.execute("UPDATE backup_operations SET state='blocked',last_error='BACKUP_DELETE_PENDING' WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state NOT IN ('completed','canceled')",params![space,local])?;
-        tx.execute("INSERT INTO asset_remote_objects(space_id,asset_id,record_key,remote_state) VALUES(?1,?2,'provider','pending_delete') ON CONFLICT(space_id,asset_id) DO UPDATE SET remote_state='pending_delete'",params![space,local])?;
+        tx.execute("INSERT INTO asset_remote_objects(space_id,asset_id,remote_state) VALUES(?1,?2,'pending_delete') ON CONFLICT(space_id,asset_id) DO UPDATE SET remote_state='pending_delete'",params![space,local])?;
         tx.commit()?;Ok(operation)
     })
 }
@@ -55,7 +67,13 @@ pub async fn delete(core: &Arc<Core>, space: &str, local: &str) -> Result<()> {
         .into_iter()
         .find(|o| o.operation_id == operation)
         .context("BACKUP_INVALID_OPERATION")?;
-    prepare_local(core, &op).await
+    if scope(core, space)?.provider_type == ProviderType::Telegram {
+        core.cancel_asset_restore(local)?;
+        core.cancel_asset_transcription(local).await?;
+        Ok(())
+    } else {
+        prepare_local(core, &op).await
+    }
 }
 async fn prepare_local(core: &Arc<Core>, op: &scheduler::Operation) -> Result<()> {
     let local = op.asset_id.as_deref().context("BACKUP_INVALID_OPERATION")?;
@@ -127,13 +145,23 @@ pub async fn execute(
     } else {
         None
     };
-    prepare_local(core, &op).await?;
+    if owned.provider_type == ProviderType::Telegram {
+        core.cancel_asset_restore(local)?;
+        core.cancel_asset_transcription(local).await?;
+    } else {
+        prepare_local(core, &op).await?;
+    }
     let _writer = core.backup_write_lock.lock().await;
     let change = AssetChange {
         recreate: false,
         resolved_conflicts: vec![],
         asset_id: remote.clone(),
-        base: None,
+        base: op
+            .payload
+            .get("base")
+            .filter(|v| !v.is_null())
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()?,
         fields: Default::default(),
         field_bases: Default::default(),
         media: None,
@@ -155,6 +183,10 @@ pub async fn execute(
         PublishReceipt::Accepted { .. } => bail!("BACKUP_PUBLICATION_UNCONFIRMED"),
         PublishReceipt::Retry { reason } => bail!(reason),
     };
+    if !asset.snapshot.deleted {
+        complete_superseded(core, operation)?;
+        return Ok(());
+    }
     core.backup_db(|db| {
         let tx = db.unchecked_transaction()?;
         sync_engine::import_asset(&tx, &owned, &asset)?;
@@ -165,6 +197,10 @@ pub async fn execute(
         tx.commit()?;
         Ok(())
     })?;
+    if owned.provider_type == ProviderType::Telegram {
+        let _restore = core.backup_restore_lock.lock().await;
+        lifecycle::remove_local(core, local).await?;
+    }
     if let Err(error) = provider.reconcile_deleted_asset(&remote, operation).await {
         if provider
             .read_asset(&remote)
@@ -277,7 +313,6 @@ pub async fn confirm_on_read(
         }
         tx.execute("DELETE FROM asset_remote_records WHERE space_id=?1 AND asset_id=?2",params![scope.space_id,local])?;
         tx.execute("UPDATE backup_space_assets SET baseline_json=NULL WHERE space_id=?1 AND local_asset_id=?2",params![scope.space_id,local])?;
-        tx.execute("UPDATE asset_remote_objects SET media_key=NULL,cover_key=NULL,transcript_key=NULL WHERE space_id=?1 AND asset_id=?2",params![scope.space_id,local])?;
         tx.commit()?;Ok(())
     })
 }

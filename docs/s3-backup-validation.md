@@ -2,6 +2,31 @@
 
 实施基线：`codex/s3-video-backup` / `2d32959`。当前任务开始时，`docs/README.md` 已修改，两个 S3 方案文档未跟踪；这些用户文档保持原样。
 
+## 2026-11-01 当前唯一格式的真实 R2 验证
+
+用户授权在既有专用 R2 测试目标上验证去掉兼容逻辑后的上传、回读和全新数据库重建；不提交、不推送。本轮只新增默认忽略的在线验收及清理隔离测试，生产实现保持不变。当前契约为 S3 库/记录格式 v2、浅层媒体键及首次直接创建的备份 SQLite schema v1；本节之后的 M1–M6 等历史记录不表示当前仍支持旧角色、旧键、迁移或续传。
+
+测试入口为 `src-tauri/src/backup/sync_online_tests.rs` 的 `real_r2_current_upload_readback_fresh_database`。只读取忽略目录 `.local/r2-current-validation/config.private.json` 中显式准备的当前字段：`schema_version`、`environment`、`endpoint`、`bucket`、`prefix`、`region`、`path_style`、`credentials`。要求 `schema_version=1`、`environment=dedicated-test`，拒绝未知字段；不在测试或产品代码中添加旧配置字段的兼容读取。真实配置、账号目标、scope 定位文件及数据库均留在忽略目录，不输出密钥或写入本记录。
+
+每轮使用测试前缀下新的 `current-run-<UUID>/`，发送前持久登记本轮范围。两个业务 SQLite 均首次创建，设备 ID 独立；恢复端只根据远端库描述连接，不复制源数据库、资产或任务。复用原有 S3Store、提供商、能力探测、队列、发现、小对象校验及按需视频恢复入口，没有并发上传或新任务系统。本轮使用此前保留的合成 MP4/PNG 副本及人工构造的中英文文案，不运行 ASR 模型，不上传用户作品。
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib current_r2_cleanup_keeps_other_prefix_objects_and_sessions -- --test-threads=1` | PASS，1 项；清理后另一前缀的对象及 multipart 会话保留 |
+| `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib real_r2_current_upload_readback_fresh_database -- --ignored --nocapture --test-threads=1` | PASS，1 项，29.86 秒 |
+| `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings` | PASS |
+
+实际验证结果：
+
+- 原队列提交完成后，视频、封面、文案均有当前浅层引用 `<Prefix>media/<asset>/<kind>-<SHA256>.<ext>`，HEAD 大小正确；封面和文案完整回读校验通过。
+- 合成视频 20,498,841 B，SHA-256 `90a00390ad62fd7674c8691ae003d0ecc9b8bf3afe02ad03c27fcbca9868a972`；PNG 封面 26,458 B，SHA-256 `4a55b5f936fd0481bd9dcb1b355e441ee181b5f1c2104fe1d310b9bb02adaec1`。原视频不转码，恢复文件的大小与完整 SHA-256 相同。
+- 全新数据库从空资产、空任务重建出 1 个资产，标题、作者名称、作者 ID/昵称/账号名/类型、原始封面及中英文文案一致。SQLite 版本为 1，空间表 7 列、远端状态表 4 列，不依赖旧列、迁移或回填。
+- 发现及读取封面/文案期间视频流请求为 0，随后显式按需恢复发起 1 次视频流，第二次请求直接复用本机文件；重建端远端 WRITE 为 0。
+- 源端视频写入调用为 1，`uploaded_parts=[]`：本轮实际走普通文件上传，不能据此宣称大文件分片、断点故障或重启上传分支已验收。
+- 源库及新库关闭后清理本轮随机前缀的 5 个对象，复查对象和 multipart 会话均为 0。保留本轮合成原件、恢复文件及独立业务数据库；没有清理其他前缀、用户视频或正式应用配置。
+
+脱敏证据位于 `.local/r2-current-validation/` 的 `live.log`、`cleanup-test.log`、`clippy.log`、冻结清单及独立审查；对应 run 子目录的 `report.json` 记录上述校验与清理终态。测试默认不运行，真实执行需要明确授权。Windows 本机 Rust/R2 路径已验证；本轮未运行原生界面、安装包、macOS、通用 S3、ASR、真实断网/权限撤销或大文件边界。无需因测试辅助变动重新构建此前交付的二进制。
+
 ## M1 资产模型与读写角色
 
 状态：M1 已通过离线验收及独立 CHILD_AGENT 复审，进入 M2。

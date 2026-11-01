@@ -1,5 +1,15 @@
 # 解析引擎来源与依赖
 
+## Telegram 存储 grammers
+
+Telegram 存储采用 [grammers](https://codeberg.org/Lonami/grammers)，直接使用 crates.io 的 `grammers-client` / `grammers-session` 0.11.0，精确解析版本及校验值由 `src-tauri/Cargo.lock` 固定。发布 crate 的 `.cargo_vcs_info.json` 指向提交 `15b7afa46a9c6853aa9d8efc9d70a0f46b1781c3`。选型沿用 [已确认方案](../docs/telegram-storage-plan.md)，不使用归档 GitHub 镜像判断维护状态，不复制或修改上游协议源码。
+
+grammers 使用 MIT OR Apache-2.0。新增解析依赖（含 Tokio 必要升级）的许可证及版本收录于 [telegram-storage-licenses.txt](telegram-storage-licenses.txt)，随安装包分发。grammers 发布 crate 没有附带许可证文件，文本从上述精确提交的 `LICENSE-MIT` / `LICENSE-APACHE` 获取；`grammers-tl-parser` 1.2.2 对应提交 `5c6d44ff30e02d6c9295bcf1fcb51403ad77c981`，已核对两份许可文本一致。其余新增依赖文本来自对应 crate 包，许可均为 MIT、MIT OR Apache-2.0 或 Apache-2.0 OR MIT。
+
+扫码授权按 [Telegram 官方流程](https://core.telegram.org/api/qr-login) 实现。二维码编码复用 [kennytm/qrcode-rust](https://github.com/kennytm/qrcode-rust) 发布 crate `qrcode` 0.14.1（MIT OR Apache-2.0），关闭默认 features，只生成矩阵，不引入 image 编码栈；base64url 复用已在锁文件中的 `base64` 0.22.1（MIT OR Apache-2.0），提升为直接依赖。两者许可证已加入同一分发清单。
+
+两个直接依赖均关闭默认 features，`grammers-session` 只开启 `serde`；不引入默认 `libsql` SQLite 存储，与应用现有 `rusqlite` 保持独立。SDK 要求 Tokio 至少 1.53.3，当前锁定 1.54.1。会话适配器仅把非持久缓存留在内存，授权数据通过独立系统凭据服务保存；不读取 tdl 或 Telegram Desktop 的会话。真实传输、文件限制、扫码和跨平台验收见实施记录，依赖编译成功不代表这些能力通过。
+
 当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.8.19` 的运行时版本为 `2026.08.19`；协议 v3，引擎版本 `0.6.0`。
 
 - 来源：https://github.com/yt-dlp/yt-dlp/tree/2026.08.19

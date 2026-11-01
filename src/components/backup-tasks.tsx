@@ -93,16 +93,19 @@ export function BackupTaskStatus({ backup, assetId }: { backup: BackupTasks; ass
   const restoring = backup.restoring.has(assetId) || op?.kind === 'restore' && op.state === 'running';
   const uploading = op?.kind === 'upload' && (op.state === 'running' || uploadRequested && op.state === 'pending');
   const needsDownload = !!asset && !asset.path && !asset.remote_deleted && asset.remote_state === 'backed_up';
-  const complete = asset?.remote_state === 'backed_up' && !!asset.path && !restoring && op?.kind !== 'upload';
+  const completeInCurrent = asset.remote_state === 'backed_up' && !!asset.path && !restoring && op?.kind !== 'upload';
+  const locations = asset.backup_locations ?? [];
+  const backedElsewhere = locations.some(value => value.space_id !== backup.settings?.space_id);
+  const complete = !op?.last_error && (completeInCurrent || backedElsewhere && !restoring && !uploading);
   const deleting = asset?.remote_state === 'pending_delete' || asset?.remote_deleted;
   const reupload = !!asset.remote_deleted && !!asset.path;
   const retryDelete = op?.kind === 'delete' && ['blocked', 'retry_wait'].includes(op.state) && backup.settings.enabled;
   const startingUpload = busy && !restoring && !uploading && !retryDelete;
   const waitingUpload = uploading && (op?.state !== 'running' || !op.payload.completed_bytes);
   const progress = op?.payload.completed_bytes == null || !asset ? 0 : Math.min(99, Math.round(op.payload.completed_bytes / asset.content_bytes * 100));
-  const label = asset?.remote_deleted && !asset.path ? '云端已删除' : restoring ? '取消下载' : uploading ? '取消上传' : deleting ? reupload ? '重新上传' : retryDelete ? '重试删除' : '远端待删除' : needsDownload ? '下载到本机' : complete ? '已备份' : '上传备份';
+  const label = asset?.remote_deleted && !asset.path ? '云端已删除' : restoring ? '取消下载' : uploading ? '取消上传' : deleting ? reupload ? '重新上传' : retryDelete ? '重试删除' : '远端待删除' : needsDownload ? '下载到本机' : complete ? completeInCurrent || !asset.path ? '已备份' : '上传到当前空间' : '上传备份';
   const state = restoring ? `正在下载 ${progress}%` : startingUpload ? '正在提交上传' : uploading ? waitingUpload ? '等待上传' : `正在上传 ${progress}%` : needsDownload ? '待下载' : complete ? '已备份' : deleting ? '远端待删除' : '待上传';
-  const disabled = busy || complete || !backup.settings.enabled || (!restoring && !needsDownload && (!backup.settings.enabled || deleting && !retryDelete && !reupload || !asset?.path && !deleting));
+  const disabled = busy || completeInCurrent || !backup.settings.enabled || (!restoring && !needsDownload && (!backup.settings.enabled || deleting && !retryDelete && !reupload || !asset?.path && !deleting));
   async function act() {
     if (disabled) return;
     if (needsDownload && !restoring && asset) { void backup.restore(asset); return; }
@@ -114,7 +117,9 @@ export function BackupTaskStatus({ backup, assetId }: { backup: BackupTasks; ass
       else { setUploadRequested(true); await backup.run(() => api.startAssetBackup(backup.settings!.space_id, assetId), '已加入上传队列'); }
     } finally { setBusy(false); }
   }
-  const tooltip = op?.last_error && !startingUpload ? `${errorText(op.last_error)}，${label}` : complete ? state : `${state}，${label}`;
+  const destinations = locations.map(value => value.display_name);
+  const backedUpHint = destinations.length ? `已备份至：${destinations.join('、')}` : '';
+  const tooltip = complete ? backedUpHint || state : [backedUpHint, op?.last_error && !startingUpload ? `${errorText(op.last_error)}，${label}` : `${state}，${label}`].filter(Boolean).join('。');
   return <><Tooltip><TooltipTrigger asChild><span className="backup-sync-tooltip inline-flex rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={disabled ? 0 : undefined}><Button variant="ghost" size="icon" className="backup-sync-button shrink-0" data-complete={complete || undefined} disabled={disabled} aria-busy={busy} aria-label={label} onClick={() => void act()}><span className="backup-sync-glyph"><SyncIcon uploading={uploading || startingUpload} indeterminate={waitingUpload || startingUpload} restoring={restoring} download={needsDownload} complete={complete} progress={progress} label={state} failed={!!op?.last_error} /></span></Button></span></TooltipTrigger><TooltipContent>{tooltip}</TooltipContent></Tooltip>{(asset.conflict_count > 0 || asset.remote_deleted && asset.has_pending_local_changes) && <Button variant="ghost" size="sm" className="h-6 px-1 text-xs text-destructive" onClick={() => setInspect(true)}>{asset.remote_deleted ? '本机待处理' : `冲突 ${asset.conflict_count}`}</Button>}<BackupDataDialog asset={asset} open={inspect} close={() => setInspect(false)} changed={backup.reload} /></>;
 }
 
@@ -142,8 +147,8 @@ function BackupAssetMenuItems({ asset, backup, context = false }: { asset: Backu
   const Item = context ? ContextMenuItem : DropdownMenuItem;
   return <>
     <BackupTransferMenuItems backup={backup} assetId={asset.asset_id} context={context} />
-    {asset.path && <Item onSelect={() => void backup.run(() => api.releaseAsset(asset.asset_id), '本机副本已释放')}>释放本机空间</Item>}
-    {backup.settings?.enabled && backup.settings.enabled && !asset.remote_deleted && <Item variant="destructive" onSelect={() => void backup.run(() => api.deleteAsset(asset.space_id, asset.asset_id), '本机已删除，等待清理远端')}>从当前同步库删除</Item>}
+    {asset.in_current_space !== false && asset.remote_state === 'backed_up' && !asset.remote_deleted && asset.path && <Item onSelect={() => void backup.run(() => api.releaseAsset(asset.asset_id), '本机副本已释放')}>释放本机空间</Item>}
+    {asset.in_current_space !== false && backup.settings?.enabled && (backup.settings.provider_type !== 'telegram' || backup.settings.can_delete_owned_media) && !asset.remote_deleted && <Item variant="destructive" onSelect={() => void backup.run(() => api.deleteAsset(asset.space_id, asset.asset_id), backup.settings?.provider_type === 'telegram' ? '已加入删除队列' : '本机已删除，等待清理远端')}>从当前同步库删除</Item>}
     <Item onSelect={() => void backup.run(() => api.hideAsset(asset.asset_id), '已从列表移除')}>从列表移除</Item>
   </>;
 }
@@ -180,7 +185,7 @@ export function BackupAssetRow({ asset, backup, dialogs, feed }: { asset: Backup
       <div className="task-row-byline">{asset.metadata.author && <Tooltip><TooltipTrigger asChild><span tabIndex={0}>{asset.metadata.author}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{asset.metadata.author}</TooltipContent></Tooltip>}<span>{asset.local_state === 'present' ? '本机有副本' : asset.remote_state === 'pending_delete' ? '远端待删除' : asset.remote_deleted ? '本机待处理' : '仅云端'}</span></div>
     </div>
     <div className={feed ? 'flex justify-end gap-1 px-3 pb-3' : 'task-row-footer'}><div className="task-row-controls">
-      <Button variant="ghost" size="icon" aria-label="播放视频" disabled={asset.remote_deleted && !asset.path} onClick={e => dialogs.play(asset,e.currentTarget)}><Play /></Button>
+      <Button variant="ghost" size="icon" aria-label="播放视频" disabled={!asset.path && (asset.in_current_space === false || asset.remote_deleted)} onClick={e => dialogs.play(asset,e.currentTarget)}><Play /></Button>
       <Button variant="ghost" size="icon" aria-label="查看文案" onClick={e => dialogs.transcript.open(asset.asset_id,e.currentTarget)}><FileText /></Button>
       <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="更多操作"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
         <BackupAssetMenuItems asset={asset} backup={backup} />
