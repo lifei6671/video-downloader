@@ -1007,7 +1007,9 @@ async fn queue_loop(
             let provider=resolve(&core,&settings.space_id)?;
             let engine=SyncEngine::new(core.clone(),provider);
             engine.enqueue()?;
+            let mut due=core.backup_db(|db|scheduler::next_sync_operation(db,&settings.space_id))?;
             // Canceled uploads retain their exact private resume state until own-session cleanup succeeds.
+            if !due.as_ref().is_some_and(|(_,foreground_delete)|*foreground_delete) {
             for op in scheduler::operations(&core)?.into_iter().filter(|o|o.space_id==settings.space_id&&o.kind=="upload"&&(o.state=="canceled"||o.state=="blocked"&&o.last_error.as_deref()==Some("BACKUP_ASSET_DELETED"))&&o.phase!="cancel_cleaned") {
                 for kind in ["video","cover","transcript"] {
                     if let Some(state)=op.payload.get(format!("resume_{kind}")).cloned() {
@@ -1015,9 +1017,11 @@ async fn queue_loop(
                     }
                 }
                 core.backup_db(|db|{db.execute("UPDATE backup_operations SET phase='cancel_cleaned',state=CASE WHEN phase='superseded' THEN 'completed' ELSE state END WHERE operation_id=?",[&op.operation_id])?;Ok(())})?;
+                due=core.backup_db(|db|scheduler::next_sync_operation(db,&settings.space_id))?;
+                if due.as_ref().is_some_and(|(_,foreground_delete)|*foreground_delete) {break;}
             }
-            let due:Option<String>=core.backup_db(|db|Ok(db.query_row("SELECT operation_id FROM backup_operations WHERE space_id=? AND kind IN ('upload','delete') AND state IN ('pending','retry_wait') AND (next_retry_at IS NULL OR next_retry_at<=unixepoch()) ORDER BY CASE WHEN kind='delete' THEN 0 ELSE 1 END,created_at,rowid LIMIT 1",[&settings.space_id],|r|r.get(0)).optional()?))?;
-            let Some(operation)=due else {return Ok(());};
+            }
+            let Some((operation,_))=due else {return Ok(());};
             core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='running',attempt=attempt+1 WHERE operation_id=?",[&operation])?;Ok(())})?;
             let kind:String=core.backup_db(|db|Ok(db.query_row("SELECT kind FROM backup_operations WHERE operation_id=?",[&operation],|r|r.get(0))?))?;
             let work=async {if kind=="delete" {super::sync_delete::execute(&core,engine.provider.as_ref(),&operation).await} else {engine.execute_upload(&operation).await}};tokio::pin!(work);

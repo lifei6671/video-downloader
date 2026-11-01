@@ -8,5 +8,6 @@ pub mod runtime_dependencies;
 pub mod settings;
 pub mod telegram_accounts;
 pub mod telegram_download;
+mod telegram_cover;
 pub mod update_download;
 pub mod updates;

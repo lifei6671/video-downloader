@@ -47,12 +47,12 @@ pub fn intent(core: &Core, space: &str, local: &str) -> Result<String> {
         let previous:Option<(String,String,String)>=tx.query_row("SELECT operation_id,state,payload_json FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='delete' AND state<>'canceled' ORDER BY CASE WHEN state='completed' THEN 1 ELSE 0 END,rowid DESC LIMIT 1",params![space,local],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         if let Some((id,state,raw))=previous.filter(|(_,state,_)|!(scope.provider_type==ProviderType::Telegram && state=="completed")) {
             let mut payload:Value=serde_json::from_str(&raw)?;
-            if state=="completed" {payload["cleanup_pass"]=0.into();}
+            if state=="completed" {payload["cleanup_pass"]=0.into();payload.as_object_mut().context("BACKUP_INVALID_OPERATION")?.remove("local_cleanup_done");}
             if let Some(saved)=payload.get("scope") {scope.check(&serde_json::from_value(saved.clone())?)?;}
             payload["scope"]=serde_json::to_value(&scope)?;payload["remote_asset_id"]=remote.clone().into();
-            tx.execute("UPDATE backup_operations SET state=CASE WHEN state='running' THEN state ELSE 'pending' END,phase=CASE WHEN ?2 THEN 'local' ELSE phase END,next_retry_at=NULL,last_error=NULL,attempt=0,payload_json=?3 WHERE operation_id=?1",params![id,state=="completed",payload.to_string()])?;
+            tx.execute("UPDATE backup_operations SET state=CASE WHEN state='running' THEN state ELSE 'pending' END,phase=CASE WHEN ?2 THEN 'tombstone' ELSE phase END,next_retry_at=NULL,last_error=NULL,attempt=0,payload_json=?3 WHERE operation_id=?1",params![id,state=="completed",payload.to_string()])?;
         } else {
-            tx.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'delete','pending','local',?4)",params![uuid::Uuid::new_v4().to_string(),space,local,json!({"scope":scope,"remote_asset_id":remote,"cleanup_pass":0,"base":base}).to_string()])?;
+            tx.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'delete','pending','tombstone',?4)",params![uuid::Uuid::new_v4().to_string(),space,local,json!({"scope":scope,"remote_asset_id":remote,"cleanup_pass":0,"base":base}).to_string()])?;
         }
         let operation:String=tx.query_row("SELECT operation_id FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='delete' AND state NOT IN ('completed','canceled')",params![space,local],|r|r.get(0))?;
         tx.execute("UPDATE backup_operations SET state='blocked',last_error='BACKUP_DELETE_PENDING' WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state NOT IN ('completed','canceled')",params![space,local])?;
@@ -61,56 +61,25 @@ pub fn intent(core: &Core, space: &str, local: &str) -> Result<String> {
     })
 }
 pub async fn delete(core: &Arc<Core>, space: &str, local: &str) -> Result<()> {
-    let operation = intent(core, space, local)?;
+    intent(core, space, local)?;
     core.wake_backup();
-    let op = scheduler::operations(core)?
-        .into_iter()
-        .find(|o| o.operation_id == operation)
-        .context("BACKUP_INVALID_OPERATION")?;
-    if scope(core, space)?.provider_type == ProviderType::Telegram {
-        core.cancel_asset_restore(local)?;
-        core.cancel_asset_transcription(local).await?;
-        Ok(())
-    } else {
-        prepare_local(core, &op).await
-    }
-}
-async fn prepare_local(core: &Arc<Core>, op: &scheduler::Operation) -> Result<()> {
-    let local = op.asset_id.as_deref().context("BACKUP_INVALID_OPERATION")?;
     core.cancel_asset_restore(local)?;
     core.cancel_asset_transcription(local).await?;
-    let _writer = core.backup_write_lock.lock().await;
-    let _restore = core.backup_restore_lock.lock().await;
-    let phase: String = core.backup_db(|db| {
-        Ok(db.query_row(
-            "SELECT phase FROM backup_operations WHERE operation_id=?",
-            [&op.operation_id],
-            |r| r.get(0),
-        )?)
-    })?;
-    if phase != "local" {
-        return Ok(());
-    }
-    if let Err(error) = lifecycle::remove_local(core, local).await {
-        core.backup_db(|db| {
-            db.execute(
-                "UPDATE backup_operations SET state='blocked',last_error=?2 WHERE operation_id=?1",
-                params![op.operation_id, error.to_string()],
-            )?;
-            Ok(())
-        })?;
-        return Err(error);
-    }
-    core.backup_db(|db| {
-        db.execute(
-            "UPDATE backup_operations SET phase='tombstone',last_error=NULL WHERE operation_id=?",
-            [&op.operation_id],
-        )?;
-        Ok(())
-    })?;
-    core.wake_backup();
     Ok(())
 }
+
+// The caller owns backup_write_lock; the remote cleanup was confirmed before this phase.
+async fn finish_local(core: &Arc<Core>, op: &scheduler::Operation) -> Result<()> {
+    let local = op.asset_id.as_deref().context("BACKUP_INVALID_OPERATION")?;
+    let _restore = core.backup_restore_lock.lock().await;
+    lifecycle::remove_local(core, local).await?;
+    core.backup_db(|db| {
+        db.execute("UPDATE backup_operations SET phase='finalizing',last_error=NULL WHERE operation_id=?", [&op.operation_id])?;
+        Ok(())
+    })?;
+    core.finish_asset_deletion(local, &op.operation_id)
+}
+
 pub async fn execute(
     core: &Arc<Core>,
     provider: &dyn BackupProvider,
@@ -132,7 +101,7 @@ pub async fn execute(
         complete_superseded(core, operation)?;
         return Ok(());
     }
-    let published = if matches!(op.phase.as_str(), "objects" | "cleanup_verify") {
+    let published = if matches!(op.phase.as_str(), "objects" | "cleanup_verify" | "local_cleanup" | "finalizing") {
         let current = provider
             .read_asset(&remote)
             .await?
@@ -145,13 +114,13 @@ pub async fn execute(
     } else {
         None
     };
-    if owned.provider_type == ProviderType::Telegram {
-        core.cancel_asset_restore(local)?;
-        core.cancel_asset_transcription(local).await?;
-    } else {
-        prepare_local(core, &op).await?;
-    }
+    core.cancel_asset_restore(local)?;
+    core.cancel_asset_transcription(local).await?;
     let _writer = core.backup_write_lock.lock().await;
+    if matches!(op.phase.as_str(), "local_cleanup" | "finalizing") {
+        finish_local(core, &op).await?;
+        return finish_pass(core, &op);
+    }
     let change = AssetChange {
         recreate: false,
         resolved_conflicts: vec![],
@@ -197,10 +166,6 @@ pub async fn execute(
         tx.commit()?;
         Ok(())
     })?;
-    if owned.provider_type == ProviderType::Telegram {
-        let _restore = core.backup_restore_lock.lock().await;
-        lifecycle::remove_local(core, local).await?;
-    }
     if let Err(error) = provider.reconcile_deleted_asset(&remote, operation).await {
         if provider
             .read_asset(&remote)
@@ -212,13 +177,25 @@ pub async fn execute(
         }
         return Err(error);
     }
+    if op.phase != "cleanup_verify" || op.payload["local_cleanup_done"] != true {
+        core.backup_db(|db| {
+            db.execute("UPDATE backup_operations SET phase='local_cleanup',last_error=NULL WHERE operation_id=?",[operation])?;
+            Ok(())
+        })?;
+        finish_local(core, &op).await?;
+    }
+    finish_pass(core, &op)
+}
+
+fn finish_pass(core: &Core, op: &scheduler::Operation) -> Result<()> {
+    let operation = &op.operation_id;
     core.backup_db(|db|{
         let raw:String=db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id=?",[operation],|r|r.get(0))?;
         let mut payload:Value=serde_json::from_str(&raw)?;
         let pass=payload["cleanup_pass"].as_u64().unwrap_or(0)+1;payload["cleanup_pass"]=pass.into();
         let done=pass>=3;
         db.execute("UPDATE backup_operations SET state=?2,phase=?3,payload_json=?4,next_retry_at=CASE WHEN ?5 THEN NULL ELSE unixepoch()+?6 END,last_error=NULL,updated_at=unixepoch() WHERE operation_id=?1 AND state='running'",params![operation,if done {"completed"} else {"retry_wait"},if done {"completed"} else {"cleanup_verify"},payload.to_string(),done,if pass==1 {30} else {120}])?;
-        db.execute("UPDATE asset_remote_objects SET remote_state='deleted' WHERE space_id=?1 AND asset_id=?2",params![owned.space_id,local])?;Ok(())
+        db.execute("UPDATE asset_remote_objects SET remote_state='deleted' WHERE space_id=?1 AND asset_id=?2",params![op.space_id,op.asset_id])?;Ok(())
     })
 }
 

@@ -29,6 +29,7 @@ export function TaskRow({ task, selected, onSelect, onPlay, cover, coverBadge, c
     <CardContent className="task-row-content">
       <div className="task-row-cover">
         {cover}
+        {feed && task.status === 'queued' && <Badge variant="warning" className="task-feed-status">{task.canceling ? '正在取消…' : !task.video && task.telegram_link ? '等待解析' : '等待中'}</Badge>}
         {feed && task.status === 'completed' && (coverBadge ?? <Badge variant="success" className="task-feed-completed">已完成</Badge>)}
         {coverActions}
         {coverProgress && <div className="task-feed-progress">{coverProgress}</div>}
@@ -42,7 +43,7 @@ export function TaskRow({ task, selected, onSelect, onPlay, cover, coverBadge, c
         {!feed && task.error && <p role="alert" className="flex items-start gap-1.5 text-xs text-destructive"><AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" /><span>{errorText(task.error)}</span></p>}
         {task.cover_error && <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><AlertCircle className="size-3.5" />封面未保存</p>}
       </div>
-      {!(feed && (task.status === 'downloading' || task.status === 'completed')) && <div className="task-row-footer"><div className="task-row-status">
+      {!(feed && (task.status === 'queued' || task.status === 'downloading' || task.status === 'completed')) && <div className="task-row-footer"><div className="task-row-status">
         <Badge variant={task.canceling ? 'warning' : statusVariant[task.status]}>{task.canceling ? '正在取消…' : task.status === 'queued' && !task.video && task.telegram_link ? '等待解析' : labels[task.status]}</Badge>
         {task.status === 'queued' && <span className="task-queue-position">队列第 {queuePosition} 位</span>}
       </div>

@@ -248,62 +248,121 @@ fn io() -> (watch::Sender<bool>, watch::Sender<bool>, Io) {
 }
 
 #[tokio::test]
-async fn telegram_streaming_flag_follows_original_mp4_layout_and_keeps_original_bytes() {
-    fn atom(kind: &[u8;4], body: &[u8]) -> Vec<u8> {
-        [((body.len()+8) as u32).to_be_bytes().as_slice(),kind,body].concat()
+async fn telegram_streaming_flag_accepts_front_and_trailing_mp4_metadata_and_keeps_original_bytes()
+{
+    fn atom(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        [
+            ((body.len() + 8) as u32).to_be_bytes().as_slice(),
+            kind,
+            body,
+        ]
+        .concat()
     }
-    let ftyp=atom(b"ftyp",b"isom0000");
-    let moov=atom(b"moov",b"metadata");
-    let mdat=atom(b"mdat",&[37;131_113]);
-    for (body, streaming) in [([ftyp.clone(),moov.clone(),mdat.clone()].concat(),true),([ftyp,mdat,moov].concat(),false)] {
-        let root=tempfile::tempdir().unwrap();
-        let journal=TestJournal::open(&root.path().join("journal.sqlite"));
-        let net=Mock::new();
-        let (_cancel,_stop,io)=io();
-        let target=target();
-        let mut source=source(root.path(),"video",&body);
-        source.video=crate::backup::provider::VideoAttributes::from_metadata(&serde_json::json!({"duration_ms":2000,"width":640,"height":360}));
-        let receipt=upload(&net,&journal,&target,source.clone(),&io).await.unwrap();
-        assert_eq!(net.video_attributes.lock().unwrap()[0].as_ref().unwrap().supports_streaming,streaming);
-        assert_eq!(receipt.reference.sha256,format!("{:x}",Sha256::digest(&body)));
-        let restored=root.path().join("restored.mp4");
-        restore(&net,&journal,&target,&receipt.reference,&restored,&io).await.unwrap();
-        assert_eq!(std::fs::read(restored).unwrap(),body);
-        assert_eq!(std::fs::read(source.path).unwrap(),body);
+    let ftyp = atom(b"ftyp", b"isom0000");
+    let moov = atom(b"moov", b"metadata");
+    let mdat = atom(b"mdat", &[37; 131_113]);
+    for (container, body) in [
+        ("mp4", [ftyp.clone(), moov.clone(), mdat.clone()].concat()),
+        ("mp4", [ftyp.clone(), mdat.clone(), moov.clone()].concat()),
+        ("mov", [ftyp.clone(), moov.clone(), mdat.clone()].concat()),
+        ("mov", [ftyp, mdat, moov].concat()),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+        let net = Mock::new();
+        let (_cancel, _stop, io) = io();
+        let target = target();
+        let mut source = source(root.path(), "video", &body);
+        source.container = container.into();
+        source.video = crate::backup::provider::VideoAttributes::from_metadata(
+            &serde_json::json!({"duration_ms":2000,"width":640,"height":360}),
+        );
+        let receipt = upload(&net, &journal, &target, source.clone(), &io)
+            .await
+            .unwrap();
+        assert!(
+            net.video_attributes.lock().unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .supports_streaming,
+            "{container} must allow streaming with either index layout"
+        );
+        assert_eq!(
+            receipt.reference.sha256,
+            format!("{:x}", Sha256::digest(&body))
+        );
+        let restored = root.path().join("restored.mp4");
+        restore(&net, &journal, &target, &receipt.reference, &restored, &io)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(restored).unwrap(), body);
+        assert_eq!(std::fs::read(source.path).unwrap(), body);
     }
 }
 
 #[tokio::test]
 async fn telegram_streaming_layout_recognition_handles_extended_and_invalid_boxes() {
-    fn atom(kind: &[u8;4], body: &[u8]) -> Vec<u8> {
-        [((body.len()+8) as u32).to_be_bytes().as_slice(),kind,body].concat()
+    fn atom(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        [
+            ((body.len() + 8) as u32).to_be_bytes().as_slice(),
+            kind,
+            body,
+        ]
+        .concat()
     }
-    let ftyp=atom(b"ftyp",b"isom0000");
-    let moov=atom(b"moov",b"metadata");
-    let data=atom(b"mdat",b"original");
-    let wide_moov=[1u32.to_be_bytes().as_slice(),b"moov",24u64.to_be_bytes().as_slice(),b"metadata"].concat();
-    let eof_data=[0u32.to_be_bytes().as_slice(),b"mdat",b"original"].concat();
-    let invalid=[1000u32.to_be_bytes().as_slice(),b"moov",b"short"].concat();
-    let empty_data=atom(b"mdat",b"");
-    let wide_empty_data=[1u32.to_be_bytes().as_slice(),b"mdat",16u64.to_be_bytes().as_slice()].concat();
-    let cases=[
-        ([ftyp.clone(),empty_data.clone(),moov.clone(),data.clone()].concat(),true),
-        ([ftyp.clone(),moov.clone(),empty_data,data.clone()].concat(),true),
-        ([ftyp.clone(),wide_empty_data,moov.clone(),data.clone()].concat(),true),
-        ([ftyp.clone(),wide_moov,data.clone()].concat(),true),
-        ([ftyp.clone(),moov.clone(),eof_data].concat(),true),
-        ([ftyp.clone(),data.clone(),moov.clone()].concat(),false),
-        ([ftyp.clone(),moov.clone()].concat(),false),
-        ([moov,data].concat(),false),
-        ([ftyp.clone(),invalid].concat(),false),
-        ([ftyp,1u32.to_be_bytes().to_vec(),b"moov".to_vec()].concat(),false),
+    let ftyp = atom(b"ftyp", b"isom0000");
+    let moov = atom(b"moov", b"metadata");
+    let data = atom(b"mdat", b"original");
+    let wide_moov = [
+        1u32.to_be_bytes().as_slice(),
+        b"moov",
+        24u64.to_be_bytes().as_slice(),
+        b"metadata",
+    ]
+    .concat();
+    let eof_data = [0u32.to_be_bytes().as_slice(), b"mdat", b"original"].concat();
+    let invalid = [1000u32.to_be_bytes().as_slice(), b"moov", b"short"].concat();
+    let empty_data = atom(b"mdat", b"");
+    let wide_empty_data = [
+        1u32.to_be_bytes().as_slice(),
+        b"mdat",
+        16u64.to_be_bytes().as_slice(),
+    ]
+    .concat();
+    let cases = [
+        (
+            [ftyp.clone(), empty_data.clone(), moov.clone(), data.clone()].concat(),
+            true,
+        ),
+        (
+            [ftyp.clone(), moov.clone(), empty_data, data.clone()].concat(),
+            true,
+        ),
+        (
+            [ftyp.clone(), wide_empty_data, moov.clone(), data.clone()].concat(),
+            true,
+        ),
+        ([ftyp.clone(), wide_moov, data.clone()].concat(), true),
+        ([ftyp.clone(), moov.clone(), eof_data].concat(), true),
+        ([ftyp.clone(), data.clone(), moov.clone()].concat(), true),
+        (
+            [ftyp.clone(), data.clone(), invalid.clone()].concat(),
+            false,
+        ),
+        ([ftyp.clone(), moov.clone()].concat(), false),
+        ([moov, data].concat(), false),
+        ([ftyp.clone(), invalid].concat(), false),
+        (
+            [ftyp, 1u32.to_be_bytes().to_vec(), b"moov".to_vec()].concat(),
+            false,
+        ),
     ];
-    let root=tempfile::tempdir().unwrap();
-    let path=root.path().join("layout.mp4");
-    let (_cancel,_stop,io)=io();
-    for (body,expected) in cases {
-        std::fs::write(&path,body).unwrap();
-        assert_eq!(mp4_has_front_metadata(&path,&io).await.unwrap(),expected);
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("layout.mp4");
+    let (_cancel, _stop, io) = io();
+    for (body, expected) in cases {
+        std::fs::write(&path, body).unwrap();
+        assert_eq!(mp4_has_metadata(&path, &io).await.unwrap(), expected);
     }
 }
 

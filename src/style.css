@@ -85,6 +85,7 @@
   --progress-track: var(--slate-4);
   --progress-value: var(--indigo-11);
   --progress-glass-background: color-mix(in srgb, var(--surface-raised) 78%, transparent);
+  --progress-delete-glass-background: color-mix(in srgb, var(--surface-raised) 50%, transparent);
   --media-placeholder: var(--slate-3);
   --scrollbar-thumb: var(--slate-7);
   --scrollbar-thumb-hover: var(--slate-12);
@@ -509,9 +510,14 @@
 .task-title-backup .backup-sync-track { color: var(--muted-foreground); opacity: 1; }
 .backup-sync-button[data-variant][data-size]:is([data-complete="true"], [aria-busy="true"]):disabled { opacity: 1; }
 .task-feed-completed, .task-feed-status { position: absolute; top: 8px; left: 8px; z-index: 2; border: 0; pointer-events: none; }
-.task-list[data-view="feed"] :is(.task-feed-play, .task-feed-cancel)[data-variant][data-size] { position: absolute; top: 8px; right: 8px; z-index: 2; background: var(--foreground); color: var(--on-primary); }
-.task-list[data-view="feed"] :is(.task-feed-play, .task-feed-cancel)[data-variant][data-size]:hover { background: var(--muted-foreground); }
+.task-list[data-view="feed"] .task-feed-play[data-variant][data-size] { position: absolute; top: 8px; right: 8px; z-index: 2; background: var(--foreground); color: var(--on-primary); }
+.task-list[data-view="feed"] .task-feed-play[data-variant][data-size]:hover { background: var(--muted-foreground); }
 .task-feed-progress { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; padding: 16px; pointer-events: none; }
+button.task-feed-progress-cancel[data-variant][data-size] { width: var(--progress-circle-size); height: var(--progress-circle-size); padding: 0; border: 0; border-radius: 50%; pointer-events: auto; }
+button.task-feed-progress-cancel[data-variant][data-size]:disabled { pointer-events: none; }
+.backup-delete-progress { pointer-events: auto; border-radius: 50%; color: var(--destructive); }
+.backup-delete-progress .progress-circular { --progress-track: var(--red-4); --progress-value: var(--red-11); --progress-glass-background: var(--progress-delete-glass-background); color: var(--destructive); backdrop-filter: none; }
+.backup-delete-progress svg { width: 24px; height: 24px; }
 .task-feed-error { position: absolute; top: 8px; left: 8px; right: 8px; z-index: 2; display: flex; align-items: flex-start; gap: 6px; max-height: calc(100% - 16px); overflow: auto; overflow-wrap: anywhere; padding: 8px; border-radius: 8px; background: var(--error-bg); color: var(--error-text); font-size: 12px; line-height: 18px; }
 .task-list[data-view="feed"] .media-thumbnail:disabled { opacity: 1; background: var(--surface-control); }
 .task-list[data-view="feed"] .media-thumbnail:disabled img { opacity: 0.25; filter: grayscale(1); transform: none; }

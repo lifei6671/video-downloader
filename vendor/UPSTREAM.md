@@ -136,3 +136,7 @@ Rust 增加 `same-file 1.0.6` 直接依赖（原锁文件已有），通过原�
 2026-10-25 补充：`scripts/build_asr.py` 为固定 FunASR CPU CLI 添加专用 `YINGQU_ASR_PROGRESS` stderr 通知并逐次刷新，仅报告分段阶段、实际窗口总数和完成数，不改推理、VAD、正文输出或许可。源码替换需精确匹配，重复构建幂等，SOURCE.json 标记 `progress_version=1`；上游提供等价完成回调后可移除。CUDA 继续复用固定 audio.cpp 的 `--log-file` 准备记录和批次结果文件，无原生修改。详见[真实分段进度](../docs/fun-asr-nano.md)。
 
 复用 [0xShug0/audio.cpp v0.9.2-drama3-base-small](https://github.com/0xShug0/audio.cpp/releases/tag/v0.9.2-drama3-base-small)，固定模型、程序 ZIP 和 CUDA 12.4 DLL ZIP 的 URL、大小、SHA-256 见 [CUDA 集成](../docs/cuda-acceleration.md) 与 `python-engine/nano_cuda.py`。只提取 CLI、所需 DLL、LICENSE，不运行 server/下载管理器。模型 Apache-2.0，原生库许可随包保留；CUDA EULA 本地副本 `vendor/nvidia-cuda-12.4-EULA.html` 随 native 资源和 CUDA 安装保存。VAD 复用已固定的 FunASR `llama-funasr-vad` 目标，不改写检测算法。无新增 Python ML 依赖。
+
+## Telegram 封面处理
+
+复用 [image-rs/image 0.25.10](https://github.com/image-rs/image)（MIT OR Apache-2.0），仅启用 JPEG、PNG、WebP，负责远端封面解码校验及 Telegram 文档预览 JPEG 生成。保留完整原封面附件和视频原字节，缩略图不替代备份原件。该版本已有于锁文件，新增直接使用及 WebP 解码依赖；图像处理依赖的许可全文随 `telegram-storage-licenses.txt` 分发。升级时验证大小/解码限制、缩略图规格、自定义封面优先级、原件字节、取消和重试。

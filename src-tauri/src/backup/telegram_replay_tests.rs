@@ -364,7 +364,7 @@ async fn telegram_t4_release_delete_lost_response_recreate_and_late_cleanup() {
             .to_string(),
         "TELEGRAM_CONNECTION_ERROR"
     );
-    assert!(!a.path().join("original.mp4").exists());
+    assert!(a.path().join("original.mp4").is_file(), "unconfirmed remote cleanup retains the local video");
     for _ in 0..3 {
         delete_pass(&core, &p, &delete).await.unwrap();
     }

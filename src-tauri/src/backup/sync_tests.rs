@@ -2,6 +2,8 @@
 mod flat_upload_tests;
 #[path = "retention_tests.rs"]
 mod retention_tests;
+#[path = "delete_flow_tests.rs"]
+mod delete_flow_tests;
 use super::*;
 use crate::backup::conflicts;
 use crate::backup::spaces;
@@ -2777,9 +2779,10 @@ async fn p4_tombstone_keeps_other_device_local_video_and_blocks_revival() {
     sync_delete::delete(&f.core, &f.space.space_id, &f.id)
         .await
         .unwrap();
-    assert!(!f.root.path().join("video.mp4").exists());
+    assert!(f.root.path().join("video.mp4").is_file(), "remote deletion must precede local cleanup");
     let deletion = deletion_operation(&f.core);
     delete_pass(&f.core, a.as_ref(), &deletion).await.unwrap();
+    assert!(!f.root.path().join("video.mp4").exists());
     bengine.pull().await.unwrap();
     assert!(local.is_file());
     assert_eq!(bcore.backup_assets().unwrap()[0].asset_state, "active");
@@ -3141,7 +3144,8 @@ async fn p4_same_remote_id_in_another_space_does_not_receive_deletion_or_cleanup
         .unwrap());
 }
 #[tokio::test]
-async fn p4_completed_delete_rechecks_late_objects_after_restart_with_same_operation() {
+async fn p4_completed_delete_stays_completed_after_restart_and_explicit_retry_reclaims_late_objects(
+) {
     let (f, a, engine) = sync_fixture().await;
     let op = claim(&engine, &f.core);
     engine.execute_upload(&op).await.unwrap();
@@ -3182,8 +3186,13 @@ async fn p4_completed_delete_rechecks_late_objects_after_restart_with_same_opera
         .into_iter()
         .find(|o| o.operation_id == deletion)
         .unwrap();
-    assert_eq!(op.state, "pending");
-    assert_eq!(op.phase, "cleanup_verify");
+    assert_eq!(op.state, "completed");
+    assert_eq!(op.phase, "completed");
+    assert!(store.0.lock().unwrap().objects.contains_key(&late));
+    assert_eq!(
+        sync_delete::intent(&core, &space.space_id, op.asset_id.as_deref().unwrap()).unwrap(),
+        deletion
+    );
     let provider = S3Provider::new(
         store.clone(),
         space,
@@ -3303,7 +3312,7 @@ fn p4_restart_with_multiple_terminal_or_active_delete_logs_is_idempotent() {
         }
         repository::init(&db).unwrap();
         repository::init(&db).unwrap();
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM backup_operations WHERE state NOT IN ('completed','canceled')",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM backup_operations WHERE state NOT IN ('completed','canceled')",[],|r|r.get::<_,i64>(0)).unwrap(),if existing_active {1} else {0});
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM backup_operations", [], |r| r
                 .get::<_, i64>(0))
@@ -3311,6 +3320,116 @@ fn p4_restart_with_multiple_terminal_or_active_delete_logs_is_idempotent() {
             if existing_active { 3 } else { 2 }
         );
     }
+}
+#[test]
+fn deletion_queue_prioritizes_foreground_work_and_preserves_retry_deadlines() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    repository::init(&db).unwrap();
+    db.execute("INSERT INTO backup_spaces VALUES('space','lib','https://example','bucket','prefix/',NULL,1)",[]).unwrap();
+    for (id, kind, state, phase, payload, created) in [
+        (
+            "background",
+            "delete",
+            "pending",
+            "cleanup_verify",
+            "{\"local_cleanup_done\":true}",
+            1,
+        ),
+        ("upload", "upload", "pending", "prepare", "{}", 2),
+        ("fresh", "delete", "pending", "tombstone", "{}", 3),
+        ("later", "delete", "retry_wait", "objects", "{}", 0),
+        ("blocked", "delete", "blocked", "objects", "{}", 0),
+        ("canceled", "delete", "canceled", "objects", "{}", 0),
+    ] {
+        db.execute(
+            "INSERT INTO media_assets VALUES(?1,NULL,'{}','video.mp4',NULL,1,'active')",
+            [id],
+        )
+        .unwrap();
+        db.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json,created_at) VALUES(?1,'space',?1,?2,?3,?4,?5,?6)",params![id,kind,state,phase,payload,created]).unwrap();
+    }
+    db.execute(
+        "UPDATE backup_operations SET next_retry_at=unixepoch()+3600 WHERE operation_id='later'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        scheduler::next_sync_operation(&db, "space").unwrap(),
+        Some(("fresh".into(), true))
+    );
+    db.execute(
+        "UPDATE backup_operations SET state='completed' WHERE operation_id='fresh'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        scheduler::next_sync_operation(&db, "space").unwrap(),
+        Some(("upload".into(), false))
+    );
+    db.execute(
+        "UPDATE backup_operations SET state='completed' WHERE operation_id='upload'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        scheduler::next_sync_operation(&db, "space").unwrap(),
+        Some(("background".into(), false))
+    );
+    db.execute(
+        "UPDATE backup_operations SET next_retry_at=unixepoch()-1 WHERE operation_id='later'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        scheduler::next_sync_operation(&db, "space").unwrap(),
+        Some(("later".into(), true)),
+        "due deletion failures retain foreground priority"
+    );
+    db.execute(
+        "UPDATE backup_operations SET state='completed' WHERE operation_id='later'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE backup_operations SET payload_json='{}' WHERE operation_id='background'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        scheduler::next_sync_operation(&db, "space").unwrap(),
+        Some(("background".into(), true)),
+        "legacy cleanup that has not finished local deletion is foreground work"
+    );
+    assert!(scheduler::next_sync_operation(&db, "other-space")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn restart_recovers_running_delete_but_preserves_completed_and_delayed_work() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    repository::init(&db).unwrap();
+    db.execute("INSERT INTO backup_spaces VALUES('space','lib','https://example','bucket','prefix/',NULL,1)",[]).unwrap();
+    for (id, state) in [
+        ("running", "running"),
+        ("delayed", "retry_wait"),
+        ("completed", "completed"),
+    ] {
+        db.execute(
+            "INSERT INTO media_assets VALUES(?1,NULL,'{}','video.mp4',NULL,1,'active')",
+            [id],
+        )
+        .unwrap();
+        db.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json,next_retry_at) VALUES(?1,'space',?1,'delete',?2,'cleanup_verify','{\"scope\":{\"protocol\":2},\"local_cleanup_done\":true}',unixepoch()+3600)",params![id,state]).unwrap();
+    }
+    repository::init(&db).unwrap();
+    repository::init(&db).unwrap();
+    let states=db.prepare("SELECT operation_id,state,last_error,next_retry_at>unixepoch() FROM backup_operations ORDER BY operation_id").unwrap().query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,bool>(3)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(states[0].1, "completed");
+    assert_eq!(states[1].1, "retry_wait");
+    assert!(states[1].3);
+    assert_eq!(states[2].1, "pending");
+    assert_eq!(states[2].2.as_deref(), Some("BACKUP_RECONCILE_REQUIRED"));
 }
 #[tokio::test]
 async fn p4_repeated_explicit_deletion_reuses_original_operation() {

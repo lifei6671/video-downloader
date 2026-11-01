@@ -3,6 +3,20 @@ use crate::desktop_core::Core;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use rusqlite::OptionalExtension;
+
+/// Select due work without promoting delayed retries or completed local cleanup.
+pub(super) fn next_sync_operation(
+    db: &rusqlite::Connection,
+    space: &str,
+) -> Result<Option<(String, bool)>> {
+    Ok(db.query_row(
+        "SELECT operation_id,kind='delete' AND COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)<>1 FROM backup_operations
+         WHERE space_id=? AND kind IN ('upload','delete') AND state IN ('pending','retry_wait') AND (next_retry_at IS NULL OR next_retry_at<=unixepoch())
+         ORDER BY CASE WHEN kind='delete' AND COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)<>1 THEN 0 WHEN kind='upload' THEN 1 ELSE 2 END,created_at,rowid LIMIT 1",
+        [space], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?)
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Operation {
     pub operation_id: String,

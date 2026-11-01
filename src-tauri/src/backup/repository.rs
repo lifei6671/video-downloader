@@ -37,11 +37,6 @@ pub fn init(db: &Connection) -> Result<()> {
     }
     // A running operation has an uncertain external outcome after restart.
     tx.execute("UPDATE backup_operations SET state='pending',last_error='BACKUP_RECONCILE_REQUIRED',updated_at=unixepoch() WHERE state='running'", [])?;
-    // Completed v2 deletes are rechecked once on the next boot for late in-flight objects.
-    tx.execute("UPDATE backup_operations SET state='pending',phase='cleanup_verify',next_retry_at=NULL,attempt=0 WHERE operation_id IN (
-        SELECT o.operation_id FROM backup_operations o WHERE o.kind='delete' AND o.state='completed' AND o.asset_id IS NOT NULL AND json_extract(o.payload_json,'$.scope.protocol')=2
-        AND NOT EXISTS(SELECT 1 FROM backup_operations active WHERE active.space_id=o.space_id AND active.asset_id=o.asset_id AND active.kind='delete' AND active.state NOT IN ('completed','canceled'))
-        AND o.rowid=(SELECT MAX(latest.rowid) FROM backup_operations latest WHERE latest.space_id=o.space_id AND latest.asset_id=o.asset_id AND latest.kind='delete' AND latest.state='completed' AND json_extract(latest.payload_json,'$.scope.protocol')=2))",[])?;
     tx.execute(
         "UPDATE asset_local_files SET local_state='missing' WHERE local_state='restoring'",
         [],

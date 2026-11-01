@@ -148,7 +148,7 @@ impl Envelope {
         Ok(if value == 0 { 1 } else { value })
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(super) struct RemoteDocument {
     pub message_id: i32,
     pub document_id: i64,
@@ -376,34 +376,49 @@ async fn source_unchanged(source: &MediaSource, io: &Io) -> Result<()> {
     result
 }
 
-/// Recognize front-loaded ISO BMFF (MP4/MOV) metadata without rewriting or decoding the original file.
-async fn mp4_has_front_metadata(path: &Path, io: &Io) -> Result<bool> {
+/// Recognize ISO BMFF metadata, including a trailing index, without changing original bytes.
+async fn mp4_has_metadata(path: &Path, io: &Io) -> Result<bool> {
     let mut file = tokio::fs::File::open(path).await.context("IO_ERROR")?;
     let total = file.metadata().await.context("IO_ERROR")?.len();
-    let (mut offset, mut ftyp, mut moov) = (0u64, false, false);
+    let (mut offset, mut ftyp, mut moov, mut mdat) = (0u64, false, false, false);
     while total.saturating_sub(offset) >= 8 {
         io.check()?;
-        file.seek(std::io::SeekFrom::Start(offset)).await.context("IO_ERROR")?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .context("IO_ERROR")?;
         let mut header = [0u8; 8];
         file.read_exact(&mut header).await.context("IO_ERROR")?;
         let length = u32::from_be_bytes(header[..4].try_into()?) as u64;
         let (length, header_bytes) = if length == 1 {
-            if total - offset < 16 { return Ok(false); }
+            if total - offset < 16 {
+                return Ok(false);
+            }
             let mut extended = [0u8; 8];
             file.read_exact(&mut extended).await.context("IO_ERROR")?;
             (u64::from_be_bytes(extended), 16)
-        } else if length == 0 { (total - offset, 8) } else { (length, 8) };
-        if length < header_bytes || length > total - offset { return Ok(false); }
+        } else if length == 0 {
+            (total - offset, 8)
+        } else {
+            (length, 8)
+        };
+        if length < header_bytes || length > total - offset {
+            return Ok(false);
+        }
         match &header[4..] {
             b"ftyp" => ftyp = true,
             b"moov" => moov = ftyp,
-            b"mdat" if length > header_bytes => return Ok(ftyp && moov),
+            b"mdat" if length > header_bytes => mdat = true,
             _ => {}
         }
         offset += length;
+        // Telegram's remote reader can seek to a trailing moov without downloading all media.
+        if ftyp && moov && mdat {
+            return Ok(true);
+        }
     }
     Ok(false)
 }
+
 pub(super) async fn prepare_video(
     core: &crate::desktop_core::Core,
     source: &mut MediaSource,
@@ -492,7 +507,7 @@ pub(super) async fn upload(
             } else { None };
             if let Some(video) = &mut video {
                 video.supports_streaming = matches!(source.container.as_str(), "mp4" | "mov" | "m4v" | "3gp" | "3g2" | "mj2")
-                    && io.run(mp4_has_front_metadata(&source.path, io)).await?;
+                    && io.run(mp4_has_metadata(&source.path, io)).await?;
             }
             let file = tokio::fs::File::open(&source.path)
                 .await

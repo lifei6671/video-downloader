@@ -15,6 +15,9 @@ struct Fixture {
     public_channel: AtomicUsize,
     auth_denied: std::sync::atomic::AtomicBool,
     inspected: Mutex<Vec<u32>>,
+    cover: Mutex<Option<Vec<u8>>>,
+    cover_reads: AtomicUsize,
+    native_attributes: std::sync::atomic::AtomicBool,
 }
 struct Fake {
     fixture: Arc<Fixture>,
@@ -38,6 +41,9 @@ fn media(message: u32) -> Media {
         mime: "video/mp4".into(),
         name: format!("video-{message}.mp4"),
         container: "mp4".into(),
+        width: None,
+        height: None,
+        duration_ms: None,
     }
 }
 fn body() -> Vec<u8> {
@@ -45,7 +51,266 @@ fn body() -> Vec<u8> {
     b[4..8].copy_from_slice(b"ftyp");
     b
 }
+fn png(color: [u8; 3]) -> Vec<u8> {
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(40, 60, image::Rgb(color))
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    encoded.into_inner()
+}
+
+#[test]
+fn metadata_fill_preserves_native_values_and_newer_cache_identity() {
+    let link = message_link("https://t.me/c/100/9").unwrap();
+    let mut native = preview(&media(9), &link);
+    native["width"] = 1080.into();
+    native["height"] = 1920.into();
+    fill_missing_attributes(&mut native, &json!({"width":1920,"height":1080,"duration_ms":2500}));
+    assert_eq!((native["width"].as_u64(), native["height"].as_u64(), native["duration_ms"].as_u64()), (Some(1080),Some(1920),Some(2500)));
+    let mut db = rusqlite::Connection::open_in_memory().unwrap();
+    crate::parse_cache::init(&db).unwrap();
+    let mut fresh = preview(&media(9), &link);
+    fresh["title"] = "new caption".into();
+    crate::parse_cache::save(&mut db, &fresh, vec![], Some(png([10,20,30])), 1).unwrap();
+    crate::parse_cache::update_telegram_metadata(&db, &native).unwrap();
+    let cached: String = db.query_row("SELECT metadata FROM parse_cache", [], |row|row.get(0)).unwrap();
+    let cached:Value=serde_json::from_str(&cached).unwrap();
+    assert_eq!(cached["title"], "new caption");
+    assert_eq!(cached["width"],1080);
+    fresh["telegram_document_id"] = 99.into();
+    let new_cover=png([90,80,70]);
+    crate::parse_cache::save(&mut db, &fresh, vec![], Some(new_cover.clone()), 2).unwrap();
+    crate::parse_cache::update_telegram_metadata(&db, &native).unwrap();
+    let (cached,cover):(String,Vec<u8>)=db.query_row("SELECT metadata,cover FROM parse_cache", [], |row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+    let cached:Value=serde_json::from_str(&cached).unwrap();
+    assert_eq!(cached["telegram_document_id"],99);
+    assert!(cached["width"].is_null());
+    assert_eq!(cached["title"],"new caption");
+    assert_eq!(cover,new_cover);
+}
+
+fn sdk_document(
+    custom: Option<Vec<u8>>,
+    thumbnail: Option<Vec<u8>>,
+) -> grammers_client::media::Document {
+    let size = |name: &str, body: Vec<u8>| {
+        tl::types::PhotoCachedSize {
+            r#type: name.into(),
+            w: 40,
+            h: 60,
+            bytes: body,
+        }
+        .into()
+    };
+    let raw = tl::types::Document {
+        id: 9,
+        access_hash: 0,
+        file_reference: vec![],
+        date: 0,
+        mime_type: "video/mp4".into(),
+        size: 4096,
+        thumbs: thumbnail.map(|body| vec![size("thumb", body)]),
+        video_thumbs: None,
+        dc_id: 1,
+        attributes: vec![tl::types::DocumentAttributeVideo {
+            round_message: false,
+            supports_streaming: true,
+            nosound: false,
+            duration: 2.5,
+            w: 1080,
+            h: 1920,
+            preload_prefix_size: None,
+            video_start_ts: None,
+            video_codec: None,
+        }
+        .into()],
+    };
+    grammers_client::media::Document::from_raw_media(tl::types::MessageMediaDocument {
+        nopremium: false,
+        spoiler: false,
+        video: true,
+        round: false,
+        voice: false,
+        document: Some(raw.into()),
+        alt_documents: None,
+        video_cover: custom.map(|body| {
+            tl::types::Photo {
+                has_stickers: false,
+                id: 1,
+                access_hash: 0,
+                file_reference: vec![],
+                date: 0,
+                sizes: vec![size("custom", body)],
+                video_sizes: None,
+                dc_id: 1,
+            }
+            .into()
+        }),
+        video_timestamp: None,
+        ttl_seconds: None,
+    })
+}
+
+#[tokio::test]
+async fn custom_cover_precedes_thumbnail_and_broken_or_missing_covers_fall_back() {
+    let custom = png([210, 30, 40]);
+    let thumbnail = png([30, 40, 210]);
+    for (custom_body, expected, calls) in [
+        (Some(custom.clone()), Some(custom), 1),
+        (Some(b"broken".to_vec()), Some(thumbnail.clone()), 2),
+        (None, Some(thumbnail.clone()), 1),
+    ] {
+        let doc = sdk_document(custom_body, Some(thumbnail.clone()));
+        let candidates = cover_candidates(&doc);
+        let reads = AtomicUsize::new(0);
+        let actual = first_available_cover(&candidates, |size| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { size.to_data().context("COVER_UNAVAILABLE") })
+        })
+        .await
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(reads.load(Ordering::SeqCst), calls);
+    }
+    let doc = sdk_document(None, None);
+    assert!(
+        first_available_cover(&cover_candidates(&doc), |_| Box::pin(async {
+            bail!("must not read missing cover")
+        }))
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let raw = match sdk_document(None, None).raw.document.unwrap() {
+        tl::enums::Document::Document(raw) => raw,
+        _ => unreachable!(),
+    };
+    let media = media_info(100, 9, &raw).unwrap();
+    let metadata = preview(&media, &message_link("https://t.me/c/100/9").unwrap());
+    assert_eq!(
+        (
+            metadata["width"].as_u64(),
+            metadata["height"].as_u64(),
+            metadata["duration_ms"].as_u64()
+        ),
+        (Some(1080), Some(1920), Some(2500))
+    );
+    assert_eq!(metadata["formats"][0]["height"], 1920);
+}
+
+#[tokio::test]
+async fn downloaded_cover_survives_metadata_fill_and_restart_without_frame_extraction() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let original = png([30, 200, 50]);
+    *fixture.cover.lock().unwrap() = Some(original.clone());
+    let application = app(root.path(), &fixture);
+    let task = resolve(&application, 9).await;
+    assert!(task.cover_cached);
+    assert_eq!(application.cover(&task.id).unwrap(), original);
+    application.download(&task.id, false).unwrap();
+    let done = wait(&application, &task.id, Status::Completed).await;
+    assert_eq!(done.video.as_ref().unwrap()["width"], 1920);
+    assert_eq!(done.video.as_ref().unwrap()["formats"][0]["height"], 1080);
+    assert_eq!(application.cover(&task.id).unwrap(), original);
+    assert!(!root.path().join("cover-started").exists());
+    assert_eq!(std::fs::read(done.path.as_ref().unwrap()).unwrap(), body());
+    application.shutdown().await;
+    drop(application);
+    let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
+    db.execute("UPDATE download_tasks SET snapshot=json_set(snapshot,'$.video.width',NULL,'$.video.height',NULL,'$.video.duration_ms',NULL) WHERE id=?",[&task.id]).unwrap();
+    drop(db);
+    let reopened = app(root.path(), &fixture);
+    reopened.start_backup_service();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if reopened
+                .list()
+                .iter()
+                .find(|t| t.id == task.id)
+                .unwrap()
+                .video
+                .as_ref()
+                .unwrap()["width"]
+                == 1920
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "metadata repair: {error}; tasks={}",
+            serde_json::to_string(&reopened.list()).unwrap()
+        )
+    });
+    assert_eq!(reopened.cover(&task.id).unwrap(), original);
+    assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
+async fn optional_cover_write_failure_keeps_completed_video_and_cached_preview() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let original = png([30, 90, 200]);
+    *fixture.cover.lock().unwrap() = Some(original.clone());
+    let gate = Arc::new(Semaphore::new(0));
+    fixture.gates.lock().unwrap().insert(9, gate.clone());
+    let application = app(root.path(), &fixture);
+    let task = resolve(&application, 9).await;
+    application.download(&task.id, false).unwrap();
+    timeout(Duration::from_secs(3), async {
+        while fixture.active.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
+    let stage: String = db
+        .query_row(
+            "SELECT path FROM task_staging WHERE task_id=?",
+            [&task.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(db);
+    std::fs::create_dir(Path::new(&stage).join("media/cover")).unwrap();
+    gate.add_permits(1);
+    let done = wait(&application, &task.id, Status::Completed).await;
+    assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
+    assert_eq!(done.cover_error.as_deref(), Some("COVER_UNAVAILABLE"));
+    assert_eq!(application.cover(&task.id).unwrap(), original);
+    application.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_attributes_keep_downloaded_cover_without_metadata_probe() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    fixture.native_attributes.store(true, Ordering::SeqCst);
+    let original = png([90, 40, 180]);
+    *fixture.cover.lock().unwrap() = Some(original.clone());
+    let application = app(root.path(), &fixture);
+    let task = resolve(&application, 9).await;
+    application.download(&task.id, false).unwrap();
+    let done = wait(&application, &task.id, Status::Completed).await;
+    assert_eq!(done.video.as_ref().unwrap()["width"], 1080);
+    assert_eq!(done.video.as_ref().unwrap()["height"], 1920);
+    assert_eq!(done.video.as_ref().unwrap()["duration_ms"], 3000);
+    assert_eq!(application.cover(&task.id).unwrap(), original);
+    assert!(done.cover_cached);
+    assert!(!root.path().join("metadata-probed").exists());
+    assert!(!root.path().join("cover-started").exists());
+    assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
+    application.shutdown().await;
+}
+
 impl Transport for Fake {
+    fn cover(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> { Box::pin(async { self.fixture.cover_reads.fetch_add(1, Ordering::SeqCst); Ok(self.fixture.cover.lock().unwrap().clone()) }) }
     fn inspect<'a>(&'a mut self, link: &'a MessageLink) -> ProviderFuture<'a, Media> {
         Box::pin(async move {
             if self.fixture.auth_denied.load(Ordering::SeqCst) { bail!("TELEGRAM_AUTH_REQUIRED"); }
@@ -54,6 +319,11 @@ impl Transport for Fake {
                 bail!("TELEGRAM_CHANNEL_FORBIDDEN");
             }
             let mut value = media(link.message);
+            if self.fixture.native_attributes.load(Ordering::SeqCst) {
+                value.width = Some(1080);
+                value.height = Some(1920);
+                value.duration_ms = Some(3000);
+            }
             value.channel = link
                 .channel
                 .unwrap_or(self.fixture.public_channel.load(Ordering::SeqCst).max(100) as u64);

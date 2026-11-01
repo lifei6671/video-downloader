@@ -59,7 +59,7 @@ async page => {
     await play.click();
     check(await play.isDisabled() && await page.locator('.video-player-loading').isVisible(),'current play has no local loading feedback');
     check(await row(9).locator('.task-play').isEnabled(),'other video was globally disabled');
-    check(await row(2).getByRole('button',{name:'取消',exact:true,includeHidden:true}).isEnabled(),'unrelated task action was globally disabled');
+    check(await row(2).getByRole('button',{name:'取消下载',exact:true,includeHidden:true}).isEnabled(),'unrelated task action was globally disabled');
     await row(3).locator('.task-row-title').dispatchEvent('dblclick');
     check(await page.evaluate(()=>window.cardPlayCalls.length===1 && window.otherButtonChanges.length===0),'duplicate playback or other buttons flickered');
     await page.evaluate(()=>window.releaseCardPlay());

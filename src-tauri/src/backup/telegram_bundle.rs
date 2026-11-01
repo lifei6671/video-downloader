@@ -368,6 +368,12 @@ fn rich_input(loaded: &Loaded) -> Result<tl::enums::InputRichMessage> {
     }
     .into())
 }
+fn archived_event_remainder(loaded: &Loaded, archived: &[RemoteDocument]) -> bool {
+    !archived.is_empty() && loaded.bundle.attachments.len() == archived.len()
+        && loaded.bundle.attachments.iter().all(|attachment| attachment.envelope.kind == "event"
+            && archived.iter().any(|expected| expected.document_id == attachment.document_id && expected.bytes == attachment.envelope.bytes && attachment.envelope.caption().ok().as_deref() == Some(expected.caption.as_str())))
+}
+
 impl GrammersTransport {
     async fn operation_bundle(
         &self,
@@ -416,7 +422,7 @@ impl GrammersTransport {
     }
     pub(super) async fn send_bundle(
         &self,
-        uploaded: Uploaded,
+        uploaded: PreparedUpload,
         envelope: Envelope,
         random_id: i64,
         video: Option<VideoAttributes>,
@@ -474,7 +480,7 @@ impl GrammersTransport {
             .invoke(&tl::functions::messages::UploadMedia {
                 business_connection_id: None,
                 peer: self.peer.into(),
-                media: uploaded_media(uploaded, video.as_ref())?,
+                media: uploaded_media(uploaded.file, video.as_ref(), uploaded.thumbnail)?,
             })
             .await
             .map_err(rpc_error)?;
@@ -545,6 +551,24 @@ impl GrammersTransport {
             Ok(sent_id(updates, random_id))
         }
     }
+    // Only the exact event-only remainder can be removed after its immutable bytes were archived.
+    pub(in crate::backup) async fn remove_archived_event_message(&self, message_id: i32, archived: &[RemoteDocument]) -> Result<()> {
+        if !self.can_delete { bail!("BACKUP_DELETE_UNSUPPORTED"); }
+        if archived.iter().any(|document| document.message_id != message_id) { bail!("TELEGRAM_MEDIA_CHANGED"); }
+        let message = match self.message(message_id).await {
+            Err(error) if error.to_string() == "TELEGRAM_MEDIA_MISSING" => return Ok(()),
+            value => value?,
+        };
+        let loaded = read(&message)?.context("TELEGRAM_MEDIA_CHANGED")?;
+        if !archived_event_remainder(&loaded, archived) { bail!("TELEGRAM_MEDIA_CHANGED"); }
+        self.client.delete_messages(self.peer, &[message_id]).await.map_err(rpc_error)?;
+        match self.message(message_id).await {
+            Err(error) if error.to_string() == "TELEGRAM_MEDIA_MISSING" => Ok(()),
+            Err(error) => Err(error),
+            Ok(_) => bail!("BACKUP_CLEANUP_PENDING"),
+        }
+    }
+
     pub(super) async fn remove_bundle_attachment(&self, expected: &RemoteDocument) -> Result<bool> {
         let message = self.message(expected.message_id).await?;
         let Some(mut loaded) = read(&message)? else {
@@ -898,5 +922,19 @@ mod tests {
             original
         );
         assert_eq!(loaded.documents[0].id, 103);
+    }
+
+    #[test]
+    fn archived_message_removal_requires_the_exact_event_only_remainder() {
+        let mut loaded = fixture();
+        let event = &loaded.bundle.attachments[3];
+        let expected = RemoteDocument {message_id:10,document_id:event.document_id,bytes:event.envelope.bytes,caption:event.envelope.caption().unwrap()};
+        assert!(!archived_event_remainder(&loaded,std::slice::from_ref(&expected)),"a message containing video or other attachments cannot be removed wholesale");
+        loaded.bundle.attachments.retain(|attachment| attachment.envelope.kind == "event");
+        loaded.documents.retain(|document| document.id == expected.document_id);
+        assert!(archived_event_remainder(&loaded,std::slice::from_ref(&expected)));
+        let mut changed = expected; changed.document_id += 1;
+        assert!(!archived_event_remainder(&loaded,&[changed]),"matching envelope text cannot replace exact document ownership");
+        assert!(!archived_event_remainder(&loaded,&[]));
     }
 }

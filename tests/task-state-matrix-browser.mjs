@@ -75,10 +75,19 @@ async page => {
           check(JSON.stringify(entries)===JSON.stringify(coverEntries),id+' cover/body menu mismatch '+JSON.stringify({entries,coverEntries}));
           const controls=await inline(target);
           if(view==='list')signatures.set(id,{entries,controls});
-          else check(JSON.stringify(signatures.get(id))===JSON.stringify({entries,controls}),id+' list/card actions, icons or disabled state differ');
+          else {
+            check(JSON.stringify(signatures.get(id).entries)===JSON.stringify(entries),id+' list/card menus differ');
+            if(!['queued','deferred','downloading','unknown','merging','canceling'].includes(id))check(JSON.stringify(signatures.get(id).controls)===JSON.stringify(controls),id+' list/card actions, icons or disabled state differ');
+          }
           const labels=entries.map(e=>e.label);
-          if(['downloading','unknown','merging'].includes(id))check(labels.includes('取消下载')&&controls.some(c=>c.label==='取消'&&c.icon?.includes('lucide-x')),id+' lost cancel');
+          if(['downloading','unknown','merging'].includes(id))check(labels.includes('取消下载')&&controls.some(c=>view==='list'?c.label==='取消'&&c.icon?.includes('lucide-x'):c.label==='取消下载'),id+' lost cancel');
           if(id==='canceling')check(entries.some(e=>e.label==='正在取消…'&&e.disabled)&&controls.some(c=>c.label==='正在取消…'&&c.disabled&&c.spinner),'canceling state inconsistent');
+          if(view==='feed'&&['queued','deferred'].includes(id)){
+            check(await target.locator('.task-row-footer,.task-queue-position').count()===0,id+' has queued footer or position');
+            check(await target.locator('.task-row-cover .task-feed-status').innerText()===(id==='deferred'?'等待解析':'等待中'),id+' lost corner status');
+            check(controls.length===1&&controls[0].label==='取消下载'&&!controls[0].disabled,id+' missing progress cancel');
+            check(await target.getByRole('progressbar',{name:'等待下载',exact:true}).count()===1,id+' missing waiting progress');
+          }
           if(['completed','missing','album','failed','canceled','failed-empty'].includes(id))check(labels.includes('从列表移除'),id+' cannot remove');
           if(id==='album')check(controls.some(c=>c.label==='查看图集'&&c.icon?.includes('lucide-images')),'album icon mismatch');
           if(id==='missing')check(!controls.some(c=>c.label==='播放视频')&&!labels.includes('打开文件夹'),'missing file has local playback/folder action');

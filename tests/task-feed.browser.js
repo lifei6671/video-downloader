@@ -107,7 +107,9 @@ async page => {
       return alpha>0 && alpha<1;
     }),'progress background is not translucent');
     check(await row('visual-4').getByRole('alert').isVisible(),'failure reason hidden');
-    check((await row('visual-2').innerText()).includes('队列第 1 位'),'queue position lost');
+    check(await row('visual-2').locator('.task-feed-status').innerText()==='等待中','queued corner status lost');
+    check(await row('visual-2').locator('.task-row-footer,.task-queue-position').count()===0,'queued footer or position remains');
+    check(await row('visual-2').getByRole('button',{name:'取消下载',exact:true}).count()===1,'queued progress cancel lost');
     check(await row('visual-5').getByText('文件不存在',{exact:true}).isVisible(),'missing-file feedback lost');
     const tween=await page.evaluate(async()=>{
       const samples=[];const started=performance.now();window.backgroundTest.progress({bytes:104857600});

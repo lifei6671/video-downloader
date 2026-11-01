@@ -10,9 +10,11 @@ import { Spinner } from '@/components/ui/spinner';
 
 export type TaskView = 'list' | 'feed';
 
-export function TaskList({ tasks, paginationKey, platform, onPlatformChange, view, onViewChange, listRef, removingIds, onExited, renderRow, assets = [], renderAsset, toolbar, empty }: {
+export function TaskList({ tasks, paginationKey, platform, onPlatformChange, view, onViewChange, listRef, removingIds, onExited, renderRow, assets = [], renderAsset, removingAssetIds, onAssetExited, toolbar, empty }: {
   tasks: Task[];
   assets?: BackupAsset[];
+  removingAssetIds?: ReadonlySet<string>;
+  onAssetExited?: (id: string) => void;
   renderAsset?: (asset: BackupAsset) => ReactNode;
   toolbar?: ReactNode;
   paginationKey: string;
@@ -63,7 +65,7 @@ export function TaskList({ tasks, paginationKey, platform, onPlatformChange, vie
     </div>
     <TabsContent ref={listRef} value={platform} className="flex min-h-0 flex-col overflow-y-auto">
       {rows.length ? <div role="list" aria-label="媒体任务列表" data-view={view} className="task-list">
-        {rows.slice(0, limit).map(row => row.kind === 'task' ? <TaskRemovalRow key={row.task.id} id={row.task.id} removing={removingIds.has(row.task.id)} onExited={onExited}>{renderRow(row.task)}</TaskRemovalRow> : <div role="listitem" className="task-list-item" key={'asset-' + row.asset.asset_id}>{renderAsset?.(row.asset)}</div>)}
+        {rows.slice(0, limit).map(row => row.kind === 'task' ? <TaskRemovalRow key={row.task.id} id={row.task.id} removing={removingIds.has(row.task.id)} onExited={onExited}>{renderRow(row.task)}</TaskRemovalRow> : <TaskRemovalRow key={'asset-' + row.asset.asset_id} id={row.asset.asset_id} removing={removingAssetIds?.has(row.asset.asset_id) ?? false} onExited={onAssetExited ?? onExited}>{renderAsset?.(row.asset)}</TaskRemovalRow>)}
       </div> : empty}
       {hasMore && <div ref={sentinel} className="task-load-more" role="status" aria-live="polite" aria-busy={loading}>
         {loading && <><Spinner aria-hidden="true" />正在加载更多…</>}

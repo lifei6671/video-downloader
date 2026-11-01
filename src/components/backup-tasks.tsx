@@ -15,28 +15,44 @@ import type { useRuntimeDependencies } from '@/components/runtime-dependencies';
 import { BackupDataDialog } from '@/components/backup-conflicts';
 import { toast } from 'sonner';
 
+function deletionFinished(operation: BackupOperation) {
+  return operation.kind === 'delete' && operation.phase !== 'superseded' && (operation.payload.local_cleanup_done === true || operation.state === 'completed' && operation.phase === 'completed');
+}
+
 export function useBackupTasks() {
   const [settings, setSettings] = useState<BackupSettings | null>(null);
   const [assets, setAssets] = useState<BackupAsset[]>([]);
   const [operations, setOperations] = useState<BackupOperation[]>([]);
   const [restoring, setRestoring] = useState<Set<string>>(new Set());
+  const [submittingDeletes, setSubmittingDeletes] = useState<Set<string>>(new Set());
+  const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
+  const [exitingAssets, setExitingAssets] = useState<BackupAsset[]>([]);
+  const assetSnapshot = useRef<BackupAsset[]>([]), operationSnapshot = useRef<BackupOperation[]>([]);
   const pollError = useRef('');
   const operationErrors = useRef<{ spaceId: string; errors: Map<string, string> } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [revision, setRevision] = useState(0);
   const live = useRef(true);
   const currentSpace = useRef(settings?.space_id); currentSpace.current = settings?.space_id;
-  useEffect(() => { setAssets([]); setOperations([]); }, [settings?.space_id]);
+  useEffect(() => { setAssets([]); setOperations([]); setExitingAssets([]); setSubmittingDeletes(new Set()); setDeleteErrors({}); assetSnapshot.current = []; operationSnapshot.current = []; }, [settings?.space_id]);
   useEffect(() => { live.current = true; void api.backupSettings().then(v => { if (live.current) setSettings(v); }).catch(e => { if (live.current) toast.error(errorText(e), { id: 'backup-error' }); }); return () => { live.current = false; }; }, []);
   const reload = useCallback(async () => {
     if (!settings) return;
     const [list, ops] = await Promise.all([api.backupAssets(settings.space_id), api.backupOperations()]);
     if (live.current && currentSpace.current === settings.space_id) {
       const scoped = ops.filter(o => o.space_id === settings.space_id);
+      setDeleteErrors(old => Object.fromEntries(Object.entries(old).filter(([id]) => !scoped.some(operation => operation.kind === 'delete' && operation.asset_id === id && (['pending','running'].includes(operation.state) || deletionFinished(operation))))));
+      const finished = scoped.filter(deletionFinished);
+      const leaving = assetSnapshot.current.filter(asset => !asset.task_id && !list.some(value => value.asset_id === asset.asset_id) && finished.some(operation => operation.asset_id === asset.asset_id));
+      if (leaving.length) setExitingAssets(old => [...old.filter(asset => !leaving.some(value => value.asset_id === asset.asset_id)), ...leaving]);
+      for (const operation of finished) {
+        if (operationSnapshot.current.some(old => old.operation_id === operation.operation_id && !deletionFinished(old))) toast.success('视频已删除');
+      }
+      assetSnapshot.current = list; operationSnapshot.current = scoped;
       const previous = operationErrors.current?.spaceId === settings.space_id ? operationErrors.current.errors : null;
       const next = new Map<string, string>();
       for (const op of scoped) {
-        if (!op.last_error || op.last_error === 'CANCELED') continue;
+        if (!op.last_error || op.last_error === 'CANCELED' || deletionFinished(op)) continue;
         const identity = `${op.last_error}:${op.attempt}`;
         next.set(op.operation_id, identity);
         // The first successful load is a history snapshot, not a new failure event.
@@ -67,10 +83,42 @@ export function useBackupTasks() {
     await run(() => api.ensureAsset(asset.asset_id), '本机副本已恢复');
     if (live.current) setRestoring(old => { const next = new Set(old); next.delete(asset.asset_id); return next; });
   }
-  const operation = (id: string) => operations.find(o => o.asset_id === id && !['completed', 'canceled'].includes(o.state) && o.phase !== 'superseded' && !(o.kind === 'upload' && assets.find(a => a.asset_id === id)?.asset_state === 'deleted'));
-  return { settings, setSettings, revision, assets, operations, operation, restoring, refreshing, refresh, reload, run, restore };
+  async function deleteAsset(assetId: string) {
+    if (!settings?.enabled || submittingDeletes.has(assetId)) return;
+    const space = settings.space_id;
+    setSubmittingDeletes(old => new Set(old).add(assetId));
+    setDeleteErrors(old => { const next = {...old}; delete next[assetId]; return next; });
+    try { await api.deleteAsset(space, assetId); await reload(); }
+    catch (error) { if (live.current && currentSpace.current === space) { setDeleteErrors(old => ({...old,[assetId]:errorText(error)})); toast.error(errorText(error), {id:'backup-error'}); } }
+    finally { if (live.current && currentSpace.current === space) setSubmittingDeletes(old => { const next = new Set(old); next.delete(assetId); return next; }); }
+  }
+  const finishAssetRemoval = useCallback((id: string) => setExitingAssets(old => old.filter(asset => asset.asset_id !== id)), []);
+  const operation = (id: string) => operations.find(o => o.asset_id === id && !['completed', 'canceled'].includes(o.state) && o.phase !== 'superseded' && !deletionFinished(o) && !(o.kind === 'upload' && assets.find(a => a.asset_id === id)?.asset_state === 'deleted'));
+  return { settings, setSettings, revision, assets, exitingAssets, finishAssetRemoval, operations, operation, restoring, submittingDeletes, deleteErrors, deleteAsset, refreshing, refresh, reload, run, restore };
 }
 export type BackupTasks = ReturnType<typeof useBackupTasks>;
+
+export function backupDeletion(backup: BackupTasks, assetId: string) {
+  const operation = backup.operations.find(value => value.asset_id === assetId && value.kind === 'delete' && !['completed','canceled'].includes(value.state) && value.phase !== 'superseded' && !deletionFinished(value));
+  const submitting = backup.submittingDeletes.has(assetId), error = backup.deleteErrors[assetId];
+  const complete = backup.exitingAssets.some(asset => asset.asset_id === assetId) || !operation && !submitting && !error && backup.assets.some(asset => asset.asset_id === assetId && asset.remote_state === 'pending_delete') && backup.operations.some(operation => operation.asset_id === assetId && deletionFinished(operation));
+  if (!complete && !operation && !submitting && !error) return null;
+  const failed = !!error || !!operation?.last_error && ['blocked','retry_wait'].includes(operation.state);
+  const phase = complete ? 'complete' : operation?.phase === 'finalizing' ? 'finalizing' : operation?.phase === 'local_cleanup' ? 'local' : 'remote';
+  const label = complete ? '删除完成' : failed ? phase === 'local' ? '本地文件删除失败' : phase === 'finalizing' ? '记录移除失败' : '远端备份删除失败' : submitting && !operation ? '正在提交删除' : phase === 'local' ? '正在删除本地文件' : phase === 'finalizing' ? '正在移除记录' : operation && ['pending','retry_wait'].includes(operation.state) ? '等待删除远端备份' : '正在删除远端备份';
+  return {operation, failed, phase, label, error};
+}
+
+export function BackupDeleteProgress({backup, assetId, cover = false}: {backup: BackupTasks; assetId: string; cover?: boolean}) {
+  const deletion = backupDeletion(backup, assetId);
+  if (!deletion) return null;
+  if (cover) return <div className="task-feed-progress"><Tooltip><TooltipTrigger asChild><div role="status" aria-live="polite" aria-label={deletion.label} tabIndex={0} className="backup-delete-progress"><Progress variant="circular" value={null} aria-label="删除进度" aria-valuetext={deletion.label}>{deletion.failed ? <AlertCircle aria-hidden="true" /> : deletion.phase === 'complete' ? <CircleCheck aria-hidden="true" /> : <Spinner aria-hidden="true" />}</Progress></div></TooltipTrigger><TooltipContent>{deletion.label}</TooltipContent></Tooltip></div>;
+  return <div role="status" aria-live="polite" className={`flex flex-wrap items-center gap-2 text-xs ${deletion.failed ? 'text-destructive' : 'text-muted-foreground'}`}>
+    {deletion.failed ? <AlertCircle aria-hidden="true" className="size-3.5" /> : deletion.phase === 'complete' ? <CircleCheck aria-hidden="true" className="size-3.5 text-success" /> : <Spinner aria-hidden="true" className="size-3.5" />}<span>{deletion.label}</span>
+    {deletion.error && <span>{deletion.error}</span>}
+    {deletion.failed && <Button size="sm" variant="ghost" className="h-6 px-1 text-xs" disabled={!backup.settings?.enabled || backup.submittingDeletes.has(assetId)} onClick={() => void backup.deleteAsset(assetId)}>重试删除</Button>}
+  </div>;
+}
 
 function isActiveTransfer(operation: BackupOperation | undefined, kind: 'upload' | 'restore') {
   return operation?.kind === kind && (kind === 'restore' ? ['pending', 'running'] : ['pending', 'running', 'retry_wait']).includes(operation.state);
@@ -97,6 +145,8 @@ export function BackupTaskError({ backup, assetId }: { backup: BackupTasks; asse
 }
 
 export function BackupAssetCoverBadge({ backup, assetId }: { backup: BackupTasks; assetId: string }) {
+  const deletion = backupDeletion(backup, assetId);
+  if (deletion) return <Badge variant={deletion.failed ? 'destructive' : deletion.phase === 'complete' ? 'success' : 'info'} className="task-feed-status">{deletion.failed ? '删除失败' : deletion.phase === 'complete' ? '删除完成' : '删除中'}</Badge>;
   const asset = backup.assets.find(value => value.asset_id === assetId);
   if (!asset) return null;
   if (asset.path) return <Badge variant="success" className="task-feed-status">已完成</Badge>;
@@ -124,6 +174,8 @@ export function SyncIcon({ uploading = false, indeterminate = false, restoring =
 
 export function BackupTaskStatus({ backup, assetId }: { backup: BackupTasks; assetId: string }) {
   const [busy, setBusy] = useState(false), [inspect, setInspect] = useState(false);
+  const deletion = backupDeletion(backup, assetId);
+  if (deletion) return <Tooltip><TooltipTrigger asChild><span className="backup-sync-tooltip inline-flex rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={deletion.failed ? undefined : 0}><Button variant="ghost" size="icon" className="backup-sync-button shrink-0" disabled={!deletion.failed || busy || !backup.settings?.enabled || backup.submittingDeletes.has(assetId)} aria-label={deletion.failed ? '重试删除' : deletion.label} onClick={() => void backup.deleteAsset(assetId)}>{deletion.failed ? <Trash2 className="size-3.5 text-destructive" /> : deletion.phase === 'complete' ? <CircleCheck className="size-3.5 text-success" /> : <Spinner className="size-3.5" />}</Button></span></TooltipTrigger><TooltipContent>{deletion.failed ? `${deletion.label}，点击重试删除` : deletion.label}</TooltipContent></Tooltip>;
   const asset = backup.assets.find(a => a.asset_id === assetId), op = backup.operation(assetId);
   if (!backup.settings || !asset) return null;
   const { restoring, waiting: waitingRestore } = restoreStatus(backup, assetId, op);
@@ -161,9 +213,11 @@ export function BackupTaskStatus({ backup, assetId }: { backup: BackupTasks; ass
 
 export function BackupTransferMenuItems({ backup, assetId, context = false }: { backup: BackupTasks; assetId: string; context?: boolean }) {
   const [busy, setBusy] = useState(false);
+  const deletion = backupDeletion(backup, assetId);
+  const Item = context ? ContextMenuItem : DropdownMenuItem;
+  if (deletion) return <Item disabled={!deletion.failed || !backup.settings?.enabled || backup.submittingDeletes.has(assetId)} onSelect={() => void backup.deleteAsset(assetId)}><Trash2 />{deletion.failed ? '重试删除' : deletion.label}</Item>;
   const asset = backup.assets.find(a => a.asset_id === assetId), op = backup.operation(assetId);
   if (!backup.settings?.enabled || !asset || asset.remote_state === 'pending_delete' && !asset.remote_deleted) return null;
-  const Item = context ? ContextMenuItem : DropdownMenuItem;
   const uploading = isActiveTransfer(op, 'upload');
   const restoring = backup.restoring.has(assetId) || isActiveTransfer(op, 'restore');
   const transferring = uploading || restoring || op?.state === 'running';
@@ -191,6 +245,7 @@ export function BackupTransferMenuItems({ backup, assetId, context = false }: { 
 function BackupAssetMenuItems({ asset, backup, transcript, context = false }: { asset: BackupAsset; backup: BackupTasks; transcript: () => void; context?: boolean }) {
   const Item = context ? ContextMenuItem : DropdownMenuItem;
   const Separator = context ? ContextMenuSeparator : DropdownMenuSeparator;
+  if (backupDeletion(backup, asset.asset_id)) return <BackupTransferMenuItems backup={backup} assetId={asset.asset_id} context={context} />;
   const hasTransfers = backup.settings?.enabled && !(asset.remote_state === 'pending_delete' && !asset.remote_deleted);
   return <>
     <Item onSelect={transcript}><FileText />查看文案</Item>
@@ -199,7 +254,7 @@ function BackupAssetMenuItems({ asset, backup, transcript, context = false }: { 
     {hasTransfers && <Separator />}
     <Item onSelect={() => void backup.run(() => api.hideAsset(asset.asset_id), '已从列表移除')}><ListX />从列表移除</Item>
     {asset.in_current_space !== false && asset.remote_state === 'backed_up' && !asset.remote_deleted && asset.path && <Item onSelect={() => void backup.run(() => api.releaseAsset(asset.asset_id), '本机副本已释放')}><Trash2 />释放本机空间</Item>}
-    {asset.in_current_space !== false && backup.settings?.enabled && (backup.settings.provider_type !== 'telegram' || backup.settings.can_delete_owned_media) && !asset.remote_deleted && <Item variant="destructive" onSelect={() => void backup.run(() => api.deleteAsset(asset.space_id, asset.asset_id), backup.settings?.provider_type === 'telegram' ? '已加入删除队列' : '本机已删除，等待清理远端')}><Trash2 />从当前同步库删除</Item>}
+    {asset.in_current_space !== false && backup.settings?.enabled && (backup.settings.provider_type !== 'telegram' || backup.settings.can_delete_owned_media) && !asset.remote_deleted && <Item variant="destructive" onSelect={() => void backup.deleteAsset(asset.asset_id)}><Trash2 />从当前同步库删除</Item>}
   </>;
 }
 
@@ -228,22 +283,24 @@ export function BackupAssetRow({ asset, backup, dialogs, feed = false }: { asset
   const title = asset.metadata.title?.trim() || asset.original_filename || '已删除视频';
   const author = asset.metadata.author?.trim();
   const status = backupAssetStatus(backup, asset);
-  const location = status === 'queued' ? '待下载' : status === 'downloading' ? '下载中' : status === 'failed' ? '下载失败' : asset.local_state === 'present' ? '本机有副本' : asset.remote_state === 'pending_delete' ? '远端待删除' : asset.remote_deleted ? '本机待处理' : '仅云端';
-  const playAction = <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className={feed ? 'task-feed-play cursor-pointer' : undefined} aria-label="播放视频" disabled={!asset.path && (asset.in_current_space === false || asset.remote_deleted)} onClick={e => dialogs.play(asset,e.currentTarget)}><Play aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>在应用内播放</TooltipContent></Tooltip>;
+  const deletion = backupDeletion(backup, asset.asset_id);
+  const location = deletion ? deletion.failed ? '删除失败' : deletion.phase === 'complete' ? '删除完成' : '删除中' : status === 'queued' ? '待下载' : status === 'downloading' ? '下载中' : status === 'failed' ? '下载失败' : asset.local_state === 'present' ? '本机有副本' : asset.remote_state === 'pending_delete' ? '远端待删除' : asset.remote_deleted ? '本机待处理' : '仅云端';
+  const playAction = <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className={feed ? 'task-feed-play cursor-pointer' : undefined} aria-label="播放视频" disabled={!!deletion || !asset.path && (asset.in_current_space === false || asset.remote_deleted)} onClick={e => dialogs.play(asset,e.currentTarget)}><Play aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>在应用内播放</TooltipContent></Tooltip>;
   return <ContextMenu><ContextMenuTrigger asChild><Card ref={row} size="sm" className="task-row task-context-target task-row-asset" data-asset-id={asset.asset_id} tabIndex={0} aria-label="远端视频操作" onKeyDown={event => {
     if (event.target !== event.currentTarget || !(event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey)) return;
     event.preventDefault();
     const bounds = event.currentTarget.getBoundingClientRect();
     event.currentTarget.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: bounds.right - 24, clientY: bounds.top + bounds.height / 2 }));
   }}><CardContent className="task-row-content">
-    <div className="task-row-cover"><Cover asset={asset} revision={backup.revision} />{feed && <><BackupAssetCoverBadge backup={backup} assetId={asset.asset_id} />{playAction}</>}</div>
+    <div className="task-row-cover"><Cover asset={asset} revision={backup.revision} />{feed && <><BackupAssetCoverBadge backup={backup} assetId={asset.asset_id} />{!deletion && playAction}<BackupDeleteProgress backup={backup} assetId={asset.asset_id} cover /></>}</div>
     <div className="task-row-information"><CardTitle className="task-row-heading"><span className="task-title-backup"><BackupTaskStatus backup={backup} assetId={asset.asset_id} /></span><Tooltip><TooltipTrigger asChild><span className="task-row-title" tabIndex={0}>{title}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{title}</TooltipContent></Tooltip></CardTitle>
       <div className="task-row-byline">{author && <Tooltip><TooltipTrigger asChild><span className="task-row-author" tabIndex={0}>{author}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{author}</TooltipContent></Tooltip>}<span>{location}</span></div>
       <BackupTaskError backup={backup} assetId={asset.asset_id} />
+      {(!feed || deletion?.failed) && <BackupDeleteProgress backup={backup} assetId={asset.asset_id} />}
     </div>
     {!feed && <div className="task-row-footer"><div className="task-row-controls">
       {playAction}
-      <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="查看文案" onClick={e => dialogs.transcript.open(asset.asset_id,e.currentTarget)}><FileText aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>查看文案</TooltipContent></Tooltip>
+      <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="查看文案" disabled={!!deletion} onClick={e => dialogs.transcript.open(asset.asset_id,e.currentTarget)}><FileText aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>查看文案</TooltipContent></Tooltip>
     </div></div>}
   </CardContent></Card></ContextMenuTrigger><ContextMenuContent collisionPadding={8} className="task-action-menu task-context-menu" aria-label="远端视频操作"><BackupAssetMenuItems asset={asset} backup={backup} transcript={() => dialogs.transcript.open(asset.asset_id,row.current)} context /></ContextMenuContent></ContextMenu>;
 }

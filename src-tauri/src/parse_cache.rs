@@ -405,6 +405,25 @@ pub fn image(db: &Connection, video: &Value, index: usize) -> Result<Vec<u8>> {
     Ok(body)
 }
 
+pub(crate) fn update_telegram_metadata(db: &Connection, video: &Value) -> Result<()> {
+    anyhow::ensure!(video["platform"] == "telegram", "INVALID_ENGINE_RESULT");
+    let cache_key = key(video)?;
+    let cached: Option<String> = db.query_row(
+        "SELECT metadata FROM parse_cache WHERE cache_key=?1 AND revision=?2",
+        params![cache_key, revision("grammers")], |row| row.get(0),
+    ).optional().context("DATABASE_ERROR")?;
+    let Some(cached) = cached else { return Ok(()); };
+    let mut cached: Value = serde_json::from_str(&cached).context("DATABASE_ERROR")?;
+    if video["telegram_document_id"].as_i64().is_none()
+        || ["telegram_document_id", "filesize", "mime_type", "original_filename"]
+            .iter().any(|field| cached[*field] != video[*field]) {
+        return Ok(());
+    }
+    crate::telegram_download::fill_missing_attributes(&mut cached, video);
+    db.execute("UPDATE parse_cache SET metadata=?2 WHERE cache_key=?1", params![cache_key, serde_json::to_string(&cached)?]).context("DATABASE_ERROR")?;
+    Ok(())
+}
+
 // Add a downloaded cover without replacing newer parsed metadata or restoring an
 // invalidated cache entry. A cache write failure never changes download success.
 pub fn save_cover(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {

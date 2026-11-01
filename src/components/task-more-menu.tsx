@@ -49,8 +49,8 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
       {task.status === 'completed' && task.path && task.video?.kind !== 'image_album' && <Item disabled={busy} onSelect={copyPath}><Copy />复制本地地址</Item>}
       {coverActions && <>
         {(hasFile || hasLink || transcript) && <Separator />}
-        <Item disabled={coverActions.saving || coverActions.copying || !coverActions.available} onSelect={coverActions.save}><Download />{coverActions.saving ? '保存中…' : '保存封面'}</Item>
-        <Item disabled={coverActions.saving || coverActions.copying || !coverActions.available} onSelect={coverActions.copy}><Copy />{coverActions.copying ? '复制中…' : '复制封面'}</Item>
+        <Item disabled={busy || coverActions.saving || coverActions.copying || !coverActions.available} onSelect={coverActions.save}><Download />{coverActions.saving ? '保存中…' : '保存封面'}</Item>
+        <Item disabled={busy || coverActions.saving || coverActions.copying || !coverActions.available} onSelect={coverActions.copy}><Copy />{coverActions.copying ? '复制中…' : '复制封面'}</Item>
       </>}
       {cancel && <Item disabled={busy || task.canceling} onSelect={() => cancel(context ? row.current : trigger.current)}><X />{task.canceling ? '正在取消…' : '取消下载'}</Item>}
       {removable && (hasFile || hasLink || transcript || coverActions) && <Separator />}

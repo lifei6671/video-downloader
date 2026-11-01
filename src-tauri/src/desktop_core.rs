@@ -620,12 +620,107 @@ impl Core {
 
     pub fn start_backup_service(self: &Arc<Self>) {
         let mut inner = self.inner.lock().unwrap();
-        if inner.closing || inner.backup_started { return; }
+        if inner.closing || inner.backup_started {
+            return;
+        }
         inner.backup_started = true;
         let core = Arc::clone(self);
         let cancel = inner.backup_cancel.subscribe();
-        inner.workers.push(tokio::spawn(crate::backup::sync_engine::run(core, cancel)));
+        inner
+            .workers
+            .push(tokio::spawn(crate::backup::sync_engine::run(core, cancel)));
+        let repairs: Vec<_> = inner
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.status == Status::Completed
+                    && task.path.is_some()
+                    && task.video.as_ref().is_some_and(|video| {
+                        video["platform"] == "telegram"
+                            && ["width", "height", "duration_ms"]
+                                .iter()
+                                .any(|field| video[*field].as_u64().is_none_or(|n| n == 0))
+                    })
+            })
+            .cloned()
+            .collect();
+        if !repairs.is_empty() {
+            let core = self.clone();
+            inner.workers.push(tokio::spawn(async move {
+                core.repair_telegram_metadata(repairs).await;
+            }));
+        }
     }
+    async fn repair_telegram_metadata(self: &Arc<Self>, tasks: Vec<Task>) {
+        for expected in tasks {
+            if self.inner.lock().unwrap().closing {
+                break;
+            }
+            let Some(path) = expected.path.as_ref().filter(|path| {
+                std::fs::symlink_metadata(path).is_ok_and(|m| {
+                    m.is_file() && !m.file_type().is_symlink() && m.len() == expected.bytes
+                })
+            }) else {
+                continue;
+            };
+            let metadata = self
+                .probe_video_metadata(path, &format!("telegram-metadata-{}", expected.id), async {
+                    loop {
+                        if self.inner.lock().unwrap().closing {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                })
+                .await;
+            let metadata = match metadata {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if error.to_string() != "CANCELED" {
+                        eprintln!("Telegram metadata probe: {error}");
+                    }
+                    continue;
+                }
+            };
+            let result = (|| -> Result<()> {
+                let mut inner = self.inner.lock().unwrap();
+                if inner.closing {
+                    return Ok(());
+                }
+                let Some(mut task) = inner
+                    .tasks
+                    .iter()
+                    .find(|task| {
+                        task.id == expected.id
+                            && task.status == Status::Completed
+                            && task.path == expected.path
+                            && task.completed_at == expected.completed_at
+                    })
+                    .cloned()
+                else {
+                    return Ok(());
+                };
+                let Some(video) = task.video.as_mut() else {
+                    return Ok(());
+                };
+                if video["platform"] != "telegram" {
+                    return Ok(());
+                }
+                let before = video.clone();
+                telegram_download::fill_missing_attributes(video, &metadata);
+                if *video == before {
+                    return Ok(());
+                }
+                parse_cache::update_telegram_metadata(&inner.db, video)?;
+                task.revision += 1;
+                publish(&mut inner, task, &*self.emit)
+            })();
+            if let Err(error) = result {
+                eprintln!("Telegram metadata repair: {error}");
+            }
+        }
+    }
+
     pub fn wake_backup(&self) {self.backup_wake.notify_waiters();}
     pub fn set_backup_foreground(&self,foreground:bool) {self.backup_foreground.store(foreground,std::sync::atomic::Ordering::Relaxed);if foreground {self.wake_backup();}}
     pub(crate) fn backup_cancellation(&self)->watch::Receiver<bool> {self.inner.lock().unwrap().backup_cancel.subscribe()}
@@ -1038,9 +1133,29 @@ impl Core {
     }
 
     fn remove_history_records(&self, inner: &mut Inner, ids: Vec<String>) -> Result<Vec<String>> {
-        if ids.is_empty() {
-            return Ok(ids);
+        if ids.is_empty() { return Ok(ids); }
+        self.remove_history_records_with(inner, ids, |_| Ok(()))
+    }
+
+    pub(crate) fn finish_asset_deletion(&self, asset: &str, operation: &str) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let tasks: Vec<_> = inner.tasks.iter().filter(|task| task.asset_id.as_deref() == Some(asset)).collect();
+        if tasks.iter().any(|task| !matches!(task.status, Status::Completed | Status::Failed | Status::Canceled)
+            || inner.active.contains_key(&task.id) || inner.downloads.contains(&task.id)
+            || inner.transcription.as_ref().is_some_and(|active| active.snapshot.task_id == task.id)) {
+            bail!("TASK_BUSY");
         }
+        let ids = tasks.into_iter().map(|task| task.id.clone()).collect();
+        self.remove_history_records_with(&mut inner, ids, |tx| {
+            let space: String = tx.query_row("SELECT space_id FROM backup_operations WHERE operation_id=?1 AND asset_id=?2 AND kind='delete'",params![operation,asset],|row|row.get(0))?;
+            tx.execute("INSERT OR IGNORE INTO asset_hidden_history(asset_id) VALUES(?)",[asset])?;
+            tx.execute("UPDATE asset_remote_objects SET remote_state='deleted' WHERE space_id=?1 AND asset_id=?2",params![space,asset])?;
+            tx.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.local_cleanup_done',json('true')) WHERE operation_id=?",[operation])?;
+            Ok(())
+        }).map(|_| ())
+    }
+
+    fn remove_history_records_with(&self, inner: &mut Inner, ids: Vec<String>, update: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>) -> Result<Vec<String>> {
         let removing: HashSet<_> = ids.iter().map(String::as_str).collect();
         let retained: HashSet<_> = inner
             .tasks
@@ -1086,6 +1201,7 @@ impl Core {
         for video in release_covers {
             parse_cache::clear_cover(&tx, &video)?;
         }
+        update(&tx)?;
         tx.commit().context("DATABASE_ERROR")?;
         // Staging records, if cleanup previously failed, remain available for
         // startup cleanup. Removing history never touches a completed video.
@@ -1656,7 +1772,8 @@ impl Core {
         cancel: watch::Receiver<bool>,
     ) -> Result<Value> {
         let previous = self.inner.lock().unwrap().tasks.iter().find(|task| task.id == id).and_then(|task|task.video.clone());
-        let video = telegram_download::operation(self, input, None, None, |_| {}, cancel).await?;
+        let outcome = telegram_download::operation(self, input, None, None, |_| {}, cancel).await?;
+        let video = outcome.value;
         if let Some(previous) = &previous {
             if previous["platform"] == "telegram" && previous["video_id"] != video["video_id"] {
                 parse_cache::forget_telegram_channel(&self.inner.lock().unwrap().db,input,previous)?;
@@ -1667,10 +1784,11 @@ impl Core {
             serde_json::from_value(video.clone()).context("INVALID_ENGINE_RESULT")?;
         identity.validate()?;
         let mut inner = self.inner.lock().unwrap();
-        let cached = parse_cache::save(&mut inner.db, &video, Vec::new(), None, now())?;
+        let cached = parse_cache::save(&mut inner.db, &video, Vec::new(), outcome.cover, now())?;
         parse_cache::remember(&inner.db, input, &cached.video)?;
         let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
         task.cached_at = Some(cached.saved_at);
+        task.cover_cached = cached.has_cover;
         Ok(cached.video)
     }
 
@@ -1761,7 +1879,29 @@ impl Core {
                     };
                 let result = if telegram {
                     match telegram_download::operation(&core, telegram_input.as_deref().context("INVALID_ENGINE_RESULT")?, Some(&video), Some(&media), progress, cancellation.clone()).await {
-                        Ok(mut result) => {
+                        Ok(outcome) => {
+                            let mut result = outcome.value;
+                            if let Some(body) = outcome.cover {
+                                let saved:Result<()> = async {
+                                    let mut cover_file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(media.join("cover")).await.context("IO_ERROR")?;
+                                    tokio::io::AsyncWriteExt::write_all(&mut cover_file, &body).await.context("IO_ERROR")?;
+                                    tokio::io::AsyncWriteExt::flush(&mut cover_file).await.context("IO_ERROR")?;
+                                    Ok(())
+                                }.await;
+                                if saved.is_ok() {
+                                    result["cover_filename"] = "cover".into();
+                                    result["cover_bytes"] = (body.len() as u64).into();
+                                }
+                            }
+                            if result["width"].as_u64().is_none() || result["height"].as_u64().is_none() || result["duration_ms"].as_u64().is_none() {
+                                let mut metadata_cancel = cancellation.clone();
+                                match core.probe_video_metadata(&media.join(result["filename"].as_str().context("INVALID_ENGINE_RESULT")?), &id, async { let _ = metadata_cancel.wait_for(|v|*v).await; }).await {
+                                    Ok(metadata) => telegram_download::fill_missing_attributes(&mut result, &metadata),
+                                    Err(error) if error.to_string()=="CANCELED" => return Err(error),
+                                    Err(_) => {},
+                                }
+                            }
+                            if result["cover_filename"].is_string() { Ok(result) } else {
                             let mut cover_cancel = cancellation.clone();
                             let cover = PythonBridge::operation_cancellable(
                                 &core.program, &core.args, &id, "extract_cover",
@@ -1778,6 +1918,7 @@ impl Core {
                                     }
                                     Ok(result)
                                 }
+                            }
                             }
                         }
                         Err(error) => Err(error),
@@ -1804,6 +1945,12 @@ impl Core {
                     let mut inner = core.inner.lock().unwrap();
                     let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
                     if task.canceling { bail!("CANCELED"); }
+                    let mut video = video;
+                    if telegram {
+                        telegram_download::merge_attributes(&mut video, &result);
+                        parse_cache::update_telegram_metadata(&inner.db, &video)?;
+                        task.video = Some(video.clone());
+                    }
                     if video["selected_format_id"].is_string() && result["format_id"] != video["selected_format_id"] {
                         bail!("INVALID_ENGINE_RESULT");
                     }
@@ -4351,4 +4498,14 @@ mod tests {
         );
         app.shutdown().await;
     }
+    #[test]
+    fn asset_deletion_finalization_retains_the_existing_busy_guard() {
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::open(&root.path().join("busy-delete.sqlite"), root.path().join("downloads"), "unused".into(), vec![], |_| {}).unwrap();
+        let task: Task = serde_json::from_value(json!({"id":"busy-task","asset_id":"busy-asset","revision":1,"status":"queued","video":null,"bytes":0,"total_bytes":null,"speed_bps":null,"error":null,"path":null,"created_at":1,"completed_at":null,"canceling":false})).unwrap();
+        core.inner.lock().unwrap().tasks.push(task);
+        assert_eq!(core.finish_asset_deletion("busy-asset", "unstarted-operation").unwrap_err().to_string(), "TASK_BUSY");
+        assert_eq!(core.list().len(), 1);
+    }
+
 }

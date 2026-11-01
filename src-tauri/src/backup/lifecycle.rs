@@ -116,7 +116,7 @@ pub async fn delete_task(core: &Arc<Core>, task_id: &str) -> Result<()> {
         if let Some(current) = super::spaces::get(core)? {
             let member:bool=core.backup_db(|db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2)",params![current.space_id,id],|r|r.get(0))?))?;
             if current.enabled && member {
-                super::sync_delete::delete(core, &current.space_id, id).await?;
+                return super::sync_delete::delete(core, &current.space_id, id).await;
             } else {
                 stop_readers(core, id).await?;
                 let _writer = core.backup_write_lock.lock().await;

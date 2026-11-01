@@ -2,6 +2,9 @@
 #[cfg(test)]
 #[path = "telegram_rich_tests.rs"]
 mod rich_tests;
+#[cfg(test)]
+#[path = "telegram_index_tests.rs"]
+mod index_tests;
 #[path = "telegram_bundle.rs"]
 mod bundle;
 use super::{
@@ -35,7 +38,7 @@ fn document_attributes(name: String, video: Option<&VideoAttributes>) -> (String
         (mime, attributes)
     } else { ("application/octet-stream".into(), attributes) }
 }
-fn uploaded_media(uploaded: Uploaded, video: Option<&VideoAttributes>) -> Result<tl::enums::InputMedia> {
+fn uploaded_media(uploaded: Uploaded, video: Option<&VideoAttributes>, thumb: Option<tl::enums::InputFile>) -> Result<tl::enums::InputMedia> {
     let name = match &uploaded.raw {
         tl::enums::InputFile::File(f) => f.name.clone(),
         tl::enums::InputFile::Big(f) => f.name.clone(),
@@ -43,11 +46,12 @@ fn uploaded_media(uploaded: Uploaded, video: Option<&VideoAttributes>) -> Result
     };
     let (mime_type, attributes) = document_attributes(name, video);
     Ok(tl::types::InputMediaUploadedDocument {
-        nosound_video:video.is_some(),force_file:video.is_none(),spoiler:false,file:uploaded.raw,thumb:None,
+        nosound_video:video.is_some(),force_file:video.is_none(),spoiler:false,file:uploaded.raw,thumb,
         mime_type,attributes,stickers:None,video_cover:None,video_timestamp:None,ttl_seconds:None,
     }.into())
 }
 struct OriginalDocument(tl::types::Document);
+pub(super) struct PreparedUpload { file: Uploaded, thumbnail: Option<tl::enums::InputFile> }
 impl grammers_client::media::Downloadable for OriginalDocument {
     fn to_raw_input_location(&self) -> Option<tl::enums::InputFileLocation> {
         Some(tl::types::InputDocumentFileLocation {id:self.0.id,access_hash:self.0.access_hash,file_reference:self.0.file_reference.clone(),thumb_size:String::new()}.into())
@@ -70,8 +74,69 @@ fn select_document(message:&grammers_client::message::Message, document_id:Optio
     documents.pop().context("TELEGRAM_MEDIA_MISSING")
 }
 
+// Shared by clones in one request; each fresh connection gets an empty cache.
+type IndexBodyCache = std::sync::Mutex<std::collections::HashMap<RemoteDocument, Vec<u8>>>;
+async fn read_index_body(
+    transport: &impl Transport,
+    cache: &IndexBodyCache,
+    expected: RemoteDocument,
+    io: &Io,
+) -> Result<Vec<u8>> {
+    io.check()?;
+    if let Some(bytes) = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("TELEGRAM_INDEX_INVALID"))?
+        .get(&expected)
+        .cloned()
+    {
+        return Ok(bytes);
+    }
+    use sha2::{Digest, Sha256};
+    let envelope: Envelope =
+        serde_json::from_str(&expected.caption).context("TELEGRAM_INDEX_INVALID")?;
+    for attempt in 0..2 {
+        let result = async {
+            let mut reader = io.run(transport.download(expected.clone())).await?;
+            let mut bytes = vec![];
+            let mut buffer = vec![0; 65536];
+            loop {
+                let count = io
+                    .run(async { reader.read(&mut buffer).await.map_err(anyhow::Error::from) })
+                    .await?;
+                if count == 0 {
+                    break;
+                }
+                if bytes.len() as u64 + count as u64 > expected.bytes {
+                    bail!("TELEGRAM_INDEX_INVALID");
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+                io.touch();
+            }
+            if bytes.len() as u64 != expected.bytes
+                || format!("{:x}", Sha256::digest(&bytes)) != envelope.sha256
+            {
+                bail!("TELEGRAM_INDEX_INVALID");
+            }
+            cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("TELEGRAM_INDEX_INVALID"))?
+                .insert(expected.clone(), bytes.clone());
+            Ok(bytes)
+        }
+        .await;
+        match result {
+            Err(e) if attempt == 0 && e.to_string() == "TELEGRAM_FILE_REFERENCE_EXPIRED" => {
+                continue
+            }
+            other => return other,
+        }
+    }
+    unreachable!("bounded index download always returns")
+}
+
 #[derive(Clone)]
 pub(super) struct GrammersTransport {
+    index_bodies: std::sync::Arc<IndexBodyCache>,
     client: Client,
     peer: PeerRef,
     max_bytes: u64,
@@ -80,9 +145,28 @@ pub(super) struct GrammersTransport {
     channel_title: String,
     preferred_message:Option<i32>,
     bundle_heading: Option<String>,
+    video_thumbnail: Option<Vec<u8>>,
 }
 pub(super) struct IndexDocument {pub revision:i64,pub document:RemoteDocument}
 impl GrammersTransport {
+    pub(super) fn with_thumbnail(&self, body: Vec<u8>) -> Self {
+        let mut value = self.clone();
+        value.video_thumbnail = Some(body);
+        value
+    }
+    async fn upload_video_thumbnail(&self) -> Result<Option<tl::enums::InputFile>> {
+        let Some(body) = self.video_thumbnail.as_ref() else {
+            return Ok(None);
+        };
+        let mut reader = std::io::Cursor::new(body.as_slice());
+        let uploaded = self
+            .client
+            .upload_stream(&mut reader, body.len(), "video-thumb.jpg".into())
+            .await
+            .map_err(io_error)?;
+        Ok(Some(uploaded.raw))
+    }
+
     pub(super) fn with_heading(&self, title: Option<&str>, filename: Option<&str>) -> Self {
         let mut value = self.clone();
         value.bundle_heading = bundle::display_heading(title, filename);
@@ -172,43 +256,7 @@ impl GrammersTransport {
         Ok((result.iter().map(|d|d.revision).max().unwrap_or(0).max(i64::from(high)), result))
     }
     pub(super) async fn index_body(&self, expected: RemoteDocument, io: &Io) -> Result<Vec<u8>> {
-        use sha2::{Digest, Sha256};
-        let envelope: Envelope =
-            serde_json::from_str(&expected.caption).context("TELEGRAM_INDEX_INVALID")?;
-        for attempt in 0..2 {
-            let result = async {
-                let mut reader = io.run(self.download(expected.clone())).await?;
-                let mut bytes = vec![];
-                let mut buffer = vec![0; 65536];
-                loop {
-                    let count = io
-                        .run(async { reader.read(&mut buffer).await.map_err(anyhow::Error::from) })
-                        .await?;
-                    if count == 0 {
-                        break;
-                    }
-                    if bytes.len() as u64 + count as u64 > expected.bytes {
-                        bail!("TELEGRAM_INDEX_INVALID");
-                    }
-                    bytes.extend_from_slice(&buffer[..count]);
-                    io.touch();
-                }
-                if bytes.len() as u64 != expected.bytes
-                    || format!("{:x}", Sha256::digest(&bytes)) != envelope.sha256
-                {
-                    bail!("TELEGRAM_INDEX_INVALID");
-                }
-                Ok(bytes)
-            }
-            .await;
-            match result {
-                Err(e) if attempt == 0 && e.to_string() == "TELEGRAM_FILE_REFERENCE_EXPIRED" => {
-                    continue
-                }
-                other => return other,
-            }
-        }
-        unreachable!("bounded index download always returns")
+        read_index_body(self, &self.index_bodies, expected, io).await
     }
     pub(super) async fn media_reader(
         &self,
@@ -291,6 +339,7 @@ impl GrammersTransport {
         };
         let max_bytes = limit(&config.config, premium)?;
         Ok(Self {
+            index_bodies: std::sync::Arc::default(),
             client,
             peer,
             max_bytes,
@@ -299,6 +348,7 @@ impl GrammersTransport {
             channel_title,
             preferred_message:None,
             bundle_heading: None,
+            video_thumbnail: None,
         })
     }
     async fn message(&self, id: i32) -> Result<grammers_client::message::Message> {
@@ -390,7 +440,7 @@ fn document(message: &grammers_client::message::Message) -> Result<(RemoteDocume
     ))
 }
 impl Transport for GrammersTransport {
-    type Uploaded = Uploaded;
+    type Uploaded = PreparedUpload;
     fn max_bytes(&self) -> u64 {
         self.max_bytes
     }
@@ -440,21 +490,23 @@ impl Transport for GrammersTransport {
         mut reader: &'a mut (dyn AsyncRead + Unpin + Send),
         bytes: u64,
         name: String,
-    ) -> ProviderFuture<'a, Uploaded> {
+    ) -> ProviderFuture<'a, PreparedUpload> {
         Box::pin(async move {
-            self.client
+            let file = self.client
                 .upload_stream(
                     &mut reader,
                     usize::try_from(bytes).context("TELEGRAM_FILE_TOO_LARGE")?,
                     name,
                 )
                 .await
-                .map_err(io_error)
+                .map_err(io_error)?;
+            let thumbnail = self.upload_video_thumbnail().await?;
+            Ok(PreparedUpload { file, thumbnail })
         })
     }
     fn send<'a>(
         &'a self,
-        uploaded: Uploaded,
+        uploaded: PreparedUpload,
         caption: String,
         random_id: i64,
         video: Option<VideoAttributes>,
@@ -463,6 +515,7 @@ impl Transport for GrammersTransport {
         Box::pin(async move {
             let envelope:Envelope=serde_json::from_str(&caption).context("BACKUP_INVALID_MEDIA")?;
             if envelope.kind!="library" {return self.send_bundle(uploaded,envelope,random_id,video,io).await;}
+            let uploaded = uploaded.file;
             let name = match &uploaded.raw {
                 tl::enums::InputFile::File(f) => f.name.clone(),
                 tl::enums::InputFile::Big(f) => f.name.clone(),
@@ -667,6 +720,15 @@ impl AsyncRead for DownloadReader {
 mod tests {
     use super::*;
     #[test]
+    fn uploaded_video_includes_custom_thumbnail_without_forcing_document_mode() {
+        let file=tl::types::InputFile {id:1,parts:1,name:"original.mov".into(),md5_checksum:String::new()}.into();
+        let thumbnail:tl::enums::InputFile=tl::types::InputFile {id:2,parts:1,name:"video-thumb.jpg".into(),md5_checksum:String::new()}.into();
+        let video=VideoAttributes {width:1080,height:1920,duration_ms:2500,supports_streaming:true};
+        let tl::enums::InputMedia::UploadedDocument(media)=uploaded_media(Uploaded::from_raw(file),Some(&video),Some(thumbnail.clone())).unwrap() else {panic!("expected uploaded video document")};
+        assert_eq!(media.thumb,Some(thumbnail));assert!(!media.force_file);
+        assert!(media.attributes.iter().any(|attr|matches!(attr,tl::enums::DocumentAttribute::Video(attr) if attr.supports_streaming&&attr.w==1080&&attr.h==1920)));
+    }
+    #[test]
     fn telegram_video_presentation_keeps_filename_and_original_document() {
         let metadata = serde_json::json!({"duration_ms":2500,"width":1920,"height":1080});
         let video = VideoAttributes::from_metadata(&metadata).unwrap();
@@ -705,7 +767,7 @@ mod tests {
                 .into(),
             );
             let tl::enums::InputMedia::UploadedDocument(media) =
-                uploaded_media(uploaded, Some(&video)).unwrap()
+                uploaded_media(uploaded, Some(&video), None).unwrap()
             else {
                 panic!("wrong media")
             };
@@ -726,7 +788,7 @@ mod tests {
             }
             .into(),
         );
-        let tl::enums::InputMedia::UploadedDocument(media) = uploaded_media(uploaded, None).unwrap()
+        let tl::enums::InputMedia::UploadedDocument(media) = uploaded_media(uploaded, None, None).unwrap()
         else {
             panic!("wrong media")
         };
