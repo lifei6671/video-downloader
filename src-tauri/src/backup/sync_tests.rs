@@ -925,7 +925,7 @@ impl BackupProvider for ReceiptProvider {
     fn delete_media(&self, r: MediaRef, o: &str) -> ProviderFuture<'_, ()> {
         self.inner.delete_media(r, o)
     }
-    fn reconcile_deleted_asset(&self, a: &str, o: &str) -> ProviderFuture<'_, ()> {
+    fn reconcile_deleted_asset(&self, a: &str, o: &str) -> ProviderFuture<'_, DeleteCleanup> {
         self.inner.reconcile_deleted_asset(a, o)
     }
 }

@@ -308,6 +308,11 @@ pub struct UploadReceipt {
     pub device_id: String,
 }
 
+pub enum DeleteCleanup {
+    Complete,
+    ArchiveReady,
+}
+
 /// Providers own transport coordination; the engine owns merge policy and local state.
 pub trait BackupProvider: Send + Sync {
     fn scope(&self) -> &Scope;
@@ -335,7 +340,7 @@ pub trait BackupProvider: Send + Sync {
         Box::pin(async { bail!("BACKUP_CLEANUP_UNSUPPORTED") })
     }
     fn reconcile_deleted_asset(&self, asset_id: &str, operation_id: &str)
-        -> ProviderFuture<'_, ()>;
+        -> ProviderFuture<'_, DeleteCleanup>;
 }
 
 #[cfg(test)]

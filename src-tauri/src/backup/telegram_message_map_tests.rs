@@ -518,6 +518,10 @@ async fn direct_delete_archive_survives_lost_reply_upgrade_delta_and_fresh_rebui
     // A later archive freezes the first deletion at the original carrier revision.
     let second = AssetChange {asset_id:uuid::Uuid::new_v4().to_string(),operation_id:uuid::Uuid::new_v4().to_string(),base:None,..change};
     let next = Provider::direct_archive_body(&io,&target,&second.asset_id,&only,Event::encode(&target,&second)?)?;
+    let pair: crate::backup::telegram_provider::Library = serde_json::from_slice(&next)?;
+    let both = [(asset.as_str(),revision),(second.asset_id.as_str(),(39_u64<<32)|1)];
+    pair.confirm_deletions(&target,39,&both)?;
+    assert!(pair.confirm_deletions(&target,39,&[(asset.as_str(),revision+1)]).is_err());
     let next = snapshot(vec![index(39,"library",library,&second.operation_id,&device,next)]);
     let rolled = Provider::project_snapshot(&fresh,&fresh_target,&io,Some(&restored.cursor),&next)?;
     assert_eq!(rolled.assets[&asset].revision,revision);

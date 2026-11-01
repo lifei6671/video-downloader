@@ -305,7 +305,7 @@ impl BackupProvider for Provider {
     fn delete_media(&self, _: MediaRef, _: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async { bail!("BACKUP_CLEANUP_UNSUPPORTED") })
     }
-    fn reconcile_deleted_asset(&self, asset: &str, _: &str) -> ProviderFuture<'_, ()> {
+    fn reconcile_deleted_asset(&self, asset: &str, _: &str) -> ProviderFuture<'_, DeleteCleanup> {
         let asset = asset.to_owned();
         Box::pin(async move {
             let (_cancel, cancel) = tokio::sync::watch::channel(false);
@@ -314,7 +314,7 @@ impl BackupProvider for Provider {
             let projected=self.projection(None)?;
             let media=transport.media(&Io::new(cancel.clone(),stop.clone(),None)).await?;
             telegram_lifecycle::reconcile_snapshot(&transport,&self.target,&asset,&Io::new(cancel,stop,None),&projected,media,vec![]).await?;
-            Ok(())
+            Ok(DeleteCleanup::Complete)
         })
     }
 }
@@ -1638,6 +1638,96 @@ async fn telegram_t3_existing_background_worker_claims_telegram_queue_and_conver
         assert_eq!(data.events.len(), 1);
     }
     core.shutdown().await;
+}
+
+#[tokio::test]
+async fn corrupt_attachment_on_parked_delete_preserves_its_file_and_allows_successor_to_finish() -> Result<()> {
+    use crate::backup::sync_delete;
+    let root = tempfile::tempdir()?;
+    let core = open(root.path());
+    let net = Arc::new(Remote::default());
+    let provider = setup(&core, net.clone(), None);
+    let engine = SyncEngine::new(core.clone(),provider.clone());
+    let mut assets = Vec::new();
+    for name in ["first","second"] {
+        let folder = root.path().join(name);
+        std::fs::create_dir(&folder)?;
+        let (asset, _) = seed(&core,&folder);
+        engine.execute_upload(&claim(&core,&engine)).await?;
+        assets.push(asset);
+    }
+    let space = &provider.scope().space_id;
+    let a = sync_delete::intent(&core,space,&assets[0])?;
+    let b = sync_delete::intent(&core,space,&assets[1])?;
+    let mut projected = provider.projection(None)?;
+    for id in &assets { projected.assets.get_mut(id).unwrap().deleted = true; }
+    let revisions:Vec<_> = assets.iter().map(|id| (id.as_str(),projected.assets[id].revision)).collect();
+    core.backup_db(|db| {
+        db.execute("UPDATE backup_operations SET phase='objects',state='running',attempt=1 WHERE operation_id=?", [&a])?;
+        assert!(sync_delete::park_confirmed_archive(db,space,&a,revisions[0].1)?);
+        Ok(())
+    })?;
+    let transport = MemoryTransport(&net);
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    let io = Io::new(rx.clone(),rx,None);
+    let mut stray = transport.media(&io).await?.into_iter().find(|doc|
+        serde_json::from_str::<Envelope>(&doc.caption).is_ok_and(|e| e.asset_id==assets[0] && e.kind=="video")).unwrap();
+    stray.message_id = 2000;
+    {
+        let mut data = net.data.lock().unwrap();
+        data.media.insert(stray.message_id,vec![42;stray.bytes as usize]);
+        data.documents.insert(stray.message_id,stray);
+    }
+    let err = telegram_lifecycle::reconcile_deleted_messages(&transport,&provider.target,&revisions,&io,
+        &projected,transport.media(&io).await?,vec![]).await.unwrap_err();
+    assert_eq!(err.to_string(),"BACKUP_CHECKSUM_MISMATCH");
+    assert!(net.delete_batches.lock().unwrap().is_empty());
+    assert!(sync_delete::recover_cleanup(&core,provider.scope(),&b,&err)?);
+    assert!(core.backup_db(|db| sync_delete::parked_archive(db,space,&b))?.is_none());
+    delete_pass(&core,&provider,&b).await?;
+    assert!(root.path().join("first/original.mp4").exists());
+    assert!(!root.path().join("second/original.mp4").exists());
+    assert!(net.data.lock().unwrap().documents.contains_key(&2000));
+    core.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_confirmed_deletions_share_one_message_batch_and_retry_only_the_survivor() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let core = open(root.path());
+    let net = Arc::new(Remote::default());
+    let provider = setup(&core, net.clone(), None);
+    let engine = SyncEngine::new(core.clone(), provider.clone());
+    let mut assets = Vec::new();
+    for name in ["first","second"] {
+        let folder = root.path().join(name);
+        std::fs::create_dir(&folder)?;
+        let (asset, _) = seed(&core, &folder);
+        engine.execute_upload(&claim(&core,&engine)).await?;
+        assets.push(asset);
+    }
+    let mut projected = provider.projection(None)?;
+    for asset in &assets { projected.assets.get_mut(asset).unwrap().deleted = true; }
+    let deletions:Vec<_> = assets.iter().map(|id| (id.as_str(), projected.assets[id].revision)).collect();
+    let transport = MemoryTransport(&net);
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    let io = Io::new(rx.clone(),rx,None);
+    let videos:Vec<_> = net.data.lock().unwrap().documents.values().filter(|d|
+        serde_json::from_str::<Envelope>(&d.caption).unwrap().kind=="video").cloned().collect();
+    assert_eq!(videos.len(),2);
+    let survivor = videos[0].message_id;
+    net.keep_message.store(survivor, Ordering::SeqCst);
+    let cleanup = || telegram_lifecycle::reconcile_deleted_messages(&transport,&provider.target,&deletions,&io,&projected,videos.clone(),vec![]);
+    assert_eq!(cleanup().await.unwrap_err().to_string(),"BACKUP_CLEANUP_PENDING");
+    let mut ids:Vec<_> = videos.iter().map(|v| v.message_id).collect();
+    ids.sort();
+    assert_eq!(net.delete_batches.lock().unwrap().as_slice(), &[ids]);
+    net.keep_message.store(0, Ordering::SeqCst);
+    cleanup().await?;
+    assert_eq!(net.delete_batches.lock().unwrap()[1], [survivor]);
+    core.shutdown().await;
+    Ok(())
 }
 
 #[tokio::test]

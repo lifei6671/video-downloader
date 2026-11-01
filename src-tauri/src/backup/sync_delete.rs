@@ -55,6 +55,8 @@ pub fn intent(core: &Core, space: &str, local: &str) -> Result<String> {
             let mut payload = json!({"scope":scope,"remote_asset_id":remote,"cleanup_pass":0,"base":base});
             if scope.provider_type == ProviderType::Telegram {
                 payload["first_archive_publish"] = true.into();
+                let queued: i64 = tx.query_row("SELECT CAST(unixepoch('subsec')*1000 AS INTEGER)", [], |r| r.get(0))?;
+                payload["queued_at_ms"] = queued.into();
             }
             tx.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'delete','pending','tombstone',?4)",params![uuid::Uuid::new_v4().to_string(),space,local,payload.to_string()])?;
         }
@@ -94,15 +96,71 @@ fn claim_archive_read(db: &rusqlite::Connection, operation: &str) -> Result<bool
     )? == 1)
 }
 
+// Only pair with an already queued fresh delete. A parked operation remains ordinary due work
+// if its successor fails, is delayed, or the process restarts.
+pub(super) fn park_confirmed_archive(db: &rusqlite::Connection, space: &str, operation: &str, revision: u64) -> Result<bool> {
+    let tx = db.unchecked_transaction()?;
+    let next: Option<String> = tx.query_row(
+        "SELECT operation_id FROM backup_operations WHERE space_id=? AND kind='delete' AND state='pending'
+         AND phase='tombstone' AND attempt=0 AND operation_id<>? ORDER BY created_at,rowid LIMIT 1",
+        params![space,operation], |row| row.get(0),
+    ).optional()?;
+    let Some(next) = next else { return Ok(false) };
+    let parked = tx.execute(
+        "UPDATE backup_operations SET state='pending',phase='archive_ready',next_retry_at=NULL,
+         payload_json=json_set(payload_json,'$.archive_next',?3,'$.archive_revision',?4,
+           '$.archive_confirmed_ms',CAST(unixepoch('subsec')*1000 AS INTEGER))
+         WHERE space_id=?1 AND operation_id=?2 AND phase='objects' AND state='running' AND attempt=1
+         AND json_extract(payload_json,'$.archive_revision') IS NULL AND COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)=0
+         AND NOT EXISTS (SELECT 1 FROM backup_operations WHERE space_id=?1 AND phase='archive_ready' AND state='pending')",
+        params![space,operation,next,i64::try_from(revision)?],
+    )? != 0;
+    tx.commit()?;
+    Ok(parked)
+}
+
+pub(super) struct ParkedArchive {
+    pub operation: String,
+    pub asset: String,
+    pub revision: i64,
+}
+
+pub(super) fn parked_archive(db: &rusqlite::Connection, space: &str, successor: &str) -> Result<Option<ParkedArchive>> {
+    Ok(db.query_row("SELECT operation_id,json_extract(payload_json,'$.remote_asset_id'),json_extract(payload_json,'$.archive_revision')
+        FROM backup_operations WHERE space_id=?1 AND kind='delete' AND phase='archive_ready' AND state='pending'
+        AND json_extract(payload_json,'$.archive_next')=?2", params![space, successor],
+        |r| Ok(ParkedArchive {operation:r.get(0)?,asset:r.get(1)?,revision:r.get(2)?})).optional()?)
+}
+
+// A failed ownership check on the parked asset cannot block its healthy successor.
+pub(super) fn recover_cleanup(core: &Core, scope: &Scope, operation: &str, error: &anyhow::Error) -> Result<bool> {
+    let rebuilt = super::telegram_provider::discard_mismatched_map(core, scope, error)?;
+    if !rebuilt && !matches!(error.to_string().as_str(), "BACKUP_CHECKSUM_MISMATCH" | "BACKUP_MEDIA_IN_USE"
+            | "BACKUP_REUPLOAD_STALE" | "TELEGRAM_INDEX_INVALID" | "BACKUP_CLEANUP_PENDING"
+            | "TELEGRAM_MEDIA_MISSING" | "TELEGRAM_MEDIA_CHANGED" | "BACKUP_PUBLICATION_UNCONFIRMED") {
+        return Ok(false);
+    }
+    let separated = core.backup_db(|db| Ok(db.execute(
+        "UPDATE backup_operations SET payload_json=json_remove(payload_json,'$.archive_next')
+         WHERE space_id=?1 AND kind='delete' AND state='pending' AND phase='archive_ready'
+         AND json_extract(payload_json,'$.archive_next')=?2", params![scope.space_id,operation],
+    )? != 0))?;
+    Ok(rebuilt || separated)
+}
+
 pub async fn execute(core:&Arc<Core>,provider:&dyn BackupProvider,operation:&str)->Result<()> {
     super::delete_timing::timed(core, operation, "total", super::telegram_session::with_delete_config(async {
+        let first_publish = provider.scope().provider_type == ProviderType::Telegram && core.backup_db(|db| {
+            db.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.foreground_started_ms',CAST(unixepoch('subsec')*1000 AS INTEGER))
+                WHERE operation_id=? AND json_extract(payload_json,'$.queued_at_ms') IS NOT NULL
+                AND json_extract(payload_json,'$.foreground_started_ms') IS NULL",[operation])?;
+            claim_archive_read(db, operation)
+        })?;
         let attempt = || Box::pin(execute_inner(core, provider, operation));
-        let first_publish = provider.scope().provider_type == ProviderType::Telegram
-            && core.backup_db(|db| claim_archive_read(db, operation))?;
         let result = super::telegram_transport::with_delete_archive_read(first_publish, attempt()).await;
         if let Err(error) = &result {
             if provider.scope().provider_type == ProviderType::Telegram
-                && super::telegram_provider::discard_mismatched_map(core, provider.scope(), error)?
+                && recover_cleanup(core, provider.scope(), operation, error)?
             {
                 // Resume at the durable phase after rebuilding; retain all upload and delete receipts.
                 return attempt().await;
@@ -132,12 +190,12 @@ async fn execute_inner(
         complete_superseded(core, operation)?;
         return Ok(());
     }
-    let published = if matches!(op.phase.as_str(), "objects" | "cleanup_verify" | "local_cleanup" | "finalizing") {
+    let published = if matches!(op.phase.as_str(), "archive_ready" | "objects" | "cleanup_verify" | "local_cleanup" | "finalizing") {
         let current = provider
             .read_asset(&remote)
             .await?
             .context("BACKUP_RECORD_UNAVAILABLE")?;
-        if !current.snapshot.deleted {
+        if !current.snapshot.deleted || op.payload["archive_revision"].as_u64().is_some_and(|r| r != current.snapshot.revision) {
             complete_superseded(core, operation)?;
             return Ok(());
         }
@@ -197,16 +255,16 @@ async fn execute_inner(
         tx.commit()?;
         Ok(())
     })?;
-    if let Err(error) = super::delete_timing::timed_setup(core,operation,"remote_cleanup",provider.reconcile_deleted_asset(&remote, operation)).await {
-        if provider
-            .read_asset(&remote)
-            .await?
-            .is_some_and(|r| !r.snapshot.deleted)
-        {
-            complete_superseded(core, operation)?;
-            return Ok(());
+    match super::delete_timing::timed_setup(core,operation,"remote_cleanup",provider.reconcile_deleted_asset(&remote, operation)).await {
+        Ok(DeleteCleanup::ArchiveReady) => return Ok(()),
+        Ok(DeleteCleanup::Complete) => {}
+        Err(error) => {
+            if provider.read_asset(&remote).await?.is_some_and(|r| !r.snapshot.deleted) {
+                complete_superseded(core, operation)?;
+                return Ok(());
+            }
+            return Err(error);
         }
-        return Err(error);
     }
     if op.phase != "cleanup_verify" || op.payload["local_cleanup_done"] != true {
         core.backup_db(|db| {
@@ -224,6 +282,13 @@ fn finish_pass(core: &Core, op: &scheduler::Operation) -> Result<()> {
         let raw:String=db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id=?",[operation],|r|r.get(0))?;
         let mut payload:Value=serde_json::from_str(&raw)?;
         let pass=payload["cleanup_pass"].as_u64().unwrap_or(0)+1;payload["cleanup_pass"]=pass.into();
+        if let Some(start) = payload["foreground_started_ms"].as_i64().filter(|_| pass == 1) {
+            let end: i64 = db.query_row("SELECT CAST(unixepoch('subsec')*1000 AS INTEGER)", [], |r|r.get(0))?;
+            payload["foreground_elapsed_ms"] = (end-start).into();
+            if let Some(queued) = payload["queued_at_ms"].as_i64() {
+                payload["initial_queue_ms"] = (start-queued).into();
+            }
+        }
         let done=pass>=3;
         db.execute("UPDATE backup_operations SET state=?2,phase=?3,payload_json=?4,next_retry_at=CASE WHEN ?5 THEN NULL ELSE unixepoch()+?6 END,last_error=NULL,updated_at=unixepoch() WHERE operation_id=?1 AND state='running'",params![operation,if done {"completed"} else {"retry_wait"},if done {"completed"} else {"cleanup_verify"},payload.to_string(),done,if pass==1 {30} else {120}])?;
         db.execute("UPDATE asset_remote_objects SET remote_state='deleted' WHERE space_id=?1 AND asset_id=?2",params![op.space_id,op.asset_id])?;Ok(())
@@ -393,6 +458,32 @@ pub async fn release_with(
         if !serde_json::from_str::<PendingChanges>(&pending)?.is_empty() {bail!("BACKUP_UNSYNCED_LOCAL_CHANGES");}
         Ok(())
     }).await
+}
+
+#[cfg(test)]
+#[test]
+fn confirmed_archive_yields_to_its_successor_and_remains_runnable_after_restart_or_failure() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("queue.sqlite");
+    let db = rusqlite::Connection::open(&path)?;
+    repository::init(&db)?;
+    db.execute("INSERT INTO backup_spaces(space_id,library_id,endpoint,bucket,prefix,enabled) VALUES('s','l','','','',0)", [])?;
+    db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,attempt,payload_json)
+                VALUES('a','s','delete','running','objects',1,'{\"remote_asset_id\":\"first\"}')", [])?;
+    assert!(!park_confirmed_archive(&db,"s","a",300)?);
+    db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json)
+                VALUES('b','s','delete','pending','tombstone','{}'),('c','s','delete','pending','tombstone','{}')", [])?;
+    assert!(park_confirmed_archive(&db,"s","a",300)?);
+    drop(db);
+    let db = rusqlite::Connection::open(path)?;
+    assert_eq!(scheduler::next_sync_operation(&db,"s")?,Some(("b".into(),true)));
+    let peer = parked_archive(&db,"s","b")?.unwrap();
+    assert_eq!((peer.operation.as_str(),peer.asset.as_str(),peer.revision),("a","first",300));
+    assert!(parked_archive(&db,"s","c")?.is_none());
+    db.execute("UPDATE backup_operations SET state='retry_wait',next_retry_at=unixepoch()+30 WHERE operation_id='b'", [])?;
+    assert_eq!(scheduler::next_sync_operation(&db,"s")?,Some(("a".into(),true)));
+    assert!(scheduler::foreground_delete_busy(&db,"s")?);
+    Ok(())
 }
 
 #[cfg(test)]

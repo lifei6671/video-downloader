@@ -916,7 +916,7 @@ impl<S: ObjectStore> BackupProvider for S3Provider<S> {
         &self,
         asset_id: &str,
         operation_id: &str,
-    ) -> ProviderFuture<'_, ()> {
+    ) -> ProviderFuture<'_, DeleteCleanup> {
         let asset = asset_id.to_owned();
         let operation = operation_id.to_owned();
         Box::pin(async move {
@@ -991,7 +991,7 @@ impl<S: ObjectStore> BackupProvider for S3Provider<S> {
                     }
                 }
             }
-            Ok(())
+            Ok(DeleteCleanup::Complete)
         })
     }
 }

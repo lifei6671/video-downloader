@@ -24,7 +24,11 @@ pub(super) fn next_sync_operation(
     Ok(db.query_row(
         "SELECT operation_id,kind='delete' AND COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)<>1 FROM backup_operations
          WHERE space_id=? AND kind IN ('upload','delete') AND state IN ('pending','retry_wait') AND (next_retry_at IS NULL OR next_retry_at<=unixepoch())
-         ORDER BY CASE WHEN kind='delete' AND COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)<>1 THEN 0 WHEN kind='upload' THEN 1 ELSE 2 END,created_at,rowid LIMIT 1",
+         ORDER BY CASE WHEN kind='delete' AND COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)<>1 THEN 0 WHEN kind='upload' THEN 1 ELSE 2 END,
+         CASE WHEN EXISTS (SELECT 1 FROM backup_operations parked WHERE parked.space_id=backup_operations.space_id
+             AND parked.phase='archive_ready' AND parked.state='pending'
+             AND json_extract(parked.payload_json,'$.archive_next')=backup_operations.operation_id) THEN 0 ELSE 1 END,
+         created_at,rowid LIMIT 1",
         [space], |row| Ok((row.get(0)?,row.get(1)?)),
     ).optional()?)
 }

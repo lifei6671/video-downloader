@@ -145,12 +145,12 @@ impl Library {
         }
         Ok(())
     }
-    fn confirm_asset_deletion(&self, target: &Target, carrier: i32, asset: &str, revision: u64) -> Result<()> {
+    pub(super) fn confirm_deletions(&self, target: &Target, carrier: i32, deletions: &[(&str, u64)]) -> Result<()> {
         let mut events = Vec::new();
         let mut high = 0;
         self.append_archived_events(target, carrier, &mut high, &mut events)?;
         let projection = telegram_replay::replay(target, high, events, None)?;
-        if !projection.assets.get(asset).is_some_and(|s| s.deleted && s.revision == revision) {
+        if !deletions.iter().all(|&(asset, revision)| projection.assets.get(asset).is_some_and(|s| s.deleted && s.revision == revision)) {
             bail!("BACKUP_PUBLICATION_UNCONFIRMED");
         }
         Ok(())
@@ -381,7 +381,7 @@ impl TelegramProvider {
     }
     pub(super) fn direct_archive_body(io: &Io, target: &Target, asset: &str,
         snapshot: &ChannelSnapshot, tombstone: Vec<u8>) -> Result<Vec<u8>> {
-        let mut plan = Self::collect_archive(io, target, asset, None, snapshot)?;
+        let mut plan = Self::collect_archive(io, target, &[(asset, u64::MAX)], snapshot)?;
         plan.library.direct_delete = Some(tombstone);
         Ok(serde_json::to_vec(&plan.library)?)
     }
@@ -442,8 +442,7 @@ impl TelegramProvider {
     }
 
     fn collect_archive(
-        io: &Io, target: &Target, asset: &str,
-        last_revision: Option<u64>, snapshot: &ChannelSnapshot,
+        io: &Io, target: &Target, deletions: &[(&str, u64)], snapshot: &ChannelSnapshot,
     ) -> Result<ArchivePlan> {
         let mut archive = vec![];
         let mut libraries = vec![];
@@ -475,12 +474,12 @@ impl TelegramProvider {
             }
             if envelope.kind != "event"
                 || envelope.library_id != target.scope.library_id
-                || envelope.asset_id != asset
             {
                 continue;
             }
+            let Some(&(asset, last_revision)) = deletions.iter().find(|(asset,_)| *asset == envelope.asset_id) else { continue };
             let revision = u64::try_from(index.revision).context("TELEGRAM_INDEX_INVALID")?;
-            if last_revision.is_some_and(|last| revision > last) {
+            if revision > last_revision {
                 bail!("BACKUP_REUPLOAD_STALE");
             }
             let body = index.verified_body()?;
@@ -519,13 +518,13 @@ impl TelegramProvider {
         transport: &GrammersTransport,
         io: &Io,
         target: &Target,
-        asset: &str,
-        deletion: u64,
+        operation: &str,
+        deletions: &[(&str,u64)],
         snapshot:ChannelSnapshot,
         timing: IndexTiming<'_>,
-    ) -> Result<(Vec<(i32, Vec<super::telegram_transfer::RemoteDocument>)>,ChannelSnapshot)> {
+    ) -> Result<Option<(Vec<(i32, Vec<super::telegram_transfer::RemoteDocument>)>,ChannelSnapshot)>> {
         let ArchivePlan { library, previous: libraries, messages } =
-            Self::collect_archive(io, target, asset, Some(deletion), &snapshot)?;
+            Self::collect_archive(io, target, deletions, &snapshot)?;
         // Compare resolved event revisions: a direct-delete carrier has different wire bytes
         // from the same history frozen in the next archive.
         let mut existing = None;
@@ -549,6 +548,10 @@ impl TelegramProvider {
             Self::send_index(core, transport, io, target, "library", &target.scope.library_id,
                 &uuid::Uuid::from_bytes(identity).to_string(), &core.telegram_storage_device_id()?, body.clone(), timing).await?;
             let snapshot = timing.refresh(transport.mapped_snapshot(core, target, io)).await?;
+            let current = Self::project_snapshot(core,target,io,None,&snapshot)?;
+            if !deletions.iter().all(|&(id,rev)| current.assets.get(id).is_some_and(|s| s.deleted && s.revision == rev)) {
+                bail!("BACKUP_REUPLOAD_STALE");
+            }
             let mut confirmed = None;
             for index in &snapshot.indexes {
                 let envelope: Envelope = serde_json::from_str(&index.document.caption)?;
@@ -564,8 +567,13 @@ impl TelegramProvider {
         timing.run("replay", async {
             let carrier: Library = serde_json::from_slice(&body)?;
             carrier.validate(target, &serde_json::from_str(&confirmed.caption)?)?;
-            carrier.confirm_asset_deletion(target, confirmed.message_id, asset, deletion)
+            carrier.confirm_deletions(target, confirmed.message_id, deletions)
         }).await?;
+        if let &[(_, revision)] = deletions {
+            if core.backup_db(|db| super::sync_delete::park_confirmed_archive(db, &target.scope.space_id, operation, revision))? {
+                return Ok(None);
+            }
+        }
         // Every superseded descriptor's events are in the confirmed canonical archive.
         let mut old_indexes = libraries.into_iter().filter(|(doc, _)| doc.message_id != confirmed.message_id).peekable();
         if old_indexes.peek().is_some() {
@@ -576,7 +584,7 @@ impl TelegramProvider {
                 Ok(())
             }).await?;
         }
-        Ok((messages.into_iter().collect(),snapshot))
+        Ok(Some((messages.into_iter().collect(),snapshot)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1016,7 +1024,7 @@ impl BackupProvider for TelegramProvider {
         &self,
         asset_id: &str,
         operation_id: &str,
-    ) -> ProviderFuture<'_, ()> {
+    ) -> ProviderFuture<'_, DeleteCleanup> {
         let asset = asset_id.to_owned();
         let operation = operation_id.to_owned();
         let target = self.target.clone();
@@ -1028,15 +1036,36 @@ impl BackupProvider for TelegramProvider {
                     let snapshot=super::delete_timing::timed(core,&operation,"locate_messages",transport.mapped_snapshot(core,&target,io)).await?;
                     let projected=super::delete_timing::timed(core,&operation,"read_index",async {Self::project_snapshot(core,&target,io,None,&snapshot)}).await?;
                     let deletion=projected.assets.get(&asset).filter(|s|s.deleted).context("BACKUP_TOMBSTONE_REQUIRED")?.revision;
-                    let (archived,snapshot)=super::delete_timing::timed(core,&operation,"archive",Self::archive_deleted_events(core,transport,io,&target,&asset,deletion,snapshot,IndexTiming::new(core,&operation,"archive"))).await?;
+                    let parked = core.backup_db(|db| super::sync_delete::parked_archive(db, &target.scope.space_id, &operation))?;
+                    let parked = parked.filter(|p| projected.assets.get(&p.asset).is_some_and(|s| s.deleted && i64::try_from(s.revision).ok() == Some(p.revision)));
+                    let mut deletions = vec![(asset.as_str(),deletion)];
+                    if let Some(peer) = &parked {
+                        deletions.push((&peer.asset,u64::try_from(peer.revision)?));
+                    }
+                    let archive = super::delete_timing::timed(core,&operation,"archive",Self::archive_deleted_events(core,transport,io,&target,&operation,&deletions,snapshot,IndexTiming::new(core,&operation,"archive"))).await?;
+                    let Some((archived,snapshot)) = archive else { return Ok(DeleteCleanup::ArchiveReady) };
                     let media=snapshot.media.clone();
                     let fresh=super::delete_timing::timed(core,&operation,"prepare_cleanup",async {Self::project_snapshot(core,&target,io,Some(&projected.cursor),&snapshot)}).await?;
                     if !fresh.assets.get(&asset).is_some_and(|s|s.deleted&&s.revision==deletion) {bail!("BACKUP_REUPLOAD_STALE");}
-                    let messages=super::delete_timing::timed_setup(core,&operation,"remove_messages",super::telegram_lifecycle::reconcile_snapshot(transport,&target,&asset,io,&fresh,media,archived)).await?;
+                    let messages=super::delete_timing::timed_setup(core,&operation,"remove_messages",super::telegram_lifecycle::reconcile_deleted_messages(transport,&target,&deletions,io,&fresh,media,archived)).await?;
                     eprintln!("telegram_delete operation={} messages={messages}",operation);
                     let final_state=super::delete_timing::timed(core,&operation,"verify",Self::project(core,&target,transport,io,Some(&fresh.cursor))).await?;
-                    if !final_state.assets.get(&asset).is_some_and(|s|s.deleted&&s.revision==deletion) {bail!("BACKUP_REUPLOAD_STALE");}
-                    Ok(())
+                    if !deletions.iter().all(|&(id,rev)| final_state.assets.get(id).is_some_and(|s|s.deleted && s.revision==rev)) {
+                        bail!("BACKUP_REUPLOAD_STALE");
+                    }
+                    if let Some(peer) = parked {
+                        let messages = i64::try_from(messages)?;
+                        core.backup_db(|db| {
+                            let tx = db.unchecked_transaction()?;
+                            tx.execute("UPDATE backup_operations SET phase='local_cleanup',payload_json=json_set(payload_json,'$.cleanup_batch',?2,'$.cleanup_messages',?3)
+                                WHERE operation_id=?1 AND state='pending' AND phase='archive_ready' AND json_extract(payload_json,'$.archive_next')=?2",
+                                rusqlite::params![peer.operation,operation,messages])?;
+                            tx.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.cleanup_batch',?1,'$.cleanup_messages',?2) WHERE operation_id=?1",
+                                rusqlite::params![operation,messages])?;
+                            tx.commit()?; Ok(())
+                        })?;
+                    }
+                    Ok(DeleteCleanup::Complete)
                 })
             })
             .await

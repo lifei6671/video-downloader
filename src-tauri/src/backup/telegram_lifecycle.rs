@@ -30,11 +30,20 @@ pub(super) trait OwnedMessageRemoval: Transport {
     fn confirm_ids_gone(&self, ids: &[i32]) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
-/// Validate every group before sending the first deletion, even when the asset spans multiple batches.
+#[cfg(test)]
 pub(super) async fn reconcile_snapshot(
+    transport: &impl OwnedMessageRemoval, target: &Target, asset: &str, io: &Io, projected: &Projection,
+    media: Vec<RemoteDocument>, archived: Vec<(i32, Vec<RemoteDocument>)>,
+) -> Result<usize> {
+    let revision = projected.assets.get(asset).filter(|s| s.deleted).context("BACKUP_TOMBSTONE_REQUIRED")?.revision;
+    reconcile_deleted_messages(transport,target,&[(asset,revision)],io,projected,media,archived).await
+}
+
+/// Check ownership for every participating asset before deleting the first physical message.
+pub(super) async fn reconcile_deleted_messages(
     transport: &impl OwnedMessageRemoval,
     target: &Target,
-    asset: &str,
+    deletions: &[(&str, u64)],
     io: &Io,
     projected: &Projection,
     media: Vec<RemoteDocument>,
@@ -43,16 +52,17 @@ pub(super) async fn reconcile_snapshot(
     if !transport.can_delete() {
         bail!("BACKUP_DELETE_UNSUPPORTED");
     }
-    let deletion = projected
-        .assets
-        .get(asset)
-        .filter(|s| s.deleted)
-        .context("BACKUP_TOMBSTONE_REQUIRED")?
-        .revision;
+    for &(asset, revision) in deletions {
+        if !projected.assets.get(asset).is_some_and(|s| s.deleted && s.revision == revision) {
+            bail!("BACKUP_TOMBSTONE_REQUIRED");
+        }
+    }
     let mut groups: std::collections::BTreeMap<i32, Vec<RemoteDocument>> =
         archived.into_iter().collect();
     for document in media {
         io.check()?;
+        let envelope: Envelope = serde_json::from_str(&document.caption).context("TELEGRAM_MEDIA_CHANGED")?;
+        let Some(&(asset, deletion)) = deletions.iter().find(|(asset,_)| *asset == envelope.asset_id) else { continue };
         let known = projected
             .references
             .get(asset)
@@ -62,8 +72,7 @@ pub(super) async fn reconcile_snapshot(
                 target.message_id(r).ok() == Some(document.message_id)
                     && r.document_id() == Some(document.document_id)
                     && r.bytes == document.bytes
-                    && serde_json::from_str::<Envelope>(&document.caption)
-                        .is_ok_and(|e| e.sha256 == r.sha256 && e.container == r.container)
+                    && envelope.sha256 == r.sha256 && envelope.container == r.container
             });
         let Some(reference) = candidate(target, asset, deletion, &document, known)? else {
             continue;
