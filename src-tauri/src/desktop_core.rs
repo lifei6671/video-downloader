@@ -155,7 +155,15 @@ fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
     })
 }
 
+#[derive(Clone, serde::Serialize)]
+pub struct DeleteActivity {
+    pub operation_id: String,
+    pub companion: Option<String>,
+    pub step: String,
+}
+
 pub enum TaskEvent {
+    DeleteActivity(Option<DeleteActivity>),
     Updated(Box<Task>),
     Removed(String),
     Transcription(Box<transcription::Snapshot>),
@@ -187,6 +195,7 @@ struct Inner {
     transcription_unsaved: HashMap<String, transcription::Snapshot>,
 }
 pub struct Core {
+    delete_activity: Mutex<Option<DeleteActivity>>,
     pub telegram_accounts: crate::telegram_accounts::TelegramAccounts,
     pub(crate) backup_wake: Arc<tokio::sync::Notify>,
     pub(crate) backup_window_wake: tokio::sync::Notify,
@@ -548,6 +557,7 @@ impl Core {
         let backup_wake=Arc::new(tokio::sync::Notify::new());
         Ok(Arc::new(Self {
             telegram_accounts,
+            delete_activity: Default::default(),
             backup_wake:backup_wake.clone(),
             backup_window_wake:Default::default(),
             delete_queue_wake:tokio::sync::Notify::new(),
@@ -732,6 +742,16 @@ impl Core {
     }
 
     pub fn wake_backup(&self) {self.backup_wake.notify_waiters();}
+    pub fn current_delete_activity(&self) -> Option<DeleteActivity> {
+        self.delete_activity.lock().expect("delete activity lock poisoned").clone()
+    }
+
+    pub(crate) fn replace_delete_activity(&self, activity: Option<DeleteActivity>) -> Option<DeleteActivity> {
+        let previous = std::mem::replace(&mut *self.delete_activity.lock().expect("delete activity lock poisoned"), activity.clone());
+        (self.emit)(TaskEvent::DeleteActivity(activity));
+        previous
+    }
+
     pub fn set_backup_foreground(&self,foreground:bool) {self.backup_foreground.store(foreground,std::sync::atomic::Ordering::Relaxed);if foreground {self.backup_window_wake.notify_waiters();}}
     pub(crate) fn backup_cancellation(&self)->watch::Receiver<bool> {self.inner.lock().unwrap().backup_cancel.subscribe()}
 

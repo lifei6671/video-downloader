@@ -1047,7 +1047,8 @@ impl BackupProvider for TelegramProvider {
                     let media=snapshot.media.clone();
                     let fresh=super::delete_timing::timed(core,&operation,"prepare_cleanup",async {Self::project_snapshot(core,&target,io,Some(&projected.cursor),&snapshot)}).await?;
                     if !fresh.assets.get(&asset).is_some_and(|s|s.deleted&&s.revision==deletion) {bail!("BACKUP_REUPLOAD_STALE");}
-                    let messages=super::delete_timing::timed_setup(core,&operation,"remove_messages",super::telegram_lifecycle::reconcile_deleted_messages(transport,&target,&deletions,io,&fresh,media,archived)).await?;
+                    let remove = super::delete_timing::timed_setup(core,&operation,"remove_messages",super::telegram_lifecycle::reconcile_deleted_messages(transport,&target,&deletions,io,&fresh,media,archived));
+                    let messages = super::delete_timing::with_companion(parked.as_ref().map(|p| p.operation.as_str()),remove).await?;
                     eprintln!("telegram_delete operation={} messages={messages}",operation);
                     let final_state=super::delete_timing::timed(core,&operation,"verify",Self::project(core,&target,transport,io,Some(&fresh.cursor))).await?;
                     if !deletions.iter().all(|&(id,rev)| final_state.assets.get(id).is_some_and(|s|s.deleted && s.revision==rev)) {

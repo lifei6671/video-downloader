@@ -23,7 +23,8 @@ export interface BackupUpdate { telegram?: { account_id: string; channel_id: str
 export interface BackupSettings extends Omit<BackupUpdate, 'credentials' | 'create_library'> { telegram_channel_title?: string | null; can_delete_owned_media?: boolean; space_id: string; library_id: string; credentials_configured: boolean; connection_pending?: boolean; last_error: string | null }
 export interface BackupConflict { image: number[] | null; id: string; field: string; value: string; device_id: string; can_adopt: boolean }
 export interface BackupLocalData { title: string; transcript: string | null; pending: boolean; remote_deleted: boolean; conflicts: BackupConflict[] }
-export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number; transfer_started?: boolean; local_cleanup_done?: boolean }; attempt: number; last_error: string | null }
+export interface DeleteActivity { operation_id: string; companion: string | null; step: string }
+export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number; transfer_started?: boolean; local_cleanup_done?: boolean; archive_next?: string }; attempt: number; last_error: string | null }
 export interface BackupLocation { space_id: string; profile: 'r2' | 's3' | 'telegram'; display_name: string; channel_title: string | null }
 export interface BackupAsset { in_current_space?: boolean; backup_locations?: BackupLocation[]; asset_id: string; task_id: string | null; metadata: Partial<Video>; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean; remote_revision: number; remote_deleted: boolean; has_pending_local_changes: boolean; conflict_count: number }
 export interface AssetTranscript { asset_id: string; content_sha256: string | null; text: string; model_revision: string; model_name: string | null; pipeline_revision: string; completed_at: number }
@@ -66,6 +67,9 @@ export const api = {
   saveBackupSettings: (config: BackupUpdate, activate: boolean) => invoke<BackupSettings>('save_backup_settings', { config: { ...config, activate } }),
   backupCredentials: (spaceId: string) => invoke<{ access_key_id: string; secret_access_key: string }>('get_backup_credentials', { spaceId }),
   testBackupConnection: (config: BackupUpdate) => invoke<void>('test_backup_connection', { config: { ...config, activate: false } }),
+  deleteActivity: () => invoke<DeleteActivity | null>('get_backup_delete_activity'),
+  onDeleteActivity: (update: (value: DeleteActivity | null) => void) =>
+    listen<DeleteActivity | null>('backup_delete_activity', event => update(event.payload)),
   backupOperations: () => invoke<BackupOperation[]>('list_backup_operations'),
   retryBackup: (operationId: string) => invoke<void>('retry_backup_operation', { operationId }),
   startAssetBackup: (spaceId: string, assetId: string) => invoke<void>('start_asset_backup', { spaceId, assetId }),

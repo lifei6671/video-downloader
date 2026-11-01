@@ -83,6 +83,7 @@ async fn finish_local(core: &Arc<Core>, op: &scheduler::Operation) -> Result<()>
         db.execute("UPDATE backup_operations SET phase='finalizing',last_error=NULL WHERE operation_id=?", [&op.operation_id])?;
         Ok(())
     })?;
+    let _stage = super::delete_timing::activity("finalizing");
     core.finish_asset_deletion(local, &op.operation_id)
 }
 
@@ -149,7 +150,7 @@ pub(super) fn recover_cleanup(core: &Core, scope: &Scope, operation: &str, error
 }
 
 pub async fn execute(core:&Arc<Core>,provider:&dyn BackupProvider,operation:&str)->Result<()> {
-    super::delete_timing::timed(core, operation, "total", super::telegram_session::with_delete_config(async {
+    let work = super::delete_timing::timed(core, operation, "total", super::telegram_session::with_delete_config(async {
         let first_publish = provider.scope().provider_type == ProviderType::Telegram && core.backup_db(|db| {
             db.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.foreground_started_ms',CAST(unixepoch('subsec')*1000 AS INTEGER))
                 WHERE operation_id=? AND json_extract(payload_json,'$.queued_at_ms') IS NOT NULL
@@ -167,7 +168,8 @@ pub async fn execute(core:&Arc<Core>,provider:&dyn BackupProvider,operation:&str
             }
         }
         result
-    })).await
+    }));
+    super::delete_timing::track_delete(core,operation,Box::pin(work)).await
 }
 async fn execute_inner(
     core: &Arc<Core>,

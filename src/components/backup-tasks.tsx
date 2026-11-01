@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Cloud, CircleCheck, CircleArrowUp, CircleArrowDown, Play, FileText, ImageOff, ListX, Trash2, X } from 'lucide-react';
 import { api, errorText, type BackupAsset, type BackupOperation, type BackupSettings, type Task } from '@/api';
+import { DeleteProgressTooltip } from './delete-progress-tooltip';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { Spinner } from '@/components/ui/spinner';
@@ -112,9 +113,9 @@ export function backupDeletion(backup: BackupTasks, assetId: string) {
 export function BackupDeleteProgress({backup, assetId, cover = false}: {backup: BackupTasks; assetId: string; cover?: boolean}) {
   const deletion = backupDeletion(backup, assetId);
   if (!deletion) return null;
-  if (cover) return <div className="task-feed-progress"><Tooltip><TooltipTrigger asChild><div role="status" aria-live="polite" aria-label={deletion.label} tabIndex={0} className="backup-delete-progress"><Progress variant="circular" value={null} aria-label="删除进度" aria-valuetext={deletion.label}>{deletion.failed ? <AlertCircle aria-hidden="true" /> : deletion.phase === 'complete' ? <CircleCheck aria-hidden="true" /> : <Spinner aria-hidden="true" />}</Progress></div></TooltipTrigger><TooltipContent>{deletion.label}</TooltipContent></Tooltip></div>;
+  if (cover) return <div className="task-feed-progress"><DeleteProgressTooltip deletion={deletion}><div role="status" aria-live="polite" aria-label={deletion.label} tabIndex={0} className="backup-delete-progress"><Progress variant="circular" value={null} aria-label="删除进度" aria-valuetext={deletion.label}>{deletion.failed ? <AlertCircle aria-hidden="true" /> : deletion.phase === 'complete' ? <CircleCheck aria-hidden="true" /> : <Spinner aria-hidden="true" />}</Progress></div></DeleteProgressTooltip></div>;
   return <div role="status" aria-live="polite" className={`flex flex-wrap items-center gap-2 text-xs ${deletion.failed ? 'text-destructive' : 'text-muted-foreground'}`}>
-    {deletion.failed ? <AlertCircle aria-hidden="true" className="size-3.5" /> : deletion.phase === 'complete' ? <CircleCheck aria-hidden="true" className="size-3.5 text-success" /> : <Spinner aria-hidden="true" className="size-3.5" />}<span>{deletion.label}</span>
+    <DeleteProgressTooltip deletion={deletion}><span role="img" aria-label={deletion.label} tabIndex={0} className="inline-flex rounded-sm focus-visible:outline-ring">{deletion.failed ? <AlertCircle aria-hidden="true" className="size-3.5" /> : deletion.phase === 'complete' ? <CircleCheck aria-hidden="true" className="size-3.5 text-success" /> : <Spinner aria-hidden="true" className="size-3.5" />}</span></DeleteProgressTooltip><span>{deletion.label}</span>
     {deletion.error && <span>{deletion.error}</span>}
     {deletion.failed && <Button size="sm" variant="ghost" className="h-6 px-1 text-xs" disabled={!backup.settings?.enabled || backup.submittingDeletes.has(assetId)} onClick={() => void backup.deleteAsset(assetId)}>重试删除</Button>}
   </div>;
@@ -175,7 +176,7 @@ export function SyncIcon({ uploading = false, indeterminate = false, restoring =
 export function BackupTaskStatus({ backup, assetId }: { backup: BackupTasks; assetId: string }) {
   const [busy, setBusy] = useState(false), [inspect, setInspect] = useState(false);
   const deletion = backupDeletion(backup, assetId);
-  if (deletion) return <Tooltip><TooltipTrigger asChild><span className="backup-sync-tooltip inline-flex rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={deletion.failed ? undefined : 0}><Button variant="ghost" size="icon" className="backup-sync-button shrink-0" disabled={!deletion.failed || busy || !backup.settings?.enabled || backup.submittingDeletes.has(assetId)} aria-label={deletion.failed ? '重试删除' : deletion.label} onClick={() => void backup.deleteAsset(assetId)}>{deletion.failed ? <Trash2 className="size-3.5 text-destructive" /> : deletion.phase === 'complete' ? <CircleCheck className="size-3.5 text-success" /> : <Spinner className="size-3.5" />}</Button></span></TooltipTrigger><TooltipContent>{deletion.failed ? `${deletion.label}，点击重试删除` : deletion.label}</TooltipContent></Tooltip>;
+  if (deletion) return <DeleteProgressTooltip deletion={deletion} retryHint><span className="backup-sync-tooltip inline-flex rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={deletion.failed ? undefined : 0}><Button variant="ghost" size="icon" className="backup-sync-button shrink-0" disabled={!deletion.failed || busy || !backup.settings?.enabled || backup.submittingDeletes.has(assetId)} aria-label={deletion.failed ? '重试删除' : deletion.label} onClick={() => void backup.deleteAsset(assetId)}>{deletion.failed ? <Trash2 className="size-3.5 text-destructive" /> : deletion.phase === 'complete' ? <CircleCheck className="size-3.5 text-success" /> : <Spinner className="size-3.5" />}</Button></span></DeleteProgressTooltip>;
   const asset = backup.assets.find(a => a.asset_id === assetId), op = backup.operation(assetId);
   if (!backup.settings || !asset) return null;
   const { restoring, waiting: waitingRestore } = restoreStatus(backup, assetId, op);

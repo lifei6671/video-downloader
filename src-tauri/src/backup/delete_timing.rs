@@ -1,5 +1,6 @@
 //! Last-attempt deletion timing is stored with the existing durable operation.
-use crate::desktop_core::Core;
+use crate::desktop_core::{Core, DeleteActivity};
+use std::sync::Arc;
 use anyhow::Result;
 use std::{
     cell::RefCell,
@@ -22,6 +23,39 @@ struct TimingDetails {
 tokio::task_local! {
     // One refresh can span multiple batches, documents and file-reference retries.
     static DETAILS: RefCell<TimingDetails>;
+    static ACTIVE_DELETE: (Arc<Core>, String);
+    static COMPANION: Option<String>;
+}
+
+pub(super) async fn track_delete<F: Future>(core: &Arc<Core>, operation: &str, work: F) -> F::Output {
+    ACTIVE_DELETE.scope((core.clone(),operation.to_owned()), work).await
+}
+
+pub(super) async fn with_companion<F: Future>(operation: Option<&str>, work: F) -> F::Output {
+    COMPANION.scope(operation.map(str::to_owned),work).await
+}
+
+// Nested work restores its parent when it returns, fails, or is canceled.
+pub(super) struct ActivitySpan {
+    core: Arc<Core>,
+    previous: Option<DeleteActivity>,
+}
+
+pub(super) fn activity(step: &str) -> Option<ActivitySpan> {
+    ACTIVE_DELETE.try_with(|(core, operation)| {
+        let previous = core.replace_delete_activity(Some(DeleteActivity {
+            operation_id: operation.clone(),
+            companion: COMPANION.try_with(Clone::clone).ok().flatten(),
+            step: step.to_owned(),
+        }));
+        ActivitySpan {core: core.clone(), previous}
+    }).ok()
+}
+
+impl Drop for ActivitySpan {
+    fn drop(&mut self) {
+        self.core.replace_delete_activity(self.previous.take());
+    }
 }
 
 pub(super) fn selected_full_scan(reason: &'static str, difference_reason: Option<&'static str>) {
@@ -37,6 +71,7 @@ pub(super) fn record_index_reuse(count: usize) {
 }
 
 pub(super) struct StepSpan {
+    _activity: Option<ActivitySpan>,
     step: &'static str,
     start: Instant,
 }
@@ -59,6 +94,7 @@ fn step_span(step: &'static str, setup: bool) -> Option<StepSpan> {
     DETAILS
         .try_with(|details| {
             (details.borrow().setup == setup).then(|| StepSpan {
+                _activity: activity(step),
                 step,
                 start: Instant::now(),
             })
@@ -156,6 +192,7 @@ pub(super) async fn timed<T>(
         start: Instant::now(),
         outcome: "canceled",
     };
+    let _activity = activity(phase);
     let result = work.await;
     stage.outcome = if result.is_ok() { "ok" } else { "error" };
     result
@@ -218,6 +255,32 @@ impl<'a> IndexTiming<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn live_activity_tracks_batch_members_and_clears_on_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::open(&root.path().join("qa.sqlite"), root.path().join("downloads"), "no-python".into(), vec![], |_| {}).unwrap();
+        let task = track_delete(&core, "second", async {
+            let _publish = activity("remote_cleanup");
+            with_companion(Some("first"), async {
+                let _batch = activity("delete_message");
+                let current = core.current_delete_activity().unwrap();
+                assert_eq!(current.operation_id, "second");
+                assert_eq!(current.companion.as_deref(), Some("first"));
+                assert_eq!(current.step, "delete_message");
+            }).await;
+            let parent = core.current_delete_activity().unwrap();
+            assert_eq!(parent.step, "remote_cleanup");
+            assert!(parent.companion.is_none());
+            std::future::pending::<()>().await
+        });
+        {
+            tokio::pin!(task);
+            tokio::select! {biased; _=&mut task=>unreachable!(), _=std::future::ready(())=>{}}
+        }
+        assert!(core.current_delete_activity().is_none());
+        core.shutdown().await;
+    }
+
     #[tokio::test]
     async fn timings_survive_restart_and_preserve_operation_payload_on_failure_and_cancellation() {
         let root = tempfile::tempdir().unwrap();

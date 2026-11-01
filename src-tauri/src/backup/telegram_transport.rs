@@ -640,6 +640,7 @@ impl Transport for GrammersTransport {
             if !self.can_delete {
                 bail!("BACKUP_DELETE_UNSUPPORTED");
             }
+            let read = super::delete_timing::activity("read_old_index");
             let message = match self.message(expected.message_id).await {
                 Ok(message) => message,
                 Err(e) if e.to_string() == "TELEGRAM_MEDIA_MISSING" => return Ok(()),
@@ -657,10 +658,14 @@ impl Transport for GrammersTransport {
             if actual != expected {
                 bail!("TELEGRAM_MEDIA_CHANGED");
             }
+            drop(read);
+            let send = super::delete_timing::activity("delete_old_index");
             self.client
                 .delete_messages(self.peer, &[expected.message_id])
                 .await
                 .map_err(rpc_error)?;
+            drop(send);
+            let _confirm = super::delete_timing::activity("confirm_old_index_gone");
             match self.message(expected.message_id).await {
                 Err(e) if e.to_string() == "TELEGRAM_MEDIA_MISSING" => Ok(()),
                 Err(e) => Err(e),

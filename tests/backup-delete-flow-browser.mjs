@@ -15,6 +15,11 @@ async page => {
         const canvas=document.createElement('canvas');canvas.width=16;canvas.height=16;canvas.getContext('2d').fillRect(0,0,16,16);const cover=Array.from(atob(canvas.toDataURL('image/png').split(',')[1]),c=>c.charCodeAt(0));
         const callbacks=new Map(),listeners=new Map();let next=0;
         window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener(){}};
+        window.activity=null;
+        window.emitActivity=value=>{
+          window.activity=value;
+          listeners.get('backup_delete_activity')?.({event:'backup_delete_activity',id:2,payload:value});
+        };
         window.emitRemoved=()=>listeners.get('task_removed')?.({event:'task_removed',id:1,payload:'task'});
         window.__TAURI_INTERNALS__={convertFileSrc:x=>x,transformCallback:callback=>{callbacks.set(++next,callback);return next;},unregisterCallback(){},invoke:async(command,args)=>{
           window.calls.push({command,args});
@@ -24,6 +29,7 @@ async page => {
           if(command==='list_tasks')return taskBacked&&!window.taskRemoved?[structuredClone(window.task)]:[];
           if(command==='get_backup_settings')return {space_id:'space',library_id:'library',display_name:'测试备份',provider_type:'telegram',profile:'telegram',enabled:true,credentials_configured:false,can_delete_owned_media:true,last_error:null};
           if(command==='list_backup_assets')return window.assetHidden?[]:[structuredClone(window.asset)];
+          if(command==='get_backup_delete_activity')return window.activity;
           if(command==='list_backup_operations')return window.operation?[structuredClone(window.operation)]:[];
           if(command==='get_backup_sync_enabled')return true;
           if(command==='list_video_transcripts')return [];
@@ -75,6 +81,18 @@ async page => {
           await p.evaluate(({phase,state,error})=>{window.operation.phase=phase;window.operation.state=state;window.operation.last_error=error;},{phase,state,error});
         };
         await stage('objects');await assertStage('正在删除远端备份');await sameRow();
+        await p.evaluate(()=>window.emitActivity({operation_id:'delete-operation',companion:null,step:'archive_identity_check'}));
+        const icon=view==='feed'?row.locator('.backup-delete-progress'):row.getByRole('img',{name:'正在删除远端备份',exact:true});
+        if(view==='feed')await icon.hover();else await icon.focus();
+        const tip=p.getByRole('tooltip');
+        await tip.filter({hasText:'正在按 ID 核对归档附件'}).waitFor();
+        await p.evaluate(()=>window.emitActivity({operation_id:'peer',companion:'delete-operation',step:'confirm_message_gone'}));
+        await tip.filter({hasText:'正在确认同批视频消息均已删除'}).waitFor();
+        const bounds=await p.locator('[data-slot=tooltip-content]').boundingBox();
+        check(bounds && bounds.x>=0 && bounds.y>=0 && bounds.x+bounds.width<=width && bounds.y+bounds.height<=height,'delete tooltip outside viewport');
+        await p.evaluate(()=>{window.emitActivity(null);window.operation.phase='archive_ready';window.operation.state='pending';window.operation.payload.archive_next='peer';});
+        await tip.filter({hasText:'归档已确认，等待同批清理完成'}).waitFor();
+        await p.keyboard.press('Escape');await p.mouse.move(0,0);
         await stage('cleanup_verify','blocked','BACKUP_ACCESS_DENIED');await assertStage('远端备份删除失败');await row.getByRole('alert').waitFor();await sameRow();
         await row.locator('[role=status]').getByRole('button',{name:'重试删除',exact:true}).click();
         await assertStage('等待删除远端备份');

@@ -135,6 +135,10 @@ fn get_backup_credentials(core: State<AppCore>, space_id: String) -> Result<ying
     yingqu_core::backup::settings::credentials(&core,&space_id,&yingqu_core::backup::settings::SystemVault).map_err(error)
 }
 #[tauri::command]
+fn get_backup_delete_activity(core: State<AppCore>) -> Option<yingqu_core::desktop_core::DeleteActivity> {
+    core.current_delete_activity()
+}
+#[tauri::command]
 fn list_backup_operations(core: State<AppCore>) -> Result<Vec<yingqu_core::backup::scheduler::Operation>,String> {
     yingqu_core::backup::scheduler::operations(&core).map_err(error)
 }
@@ -689,6 +693,9 @@ fn main() {
                 engine.to_string_lossy().into_owned(),
                 vec![],
                 move |event| match event {
+                    TaskEvent::DeleteActivity(activity) => {
+                        let _ = handle.emit("backup_delete_activity", activity);
+                    }
                     TaskEvent::Updated(task) => {
                         let _ = handle.emit("task_updated", task);
                     }
@@ -737,7 +744,7 @@ fn main() {
             telegram_storage_status, telegram_storage_resume, telegram_storage_login_qr, telegram_storage_password, telegram_storage_cancel, telegram_storage_logout, telegram_storage_channels,
             ensure_local_video,cancel_asset_restore,prepare_asset_playback,play_asset,start_asset_transcription,copy_asset_transcript,
             hide_asset_history,release_local_video,delete_asset_and_backup,export_asset_transcript,list_backup_assets,refresh_backup_assets,get_asset_transcript,get_asset_cover,
-            get_backup_settings,get_backup_credentials,save_backup_settings,test_backup_connection,list_backup_operations,start_asset_backup,retry_backup_operation,cancel_backup_operation,list_backup_spaces,get_backup_sync_enabled,set_backup_sync_enabled,get_backup_space_usage,delete_backup_space,rename_backup_space,select_backup_space,get_backup_local_data,get_backup_conflict,resolve_backup_conflict,export_backup_local_data,
+            get_backup_settings,get_backup_credentials,save_backup_settings,test_backup_connection,get_backup_delete_activity,list_backup_operations,start_asset_backup,retry_backup_operation,cancel_backup_operation,list_backup_spaces,get_backup_sync_enabled,set_backup_sync_enabled,get_backup_space_usage,delete_backup_space,rename_backup_space,select_backup_space,get_backup_local_data,get_backup_conflict,resolve_backup_conflict,export_backup_local_data,
             list_video_transcripts,
             get_video_transcript,
             start_video_transcription,
