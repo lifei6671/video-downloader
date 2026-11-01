@@ -78,6 +78,57 @@ fn select_document(message:&grammers_client::message::Message, document_id:Optio
 
 // Shared by clones in one request; each fresh connection gets an empty cache.
 type IndexBodyCache = std::sync::Mutex<std::collections::HashMap<RemoteDocument, Vec<u8>>>;
+// Verification evidence lasts one execution attempt, including neither a retry nor maintenance.
+struct ArchiveRead {
+    target: Target,
+    document: RemoteDocument,
+    bytes: Vec<u8>,
+}
+tokio::task_local! {
+    static DELETE_ARCHIVE_READ: std::cell::RefCell<Option<ArchiveRead>>;
+    static PUBLISH_ARCHIVE: (Target, String);
+}
+
+pub(super) async fn with_delete_archive_read<F: Future>(first_publish: bool, work: F) -> F::Output {
+    if first_publish {
+        DELETE_ARCHIVE_READ.scope(Default::default(), work).await
+    } else {
+        work.await
+    }
+}
+
+pub(super) async fn capture_publish_refresh<F: Future>(target: &Target, operation: &str, work: F) -> F::Output {
+    PUBLISH_ARCHIVE.scope((target.clone(), operation.to_owned()), work).await
+}
+
+fn remember_archive_read(envelope: &Envelope, document: &RemoteDocument, bytes: &[u8]) {
+    let _ = PUBLISH_ARCHIVE.try_with(|(target, operation)| {
+        if envelope.kind == "library" && envelope.operation_id == *operation && envelope.library_id == target.scope.library_id {
+            let _ = DELETE_ARCHIVE_READ.try_with(|slot| slot.replace(Some(ArchiveRead {
+                target: target.clone(), document: document.clone(), bytes: bytes.to_vec(),
+            })));
+        }
+    });
+}
+
+pub(super) async fn confirm_archive(transport: &impl Transport, target: &Target, document: &RemoteDocument, expected: &[u8], io: &Io) -> Result<()> {
+    io.check()?;
+    let published = DELETE_ARCHIVE_READ.try_with(|slot| slot.take()).ok().flatten();
+    if let Some(read) = published {
+        if read.target != *target || read.document != *document || read.bytes != expected {
+            bail!("BACKUP_PUBLICATION_UNCONFIRMED");
+        }
+        let _check = super::delete_timing::setup_span("archive_identity_check");
+        let current = io.run(transport.inspect_document(document.message_id, document.document_id)).await?;
+        if current != *document { bail!("TELEGRAM_MEDIA_CHANGED"); }
+    } else {
+        let _download = super::delete_timing::setup_span("archive_body_download");
+        let bytes = read_index_body(transport, &IndexBodyCache::default(), document.clone(), io, None).await?;
+        if bytes != expected { bail!("BACKUP_PUBLICATION_UNCONFIRMED"); }
+    }
+    Ok(())
+}
+
 async fn read_index_body(
     transport: &impl Transport,
     cache: &IndexBodyCache,
@@ -124,6 +175,7 @@ async fn read_index_body(
             {
                 bail!("TELEGRAM_INDEX_INVALID");
             }
+            remember_archive_read(&envelope, &expected, &bytes);
             cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("TELEGRAM_INDEX_INVALID"))?
@@ -160,6 +212,14 @@ pub(super) struct IndexDocument {
     pub revision: i64,
     pub document: RemoteDocument,
     source: IndexSource,
+}
+impl IndexDocument {
+    pub(super) fn verified_body(&self) -> Result<&[u8]> {
+        match &self.source {
+            IndexSource::Verified(bytes) => Ok(bytes),
+            IndexSource::Scanned(_) => bail!("TELEGRAM_INDEX_INVALID"),
+        }
+    }
 }
 #[derive(Clone)]
 enum IndexSource {
@@ -361,14 +421,6 @@ impl GrammersTransport {
             IndexSource::Scanned(document) => self.original_reader(document),
         };
         read_index_body(self, &self.index_bodies, index.document.clone(), io, Some(reader)).await
-    }
-
-    pub(super) async fn confirm_archive(&self, document: &RemoteDocument, expected: &[u8], io: &Io) -> Result<()> {
-        let bytes = read_index_body(self, &IndexBodyCache::default(), document.clone(), io, None).await?;
-        if bytes != expected {
-            bail!("BACKUP_PUBLICATION_UNCONFIRMED");
-        }
-        Ok(())
     }
 
     fn original_reader(&self, document: &tl::types::Document) -> Box<dyn AsyncRead + Unpin + Send> {

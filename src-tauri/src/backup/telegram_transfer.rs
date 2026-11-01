@@ -712,4 +712,4 @@ pub(super) async fn restore(
 
 #[cfg(test)]
 #[path = "telegram_transfer_tests.rs"]
-mod tests;
+pub(super) mod tests;

@@ -460,6 +460,22 @@ async fn telegram_transfer_uncertain_send_reconciles_after_restart_without_readi
         .await
         .unwrap();
 }
+/// Inject a lost reply after the mock channel has committed the real transfer payload.
+pub(in crate::backup) async fn send_archive_losing_reply(
+    root: &Path, journal: &impl Journal, target: &Target, operation: &str, device: &str, body: &[u8], io: &Io,
+) -> (RemoteDocument, Vec<u8>) {
+    let net = Mock::new();
+    net.sends.store(29, Ordering::SeqCst); // next channel message ID is 30
+    net.lost_response.store(true, Ordering::SeqCst);
+    let mut file = source(root, "library", body);
+    file.asset_id.clone_from(&target.scope.library_id);
+    file.operation_id = operation.into();
+    file.device_id = device.into();
+    assert_eq!(upload(&net, journal, target, file, io).await.unwrap_err().to_string(), "TELEGRAM_CONNECTION_ERROR");
+    assert_eq!(net.uploads.load(Ordering::SeqCst), 1);
+    net.documents.into_inner().unwrap().remove(&30).unwrap()
+}
+
 #[tokio::test]
 async fn telegram_transfer_unknown_outcome_remains_unconfirmed_and_does_not_blindly_retry() {
     let root = tempfile::tempdir().unwrap();

@@ -52,7 +52,11 @@ pub fn intent(core: &Core, space: &str, local: &str) -> Result<String> {
             payload["scope"]=serde_json::to_value(&scope)?;payload["remote_asset_id"]=remote.clone().into();
             tx.execute("UPDATE backup_operations SET state=CASE WHEN state='running' THEN state ELSE 'pending' END,phase=CASE WHEN ?2 THEN 'tombstone' ELSE phase END,next_retry_at=NULL,last_error=NULL,attempt=0,payload_json=?3 WHERE operation_id=?1",params![id,state=="completed",payload.to_string()])?;
         } else {
-            tx.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'delete','pending','tombstone',?4)",params![uuid::Uuid::new_v4().to_string(),space,local,json!({"scope":scope,"remote_asset_id":remote,"cleanup_pass":0,"base":base}).to_string()])?;
+            let mut payload = json!({"scope":scope,"remote_asset_id":remote,"cleanup_pass":0,"base":base});
+            if scope.provider_type == ProviderType::Telegram {
+                payload["first_archive_publish"] = true.into();
+            }
+            tx.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'delete','pending','tombstone',?4)",params![uuid::Uuid::new_v4().to_string(),space,local,payload.to_string()])?;
         }
         let operation:String=tx.query_row("SELECT operation_id FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='delete' AND state NOT IN ('completed','canceled')",params![space,local],|r|r.get(0))?;
         tx.execute("UPDATE backup_operations SET state='blocked',last_error='BACKUP_DELETE_PENDING' WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state NOT IN ('completed','canceled')",params![space,local])?;
@@ -80,15 +84,28 @@ async fn finish_local(core: &Arc<Core>, op: &scheduler::Operation) -> Result<()>
     core.finish_asset_deletion(local, &op.operation_id)
 }
 
+// Consume the first-run marker before network I/O. Requeueing (even after a crash before send)
+// cannot re-enable it; pre-upgrade pending operations conservatively use a fresh download.
+fn claim_archive_read(db: &rusqlite::Connection, operation: &str) -> Result<bool> {
+    Ok(db.execute(
+        "UPDATE backup_operations SET payload_json=json_remove(payload_json,'$.first_archive_publish')
+         WHERE operation_id=? AND phase='tombstone' AND attempt=1 AND json_extract(payload_json,'$.first_archive_publish')=1",
+        [operation],
+    )? == 1)
+}
+
 pub async fn execute(core:&Arc<Core>,provider:&dyn BackupProvider,operation:&str)->Result<()> {
     super::delete_timing::timed(core, operation, "total", super::telegram_session::with_delete_config(async {
-        let result = execute_inner(core, provider, operation).await;
+        let attempt = || Box::pin(execute_inner(core, provider, operation));
+        let first_publish = provider.scope().provider_type == ProviderType::Telegram
+            && core.backup_db(|db| claim_archive_read(db, operation))?;
+        let result = super::telegram_transport::with_delete_archive_read(first_publish, attempt()).await;
         if let Err(error) = &result {
             if provider.scope().provider_type == ProviderType::Telegram
                 && super::telegram_provider::discard_mismatched_map(core, provider.scope(), error)?
             {
                 // Resume at the durable phase after rebuilding; retain all upload and delete receipts.
-                return execute_inner(core, provider, operation).await;
+                return attempt().await;
             }
         }
         result
@@ -376,4 +393,22 @@ pub async fn release_with(
         if !serde_json::from_str::<PendingChanges>(&pending)?.is_empty() {bail!("BACKUP_UNSYNCED_LOCAL_CHANGES");}
         Ok(())
     }).await
+}
+
+#[cfg(test)]
+#[test]
+fn retrying_a_delete_before_send_cannot_claim_the_publish_read_again() -> Result<()> {
+    let db = rusqlite::Connection::open_in_memory()?;
+    repository::init(&db)?;
+    db.execute("INSERT INTO backup_spaces(space_id,library_id,endpoint,bucket,prefix,enabled) VALUES('s','l','','','',0)", [])?;
+    db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,attempt,payload_json)
+                VALUES('op','s','delete','running','tombstone',1,'{\"first_archive_publish\":true,\"cleanup_pass\":0}')", [])?;
+    assert!(claim_archive_read(&db, "op")?);
+    // A manual retry resets the counter, even if no remote send was reserved.
+    db.execute("UPDATE backup_operations SET state='pending', attempt=0 WHERE operation_id='op'", [])?;
+    db.execute("UPDATE backup_operations SET state='running', attempt=attempt+1 WHERE operation_id='op'", [])?;
+    assert!(!claim_archive_read(&db, "op")?);
+    let saved: String = db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id='op'", [], |row| row.get(0))?;
+    assert_eq!(serde_json::from_str::<Value>(&saved)?, json!({"cleanup_pass":0}));
+    Ok(())
 }

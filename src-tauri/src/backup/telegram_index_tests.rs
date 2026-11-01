@@ -5,7 +5,10 @@ use std::sync::{
     Mutex,
 };
 
+#[derive(Default)]
 struct Downloads {
+    current: Mutex<Option<RemoteDocument>>,
+    inspections: AtomicUsize,
     body: Mutex<Vec<u8>>,
     calls: AtomicUsize,
     expired: AtomicBool,
@@ -36,8 +39,11 @@ impl Transport for Downloads {
     ) -> super::super::provider::ProviderFuture<'a, Option<i32>> {
         unreachable!("index reads must not send")
     }
-    fn inspect(&self, _: i32) -> super::super::provider::ProviderFuture<'_, RemoteDocument> {
-        unreachable!("index download already has fresh message evidence")
+    fn inspect(&self, id: i32) -> super::super::provider::ProviderFuture<'_, RemoteDocument> {
+        Box::pin(async move {
+            self.inspections.fetch_add(1, Ordering::SeqCst);
+            self.current.lock().unwrap().clone().filter(|doc| doc.message_id == id).context("TELEGRAM_MEDIA_MISSING")
+        })
     }
     fn find<'a>(
         &'a self,
@@ -91,6 +97,7 @@ async fn verified_index_reads_reuse_body_but_refresh_changed_document_evidence()
         body: Mutex::new(body.to_vec()),
         calls: AtomicUsize::new(0),
         expired: AtomicBool::new(false),
+        ..Default::default()
     };
     let cache = IndexBodyCache::default();
     let (_cancel, rx) = tokio::sync::watch::channel(false);
@@ -137,6 +144,7 @@ async fn index_cache_does_not_keep_bad_hashes_or_ignore_cancellation_and_request
         body: Mutex::new(b"bad! index".to_vec()),
         calls: AtomicUsize::new(0),
         expired: AtomicBool::new(false),
+        ..Default::default()
     };
     let cache = IndexBodyCache::default();
     let (cancel, rx) = tokio::sync::watch::channel(false);
@@ -200,6 +208,7 @@ async fn scan_reference_reads_verified_bytes_and_refreshes_only_on_expiry() {
         body: Mutex::new(body.to_vec()),
         calls: AtomicUsize::new(0),
         expired: AtomicBool::new(false),
+        ..Default::default()
     };
     let (_cancel, rx) = tokio::sync::watch::channel(false);
     let (_stop, srx) = tokio::sync::watch::channel(false);
@@ -236,6 +245,7 @@ async fn index_file_reference_refresh_remains_bounded() {
         body: Mutex::new(body.to_vec()),
         calls: AtomicUsize::new(0),
         expired: AtomicBool::new(true),
+        ..Default::default()
     };
     let cache = IndexBodyCache::default();
     let (_cancel, rx) = tokio::sync::watch::channel(false);
@@ -245,6 +255,66 @@ async fn index_file_reference_refresh_remains_bounded() {
         .await
         .unwrap();
     assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn direct_archive_requires_this_attempts_remote_bytes_and_current_attachment() -> Result<()> {
+    use crate::backup::provider::{ProviderType, Scope};
+
+    let body = b"remote archive bytes";
+    let mut doc = document(body);
+    let mut envelope: Envelope = serde_json::from_str(&doc.caption)?;
+    envelope.kind = "library".into();
+    doc.caption = envelope.caption()?;
+    let target = Target {
+        scope: Scope {space_id: "space".into(), library_id: envelope.library_id.clone(), protocol: 2, provider_type: ProviderType::Telegram},
+        account_id: "1".into(), channel_id: "2".into(),
+    };
+    let source = Downloads {body: Mutex::new(body.to_vec()), current: Mutex::new(Some(doc.clone())), ..Default::default()};
+    let (_cancel, rx) = tokio::sync::watch::channel(false);
+    let io = Io::new(rx.clone(), rx, None);
+    let cache = IndexBodyCache::default();
+    let publish = |cache| capture_publish_refresh(&target, &envelope.operation_id, read_index_body(&source, cache, doc.clone(), &io, None));
+    with_delete_archive_read(true, async {
+        publish(&cache).await?;
+        confirm_archive(&source, &target, &doc, body, &io).await
+    }).await?;
+    assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(source.inspections.load(Ordering::SeqCst), 1);
+
+    // A warm cache and a fresh attempt cannot vouch for a remote read in this attempt.
+    with_delete_archive_read(true, async {
+        publish(&cache).await?;
+        confirm_archive(&source, &target, &doc, body, &io).await
+    }).await?;
+    assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(source.inspections.load(Ordering::SeqCst), 1);
+
+    // The retry itself can publish and download successfully. Its cleanup still performs a cold read.
+    let retry_cache = IndexBodyCache::default();
+    with_delete_archive_read(false, async {
+        capture_publish_refresh(&target, &envelope.operation_id, read_index_body(&source, &retry_cache, doc.clone(), &io, None)).await?;
+        confirm_archive(&source, &target, &doc, body, &io).await
+    }).await?;
+    assert_eq!(source.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(source.inspections.load(Ordering::SeqCst), 1);
+
+    let mut replaced = doc.clone();
+    replaced.document_id += 1;
+    let mut edited = doc.clone();
+    edited.caption.push(' ');
+    for current in [Some(replaced), Some(edited), None] {
+        let fresh = IndexBodyCache::default();
+        let result = with_delete_archive_read(true, async {
+            capture_publish_refresh(&target, &envelope.operation_id, read_index_body(&source, &fresh, doc.clone(), &io, None)).await?;
+            *source.current.lock().unwrap() = current;
+            confirm_archive(&source, &target, &doc, body, &io).await
+        }).await;
+        assert!(matches!(result.unwrap_err().to_string().as_str(), "TELEGRAM_MEDIA_CHANGED" | "TELEGRAM_MEDIA_MISSING"));
+    }
+    assert_eq!(source.calls.load(Ordering::SeqCst), 7);
+    assert_eq!(source.inspections.load(Ordering::SeqCst), 4);
+    Ok(())
 }
 
 #[test]
