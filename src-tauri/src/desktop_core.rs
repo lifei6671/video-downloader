@@ -340,6 +340,7 @@ impl Core {
         crate::backup::repository::init(&db)?;
         let settings = settings::load(&db, directory)?;
         let telegram_accounts = crate::telegram_accounts::TelegramAccounts::load(&db)?;
+        telegram_accounts.configure_proxy(settings.profiles.iter().find(|p| p.platform == "telegram").cloned());
         let mut tasks = {
             let mut query =
                 db.prepare("SELECT snapshot FROM download_tasks ORDER BY rowid DESC")?;
@@ -850,7 +851,9 @@ impl Core {
     pub fn save_profile(&self, update: settings::ProfileUpdate) -> Result<Settings> {
         let mut inner = self.inner.lock().unwrap();
         let Inner { db, settings, .. } = &mut *inner;
-        settings::save_profile(db, settings, update)?;
+        let result = settings::save_profile(db, settings, update);
+        self.telegram_accounts.configure_proxy(settings.profiles.iter().find(|p| p.platform == "telegram").cloned());
+        result?;
         Ok(settings.clone())
     }
     pub fn set_directory(&self, path: PathBuf) -> Result<Settings> {

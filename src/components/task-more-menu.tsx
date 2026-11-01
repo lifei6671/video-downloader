@@ -78,7 +78,7 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
         event.currentTarget.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: bounds.right - 24, clientY: bounds.top + bounds.height / 2}));
       }}>{children}</div>
     </ContextMenuTrigger>
-    <ContextMenuContent className="task-action-menu task-context-menu" aria-label="任务操作" onCloseAutoFocus={event => {
+    <ContextMenuContent collisionPadding={8} className="task-action-menu task-context-menu" aria-label="任务操作" onCloseAutoFocus={event => {
       event.preventDefault();
       // Do not steal focus from a dialog, an outside click or removal's neighbor.
       requestAnimationFrame(() => {
@@ -94,6 +94,6 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
     <DropdownMenuTrigger asChild>
       <Button ref={trigger} size="icon" variant="ghost" aria-label="更多操作" disabled={busy}><MoreHorizontal aria-hidden="true" /></Button>
     </DropdownMenuTrigger>
-    <DropdownMenuContent className="task-action-menu" align="end" aria-label="任务操作">{items}</DropdownMenuContent>
+    <DropdownMenuContent collisionPadding={8} className="task-action-menu" align="end" aria-label="任务操作">{items}</DropdownMenuContent>
   </DropdownMenu>;
 }

@@ -91,7 +91,10 @@ struct Control {
     view: View,
     cancel: watch::Sender<bool>,
 }
+pub(crate) type ProxySettings = Arc<Mutex<Option<crate::settings::Profile>>>;
+
 struct Connection {
+    proxy_url: Option<String>,
     client: Client,
     session: Arc<VaultSession>,
     handle: SenderPoolHandle,
@@ -103,16 +106,16 @@ struct Connection {
     >,
 }
 impl Connection {
-    async fn open(namespace: String, api_id: i32) -> Result<Self> {
+    async fn open(namespace: String, api_id: i32, proxy_url: Option<String>) -> Result<Self> {
         let mut session =
             VaultSession::load(namespace.clone(), Arc::new(SystemSessionVault)).await?;
         if session.revoked() {
             session.erase().await?;
             session = VaultSession::load(namespace, Arc::new(SystemSessionVault)).await?;
         }
-        Ok(Self::start(session, api_id))
+        Ok(Self::start(session, api_id, proxy_url))
     }
-    fn start(session: Arc<VaultSession>, api_id: i32) -> Self {
+    fn start(session: Arc<VaultSession>, api_id: i32, proxy_url: Option<String>) -> Self {
         let SenderPool {
             runner,
             handle,
@@ -124,11 +127,13 @@ impl Connection {
                 device_model: "Yingqu Telegram Storage".into(),
                 app_version: env!("CARGO_PKG_VERSION").into(),
                 retry_policy: Box::new(NoRetries),
+                proxy_url: proxy_url.clone(),
                 ..Default::default()
             },
         );
         let thin = handle.thin.clone();
         Self {
+            proxy_url,
             client: Client::new(handle),
             session,
             handle: thin,
@@ -160,10 +165,10 @@ impl Connection {
             joining.runner.take();
         }
     }
-    async fn reconnect_if_stopped(&mut self, api_id: i32) {
-        if self.stopped.load(Ordering::SeqCst) && !self.revoked.load(Ordering::SeqCst) {
+    async fn reconnect_if_stopped(&mut self, api_id: i32, proxy_url: Option<String>) {
+        if (self.stopped.load(Ordering::SeqCst) || self.proxy_url != proxy_url) && !self.revoked.load(Ordering::SeqCst) {
             self.close().await;
-            *self = Self::start(self.session.clone(), api_id);
+            *self = Self::start(self.session.clone(), api_id, proxy_url);
         }
     }
 }
@@ -273,6 +278,7 @@ struct State {
 }
 
 pub struct TelegramSession {
+    proxy: ProxySettings,
     control: Mutex<Control>,
     state: tokio::sync::Mutex<State>,
     closed: AtomicBool,
@@ -282,6 +288,7 @@ pub struct TelegramSession {
 impl Default for TelegramSession {
     fn default() -> Self {
         Self {
+            proxy: Arc::new(Mutex::new(None)),
             control: Mutex::new(Control {
                 view: View::default(),
                 cancel: watch::channel(false).0,
@@ -294,6 +301,12 @@ impl Default for TelegramSession {
     }
 }
 impl TelegramSession {
+    pub(crate) fn with_proxy(proxy: ProxySettings) -> Self {
+        Self { proxy, ..Self::default() }
+    }
+    fn proxy_url(&self) -> Result<Option<String>> {
+        self.proxy.lock().unwrap().as_ref().map(crate::settings::profile_proxy).transpose().map(Option::flatten)
+    }
     #[cfg(test)]
     pub(crate) fn set_test_view(&self, phase: Phase, account_id: &str) {
         let mut control = self.control.lock().unwrap();
@@ -443,7 +456,7 @@ impl TelegramSession {
         }
         let result = async {
             state.connection =
-                Some(Connection::open(format!("{device_id}/session-v1"), identity.id).await?);
+                Some(Connection::open(format!("{device_id}/session-v1"), identity.id, self.proxy_url()?).await?);
             let connection = state
                 .connection
                 .as_ref()
@@ -559,8 +572,8 @@ impl TelegramSession {
             bail!("TELEGRAM_AUTH_REQUIRED");
         }
         let result = async {
-            if let Some(connection) = state.connection.as_mut().filter(|c| c.stopped.load(Ordering::SeqCst) && !c.revoked.load(Ordering::SeqCst)) {
-                connection.reconnect_if_stopped(AppIdentity::load()?.id).await;
+            if let Some(connection) = state.connection.as_mut().filter(|c| !c.revoked.load(Ordering::SeqCst)) {
+                connection.reconnect_if_stopped(AppIdentity::load()?.id, self.proxy_url()?).await;
             }
             let connection = state
                 .connection
@@ -744,7 +757,7 @@ impl TelegramSession {
         }
         let io = transfer::Io::new(cancel, stop.clone(), control);
         if let Some(connection) = state.connection.as_mut() {
-            connection.reconnect_if_stopped(AppIdentity::load()?.id).await;
+            connection.reconnect_if_stopped(AppIdentity::load()?.id, self.proxy_url()?).await;
         }
         let connection = state
             .connection
@@ -838,7 +851,7 @@ impl TelegramSession {
         let mut cancel = self.operation(id)?;
         if let Some(connection) = state.connection.as_mut() {
             if connection.stopped.load(Ordering::SeqCst) && !connection.revoked.load(Ordering::SeqCst) {
-                connection.reconnect_if_stopped(AppIdentity::load()?.id).await;
+                connection.reconnect_if_stopped(AppIdentity::load()?.id, self.proxy_url()?).await;
             }
         }
         let result = async {
@@ -889,7 +902,7 @@ impl TelegramSession {
         let mut downloads = self.downloads.lock().expect("telegram downloads lock poisoned");
         let authorization = downloads.as_mut().context("TELEGRAM_AUTH_REQUIRED")?;
         if authorization.session.revoked() { bail!("TELEGRAM_AUTH_REQUIRED"); }
-        let connection = Arc::new(Connection::start(authorization.session.clone(), api_id));
+        let connection = Arc::new(Connection::start(authorization.session.clone(), api_id, self.proxy_url()?));
         authorization.connections.retain(|c| c.strong_count() > 0);
         authorization.connections.push(Arc::downgrade(&connection));
         Ok(DownloadConnection { connection, cancel: authorization.cancel.subscribe() })
@@ -1114,7 +1127,7 @@ mod tests {
         }
         let vault = Arc::new(EraseVault(std::sync::atomic::AtomicBool::new(true)));
         let keys = VaultSession::load("offline-erase-retry".into(), vault.clone()).await.unwrap();
-        let connection = Connection::start(keys, 12);
+        let connection = Connection::start(keys, 12, None);
         connection.revoked.store(true, Ordering::SeqCst); // Remote sign-out already succeeded.
         let session = TelegramSession::default(); let cancel = session.start_operation().unwrap();
         session.set_view(&cancel, Phase::Ready, Some(Account{id:"123".into(),name:"test".into()}), None);
@@ -1142,7 +1155,7 @@ mod tests {
         assert_eq!(session.status().last_error.as_deref(), Some("TELEGRAM_AUTH_REQUIRED"));
         assert!(session.has_operation(&id), "authorization loss must leave local cleanup retryable");
         let keys = VaultSession::load("offline-auth-cleanup".into(), Arc::new(DownloadVault)).await.unwrap();
-        let connection = Connection::start(keys, 12);
+        let connection = Connection::start(keys, 12, None);
         connection.revoked.store(true, Ordering::SeqCst);
         session.state.lock().await.connection = Some(connection);
         session.logout(&id).await.unwrap();
@@ -1181,7 +1194,7 @@ mod tests {
                 let mut state = session.state.lock().await;
                 let cancel = session.start_operation().unwrap();
                 let _attempt = AuthorizationAttempt { session:&session, cancel, completed:false };
-                if with_pool { state.connection = Some(Connection::start(keys,12)); }
+                if with_pool { state.connection = Some(Connection::start(keys, 12, None)); }
                 let _pool = state.connection.as_ref().map(|connection| ConnectingPool { connection, completed:false });
                 std::future::pending::<()>().await;
             });
@@ -1199,7 +1212,7 @@ mod tests {
     async fn download_sender_pools_cancel_independently_and_logout_joins_all() {
         let keys = VaultSession::load("offline-downloads".into(), Arc::new(DownloadVault)).await.unwrap();
         let session = TelegramSession::default();
-        let backup = Connection::start(keys.clone(), 12);
+        let backup = Connection::start(keys.clone(), 12, None);
         *session.downloads.lock().unwrap() = Some(DownloadAuthorization { session:keys, cancel:watch::channel(false).0, connections:vec![] });
         let a = session.register_download(12).unwrap();
         let b = session.register_download(12).unwrap();
@@ -1218,11 +1231,11 @@ mod tests {
     #[tokio::test]
     async fn abandoned_login_restore_stops_its_pool_before_reconnect() {
         let keys = VaultSession::load("offline-connect-cancel".into(), Arc::new(DownloadVault)).await.unwrap();
-        let mut connection = Connection::start(keys,12);
+        let mut connection = Connection::start(keys, 12, None);
         let runner = connection.runner.lock().unwrap().as_ref().unwrap().abort_handle();
         drop(ConnectingPool { connection:&connection, completed:false });
         assert!(connection.stopped.load(Ordering::SeqCst));
-        connection.reconnect_if_stopped(12).await;
+        connection.reconnect_if_stopped(12, None).await;
         assert!(runner.is_finished());
         connection.close().await;
     }
@@ -1348,7 +1361,7 @@ mod tests {
         let keys = VaultSession::load("offline-lifecycle".into(), Arc::new(EmptyVault))
             .await
             .unwrap();
-        let mut connection = Connection::start(keys.clone(), 12);
+        let mut connection = Connection::start(keys.clone(), 12, None);
         let session = TelegramSession::default();
         let stop = session.start_operation().unwrap();
         let old_runner = connection
@@ -1366,7 +1379,7 @@ mod tests {
         });
         assert!(connection.stopped.load(Ordering::SeqCst));
         // This is the exact reconnect path used by logout, without issuing a real sign-out RPC.
-        connection.reconnect_if_stopped(12).await;
+        connection.reconnect_if_stopped(12, None).await;
         assert!(old_runner.is_finished());
         assert!(!connection.stopped.load(Ordering::SeqCst));
         assert!(Arc::ptr_eq(&connection.session, &keys));
@@ -1432,4 +1445,66 @@ mod tests {
         session.shutdown().await;
         assert!(session.start_operation().is_err());
     }
+    #[tokio::test]
+    async fn telegram_proxy_routes_login_and_download_pools_and_reconnects_after_change() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("socks5://{}", listener.local_addr().unwrap());
+        let profile = serde_json::from_value(serde_json::json!({
+            "platform":"telegram", "user_agent":"test", "proxy":address,
+            "cookie_configured":false, "cookie":"", "credential_ref":null
+        })).unwrap();
+        let session = TelegramSession::with_proxy(Arc::new(Mutex::new(Some(profile))));
+        let keys = VaultSession::load("offline-proxy".into(), Arc::new(DownloadVault)).await.unwrap();
+        let mut login = Connection::start(keys.clone(), 12, session.proxy_url().unwrap());
+        *session.downloads.lock().unwrap() = Some(DownloadAuthorization { session:keys, cancel:watch::channel(false).0, connections:vec![] });
+        let download = session.register_download(12).unwrap();
+        for connection in [&login, download.connection.as_ref()] {
+            let observed = async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut greeting = [0; 2]; stream.read_exact(&mut greeting).await.unwrap();
+                assert_eq!(greeting[0], 5);
+                let mut methods = vec![0; greeting[1] as usize]; stream.read_exact(&mut methods).await.unwrap();
+                assert!(methods.contains(&0)); stream.write_all(&[5, 0]).await.unwrap();
+                let mut target = [0; 4]; stream.read_exact(&mut target).await.unwrap();
+                assert_eq!(target[..3], [5, 1, 0]); // SOCKS CONNECT is sent before any MTProto request.
+            };
+            tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! { _ = observed => {}, _ = connection.client.get_me() => panic!("request bypassed local proxy") }
+            }).await.unwrap();
+        }
+        let old_runner = login.runner.lock().unwrap().as_ref().unwrap().abort_handle();
+        login.reconnect_if_stopped(12, None).await;
+        assert!(old_runner.is_finished());
+        assert!(login.proxy_url.is_none());
+        // Already running download keeps its own pool and configured route.
+        assert_eq!(download.connection.proxy_url.as_deref(), Some(address.as_str()));
+        session.proxy.lock().unwrap().as_mut().unwrap().proxy = None;
+        let next = session.register_download(12).unwrap();
+        assert!(next.connection.proxy_url.is_none());
+        next.close().await; download.close().await; login.close().await; session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn telegram_proxy_decodes_username_and_password_before_socks_authentication() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = format!("socks5://user%40example%2540:p%40ss%3A%25@{}",listener.local_addr().unwrap());
+        let keys = VaultSession::load("offline-proxy-auth".into(),Arc::new(DownloadVault)).await.unwrap();
+        let connection = Connection::start(keys,12,Some(proxy));
+        let observed = async {
+            let (mut stream,_) = listener.accept().await.unwrap();
+            let mut greeting=[0;2];stream.read_exact(&mut greeting).await.unwrap();assert_eq!(greeting[0],5);
+            let mut methods=vec![0;greeting[1] as usize];stream.read_exact(&mut methods).await.unwrap();assert!(methods.contains(&2));stream.write_all(&[5,2]).await.unwrap();
+            let mut header=[0;2];stream.read_exact(&mut header).await.unwrap();assert_eq!(header[0],1);
+            let mut username=vec![0;header[1] as usize];stream.read_exact(&mut username).await.unwrap();
+            let len=stream.read_u8().await.unwrap();let mut password=vec![0;len as usize];stream.read_exact(&mut password).await.unwrap();
+            assert_eq!(username,b"user@example%40");assert_eq!(password,b"p@ss:%");
+            stream.write_all(&[1,0]).await.unwrap();
+            let mut target=[0;3];stream.read_exact(&mut target).await.unwrap();assert_eq!(target,[5,1,0]);
+        };
+        tokio::time::timeout(Duration::from_secs(3),async {tokio::select! {_=observed=>{},_=connection.client.get_me()=>panic!("SOCKS authentication failed")}}).await.unwrap();
+        connection.close().await;
+    }
+
 }

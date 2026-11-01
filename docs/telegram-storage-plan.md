@@ -54,6 +54,10 @@ Rust 管理 grammers 连接及其后台任务，在现有 Tokio 生命周期内�
 
 私有频道不是端到端加密空间。首版保留原始字节：具有有效时长和尺寸的 MP4 使用视频 MIME 及视频属性，以媒体方式展示且不转码；仅当原文件的 `ftyp`、`moov` 位于第一个非空 `mdat` 前时设置 Telegram `supports_streaming`。尾部索引或无法识别的布局不标记、不重封装，实际播放仍取决于客户端对原编码的支持。此标记不改变应用的 `range_read=false` 与完整回读校验；其它视频、封面和文案保持原文件附件，封面不改为照片模式；本方案不增加应用层文件加密或密钥分享流程，也不将 Telegram 设为重要资料的唯一恢复副本。
 
+### MOV 为什么显示为文件
+
+当前发送器只为带有效时长和尺寸的 MP4 添加 `documentAttributeVideo`；MOV 不进入该分支，使用 `application/octet-stream` 及 `force_file=true`，因此作为原文件附件显示。`yingqu-video.mov` 来自上传端生成的 `yingqu-<kind>.<container>` 附件名，不表示本地文件已被转码。`force_file` 的语义见 [Telegram 官方说明](https://core.telegram.org/constructor/inputMediaUploadedDocument)。文件扩展名不能证明客户端对原编码的兼容性；当前备份不自动重封装或转码，直接保留原始字节。
+
 ## 5. 频道、索引和文件身份
 
 首版一个备份空间对应一个由用户创建的专用私有频道，媒体和索引共用该频道。用户登录后从有权访问的频道列表选择，不要求手填数字 ID，不自动创建或修改频道。初始化前检查读取历史、发布文件以及拟启用删除所需权限；关闭自动删除等能力不应被误报为账号不可用。

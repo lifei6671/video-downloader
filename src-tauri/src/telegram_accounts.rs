@@ -1,6 +1,6 @@
 //! Local account choices for Telegram downloads and backups. Default choices share one session.
 use crate::{
-    backup::telegram_session::{Phase, TelegramSession, View},
+    backup::telegram_session::{Phase, ProxySettings, TelegramSession, View},
     desktop_core::Core,
 };
 use anyhow::{bail, Result};
@@ -48,10 +48,10 @@ pub struct Binding {
     pub session: Arc<TelegramSession>,
 }
 impl Binding {
-    fn new(namespace: String) -> Self {
+    fn new(namespace: String, proxy: ProxySettings) -> Self {
         Self {
             namespace,
-            session: Arc::new(TelegramSession::default()),
+            session: Arc::new(TelegramSession::with_proxy(proxy)),
         }
     }
 }
@@ -61,6 +61,7 @@ struct Choices {
     closed: bool,
 }
 pub struct TelegramAccounts {
+    proxy: ProxySettings,
     choices: Mutex<Choices>,
 }
 impl TelegramAccounts {
@@ -80,20 +81,25 @@ impl TelegramAccounts {
             uuid::Uuid::parse_str(&value)?;
             Ok(value)
         };
-        let download = Binding::new(load(Purpose::Download)?);
+        let proxy = Arc::new(Mutex::new(None));
+        let download = Binding::new(load(Purpose::Download)?, proxy.clone());
         let namespace = load(Purpose::Backup)?;
         let backup = if namespace == download.namespace {
             download.clone()
         } else {
-            Binding::new(namespace)
+            Binding::new(namespace, proxy.clone())
         };
         Ok(Self {
+            proxy,
             choices: Mutex::new(Choices {
                 active: [download, backup],
                 pending: [None, None],
                 closed: false,
             }),
         })
+    }
+    pub fn configure_proxy(&self, profile: Option<crate::settings::Profile>) {
+        *self.proxy.lock().unwrap() = profile;
     }
     pub fn binding(&self, purpose: Purpose) -> Binding {
         self.choices.lock().unwrap().active[purpose.index()].clone()
@@ -299,7 +305,7 @@ impl TelegramAccounts {
         {
             bail!("TELEGRAM_STALE_OPERATION");
         }
-        let binding = Binding::new(uuid::Uuid::new_v4().to_string());
+        let binding = Binding::new(uuid::Uuid::new_v4().to_string(), self.proxy.clone());
         choices.pending[purpose.index()] = Some(binding.clone());
         Ok(binding)
     }
@@ -399,7 +405,7 @@ impl TelegramAccounts {
                 &binding.session,
                 &choices.active[purpose.other().index()].session,
             ) {
-                let signed_out = Binding::new(uuid::Uuid::new_v4().to_string());
+                let signed_out = Binding::new(uuid::Uuid::new_v4().to_string(), self.proxy.clone());
                 Self::save(core, purpose, &signed_out)?;
                 choices.active[purpose.index()] = signed_out;
                 true
@@ -444,7 +450,7 @@ mod tests {
         .unwrap()
     }
     fn pending(accounts: &TelegramAccounts, purpose: Purpose, phase: Phase) -> Binding {
-        let next = Binding::new(uuid::Uuid::new_v4().to_string());
+        let next = Binding::new(uuid::Uuid::new_v4().to_string(), accounts.proxy.clone());
         next.session.set_test_view(phase, "account-b");
         accounts.choices.lock().unwrap().pending[purpose.index()] = Some(next.clone());
         next
@@ -803,4 +809,31 @@ mod tests {
         );
         app.shutdown().await;
     }
+    #[tokio::test]
+    async fn removing_telegram_backup_configuration_keeps_both_account_bindings_and_proxy() {
+        let root = tempfile::tempdir().unwrap(); let app = core(root.path());
+        let download = app.telegram_accounts.binding(Purpose::Download);
+        let backup = app.telegram_accounts.binding(Purpose::Backup);
+        backup.session.set_test_view(Phase::Ready,"account-a");
+        app.save_profile(crate::settings::ProfileUpdate { platform:"telegram".into(),user_agent:"test".into(),cookie:None,proxy:Some("socks5://127.0.0.1:1080".into()),http_chunk_size:None }).unwrap();
+        app.backup_db(|db| {
+            db.execute_batch("INSERT INTO backup_spaces VALUES('telegram-qa','library-qa','','','',NULL,0);
+                INSERT INTO backup_provider_config(space_id,provider_type,profile) VALUES('telegram-qa','telegram','telegram');
+                INSERT INTO telegram_spaces(space_id,account_id,channel_id) VALUES('telegram-qa','account-a','100');")?;
+            Ok(())
+        }).unwrap();
+        crate::backup::spaces::remove(&app,"telegram-qa",false).await.unwrap();
+        assert!(crate::backup::spaces::list(&app).unwrap().is_empty());
+        for (purpose, binding) in [(Purpose::Download,&download),(Purpose::Backup,&backup)] {
+            assert!(Arc::ptr_eq(&app.telegram_accounts.binding(purpose).session,&binding.session));
+            assert!(matches!(app.telegram_accounts.status(purpose).phase,Phase::Ready));
+        }
+        let id = download.session.status().operation_id.unwrap();
+        app.telegram_accounts.logout(&app,Purpose::Download,&id).await.unwrap();
+        assert!(matches!(backup.session.status().phase,Phase::Ready));
+        assert_eq!(app.proxy("telegram").unwrap().as_deref(),Some("socks5://127.0.0.1:1080/"));
+        assert!(app.telegram_accounts.proxy.lock().unwrap().as_ref().unwrap().proxy.is_some());
+        app.shutdown().await;
+    }
+
 }

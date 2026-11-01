@@ -1,0 +1,25 @@
+{
+  "name": "grammers-mtsender",
+  "version": "0.11.0",
+  "source": "registry+https://github.com/rust-lang/crates.io-index",
+  "crate_checksum": "b009d7d0f571cabac15e1ac7f588fefb764f23aba13bf8b9063a0a32a036075d",
+  "upstream_commit": "15b7afa46a9c6853aa9d8efc9d70a0f46b1781c3",
+  "upstream": "https://codeberg.org/Lonami/grammers",
+  "patch": "Decode URL userinfo as UTF-8 before SOCKS5 authentication; proxy feature adds percent-encoding.",
+  "upstream_files": {
+    "Cargo.toml": "c20ae790675ad435ad937ab95d80e9a8c81c84e112371a9810c51baa8b8ee228",
+    "Cargo.toml.orig": "a1b70fd5327b115f3364a877bf16671cf4af4c7ce0ecdc762f5eefadc7eb32f4",
+    "DEPS.md": "f55964f8ed49c3a3697774c4986d977beae523a6bc61559c99622aa0b75bf1ae",
+    "README.md": "865863a2c4404c590c111ce5a3c2a2cf9d39a2b518159590306f9313cce75aea",
+    "src/configuration.rs": "23cab3d1ba36bdba9bada73c4a3908323c21dada53004fe139b5abbeb8a69fd1",
+    "src/errors.rs": "4e3fad08b5b09b7553bfcbc6d6c1842600296e3b1a1387162b27421ff7ae1de6",
+    "src/lib.rs": "5dde6b424c4dbf5a7f92f2fcf0fc996ee81c219b88822a9a482dbba8cd546225",
+    "src/sender.rs": "f048c882a9b4819308eeeb88e1b26004184ad4856ac5abdd995c01dc1c359e40",
+    "src/sender_pool.rs": "6b88b0c30025d046f4e63383fa6aaee3445b5062a9e1fd6faa8e6db74e60933e",
+    "src/updates_receiver.rs": "50d76ea182ab87b532c2caed1384e69f69b026a2e33a635217cf0e4358a6cffd",
+    "tests/deps.rs": "4e7a9dcf22751663f0bf6e4362e2064bf9d47a09d51cbeb94d0de47396ffb3d6",
+    "tests/lib.rs": "f4caf3718381768dfc3e9496219d76252ebe6e382759fabbefe9832963f3fd79",
+    "src/net/mod.rs": "9eb4838443950482773ad180844916f6861c776f3bfd3fe3180166934d54dda7",
+    "src/net/tcp.rs": "fb7700f93544a4f85f1351d2548acc4a6f6e1c54db331101b33642b443d6ac8f"
+  }
+}

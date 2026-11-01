@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { api, errorText, type BackupSettings, type TelegramStorageChannel, type TelegramStorageStatus } from '@/api';
+import { api, errorText, type Settings, type Profile, type BackupSettings, type TelegramStorageChannel, type TelegramStorageStatus } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Field, FieldLabel } from '@/components/ui/field';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import { TelegramNetworkSettings } from '@/components/telegram-network-settings';
 import { TelegramLoginQr } from '@/components/telegram-login-qr';
 import { Spinner } from '@/components/ui/spinner';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
-export function TelegramStorageSettings({ space, name, connected, saving, actions, accountOnly = false, active = true }: { active?: boolean; accountOnly?: boolean; space?: BackupSettings; name?: string; connected?: (value: BackupSettings) => Promise<void>; saving?: (value: boolean) => void; actions?: ReactNode }) {
+export function TelegramStorageSettings({ space, name, connected, saving, actions, accountOnly = false, active = true, network, networkSaved }: { network?: Profile; networkSaved?: (value: Settings) => void; active?: boolean; accountOnly?: boolean; space?: BackupSettings; name?: string; connected?: (value: BackupSettings) => Promise<void>; saving?: (value: boolean) => void; actions?: ReactNode }) {
   const purpose = accountOnly ? 'download' : 'backup';
   const [status, setStatus] = useState<TelegramStorageStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -164,6 +165,7 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
     if (id && (busy || phase === 'qr' || phase === 'connecting' || phase === 'password')) void cancel();
   }
   return <section className="max-w-xl space-y-4" aria-label={accountOnly ? "Telegram 账号" : "Telegram 存储账号"} aria-busy={!!busy}>
+    {accountOnly && network && networkSaved && <TelegramNetworkSettings profile={network} saved={networkSaved} disabled={!!busy || ['connecting', 'qr', 'password'].includes(status?.phase ?? '')} />}
     {!status && !error && <p role="status" className="flex items-center gap-2 text-sm"><Spinner />正在读取账号…</p>}
     {status && !status.configured && <p role="status" className="text-sm text-muted-foreground">此构建尚未配置 Telegram 应用身份。</p>}
     {(status?.configured || space) && <>

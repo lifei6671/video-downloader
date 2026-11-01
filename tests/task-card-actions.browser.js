@@ -84,7 +84,7 @@ async page => {
   await page.keyboard.press('Escape');await page.locator('.video-player-dialog').waitFor({state:'detached'});
   await row(3).locator('.task-row-title').click({button:'right'});
   await page.getByRole('menuitem',{name:'复制本地地址',exact:true}).click();
-  await page.locator('[data-sonner-toast][data-type="error"]').filter({hasText:'操作失败'}).waitFor();
+  await page.locator('[data-sonner-toast][data-type="error"]').filter({hasText:'无法写入系统剪贴板，请重试'}).waitFor();
   await page.evaluate(()=>window.backgroundTest.complete('visual-1'));
   await page.waitForFunction(()=>!document.querySelector('[data-task-id="visual-1"] [data-media-cover]').disabled);
   await row(1).getByRole('button',{name:'查看封面',exact:true}).click();

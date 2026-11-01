@@ -76,7 +76,7 @@ async page => {
     check(Math.abs(ringBox.width-ringBox.height)<1 && ringBox.width===64,'progress is not a 64px circle');
     const downloadingCover=await row('visual-1').getByRole('button',{name:'查看封面',exact:true}).boundingBox();
     check(ringBox.x>=downloadingCover.x && ringBox.y>=downloadingCover.y && ringBox.x+ringBox.width<=downloadingCover.x+downloadingCover.width && ringBox.y+ringBox.height<=downloadingCover.y+downloadingCover.height,'progress escaped cover');
-    check(await row('visual-3').locator('.task-row-title').evaluate(node=>getComputedStyle(node).webkitLineClamp==='2'),'title is not clamped to two lines');
+    check(await row('visual-3').locator('.task-row-title').evaluate(node=>{ const style=getComputedStyle(node); return style.whiteSpace==='nowrap' && style.textOverflow==='ellipsis'; }),'title is not a single truncated line');
     const image=row('visual-3').locator('.media-cover-image');
     const beforeHover=await row('visual-3').boundingBox();
     await row('visual-3').hover();

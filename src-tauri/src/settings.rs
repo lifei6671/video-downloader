@@ -112,7 +112,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         Err(_) => bail!("DATABASE_ERROR"),
     };
     let mut profiles = Vec::new();
-    for platform in ["douyin", "tiktok", "youtube"] {
+    for platform in ["douyin", "tiktok", "youtube", "telegram"] {
         let row = db.query_row(
             "SELECT user_agent,proxy,cookie,credential_ref,http_chunk_size FROM platform_settings WHERE platform=?",
             [platform],
@@ -163,6 +163,9 @@ pub fn cookie(settings: &Settings, platform: &str) -> Result<String> {
 // Explicit settings-editor read; ordinary settings only contain the public address.
 pub fn proxy(settings: &Settings, platform: &str) -> Result<Option<String>> {
     let profile = settings.profiles.iter().find(|p| p.platform == platform).context("CONFIG_INVALID")?;
+    profile_proxy(profile)
+}
+pub(crate) fn profile_proxy(profile: &Profile) -> Result<Option<String>> {
     match &profile.credential_ref {
         Some(reference) => Ok(Some(
             String::from_utf8(entry(reference)?.get_secret().context("CREDENTIAL_ERROR")?)
@@ -174,7 +177,7 @@ pub fn proxy(settings: &Settings, platform: &str) -> Result<Option<String>> {
 
 pub fn snapshot(settings: &Settings) -> Result<Value> {
     let mut profiles = serde_json::Map::new();
-    for profile in &settings.profiles {
+    for profile in settings.profiles.iter().filter(|p| p.platform != "telegram") {
         let proxy = proxy(settings, &profile.platform)?;
         let mut value = json!({"user_agent": profile.user_agent, "proxy": proxy, "cookie": profile.cookie});
         if profile.platform == "youtube" {
@@ -237,6 +240,7 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
                 .context("CONFIG_INVALID")?;
             if proxy.len() > 2000
                 || !matches!(parsed.scheme(), "http" | "socks5")
+                || update.platform == "telegram" && parsed.scheme() != "socks5"
                 || parsed.host_str().is_none()
                 || port == 0
                 || parsed.query().is_some()
@@ -610,7 +614,7 @@ mod tests {
         )
         .unwrap();
         let restored = load(&db, PathBuf::new()).unwrap();
-        assert_eq!(restored.profiles.len(), 3);
+        assert_eq!(restored.profiles.len(), 4);
         assert_eq!(
             super::cookie(&restored, "youtube").unwrap(),
             "session=fixture"
@@ -635,4 +639,20 @@ mod tests {
         assert_eq!(restored.filename_template, crate::naming::DEFAULT_TEMPLATE);
         assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 2);
     }
+    #[test]
+    fn telegram_proxy_is_persisted_separately_and_excluded_from_engine_snapshot() {
+        let db = Connection::open_in_memory().unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        let edit = |proxy: &str| ProfileUpdate { platform:"telegram".into(), user_agent:"Telegram".into(), cookie:None, proxy:Some(proxy.into()), http_chunk_size:None };
+        save_profile(&db, &mut settings, edit("socks5://127.0.0.1:1080")).unwrap();
+        let restored = load(&db, PathBuf::new()).unwrap();
+        assert_eq!(proxy(&restored,"telegram").unwrap().as_deref(), Some("socks5://127.0.0.1:1080/"));
+        assert!(proxy(&restored,"youtube").unwrap().is_none());
+        assert!(snapshot(&restored).unwrap().get("telegram").is_none());
+        assert!(save_profile(&db,&mut settings,edit("http://127.0.0.1:1080")).is_err());
+        assert_eq!(proxy(&settings,"telegram").unwrap(), proxy(&restored,"telegram").unwrap());
+        save_profile(&db,&mut settings,edit("")).unwrap();
+        assert!(proxy(&load(&db,PathBuf::new()).unwrap(),"telegram").unwrap().is_none());
+    }
+
 }
