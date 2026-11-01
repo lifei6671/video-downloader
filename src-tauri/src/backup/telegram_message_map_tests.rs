@@ -395,9 +395,18 @@ fn setup_target(core: &Core) -> Target {
 
 #[tokio::test]
 async fn direct_delete_archive_survives_lost_reply_upgrade_delta_and_fresh_rebuild() -> Result<()> {
+    exercise_archive_upgrade(false).await
+}
+
+#[tokio::test]
+async fn segmented_delete_rotates_legacy_archive_recovers_lost_reply_and_rebuilds() -> Result<()> {
+    exercise_archive_upgrade(true).await
+}
+
+async fn exercise_archive_upgrade(rollover: bool) -> Result<()> {
     use crate::backup::{
         provider::{AssetChange, Checkpoint, MediaLocation, MediaRef, ReferenceChange},
-        telegram_provider::TelegramProvider as Provider, telegram_replay::{Cursor, Event},
+        telegram_provider::{segments::Catalog, TelegramProvider as Provider}, telegram_replay::{Cursor, Event},
         telegram_transfer::tests::send_archive_losing_reply,
         telegram_transfer_journal::{CoreJournal, Journal, SendState},
     };
@@ -436,9 +445,26 @@ async fn direct_delete_archive_survives_lost_reply_upgrade_delta_and_fresh_rebui
         cover:ReferenceChange::Unchanged,transcript:ReferenceChange::Unchanged,delete:false,
         operation_id:uuid::Uuid::new_v4().to_string(),device_id:device.clone(),
         conflicts:vec![],resolved_conflicts:vec![],field_bases:Default::default() };
-    let old_library = serde_json::to_vec(&serde_json::json!({"schema_version":2,"library_id":library,
-        "provider_type":"telegram","mode":"single_writer","account_id":target.account_id,"channel_id":target.channel_id}))?;
-    let initial = snapshot(vec![index(5,"library",library,library,&device,old_library),
+    let mut descriptor = serde_json::json!({"schema_version":2,"library_id":library,
+        "provider_type":"telegram","mode":"single_writer","account_id":target.account_id,"channel_id":target.channel_id});
+    let mut sealed_peer = None;
+    if rollover {
+        // A real oversized pre-segmentation archive. No new fields and no test-only size override.
+        let mut history = vec![];
+        let mut bytes = 0;
+        while bytes < 1024 * 1024 {
+            let peer = AssetChange { asset_id:uuid::Uuid::new_v4().to_string(), operation_id:uuid::Uuid::new_v4().to_string(),
+                delete:true,media:None,fields:Default::default(),..create.clone() };
+            let revision = (2_i64 << 32) + 1 + history.len() as i64;
+            let record = serde_json::json!({"revision":revision,"body":Event::encode(&target,&peer)?});
+            bytes += serde_json::to_vec(&record)?.len();
+            history.push(record);
+            sealed_peer = Some((peer.asset_id, revision as u64));
+        }
+        descriptor["archived_events"] = history.into();
+    }
+    let legacy = index(5,"library",library,library,&device,serde_json::to_vec(&descriptor)?);
+    let initial = snapshot(vec![legacy.clone(),
         index(10,"event",&asset,&create.operation_id,&device,Event::encode(&target,&create)?)]);
     let old = refresh(&core,&target,&io,&Channel(Mutex::new([Step::Full(50,initial)].into()))).await?;
     let before = Provider::project_snapshot(&core,&target,&io,None,&old)?;
@@ -452,6 +478,12 @@ async fn direct_delete_archive_survives_lost_reply_upgrade_delta_and_fresh_rebui
         operation_id:uuid::Uuid::new_v4().to_string(), ..create };
     let event = Event::encode(&target,&change)?;
     let body = Provider::direct_archive_body(&io,&target,&asset,&old,event.clone())?;
+    let wire: serde_json::Value = serde_json::from_slice(&body)?;
+    if rollover {
+        assert_eq!(wire["previous_segment"]["message_id"],5);
+        assert_eq!(wire["archived_events"].as_array().unwrap().len(),1,"only this asset moves into the new segment");
+        assert!(body.len() < legacy.document.bytes as usize / 50);
+    } else { assert!(wire.get("previous_segment").is_none()); }
     let (carrier, committed_bytes) = send_archive_losing_reply(root.path(),&CoreJournal(&core),&target,
         &change.operation_id,&device,&body,&io).await;
     assert_eq!(body,committed_bytes);
@@ -492,10 +524,15 @@ async fn direct_delete_archive_survives_lost_reply_upgrade_delta_and_fresh_rebui
     let revision = (30_u64<<32)|1;
     assert!(applied.assets[&asset].deleted);
     assert_eq!(applied.assets[&asset].revision,revision);
-    let removals = Channel(Mutex::new([Step::Changes(51,Some((52,vec![5,10]))),
-        Step::Read(vec![5,10],Ok(snapshot(vec![])))].into()));
+    let catalog = Catalog::read(&target,&both,&io)?;
+    assert!(!catalog.superseded(30));
+    assert_eq!(catalog.superseded(5),!rollover);
+    let mut removed_ids:Vec<_> = both.indexes.iter().map(|i| i.document.message_id).filter(|id| catalog.superseded(*id)).collect();
+    removed_ids.push(10);
+    let removals = Channel(Mutex::new([Step::Changes(51,Some((52,removed_ids.clone()))),
+        Step::Read(removed_ids,Ok(snapshot(vec![])))].into()));
     let only = refresh(&core,&target,&io,&removals).await?;
-    assert_eq!(only.indexes.len(),1);
+    assert_eq!(only.indexes.len(),if rollover {2} else {1});
     let final_state = Provider::project_snapshot(&core,&target,&io,Some(&applied.cursor),&only)?;
     assert_eq!(applied.cursor.evidence,final_state.cursor.evidence);
 
@@ -508,7 +545,16 @@ async fn direct_delete_archive_survives_lost_reply_upgrade_delta_and_fresh_rebui
     let discovered = Provider::descriptor_library_id(&fresh_target,&envelope,direct.verified_body()?)?;
     assert_eq!(discovered,target.scope.library_id);
     fresh_target.scope.library_id = discovered;
-    let scan = Channel(Mutex::new([Step::Full(52,snapshot(vec![direct]))].into()));
+    if rollover {
+        let missing = snapshot(vec![direct.clone()]);
+        assert_eq!(Provider::project_snapshot(&fresh,&fresh_target,&io,None,&missing).err().unwrap().to_string(),"TELEGRAM_INDEX_CHANGED");
+        let mut altered = descriptor.clone();
+        altered["archived_events"].as_array_mut().unwrap().pop();
+        let replaced = index(5,"library",library,library,&device,serde_json::to_vec(&altered)?);
+        assert_eq!(Provider::project_snapshot(&fresh,&fresh_target,&io,None,&snapshot(vec![replaced,direct.clone()])).err().unwrap().to_string(),"TELEGRAM_INDEX_CHANGED");
+    }
+    let kept = if rollover {vec![legacy.clone(), direct]} else {vec![direct]};
+    let scan = Channel(Mutex::new([Step::Full(52,snapshot(kept))].into()));
     let only = refresh(&fresh,&fresh_target,&io,&scan).await?;
     let restored = Provider::project_snapshot(&fresh,&fresh_target,&io,None,&only)?;
     assert!(restored.assets[&asset].deleted);
@@ -518,14 +564,21 @@ async fn direct_delete_archive_survives_lost_reply_upgrade_delta_and_fresh_rebui
     // A later archive freezes the first deletion at the original carrier revision.
     let second = AssetChange {asset_id:uuid::Uuid::new_v4().to_string(),operation_id:uuid::Uuid::new_v4().to_string(),base:None,..change};
     let next = Provider::direct_archive_body(&io,&target,&second.asset_id,&only,Event::encode(&target,&second)?)?;
-    let pair: crate::backup::telegram_provider::Library = serde_json::from_slice(&next)?;
     let both = [(asset.as_str(),revision),(second.asset_id.as_str(),(39_u64<<32)|1)];
-    pair.confirm_deletions(&target,39,&both)?;
-    assert!(pair.confirm_deletions(&target,39,&[(asset.as_str(),revision+1)]).is_err());
-    let next = snapshot(vec![index(39,"library",library,&second.operation_id,&device,next)]);
+    let updated: serde_json::Value = serde_json::from_slice(&next)?;
+    assert_eq!(updated.get("previous_segment"),wire.get("previous_segment"),"updating the active segment keeps its immutable predecessor");
+    let head = index(39,"library",library,&second.operation_id,&device,next);
+    let next = snapshot(if rollover {vec![legacy,head]} else {vec![head]});
+    let catalog = Catalog::read(&target,&next,&io)?;
+    catalog.confirm_deletions(&target,&both)?;
+    assert!(catalog.confirm_deletions(&target,&[(asset.as_str(),revision+1)]).is_err());
     let rolled = Provider::project_snapshot(&fresh,&fresh_target,&io,Some(&restored.cursor),&next)?;
     assert_eq!(rolled.assets[&asset].revision,revision);
     assert_eq!(rolled.assets[&second.asset_id].revision,(39_u64<<32)|1);
+    if let Some((peer, peer_revision)) = sealed_peer {
+        assert_eq!(rolled.assets[&peer].revision,peer_revision);
+        catalog.confirm_deletions(&fresh_target,&[(peer.as_str(),peer_revision),both[1]])?;
+    }
     core.shutdown().await;
     fresh.shutdown().await;
     Ok(())
