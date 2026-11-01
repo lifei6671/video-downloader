@@ -18,7 +18,7 @@ async (page) => {
       if(command==='list_tasks')return window.tasks;
       if(command==='list_video_transcripts')return [];
       if(command==='list_backup_operations')return window.ops;
-      if(command==='get_settings')return {download_directory:'C:/fixture',filename_template:'{title}',max_downloads:2,profiles:[],tdl:{enabled:false,path:null}};
+      if(command==='get_settings')return {download_directory:'C:/fixture',filename_template:'{title}',max_downloads:2,profiles:[]};
       if(command==='list_backup_spaces')return [window.backupSettings];
       if(command==='select_backup_space')return window.backupSettings;
       if(command==='get_backup_sync_enabled')return true;

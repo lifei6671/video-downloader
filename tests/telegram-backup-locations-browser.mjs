@@ -18,7 +18,7 @@ async page => {
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
     window.__TAURI_INTERNALS__ = { convertFileSrc:x=>x, transformCallback:()=>1, unregisterCallback() {}, invoke:async (command,args) => {
       window.calls.push({command,args});
-      if(command==='get_settings') return {download_directory:'C:/fixture',filename_template:'{title}',max_downloads:2,profiles:[],tdl:{enabled:false,path:null}};
+      if(command==='get_settings') return {download_directory:'C:/fixture',filename_template:'{title}',max_downloads:2,profiles:[]};
       if(command==='list_tasks') return window.taskBacked ? [structuredClone(window.task)] : [];
       if(command==='get_backup_settings') return structuredClone(window.spaces.find(s=>s.space_id===window.current));
       if(command==='list_backup_spaces') return structuredClone(window.spaces);

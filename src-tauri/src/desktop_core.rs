@@ -3,7 +3,7 @@ use crate::{
     parse_cache,
     python_bridge::PythonBridge,
     settings::{self, Settings},
-    tdl_bridge::{self, TdlSettings},
+    telegram_download,
 };
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
@@ -162,7 +162,7 @@ pub enum TaskEvent {
 }
 
 struct Active {
-    tdl: Option<TdlSettings>,
+    telegram: bool,
     download_after_resolve: bool,
     profiles: Value,
     directory: PathBuf,
@@ -185,11 +185,9 @@ struct Inner {
     dependency_cancel: Option<watch::Sender<bool>>,
     transcription: Option<transcription::ActiveTranscription>,
     transcription_unsaved: HashMap<String, transcription::Snapshot>,
-    tdl_login_cancel: Option<watch::Sender<bool>>,
-    tdl_login_control: Option<tdl_bridge::LoginControl>,
 }
 pub struct Core {
-    pub telegram_storage: crate::backup::telegram_session::TelegramSession,
+    pub telegram_accounts: crate::telegram_accounts::TelegramAccounts,
     pub(crate) backup_wake: Arc<tokio::sync::Notify>,
     pub(crate) backup_foreground: std::sync::atomic::AtomicBool,
     pub(crate) backup_active_probes: Mutex<HashSet<String>>,
@@ -201,7 +199,8 @@ pub struct Core {
     program: String,
     args: Vec<String>,
     runtime_directory: PathBuf,
-    tdl_session: tdl_bridge::Session,
+    #[cfg(test)]
+    pub(crate) telegram_source: Mutex<Option<telegram_download::Factory>>,
     emit: Arc<dyn Fn(TaskEvent) + Send + Sync>,
 }
 
@@ -340,6 +339,7 @@ impl Core {
         transcription::init(&db)?;
         crate::backup::repository::init(&db)?;
         let settings = settings::load(&db, directory)?;
+        let telegram_accounts = crate::telegram_accounts::TelegramAccounts::load(&db)?;
         let mut tasks = {
             let mut query =
                 db.prepare("SELECT snapshot FROM download_tasks ORDER BY rowid DESC")?;
@@ -477,7 +477,7 @@ impl Core {
                                             .video
                                             .as_ref()
                                             .is_none_or(|v| v["platform"] != "telegram")
-                                            || crate::files::tdl_recovery_valid(
+                                            || crate::files::telegram_recovery_valid(
                                                 Path::new(&target),
                                                 size,
                                             ))
@@ -541,7 +541,7 @@ impl Core {
         }
         let backup_wake=Arc::new(tokio::sync::Notify::new());
         Ok(Arc::new(Self {
-            telegram_storage: crate::backup::telegram_session::TelegramSession::default(),
+            telegram_accounts,
             backup_wake:backup_wake.clone(),
             backup_foreground:std::sync::atomic::AtomicBool::new(true),
             backup_active_probes:Mutex::new(HashSet::new()),
@@ -564,13 +564,12 @@ impl Core {
                 dependency_cancel: None,
                 transcription: None,
                 transcription_unsaved: HashMap::new(),
-                tdl_login_cancel: None,
-                tdl_login_control: None,
             }),
             program,
             args,
             runtime_directory: db_path.parent().context("IO_ERROR")?.join("runtime"),
-            tdl_session: tdl_bridge::Session::default(),
+            #[cfg(test)]
+            telegram_source: Mutex::new(None),
             emit: Arc::new(emit),
         }))
     }
@@ -687,110 +686,6 @@ impl Core {
     }
     pub fn settings(&self) -> Settings {
         self.inner.lock().unwrap().settings.clone()
-    }
-    pub fn save_tdl(&self, mut config: TdlSettings) -> Result<Settings> {
-        if config
-            .path
-            .as_ref()
-            .is_some_and(|p| !p.is_absolute() || !p.is_file())
-        {
-            bail!("TDL_UNAVAILABLE");
-        }
-        let mut inner = self.inner.lock().unwrap();
-        if inner.closing {
-            bail!("INVALID_STATE");
-        }
-        if inner.tdl_login_cancel.is_some() {
-            bail!("TDL_BUSY");
-        }
-        config.session_directory = inner.settings.tdl.session_directory.clone();
-        inner.db.execute("INSERT INTO tdl_settings(id,enabled,path) VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,path=excluded.path",
-            params![config.enabled, config.path.as_ref().map(|p| p.to_string_lossy().into_owned())]).context("DATABASE_ERROR")?;
-        inner.settings.tdl = config;
-        Ok(inner.settings.clone())
-    }
-    pub fn tdl_login_running(&self) -> bool {
-        self.inner.lock().unwrap().tdl_login_cancel.is_some()
-    }
-    pub fn tdl_login_status(&self) -> Option<tdl_bridge::LoginStatus> {
-        self.inner
-            .lock()
-            .unwrap()
-            .tdl_login_control
-            .as_ref()
-            .map(|control| control.state.borrow().clone())
-    }
-    pub fn submit_tdl_password(
-        &self,
-        login_id: &str,
-        password: zeroize::Zeroizing<String>,
-    ) -> Result<()> {
-        let inner = self.inner.lock().unwrap();
-        if inner.closing {
-            bail!("INVALID_STATE");
-        }
-        inner
-            .tdl_login_control
-            .as_ref()
-            .context("INVALID_STATE")?
-            .submit(login_id, password)
-    }
-    pub fn cancel_tdl_login(&self) -> Result<()> {
-        if let Some(cancel) = &self.inner.lock().unwrap().tdl_login_cancel {
-            let _ = cancel.send(true);
-        }
-        Ok(())
-    }
-    pub async fn login_tdl(self: &Arc<Self>, path: Option<PathBuf>) -> Result<Settings> {
-        let (send, receive) = tokio::sync::oneshot::channel();
-        {
-            let mut inner = self.inner.lock().unwrap();
-            if inner.closing {
-                bail!("INVALID_STATE");
-            }
-            if inner.tdl_login_cancel.is_some() || inner.active.values().any(|a| a.tdl.is_some()) {
-                bail!("TDL_BUSY");
-            }
-            let (cancel, receiver) = watch::channel(false);
-            inner.tdl_login_cancel = Some(cancel);
-            let (control, input) = tdl_bridge::LoginControl::new();
-            let state = control.state.clone();
-            inner.tdl_login_control = Some(control);
-            let core = self.clone();
-            let worker = tokio::spawn(async move {
-                let result = tdl_bridge::login(
-                    path.as_deref(),
-                    &core.runtime_directory.join("tdl-sessions"),
-                    receiver,
-                    state,
-                    input,
-                )
-                .await;
-                let mut inner = core.inner.lock().unwrap();
-                let result = result.and_then(|scratch| {
-                    if inner.closing || inner.tdl_login_cancel.as_ref().is_some_and(|c| *c.borrow()) {
-                        bail!("CANCELED");
-                    }
-                    let directory = scratch.path().join("data");
-                    let transaction = inner.db.transaction().context("DATABASE_ERROR")?;
-                    transaction.execute("INSERT INTO tdl_settings(id,enabled,path,session_directory) VALUES(1,0,?1,?2) ON CONFLICT(id) DO UPDATE SET path=excluded.path,session_directory=excluded.session_directory",
-                        params![path.as_ref().map(|p| p.to_string_lossy().into_owned()), directory.to_string_lossy()]).context("DATABASE_ERROR")?;
-                    // Metadata learned under another account must not serve as a new preview.
-                    transaction.execute_batch("DELETE FROM parse_cache_images WHERE cache_key IN (SELECT cache_key FROM parse_cache WHERE platform='telegram'); DELETE FROM parse_cache WHERE platform='telegram'; DELETE FROM parse_cache_aliases WHERE platform='telegram';").context("DATABASE_ERROR")?;
-                    transaction.commit().context("DATABASE_ERROR")?;
-                    inner.settings.tdl.path = path;
-                    inner.settings.tdl.session_directory = Some(directory);
-                    let _ = scratch.keep();
-                    Ok(inner.settings.clone())
-                });
-                inner.tdl_login_cancel = None;
-                inner.tdl_login_control = None;
-                let _ = send.send(result);
-            });
-            inner.workers.retain(|worker| !worker.is_finished());
-            inner.workers.push(worker);
-        }
-        receive.await.context("TDL_LOGIN_FAILED")?
     }
     pub fn cookie(&self, platform: &str) -> Result<String> {
         settings::cookie(&self.inner.lock().unwrap().settings, platform)
@@ -993,7 +888,7 @@ impl Core {
         input: String,
         resolver: String,
     ) -> Result<Task> {
-        if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk" | "tdl") {
+        if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk" | "grammers") {
             bail!("CONFIG_INVALID");
         }
         self.resolve_task(input, None, resolver, None)
@@ -1056,8 +951,8 @@ impl Core {
                     .context("INVALID_ENGINE_RESULT")?;
             video.validate()?;
             (
-                video.canonical_url,
-                video.resolver,
+                if video.platform == "telegram" { task.telegram_link.clone().unwrap_or(parse_cache::telegram_source(&inner.db, task.video.as_ref().unwrap())?) } else { video.canonical_url },
+                if video.platform == "telegram" { "grammers".into() } else { video.resolver },
                 task.video.as_ref().unwrap()["selected_format_id"]
                     .as_str()
                     .map(str::to_owned),
@@ -1283,15 +1178,15 @@ impl Core {
         if input.trim().is_empty() || input.len() > 8192 {
             bail!("INVALID_INPUT");
         }
-        let telegram = tdl_bridge::is_telegram(&input);
+        let telegram = telegram_download::is_telegram(&input);
         let resolver = if telegram {
-            tdl_bridge::message_link(&input)?;
-            if !matches!(resolver.as_str(), "auto" | "tdl") {
+            telegram_download::message_link(&input)?;
+            if !matches!(resolver.as_str(), "auto" | "grammers") {
                 bail!("UNSUPPORTED_CONTENT");
             }
-            "tdl".to_owned()
+            "grammers".to_owned()
         } else {
-            if resolver == "tdl" {
+            if resolver == "grammers" {
                 bail!("INVALID_INPUT");
             }
             resolver
@@ -1317,21 +1212,10 @@ impl Core {
             None
         };
         let download_after_resolve = previous.is_some();
-        let mut cached = parse_cache::find(&inner.db, &input, &resolver)?;
+        let mut cached = if telegram { None } else { parse_cache::find(&inner.db, &input, &resolver)? };
         if let (Some(cached), Some(format_id)) = (&mut cached, &requested_format) {
             apply_video_format(&mut cached.video, format_id)?;
         }
-        let tdl = if telegram {
-            if inner.tdl_login_cancel.is_some() {
-                bail!("TDL_BUSY");
-            }
-            if !inner.settings.tdl.enabled {
-                bail!("TDL_EXPERIMENTAL_DISABLED");
-            }
-            Some(inner.settings.tdl.clone())
-        } else {
-            None
-        };
         let profiles = if telegram {
             json!({})
         } else {
@@ -1369,7 +1253,7 @@ impl Core {
             cached_at: None,
             cover_cached: false,
             telegram_link: if telegram {
-                Some(tdl_bridge::message_link(&input)?.url)
+                Some(telegram_download::message_link(&input)?.url)
             } else {
                 None
             },
@@ -1403,7 +1287,7 @@ impl Core {
         inner.active.insert(
             task.id.clone(),
             Active {
-                tdl: tdl.clone(),
+                telegram,
                 download_after_resolve,
                 profiles: profiles.clone(),
                 directory: directory.clone(),
@@ -1431,8 +1315,8 @@ impl Core {
         inner.workers.retain(|worker| !worker.is_finished());
         let worker = tokio::spawn(async move {
             let result = async {
-                if let Some(config) = tdl {
-                    return core.resolve_telegram(&config, &input, &id, cancellation.clone()).await;
+                if telegram {
+                    return core.resolve_telegram(&input, &id, cancellation.clone()).await;
                 }
                 if parse_cache::share_url(&input).is_some() {
                     let has_cache: bool = core.inner.lock().unwrap().db.query_row(
@@ -1660,15 +1544,6 @@ impl Core {
         if task.status != Status::Ready && !deferred {
             bail!("INVALID_STATE");
         }
-        if (deferred
-            || task
-                .video
-                .as_ref()
-                .is_some_and(|v| v["platform"] == "telegram"))
-            && !inner.settings.tdl.enabled
-        {
-            bail!("TDL_EXPERIMENTAL_DISABLED");
-        }
         if !confirm_duplicate && previously_downloaded(&inner.tasks, &task) {
             bail!("ALREADY_DOWNLOADED");
         }
@@ -1678,14 +1553,6 @@ impl Core {
                     .video
                     .as_ref()
                     .is_some_and(|v| v["platform"] == "telegram");
-            let tdl = if telegram {
-                if inner.tdl_login_cancel.is_some() {
-                    bail!("TDL_BUSY");
-                }
-                Some(inner.settings.tdl.clone())
-            } else {
-                None
-            };
             let profiles = if telegram {
                 json!({})
             } else {
@@ -1698,7 +1565,7 @@ impl Core {
             inner.active.insert(
                 id.to_owned(),
                 Active {
-                    tdl,
+                    telegram,
                     download_after_resolve: deferred,
                     profiles,
                     directory,
@@ -1732,43 +1599,11 @@ impl Core {
     // submissions, settings changes, cancellation, and process completion.
     fn dispatch(self: &Arc<Self>, inner: &mut Inner) {
         while !inner.closing && inner.downloads.len() < usize::from(inner.settings.max_downloads) {
-            let waiting_channel = inner
-                .tasks
-                .iter()
-                .filter(|t| {
-                    matches!(t.status, Status::Queued | Status::Parsing)
-                        && t.download_requested
-                        && t.video.is_none()
-                        && t.telegram_link.is_some()
-                })
-                .filter_map(|t| t.queue_order)
-                .min();
-            let telegram_busy = inner.active.iter().any(|(id, active)| {
-                active.tdl.is_some()
-                    && (inner.downloads.contains(id)
-                        || inner
-                            .tasks
-                            .iter()
-                            .any(|t| t.id == *id && t.status == Status::Parsing))
-            });
             let Some(id) = inner
                 .tasks
                 .iter()
                 .filter(|t| t.status == Status::Queued)
-                .filter(|t| {
-                    if t.video.is_none() {
-                        !telegram_busy
-                            && !inner
-                                .tasks
-                                .iter()
-                                .any(|other| other.status == Status::Parsing)
-                    } else {
-                        // Later Telegram downloads must not keep an unknown channel
-                        // waiting forever. Other platforms may use free slots.
-                        !inner.active.get(&t.id).is_some_and(|a| a.tdl.is_some())
-                            || waiting_channel.is_none_or(|order| t.queue_order < Some(order))
-                    }
-                })
+                .filter(|t| t.video.is_some() || !inner.tasks.iter().any(|other| other.status == Status::Parsing))
                 .min_by_key(|t| t.queue_order)
                 .map(|t| t.id.clone())
             else {
@@ -1796,16 +1631,18 @@ impl Core {
 
     async fn resolve_telegram(
         self: &Arc<Self>,
-        config: &TdlSettings,
         input: &str,
         id: &str,
         cancel: watch::Receiver<bool>,
     ) -> Result<Value> {
-        let channel = parse_cache::tdl_channel(&self.inner.lock().unwrap().db, input)?;
-        let video = self
-            .tdl_session
-            .operation(config, input, None, None, |_| {}, cancel, channel)
-            .await?;
+        let previous = self.inner.lock().unwrap().tasks.iter().find(|task| task.id == id).and_then(|task|task.video.clone());
+        let video = telegram_download::operation(self, input, None, None, |_| {}, cancel).await?;
+        if let Some(previous) = &previous {
+            if previous["platform"] == "telegram" && previous["video_id"] != video["video_id"] {
+                parse_cache::forget_telegram_channel(&self.inner.lock().unwrap().db,input,previous)?;
+                bail!(telegram_download::ALIAS_IDENTITY_MISMATCH);
+            }
+        }
         let identity: Video =
             serde_json::from_value(video.clone()).context("INVALID_ENGINE_RESULT")?;
         identity.validate()?;
@@ -1820,13 +1657,6 @@ impl Core {
     fn start_deferred(self: &Arc<Self>, inner: &mut Inner, id: &str) -> Result<()> {
         let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
         let input = task.telegram_link.clone().context("INVALID_STATE")?;
-        let config = inner
-            .active
-            .get(id)
-            .unwrap()
-            .tdl
-            .clone()
-            .context("INVALID_STATE")?;
         let (cancel, cancellation) = watch::channel(false);
         let (done, done_rx) = watch::channel(false);
         task.status = Status::Parsing;
@@ -1841,7 +1671,7 @@ impl Core {
         inner.workers.retain(|worker| !worker.is_finished());
         inner.workers.push(tokio::spawn(async move {
             let result = core
-                .resolve_telegram(&config, &input, &id, cancellation)
+                .resolve_telegram(&input, &id, cancellation)
                 .await;
             core.inner.lock().unwrap().downloads.remove(&id);
             core.finish(&id, result, false);
@@ -1857,13 +1687,13 @@ impl Core {
             .get(id)
             .expect("queued task has configuration snapshot");
         let profiles = active.profiles.clone();
-        let tdl = active.tdl.clone();
+        let telegram = active.telegram;
         let directory = active.directory.clone();
         let filename_template = active.filename_template.clone();
         let naming_time = crate::naming::current_time();
         let video = task.video.clone().context("INVALID_STATE")?;
-        let tdl_input = if tdl.is_some() {
-            Some(parse_cache::tdl_source(&inner.db, &video)?)
+        let telegram_input = if telegram {
+            Some(parse_cache::telegram_source(&inner.db, &video)?)
         } else {
             None
         };
@@ -1909,8 +1739,8 @@ impl Core {
                         task.revision += 1;
                         (core.emit)(TaskEvent::Updated(Box::new(task.clone())));
                     };
-                let result = if let Some(config) = tdl {
-                    match core.tdl_session.operation(&config, tdl_input.as_deref().context("INVALID_ENGINE_RESULT")?, Some(&video), Some(&media), progress, cancellation.clone(), None).await {
+                let result = if telegram {
+                    match telegram_download::operation(&core, telegram_input.as_deref().context("INVALID_ENGINE_RESULT")?, Some(&video), Some(&media), progress, cancellation.clone()).await {
                         Ok(mut result) => {
                             let mut cover_cancel = cancellation.clone();
                             let cover = PythonBridge::operation_cancellable(
@@ -1941,14 +1771,14 @@ impl Core {
                             "image_count":video["images"].as_array().map(Vec::len)},"staging_dir":media}),
                     progress, async { let _ = cancellation.wait_for(|v| *v).await; }).await
                 };
-                if result.as_ref().is_err_and(|error| error.root_cause().to_string() == tdl_bridge::ALIAS_IDENTITY_MISMATCH) {
+                if result.as_ref().is_err_and(|error| error.root_cause().to_string() == telegram_download::ALIAS_IDENTITY_MISMATCH) {
                     // A freshly resolved public bootstrap proved this exact alias
                     // stale. Do not retry or remove a concurrently updated mapping.
-                    parse_cache::forget_tdl_channel(&core.inner.lock().unwrap().db,
-                        tdl_input.as_deref().context("INVALID_ENGINE_RESULT")?, &video)?;
+                    parse_cache::forget_telegram_channel(&core.inner.lock().unwrap().db,
+                        telegram_input.as_deref().context("INVALID_ENGINE_RESULT")?, &video)?;
                 }
-                if result.as_ref().is_err_and(|error| error.to_string() == "TDL_MEDIA_CHANGED") {
-                    parse_cache::invalidate_tdl(&mut core.inner.lock().unwrap().db, &video)?;
+                if result.as_ref().is_err_and(|error| error.to_string() == "TELEGRAM_MEDIA_CHANGED") {
+                    parse_cache::invalidate_telegram(&mut core.inner.lock().unwrap().db, &video)?;
                 }
                 let committed = result.and_then(|result| {
                     let mut inner = core.inner.lock().unwrap();
@@ -2087,9 +1917,6 @@ impl Core {
             if let Some(cancel) = &inner.dependency_cancel {
                 let _ = cancel.send(true);
             }
-            if let Some(cancel) = &inner.tdl_login_cancel {
-                let _ = cancel.send(true);
-            }
             let active = inner
                 .active
                 .iter()
@@ -2103,7 +1930,7 @@ impl Core {
                 .collect::<Vec<_>>();
             (active, std::mem::take(&mut inner.workers))
         };
-        self.telegram_storage.shutdown().await;
+        self.telegram_accounts.shutdown().await;
         let cancellations = active
             .iter()
             .map(|(id, _)| {
@@ -2692,7 +2519,7 @@ mod tests {
         std::fs::write(&video_path, b"original video").unwrap();
         std::fs::write(&cover_path, b"original cover").unwrap();
         std::fs::write(album_path.join("001.jpg"), b"original image").unwrap();
-        let telegram = json!({"platform":"telegram","video_id":"100_9","resolver":"tdl","kind":"video",
+        let telegram = json!({"platform":"telegram","video_id":"100_9","resolver":"grammers","kind":"video",
             "canonical_url":"https://t.me/c/100/9","selected_format_id":"original",
             "formats":[{"format_id":"original","container":"mp4","filesize":4096}]});
         let mut retained_video = telegram.clone();
@@ -2819,7 +2646,7 @@ mod tests {
                 parse_cache::cover(&inner.db, &retained_video).unwrap(),
                 cover
             );
-            assert!(parse_cache::find(&inner.db, "https://t.me/c/100/9", "tdl")
+            assert!(parse_cache::find(&inner.db, "https://t.me/c/100/9", "grammers")
                 .unwrap()
                 .is_some());
         }
@@ -2872,7 +2699,7 @@ mod tests {
                     }
                     if platform == "telegram" {
                         video["video_id"] = "100_9".into();
-                        video["resolver"] = "tdl".into();
+                        video["resolver"] = "grammers".into();
                         video["selected_format_id"] = "original".into();
                         video["formats"] =
                             json!([{"format_id":"original","container":"mp4","filesize":4096}]);

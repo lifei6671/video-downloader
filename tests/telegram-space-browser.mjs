@@ -9,13 +9,13 @@ async page => {
     window.__TAURI_INTERNALS__ = { convertFileSrc: value => value, transformCallback: () => 1, unregisterCallback: () => {}, invoke: async (command, args) => {
       const config = args?.config;
       window.calls.push({ command, provider: config?.provider_type, create: config?.create_library, activate: config?.activate, space: args?.spaceId });
-      if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [], tdl: { enabled: false, path: null } };
+      if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [] };
       if (command === 'get_backup_settings') return structuredClone(window.spaces.find(s => s.space_id === window.current) ?? null);
       if (command === 'get_backup_sync_enabled') return window.enabled;
       if (command === 'list_backup_spaces') return structuredClone(window.spaces);
       if (['list_tasks', 'list_video_transcripts', 'list_backup_assets', 'list_backup_operations'].includes(command)) return [];
       if (command === 'check_runtime_dependencies') return { platform: 'windows', directory: 'C:/fixture', tools: [] };
-      if (command === 'telegram_storage_status') return { configured: !window.unconfigured, phase: window.signedOut ? 'signed_out' : window.statusPhase ?? 'ready', operation_id: 'login', account: window.signedOut ? null : { id: '123', name: '测试账号' }, last_error: null };
+      if (command === 'telegram_storage_status') return { configured: !window.unconfigured, phase: window.signedOut ? 'signed_out' : window.statusPhase ?? 'ready', operation_id: 'login', account: window.signedOut ? null : { id: window.accountId ?? '123', name: window.accountName ?? '测试账号' }, last_error: null };
       if (command === 'telegram_storage_channels') { if(window.holdChannels) await new Promise(resolve=>{window.releaseChannels=resolve;}); return [{ id: '777', title: '专用私有频道', can_post: true, can_delete: false }, { id: '888', title: '只读频道', can_post: false, can_delete: false }]; }
       if (command === 'save_backup_settings') {
         if (config.provider_type !== 'telegram' || config.endpoint || config.bucket || config.prefix || config.credentials) throw new Error('Telegram received S3 configuration');
@@ -67,11 +67,20 @@ async page => {
       const a = await button('重新连接').boundingBox(), b = await button('删除配置').boundingBox();
       assert(Math.abs(a.y - b.y) < 1, 'Saved actions wrap onto separate rows');
       assert(await button('退出存储账号').count() === 0, 'Saved configuration exposes logout');
+      assert(await button('切换其他账号').isVisible(), 'Saved configuration lacks account switching');
       assert(await p.getByRole('combobox', { name: '备份提供商' }).count() === 0, 'Saved Telegram provider remains editable');
       await p.locator('.backup-settings-actions').getByText('Telegram', { exact: true }).waitFor();
       assert(await p.getByRole('combobox', { name: '私有频道' }).count() === 0, 'Saved target remains editable');
       await p.getByText('专用私有频道', { exact: true }).waitFor();
     }
+    await p.evaluate(()=>{window.accountId='999';window.accountName='其他测试账号';});
+    await p.getByRole('tab',{name:/对象存储/}).click();await p.getByRole('tab',{name:'知识库测试',exact:true}).click();
+    await p.getByText('其他测试账号',{exact:true}).waitFor();
+    await p.getByText('当前登录账号与此备份空间不匹配。',{exact:true}).waitFor();
+    assert(await button('重新连接').isDisabled(),'Mismatched account can reconnect the original target');
+    assert(await p.evaluate(()=>window.spaces.find(s=>s.space_id==='tg').telegram.account_id)==='123','Account switch changed the saved target binding');
+    await p.evaluate(()=>{delete window.accountId;delete window.accountName;});
+    await p.getByRole('tab',{name:/对象存储/}).click();await p.getByRole('tab',{name:'知识库测试',exact:true}).click();
     const channelReads=await p.evaluate(()=>window.calls.filter(c=>c.command==='telegram_storage_channels').length);
     await p.evaluate(()=>{window.spaces.find(s=>s.space_id==='tg').telegram_channel_title=null;window.holdChannels=true;});
     for(let i=0;i<3;i++) {
@@ -111,6 +120,6 @@ async page => {
     assert(calls.filter(c => c.command === 'save_backup_settings').every(c => c.provider === 'telegram' && c.activate === false), 'Saving violated activation or provider isolation');
     assert(!calls.some(c => ['login_tdl', 'telegram_storage_logout', 'delete_asset', 'release_asset'].includes(c.command)), 'Configuration flow touched account or media lifecycle');
     assert(failures.length === 0, failures.join('\n'));
-    return { passed: true, viewports: 3, flows: ['connect-missing-library', 'explicit-create', 'busy-feedback', 'save-without-activation', 'switch-telegram-s3', 'readonly-channel', 'saved-target-readonly', 'persistent-space-error', 'local-config-delete', 'no-credential-access'] };
+    return { passed: true, viewports: 3, flows: ['connect-missing-library', 'explicit-create', 'busy-feedback', 'save-without-activation', 'switch-telegram-s3', 'readonly-channel', 'saved-target-readonly', 'account-mismatch-binding-preserved', 'persistent-space-error', 'local-config-delete', 'no-credential-access'] };
   } finally { await p.close(); }
 }

@@ -22,6 +22,7 @@ pub fn init(db: &Connection) -> Result<()> {
     }
     tx.execute_batch(include_str!("sync-schema.sql"))?;
     tx.execute_batch(include_str!("telegram-schema.sql"))?;
+    super::spaces::select_initial_default(&tx)?;
     tx.execute(
         "INSERT OR IGNORE INTO backup_device(id,device_id) VALUES(1,?)",
         [Uuid::new_v4().to_string()],

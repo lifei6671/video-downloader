@@ -429,7 +429,7 @@ async fn single_protocol_save_probes_without_confirmation_or_credential_replacem
         .contains_key("protocol"));
 }
 #[tokio::test]
-async fn single_protocol_readding_configuration_keeps_identity_and_explicit_default_selection() {
+async fn single_protocol_readding_the_only_configuration_keeps_identity_and_default() {
     let f = Fixture::new(24).await;
     f.upload().await.unwrap();
     let vault = Vault::default();
@@ -443,8 +443,8 @@ async fn single_protocol_readding_configuration_keeps_identity_and_explicit_defa
         .await
         .unwrap();
     assert_eq!(saved.protocol, 2);
-    assert!(!saved.enabled);
-    assert!(spaces::get(&f.core).unwrap().is_none());
+    assert!(saved.enabled);
+    assert_eq!(spaces::get(&f.core).unwrap().unwrap().space_id, saved.space_id);
     assert_eq!(saved.space_id, f.space.space_id);
     let chosen = spaces::select_with(&f.core, &saved.space_id, &vault, |_, _, _, _| {
         Ok(f.store.clone())
@@ -741,8 +741,8 @@ async fn settings_actions_empty_configuration_can_be_removed_and_explicitly_read
         .unwrap();
     assert_eq!(restored.space_id, saved.space_id);
     assert_eq!(restored.library_id, saved.library_id);
-    assert!(!restored.enabled);
-    assert!(spaces::get(&core).unwrap().is_none());
+    assert!(restored.enabled);
+    assert_eq!(spaces::get(&core).unwrap().unwrap().space_id, restored.space_id);
 }
 
 #[tokio::test]
@@ -2094,39 +2094,54 @@ async fn p3_save_configuration_without_activation_preserves_default_and_queue() 
 }
 
 #[tokio::test]
-async fn p3_first_saved_configuration_waits_for_explicit_activation() {
-    let root = tempfile::tempdir().unwrap();
-    let core = Core::open(
-        &root.path().join("tabs.sqlite"),
-        root.path().join("downloads"),
-        "unused".into(),
-        vec![],
-        |_| {},
-    )
-    .unwrap();
-    let vault = Vault::default();
-    let store = Memory::default();
-    let mut edit = update_for("https://s3.example.test", "first-saved", "first/", "s3");
-    edit.activate = false;
-    edit.display_name = Some("个人存储".into());
-    let saved = crate::backup::spaces::save_with(&core, edit, &vault, |_, _, _, _| Ok(store))
-        .await
+async fn p3_first_saved_configuration_is_default_and_preserves_sync_preference() {
+    for sync_enabled in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::open(
+            &root.path().join("tabs.sqlite"),
+            root.path().join("downloads"),
+            "unused".into(),
+            vec![],
+            |_| {},
+        )
         .unwrap();
-    assert_eq!(saved.display_name, "个人存储");
-    assert!(!saved.enabled);
-    assert!(crate::backup::spaces::get(&core).unwrap().is_none());
-    assert_eq!(crate::backup::spaces::list(&core).unwrap().len(), 1);
-    assert!(scheduler::operations(&core).unwrap().is_empty());
-    let mut edit = update_for(&saved.endpoint, &saved.bucket, &saved.prefix, "s3");
-    edit.activate = false;
-    edit.enabled = false;
-    edit.credentials = None;
-    let unchanged =
-        crate::backup::spaces::save_with(&core, edit, &vault, |_, _, _, _| Ok(Memory::default()))
+        crate::backup::spaces::set_enabled(&core, sync_enabled)
             .await
             .unwrap();
-    assert_eq!(unchanged.display_name, "个人存储");
-    assert!(crate::backup::spaces::get(&core).unwrap().is_none());
+        let vault = Vault::default();
+        let store = Memory::default();
+        let mut edit = update_for("https://s3.example.test", "first-saved", "first/", "s3");
+        edit.activate = false;
+        edit.display_name = Some("个人存储".into());
+        let saved = crate::backup::spaces::save_with(&core, edit, &vault, |_, _, _, _| Ok(store))
+            .await
+            .unwrap();
+        assert_eq!(saved.display_name, "个人存储");
+        assert_eq!(saved.enabled, sync_enabled);
+        assert_eq!(
+            crate::backup::spaces::get(&core).unwrap().unwrap().space_id,
+            saved.space_id
+        );
+        assert_eq!(crate::backup::spaces::list(&core).unwrap().len(), 1);
+        assert!(scheduler::operations(&core).unwrap().is_empty());
+        let mut edit = update_for(&saved.endpoint, &saved.bucket, &saved.prefix, "s3");
+        edit.activate = false;
+        edit.enabled = false;
+        edit.credentials = None;
+        let unchanged = crate::backup::spaces::save_with(&core, edit, &vault, |_, _, _, _| {
+            Ok(Memory::default())
+        })
+        .await
+        .unwrap();
+        assert_eq!(unchanged.display_name, "个人存储");
+        assert_eq!(
+            crate::backup::spaces::get(&core).unwrap().unwrap().space_id,
+            saved.space_id
+        );
+        assert_eq!(crate::backup::spaces::enabled(&core).unwrap(), sync_enabled);
+        assert_eq!(unchanged.enabled, sync_enabled);
+        core.shutdown().await;
+    }
 }
 
 #[tokio::test]

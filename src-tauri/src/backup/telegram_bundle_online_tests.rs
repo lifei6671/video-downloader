@@ -75,13 +75,13 @@ async fn shape(
     let target = entries[0].target.clone();
     p.scope().check(&target.scope)?;
     let id = core
-        .telegram_storage
+        .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
         .status()
         .operation_id
         .context("QA login operation missing")?;
     let (_stop, rx) = tokio::sync::watch::channel(false);
     let docs = core
-        .telegram_storage
+        .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
         .with_transport(core, &id, target, rx, None, move |_, t, _| {
             Box::pin(async move { t.bundle_documents(message).await })
         })
@@ -95,7 +95,7 @@ async fn stage(core: &Arc<Core>, cfg: &Config, mode: &str) -> Result<()> {
     let p = connect(core, cfg, false).await?;
     if mode == "inspect" {
         let login = core
-            .telegram_storage
+            .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
             .status()
             .operation_id
             .context("QA login")?;
@@ -107,7 +107,7 @@ async fn stage(core: &Arc<Core>, cfg: &Config, mode: &str) -> Result<()> {
         )?;
         let (_stop, rx) = tokio::sync::watch::channel(false);
         let report = core
-            .telegram_storage
+            .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
             .with_transport(core, &login, target, rx, None, |_, t, io| {
                 Box::pin(async move { t.recent_rich_shapes(io).await })
             })

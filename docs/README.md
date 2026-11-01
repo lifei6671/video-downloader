@@ -1,5 +1,7 @@
 # 技术文档
 
+- [Telegram 下载](telegram-download.md)：grammers 原始视频下载、共用授权、队列/取消与历史兼容。
+
 - [开发、验证与发布](development.md)：源码运行、测试、引擎打包、CI 与标签发布。
 - [CSP 组件验证](csp-component-validation.md)：动态样式、浮层滚动锁、SVG 与远端备份初始化通知的审计及回归。
 - [R2 多设备双向同步改造方案](r2-multi-device-sync-plan.md)：下一阶段目标，所有设备平等读写、冲突合并、删除传播与视频懒加载；尚未实施。

@@ -159,6 +159,30 @@ pub fn current_id(core: &Core) -> Result<Option<String>> {
             .optional()?)
     })
 }
+/// Choose the sole verified, visible configuration without changing the user's sync preference.
+/// Called inside the save/startup transaction; incomplete Telegram reservations cannot be defaults.
+pub(super) fn select_initial_default(db: &rusqlite::Connection) -> Result<Option<String>> {
+    let current: Option<String> = db
+        .query_row(
+            "SELECT space_id FROM backup_current_space WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if current.is_some() {
+        return Ok(None);
+    }
+    let only: Option<String> = db.query_row(
+        "SELECT MIN(s.space_id) FROM backup_spaces s JOIN backup_provider_config p USING(space_id)
+         WHERE p.capabilities_json IS NOT NULL AND p.protocol=2
+         AND NOT EXISTS(SELECT 1 FROM backup_removed_spaces r WHERE r.space_id=s.space_id)
+         AND NOT EXISTS(SELECT 1 FROM telegram_spaces t WHERE t.space_id=s.space_id AND t.initializing=1)
+         HAVING COUNT(*)=1", [], |row| row.get(0)).optional()?;
+    if let Some(id) = &only {
+        db.execute("INSERT INTO backup_current_space VALUES(1,?)", [id])?;
+    }
+    Ok(only)
+}
 pub(super) fn normalized_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.chars().count() > 64 || name.chars().any(char::is_control) { bail!("BACKUP_INVALID_SPACE_NAME"); }
@@ -715,6 +739,9 @@ async fn connect_locked<S: ObjectStore>(
         tx.execute("UPDATE backup_sync_checkpoints SET last_error=NULL WHERE space_id=?",[&space.space_id])?;
         if let Some(old)=old.as_ref().and_then(|s|s.credential_ref.as_ref()) {tx.execute("INSERT OR IGNORE INTO backup_credential_cleanup VALUES(?)",[old])?;}
         if select_saved {select_in_transaction(&tx,&space.space_id,space.enabled)?;}
+        else if select_initial_default(&tx)?.as_deref()==Some(&space.space_id) {
+            select_in_transaction(&tx,&space.space_id,desired)?;
+        }
         tx.commit()?;Ok(())
     });
     if let Err(error) = result {
@@ -882,4 +909,111 @@ pub async fn cleanup_probes_with<S: ObjectStore>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod initial_default_tests {
+    use super::*;
+    fn seed(db: &rusqlite::Connection, provider: &str, verified: bool, suffix: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        repository::save_space(
+            db,
+            &Space {
+                space_id: id.clone(),
+                library_id: uuid::Uuid::new_v4().to_string(),
+                endpoint: format!("https://{suffix}.example.test"),
+                bucket: suffix.into(),
+                prefix: "media/".into(),
+                credential_ref: None,
+                enabled: false,
+            },
+        )
+        .unwrap();
+        db.execute("UPDATE backup_provider_config SET provider_type=?2,profile=?2,capabilities_json=?3 WHERE space_id=?1", params![id,provider,verified.then_some("{}")]).unwrap();
+        id
+    }
+    #[test]
+    fn initial_default_requires_verification_and_preserves_existing_default_and_sync_preference() {
+        for provider in ["s3", "telegram"] {
+            for enabled in [false, true] {
+                let db = rusqlite::Connection::open_in_memory().unwrap();
+                repository::init(&db).unwrap();
+                db.execute("INSERT INTO backup_sync_preference VALUES(1,?)", [enabled])
+                    .unwrap();
+                let first = seed(&db, provider, false, "first");
+                assert!(select_initial_default(&db).unwrap().is_none());
+                db.execute(
+                    "UPDATE backup_provider_config SET capabilities_json='{}' WHERE space_id=?",
+                    [&first],
+                )
+                .unwrap();
+                if provider == "telegram" {
+                    db.execute(
+                        "INSERT INTO telegram_spaces VALUES(?,'123','777',1)",
+                        [&first],
+                    )
+                    .unwrap();
+                    assert!(select_initial_default(&db).unwrap().is_none());
+                    db.execute(
+                        "UPDATE telegram_spaces SET initializing=0 WHERE space_id=?",
+                        [&first],
+                    )
+                    .unwrap();
+                }
+                assert_eq!(
+                    select_initial_default(&db).unwrap().as_deref(),
+                    Some(first.as_str())
+                );
+                seed(&db, "s3", true, "second");
+                assert!(select_initial_default(&db).unwrap().is_none());
+                let current: String = db
+                    .query_row("SELECT space_id FROM backup_current_space", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(current, first);
+                assert_eq!(enabled_in(&db).unwrap(), enabled);
+            }
+        }
+    }
+    #[test]
+    fn startup_backfills_only_a_sole_visible_verified_config() {
+        for count in 0..=2 {
+            let db = rusqlite::Connection::open_in_memory().unwrap();
+            repository::init(&db).unwrap();
+            let removed = seed(&db, "s3", true, "removed");
+            db.execute("INSERT INTO backup_removed_spaces VALUES(?)", [removed])
+                .unwrap();
+            seed(&db, "s3", false, "unfinished");
+            let mut ready = vec![];
+            for index in 0..count {
+                ready.push(seed(&db, "s3", true, &format!("ready-{index}")));
+            }
+            repository::init(&db).unwrap();
+            repository::init(&db).unwrap();
+            let current: Option<String> = db
+                .query_row("SELECT space_id FROM backup_current_space", [], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .unwrap();
+            assert_eq!(
+                current,
+                if count == 1 {
+                    Some(ready[0].clone())
+                } else {
+                    None
+                }
+            );
+            assert!(!enabled_in(&db).unwrap());
+            let enabled: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM backup_spaces WHERE enabled=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(enabled, 0);
+        }
+    }
 }

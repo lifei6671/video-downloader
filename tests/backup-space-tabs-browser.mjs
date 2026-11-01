@@ -12,7 +12,7 @@ async (page) => {
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
     window.__TAURI_INTERNALS__ = { convertFileSrc: path => `http://asset.localhost/${encodeURIComponent(path)}`, transformCallback: () => 1, unregisterCallback: () => {}, invoke: async (command, args) => {
       window.tabCalls.push({ command, args });
-      if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [], tdl: { enabled: false, path: null } };
+      if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [] };
       if(command==='get_backup_sync_enabled')return true;
       if (command === 'get_backup_settings') return window.tabSpaces.find(s => s.space_id === window.tabCurrent) ?? null;
       if (command === 'list_backup_spaces') return window.tabSpaces.map(s => ({ ...s }));

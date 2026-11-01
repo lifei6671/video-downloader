@@ -25,8 +25,6 @@ pub struct Settings {
     pub filename_template: String,
     pub max_downloads: u8,
     pub profiles: Vec<Profile>,
-    #[serde(default)]
-    pub tdl: crate::tdl_bridge::TdlSettings,
 }
 
 #[derive(Deserialize)]
@@ -62,8 +60,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         "CREATE TABLE IF NOT EXISTS app_settings (id INTEGER PRIMARY KEY CHECK(id=1), directory TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS platform_settings (
            platform TEXT PRIMARY KEY, user_agent TEXT NOT NULL, proxy TEXT,
-           cookie TEXT NOT NULL, credential_ref TEXT);
-         CREATE TABLE IF NOT EXISTS tdl_settings (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL, path TEXT);",
+           cookie TEXT NOT NULL, credential_ref TEXT);",
     ).context("DATABASE_ERROR")?;
     let has_chunk_size = db
         .prepare("PRAGMA table_info(platform_settings)")?
@@ -73,16 +70,6 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         .any(|name| name == "http_chunk_size");
     if !has_chunk_size {
         db.execute_batch("ALTER TABLE platform_settings ADD COLUMN http_chunk_size INTEGER")
-            .context("DATABASE_ERROR")?;
-    }
-    let has_session = db
-        .prepare("PRAGMA table_info(tdl_settings)")?
-        .query_map([], |r| r.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .iter()
-        .any(|name| name == "session_directory");
-    if !has_session {
-        db.execute_batch("ALTER TABLE tdl_settings ADD COLUMN session_directory TEXT")
             .context("DATABASE_ERROR")?;
     }
     let has_limit = db
@@ -154,27 +141,11 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
     if profiles.iter().any(|p| p.http_chunk_size.is_some_and(|n| p.platform != "youtube" || !valid_chunk_size(n))) {
         bail!("DATABASE_ERROR");
     }
-    let tdl = match db.query_row(
-        "SELECT enabled,path,session_directory FROM tdl_settings WHERE id=1",
-        [],
-        |r| {
-            Ok(crate::tdl_bridge::TdlSettings {
-                enabled: r.get(0)?,
-                path: r.get::<_, Option<String>>(1)?.map(PathBuf::from),
-                session_directory: r.get::<_, Option<String>>(2)?.map(PathBuf::from),
-            })
-        },
-    ) {
-        Ok(value) => value,
-        Err(rusqlite::Error::QueryReturnedNoRows) => crate::tdl_bridge::TdlSettings::default(),
-        Err(_) => bail!("DATABASE_ERROR"),
-    };
     Ok(Settings {
         download_directory,
         filename_template,
         max_downloads,
         profiles,
-        tdl,
     })
 }
 
@@ -337,6 +308,16 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn obsolete_external_tool_settings_are_ignored_and_preserved() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE tdl_settings(id INTEGER PRIMARY KEY, enabled INTEGER, path TEXT, session_directory TEXT); INSERT INTO tdl_settings VALUES(1,1,'missing-tool','old-session');").unwrap();
+        let settings = load(&db,PathBuf::from("downloads")).unwrap();
+        assert!(serde_json::to_value(settings).unwrap().get("tdl").is_none());
+        assert_eq!(db.query_row("SELECT session_directory FROM tdl_settings",[],|r|r.get::<_,String>(0)).unwrap(),"old-session");
+        let fresh = Connection::open_in_memory().unwrap(); load(&fresh,PathBuf::from("downloads")).unwrap();
+        assert_eq!(fresh.query_row("SELECT count(*) FROM sqlite_master WHERE name='tdl_settings'",[],|r|r.get::<_,u32>(0)).unwrap(),0);
+    }
     #[test]
     fn proxy_editor_reads_persisted_addresses_and_preserves_failure_semantics() {
         let db = Connection::open_in_memory().unwrap();

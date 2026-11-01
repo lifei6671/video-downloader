@@ -11,7 +11,7 @@ use std::{
     future::Future,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     time::Duration,
 };
@@ -146,15 +146,18 @@ impl Connection {
             .lock()
             .expect("telegram runner lock poisoned")
             .take();
-        if let Some(mut runner) = runner {
+        if let Some(runner) = runner {
+            let mut joining = PoolJoin { connection: self, runner: Some(runner) };
             // A connecting sender may not service quit yet. Abort its owned pool if it cannot drain.
-            if tokio::time::timeout(Duration::from_secs(2), &mut runner)
+            if tokio::time::timeout(Duration::from_secs(2), joining.runner.as_mut().expect("owned pool runner"))
                 .await
                 .is_err()
             {
+                let runner = joining.runner.as_mut().expect("owned pool runner");
                 runner.abort();
                 let _ = runner.await;
             }
+            joining.runner.take();
         }
     }
     async fn reconnect_if_stopped(&mut self, api_id: i32) {
@@ -174,6 +177,46 @@ impl Drop for Connection {
             .take()
         {
             runner.abort();
+        }
+    }
+}
+// Restore can be dropped while loading the vault, before a sender pool even exists.
+struct AuthorizationAttempt<'a> {
+    session: &'a TelegramSession,
+    cancel: watch::Receiver<bool>,
+    completed: bool,
+}
+impl Drop for AuthorizationAttempt<'_> {
+    fn drop(&mut self) {
+        if self.completed { return; }
+        let mut control = self.session.control.lock().expect("telegram control lock poisoned");
+        if *self.cancel.borrow() || self.session.closed.load(Ordering::SeqCst) { return; }
+        control.cancel.send_replace(true);
+        control.view.phase = Phase::SignedOut;
+        control.view.account = None;
+        control.view.qr = None;
+        control.view.qr_expires_at = None;
+        control.view.last_error = Some("TELEGRAM_CANCELED".into());
+    }
+}
+// Keep the join handle owned if a caller abandons close while its pool is draining.
+struct PoolJoin<'a> { connection: &'a Connection, runner: Option<JoinHandle<()>> }
+impl Drop for PoolJoin<'_> {
+    fn drop(&mut self) {
+        if let Some(runner) = self.runner.take() {
+            runner.abort();
+            *self.connection.runner.lock().expect("telegram runner lock poisoned") = Some(runner);
+        }
+    }
+}
+// A task may cancel while restoring authorization. Retain the owned runner for the next join.
+struct ConnectingPool<'a> { connection: &'a Connection, completed: bool }
+impl Drop for ConnectingPool<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.connection.stopped.store(true, Ordering::SeqCst);
+            self.connection.handle.quit();
+            if let Some(runner) = self.connection.runner.lock().expect("telegram runner lock poisoned").as_ref() { runner.abort(); }
         }
     }
 }
@@ -234,6 +277,7 @@ pub struct TelegramSession {
     state: tokio::sync::Mutex<State>,
     closed: AtomicBool,
     transfer: Mutex<Option<watch::Sender<bool>>>,
+    downloads: Mutex<Option<DownloadAuthorization>>,
 }
 impl Default for TelegramSession {
     fn default() -> Self {
@@ -245,10 +289,18 @@ impl Default for TelegramSession {
             state: tokio::sync::Mutex::new(State::default()),
             closed: AtomicBool::new(false),
             transfer: Mutex::new(None),
+            downloads: Mutex::new(None),
         }
     }
 }
 impl TelegramSession {
+    #[cfg(test)]
+    pub(crate) fn set_test_view(&self, phase: Phase, account_id: &str) {
+        let mut control = self.control.lock().unwrap();
+        control.view.operation_id = Some(uuid::Uuid::new_v4().to_string());
+        control.view.phase = phase;
+        control.view.account = Some(Account { id: account_id.into(), name: account_id.into() });
+    }
     pub fn status(&self) -> View {
         self.control
             .lock()
@@ -285,6 +337,13 @@ impl TelegramSession {
         }
         Ok(control.cancel.subscribe())
     }
+    pub(crate) fn has_operation(&self, id: &str) -> bool { self.operation(id).is_ok() }
+    fn record_error(&self, cancel: &watch::Receiver<bool>, message: String) {
+        let mut control = self.control.lock().expect("telegram control lock poisoned");
+        let auth_lost = matches!(control.view.phase, Phase::SignedOut)
+            && matches!(control.view.last_error.as_deref(), Some("TELEGRAM_AUTH_REQUIRED" | "TELEGRAM_RELOGIN_REQUIRED"));
+        if !*cancel.borrow() && !auth_lost { control.view.last_error = Some(message); }
+    }
     fn set_view(
         &self,
         cancel: &watch::Receiver<bool>,
@@ -309,7 +368,13 @@ impl TelegramSession {
     ) -> Result<View> {
         if let Err(error) = result {
             let message = error.to_string();
-            if matches!(
+            if matches!(message.as_str(), "TELEGRAM_AUTH_REQUIRED" | "TELEGRAM_RELOGIN_REQUIRED")
+                || state.connection.as_ref().is_some_and(|c| c.revoked.load(Ordering::SeqCst) || c.session.revoked()) {
+                self.close_downloads().await;
+                if let Some(connection) = &state.connection { connection.close().await; }
+                // Retain connection/operation so a failed local credential erase remains retryable.
+                self.set_view(cancel, Phase::SignedOut, None, Some(message));
+            } else if matches!(
                 message.as_str(),
                 "TELEGRAM_CANCELED" | "TELEGRAM_TIMEOUT" | "TELEGRAM_QR_TIMEOUT"
             ) {
@@ -318,11 +383,9 @@ impl TelegramSession {
                 }
                 self.set_view(cancel, Phase::SignedOut, None, Some(message));
             } else {
-                let mut control = self.control.lock().expect("telegram control lock poisoned");
-                if !*cancel.borrow() {
-                    control.view.last_error = Some(message);
-                }
+                self.record_error(cancel, message);
             }
+            self.authorize_downloads(state, &self.status());
             return Err(error);
         }
         let mut control = self.control.lock().expect("telegram control lock poisoned");
@@ -330,6 +393,7 @@ impl TelegramSession {
             bail!("TELEGRAM_CANCELED");
         }
         control.view.last_error = None;
+        self.authorize_downloads(state, &control.view);
         Ok(control.view.clone())
     }
     /// Resume uses only the app's own vault namespace and never starts a new authorization.
@@ -366,8 +430,14 @@ impl TelegramSession {
         if !qr_login && !matches!(self.status().phase, Phase::SignedOut) {
             bail!("TELEGRAM_BUSY");
         }
+        // A local erase may fail after Telegram has already revoked the authorization.
+        // Finish that cleanup before replacing the connection and losing its retry evidence.
+        if let Some(connection) = state.connection.as_ref().filter(|c| c.revoked.load(Ordering::SeqCst)) {
+            connection.session.erase().await?;
+        }
         let identity = AppIdentity::load()?;
         let mut cancel = self.start_operation()?;
+        let mut attempt = AuthorizationAttempt { session:self, cancel:cancel.clone(), completed:false };
         if let Some(connection) = state.connection.take() {
             connection.close().await;
         }
@@ -378,6 +448,7 @@ impl TelegramSession {
                 .connection
                 .as_ref()
                 .context("TELEGRAM_NOT_CONNECTED")?;
+            let mut guard = ConnectingPool { connection, completed: false };
             if bounded(&mut cancel, async {
                 connection.client.is_authorized().await.map_err(rpc_error)
             })
@@ -387,7 +458,7 @@ impl TelegramSession {
                 self.set_view(&cancel, Phase::Ready, Some(account), None);
             } else if qr_login {
                 if connection.session.account_id().is_some() {
-                    bail!("TELEGRAM_AUTH_REQUIRED");
+                    bail!("TELEGRAM_RELOGIN_REQUIRED");
                 }
                 let transport = QrConnection {
                     connection,
@@ -423,13 +494,16 @@ impl TelegramSession {
             } else {
                 self.set_view(&cancel, Phase::SignedOut, None, None);
             }
+            guard.completed = true;
             Ok(())
         }
         .await;
         if result.is_err() {
             self.set_view(&cancel, Phase::SignedOut, None, None);
         }
-        self.finish(&mut state, &cancel, result).await
+        let result = self.finish(&mut state, &cancel, result).await;
+        attempt.completed = true;
+        result
     }
     pub async fn submit_password(&self, id: &str, password: String) -> Result<View> {
         let password = Zeroizing::new(password);
@@ -485,6 +559,9 @@ impl TelegramSession {
             bail!("TELEGRAM_AUTH_REQUIRED");
         }
         let result = async {
+            if let Some(connection) = state.connection.as_mut().filter(|c| c.stopped.load(Ordering::SeqCst) && !c.revoked.load(Ordering::SeqCst)) {
+                connection.reconnect_if_stopped(AppIdentity::load()?.id).await;
+            }
             let connection = state
                 .connection
                 .as_ref()
@@ -649,7 +726,7 @@ impl TelegramSession {
         if *cancel.borrow() {
             bail!("TELEGRAM_TRANSFER_CANCELED");
         }
-        let state = tokio::select! { biased;
+        let mut state = tokio::select! { biased;
             _=cancel.wait_for(|v|*v)=>bail!("TELEGRAM_TRANSFER_CANCELED"),
             state=self.state.lock()=>state,
         };
@@ -666,6 +743,9 @@ impl TelegramSession {
             bail!("TELEGRAM_FLOOD_WAIT:{wait}");
         }
         let io = transfer::Io::new(cancel, stop.clone(), control);
+        if let Some(connection) = state.connection.as_mut() {
+            connection.reconnect_if_stopped(AppIdentity::load()?.id).await;
+        }
         let connection = state
             .connection
             .as_ref()
@@ -700,12 +780,23 @@ impl TelegramSession {
         }
         .await;
         if let Err(error) = &result {
+            if error.to_string() == "TELEGRAM_AUTH_REQUIRED" { self.authorization_failed(id).await; }
             journal.failure(&target.account_id, &error.to_string())?;
             connection.close().await;
-            self.set_view(&stop, Phase::SignedOut, None, Some(error.to_string()));
+            if error.to_string() != "TELEGRAM_TRANSFER_CANCELED" {
+                self.record_error(&stop, error.to_string());
+            }
         }
         registration.completed = true;
         result
+    }
+    /// Stop only backup I/O. Shared download authorization and its sender pools remain valid.
+    pub(crate) async fn cancel_backup_transfer(&self) {
+        let transfer = self.transfer.lock().expect("telegram transfer lock poisoned").clone();
+        if let Some(cancel) = transfer {
+            cancel.send_replace(true);
+            let _state = self.state.lock().await; // The transfer owns the lock until request/pool cleanup.
+        }
     }
     /// Signal first so an in-flight network request cannot hold cancellation behind the state lock.
     pub async fn cancel(&self, id: &str) -> Result<View> {
@@ -716,6 +807,7 @@ impl TelegramSession {
             }
             control.cancel.send_replace(true);
         }
+        self.close_downloads().await;
         let mut state = self.state.lock().await;
         if self.status().operation_id.as_deref() != Some(id) {
             bail!("TELEGRAM_STALE_OPERATION");
@@ -742,11 +834,12 @@ impl TelegramSession {
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("TELEGRAM_BUSY"))?
         };
+        self.close_downloads().await;
         let mut cancel = self.operation(id)?;
         if let Some(connection) = state.connection.as_mut() {
-            connection
-                .reconnect_if_stopped(AppIdentity::load()?.id)
-                .await;
+            if connection.stopped.load(Ordering::SeqCst) && !connection.revoked.load(Ordering::SeqCst) {
+                connection.reconnect_if_stopped(AppIdentity::load()?.id).await;
+            }
         }
         let result = async {
             let connection = state
@@ -776,8 +869,52 @@ impl TelegramSession {
         control.view = View::default();
         Ok(control.view.clone())
     }
+    fn authorize_downloads(&self, state: &State, view: &View) {
+        if self.closed.load(Ordering::SeqCst) || !matches!(view.phase, Phase::Ready) { return; }
+        if let Some(connection) = &state.connection {
+            if connection.revoked.load(Ordering::SeqCst) || connection.session.revoked() { return; }
+            let mut downloads = self.downloads.lock().expect("telegram downloads lock poisoned");
+            if downloads.is_none() {
+                *downloads = Some(DownloadAuthorization { session: connection.session.clone(), cancel: watch::channel(false).0, connections: vec![] });
+            }
+        }
+    }
+    /// Each task owns a sender pool; cancelling it cannot stop other tasks or backup I/O.
+    pub(crate) fn download_connection(&self) -> Result<DownloadConnection> {
+        if self.closed.load(Ordering::SeqCst) { bail!("TELEGRAM_CLOSED"); }
+        self.register_download(AppIdentity::load()?.id)
+    }
+    fn register_download(&self, api_id: i32) -> Result<DownloadConnection> {
+        if self.closed.load(Ordering::SeqCst) { bail!("TELEGRAM_CLOSED"); }
+        let mut downloads = self.downloads.lock().expect("telegram downloads lock poisoned");
+        let authorization = downloads.as_mut().context("TELEGRAM_AUTH_REQUIRED")?;
+        if authorization.session.revoked() { bail!("TELEGRAM_AUTH_REQUIRED"); }
+        let connection = Arc::new(Connection::start(authorization.session.clone(), api_id));
+        authorization.connections.retain(|c| c.strong_count() > 0);
+        authorization.connections.push(Arc::downgrade(&connection));
+        Ok(DownloadConnection { connection, cancel: authorization.cancel.subscribe() })
+    }
+    /// Invalidate only the authorization that produced a definitive RPC authentication error.
+    pub(crate) async fn authorization_failed(&self, id: &str) {
+        {
+            let mut control = self.control.lock().expect("telegram control lock poisoned");
+            if self.closed.load(Ordering::SeqCst) || control.view.operation_id.as_deref() != Some(id) || !matches!(control.view.phase, Phase::Ready) { return; }
+            control.view.phase = Phase::SignedOut; control.view.account = None;
+            control.view.last_error = Some("TELEGRAM_AUTH_REQUIRED".into());
+        }
+        if let Some(cancel) = self.transfer.lock().expect("telegram transfer lock poisoned").clone() { cancel.send_replace(true); }
+        self.close_downloads().await;
+    }
+    async fn close_downloads(&self) {
+        let downloads = self.downloads.lock().expect("telegram downloads lock poisoned").take();
+        if let Some(downloads) = downloads {
+            downloads.cancel.send_replace(true);
+            for connection in downloads.connections.into_iter().filter_map(|c| c.upgrade()) { connection.close().await; }
+        }
+    }
     pub async fn shutdown(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        self.close_downloads().await;
         self.control
             .lock()
             .expect("telegram control lock poisoned")
@@ -788,6 +925,20 @@ impl TelegramSession {
             connection.close().await;
         }
     }
+}
+struct DownloadAuthorization {
+    session: Arc<VaultSession>,
+    cancel: watch::Sender<bool>,
+    connections: Vec<Weak<Connection>>,
+}
+pub(crate) struct DownloadConnection {
+    connection: Arc<Connection>,
+    cancel: watch::Receiver<bool>,
+}
+impl DownloadConnection {
+    pub(crate) fn client(&self) -> Client { self.connection.client.clone() }
+    pub(crate) fn cancellation(&self) -> watch::Receiver<bool> { self.cancel.clone() }
+    pub(crate) async fn close(self) { self.connection.close().await; }
 }
 struct TransferRegistration<'a> {
     session: &'a TelegramSession,
@@ -876,7 +1027,7 @@ pub(super) async fn bounded<T>(
         result = tokio::time::timeout(REQUEST_TIMEOUT, work) => result.map_err(|_| anyhow::anyhow!("TELEGRAM_TIMEOUT"))?,
     }
 }
-pub(super) fn rpc_error(error: InvocationError) -> anyhow::Error {
+pub(crate) fn rpc_error(error: InvocationError) -> anyhow::Error {
     // Never forward Display/Debug: RPC errors may carry request or connection context.
     let code = match error {
         InvocationError::Rpc(error) => {
@@ -921,6 +1072,160 @@ fn sign_in_error(error: SignInError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn backup_business_errors_preserve_authorization_and_do_not_revive_signed_out_state() {
+        let session = TelegramSession::default(); let cancel = session.start_operation().unwrap();
+        session.set_view(&cancel, Phase::Ready, Some(Account{id:"123".into(),name:"test".into()}), None);
+        for code in ["TELEGRAM_MEDIA_MISSING", "TELEGRAM_CHANNEL_FORBIDDEN", "TELEGRAM_FILE_TOO_LARGE", "TELEGRAM_INDEX_INVALID"] {
+            session.record_error(&cancel, code.into());
+            assert!(matches!(session.status().phase, Phase::Ready));
+            assert_eq!(session.status().account.unwrap().id, "123");
+            assert_eq!(session.status().last_error.as_deref(), Some(code));
+        }
+        session.set_view(&cancel, Phase::SignedOut, None, Some("TELEGRAM_AUTH_REQUIRED".into()));
+        session.record_error(&cancel, "TELEGRAM_MEDIA_MISSING".into());
+        assert_eq!(session.status().last_error.as_deref(), Some("TELEGRAM_AUTH_REQUIRED"));
+        assert!(matches!(session.status().phase, Phase::SignedOut));
+        assert!(session.status().account.is_none());
+        session.shutdown().await;
+    }
+    #[tokio::test]
+    async fn definitive_auth_failure_clears_account_but_network_and_password_errors_keep_their_phase() {
+        for (message, phase, ready) in [("TELEGRAM_AUTH_REQUIRED", Phase::Ready, false), ("TELEGRAM_RELOGIN_REQUIRED", Phase::Ready, false), ("TELEGRAM_CONNECTION_ERROR", Phase::Ready, true), ("TELEGRAM_INVALID_PASSWORD", Phase::Password, false)] {
+            let session = TelegramSession::default();
+            let cancel = session.start_operation().unwrap();
+            session.set_view(&cancel, phase.clone(), Some(Account{id:"123".into(),name:"test".into()}), None);
+            let mut state = session.state.lock().await;
+            assert!(session.finish(&mut state, &cancel, Err(anyhow::anyhow!(message))).await.is_err());
+            let view = session.status();
+            assert_eq!(matches!(view.phase, Phase::Ready), ready);
+            if message == "TELEGRAM_AUTH_REQUIRED" || message == "TELEGRAM_RELOGIN_REQUIRED" { assert!(view.account.is_none()); assert!(matches!(view.phase, Phase::SignedOut)); }
+            if message == "TELEGRAM_INVALID_PASSWORD" { assert!(matches!(view.phase, Phase::Password)); }
+            drop(state); session.shutdown().await;
+        }
+    }
+    #[tokio::test]
+    async fn successful_remote_logout_with_failed_local_erase_is_signed_out_and_cleanup_can_retry() {
+        struct EraseVault(std::sync::atomic::AtomicBool);
+        impl super::super::telegram_vault::SessionVault for EraseVault {
+            fn read(&self, _: &str) -> Result<Option<zeroize::Zeroizing<String>>> { Ok(None) }
+            fn write(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+            fn delete(&self, _: &str) -> Result<()> { if self.0.load(Ordering::SeqCst) { bail!("QA_ERASE_FAILED"); } Ok(()) }
+        }
+        let vault = Arc::new(EraseVault(std::sync::atomic::AtomicBool::new(true)));
+        let keys = VaultSession::load("offline-erase-retry".into(), vault.clone()).await.unwrap();
+        let connection = Connection::start(keys, 12);
+        connection.revoked.store(true, Ordering::SeqCst); // Remote sign-out already succeeded.
+        let session = TelegramSession::default(); let cancel = session.start_operation().unwrap();
+        session.set_view(&cancel, Phase::Ready, Some(Account{id:"123".into(),name:"test".into()}), None);
+        session.state.lock().await.connection = Some(connection);
+        let id = session.status().operation_id.unwrap();
+        assert!(session.logout(&id).await.is_err());
+        assert!(matches!(session.status().phase, Phase::SignedOut));
+        assert!(session.status().account.is_none());
+        assert!(session.state.lock().await.connection.is_some());
+        assert!(session.has_operation(&id));
+        vault.0.store(false, Ordering::SeqCst);
+        session.logout(&id).await.unwrap();
+        assert!(session.state.lock().await.connection.is_none());
+        session.shutdown().await;
+    }
+    #[tokio::test]
+    async fn download_auth_failure_ignores_old_operations_and_clears_the_current_account() {
+        let session = TelegramSession::default(); session.set_test_view(Phase::Ready, "account-a");
+        let id = session.status().operation_id.unwrap();
+        session.authorization_failed("old-operation").await;
+        assert!(matches!(session.status().phase, Phase::Ready));
+        session.authorization_failed(&id).await;
+        assert!(matches!(session.status().phase, Phase::SignedOut));
+        assert!(session.status().account.is_none());
+        assert_eq!(session.status().last_error.as_deref(), Some("TELEGRAM_AUTH_REQUIRED"));
+        assert!(session.has_operation(&id), "authorization loss must leave local cleanup retryable");
+        let keys = VaultSession::load("offline-auth-cleanup".into(), Arc::new(DownloadVault)).await.unwrap();
+        let connection = Connection::start(keys, 12);
+        connection.revoked.store(true, Ordering::SeqCst);
+        session.state.lock().await.connection = Some(connection);
+        session.logout(&id).await.unwrap();
+        assert!(session.state.lock().await.connection.is_none());
+        session.shutdown().await;
+    }
+    #[tokio::test]
+    async fn backup_cancellation_preserves_shared_authorization_and_waits_for_cleanup() {
+        let session = Arc::new(TelegramSession::default());
+        session.set_test_view(Phase::Ready, "account-a");
+        let (abort, receive) = watch::channel(false);
+        *session.transfer.lock().unwrap() = Some(abort);
+        let locked = session.state.lock().await;
+        let stopping = tokio::spawn({ let session = session.clone(); async move { session.cancel_backup_transfer().await; } });
+        tokio::time::timeout(Duration::from_secs(1), async { while !*receive.borrow() { tokio::task::yield_now().await; } }).await.unwrap();
+        assert!(!stopping.is_finished());
+        assert_eq!(session.status().account.unwrap().id, "account-a");
+        assert!(!*session.control.lock().unwrap().cancel.borrow());
+        drop(locked);
+        stopping.await.unwrap();
+        assert!(matches!(session.status().phase, Phase::Ready));
+        session.shutdown().await;
+    }
+    struct DownloadVault;
+    impl super::super::telegram_vault::SessionVault for DownloadVault {
+        fn read(&self, _: &str) -> Result<Option<zeroize::Zeroizing<String>>> { Ok(None) }
+        fn write(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+        fn delete(&self, _: &str) -> Result<()> { Ok(()) }
+    }
+    #[tokio::test]
+    async fn dropped_restore_resets_connecting_before_and_after_pool_creation() {
+        for with_pool in [false,true] {
+            let session = TelegramSession::default();
+            let keys = VaultSession::load("offline-restore-state".into(),Arc::new(DownloadVault)).await.unwrap();
+            let mut restore = Box::pin(async {
+                let mut state = session.state.lock().await;
+                let cancel = session.start_operation().unwrap();
+                let _attempt = AuthorizationAttempt { session:&session, cancel, completed:false };
+                if with_pool { state.connection = Some(Connection::start(keys,12)); }
+                let _pool = state.connection.as_ref().map(|connection| ConnectingPool { connection, completed:false });
+                std::future::pending::<()>().await;
+            });
+            assert!(tokio::time::timeout(Duration::from_millis(10), &mut restore).await.is_err());
+            assert!(matches!(session.status().phase,Phase::Connecting));
+            drop(restore);
+            assert!(matches!(session.status().phase,Phase::SignedOut));
+            assert_eq!(session.status().last_error.as_deref(),Some("TELEGRAM_CANCELED"));
+            let token = session.start_operation().unwrap();
+            assert!(!*token.borrow());
+            session.shutdown().await;
+        }
+    }
+    #[tokio::test]
+    async fn download_sender_pools_cancel_independently_and_logout_joins_all() {
+        let keys = VaultSession::load("offline-downloads".into(), Arc::new(DownloadVault)).await.unwrap();
+        let session = TelegramSession::default();
+        let backup = Connection::start(keys.clone(), 12);
+        *session.downloads.lock().unwrap() = Some(DownloadAuthorization { session:keys, cancel:watch::channel(false).0, connections:vec![] });
+        let a = session.register_download(12).unwrap();
+        let b = session.register_download(12).unwrap();
+        let a_runner = a.connection.runner.lock().unwrap().as_ref().unwrap().abort_handle();
+        let b_runner = b.connection.runner.lock().unwrap().as_ref().unwrap().abort_handle();
+        let backup_runner = backup.runner.lock().unwrap().as_ref().unwrap().abort_handle();
+        let cancel = b.cancellation();
+        a.close().await;
+        assert!(a_runner.is_finished()); assert!(!b_runner.is_finished()); assert!(!backup_runner.is_finished());
+        session.close_downloads().await;
+        assert!(*cancel.borrow()); assert!(b_runner.is_finished()); assert!(!backup_runner.is_finished());
+        assert!(session.register_download(12).is_err());
+        backup.close().await;
+        session.shutdown().await;
+    }
+    #[tokio::test]
+    async fn abandoned_login_restore_stops_its_pool_before_reconnect() {
+        let keys = VaultSession::load("offline-connect-cancel".into(), Arc::new(DownloadVault)).await.unwrap();
+        let mut connection = Connection::start(keys,12);
+        let runner = connection.runner.lock().unwrap().as_ref().unwrap().abort_handle();
+        drop(ConnectingPool { connection:&connection, completed:false });
+        assert!(connection.stopped.load(Ordering::SeqCst));
+        connection.reconnect_if_stopped(12).await;
+        assert!(runner.is_finished());
+        connection.close().await;
+    }
     #[tokio::test]
     async fn telegram_busy_background_resumes_wait_and_reuse_the_same_ready_operation() {
         let session = TelegramSession::default();

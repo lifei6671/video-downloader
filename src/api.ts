@@ -1,7 +1,7 @@
 import { invoke, Channel, convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 export type Status = 'parsing' | 'ready' | 'queued' | 'downloading' | 'completed' | 'failed' | 'canceled';
-export type Resolver = 'auto' | 'yt-dlp' | 'dtk' | 'tdl';
+export type Resolver = 'auto' | 'yt-dlp' | 'dtk' | 'grammers';
 export type ProjectPage = 'source' | 'issues' | 'releases' | 'license' | 'credits' | 'credit-ytdlp' | 'credit-dtk' | 'credit-tauri' | 'credit-react' | 'credit-shadcn' | 'credit-lucide';
 export interface UpdateCheck { current_version: string; latest_version: string; release_tag: string; has_update: boolean; release_notes: string; published_at: string | null; installer: { name: string; size: number } | null }
 export interface UpdateDownload { id: string; revision: number; release: UpdateCheck; phase: 'preparing' | 'downloading' | 'verifying' | 'canceling' | 'completed' | 'canceled' | 'failed'; downloaded_bytes: number; total_bytes: number | null; filename: string | null; error: string | null }
@@ -16,11 +16,9 @@ export interface AuthorProfile { id?: string | null; nickname?: string | null; h
 export interface Video { author_profile?: AuthorProfile; cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
 export interface Task { asset_id?: string | null; total_bytes_estimate?: number | null; telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
 export interface Profile { http_chunk_size?: number | null; platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
-export interface TdlSettings { enabled: boolean; path: string | null; session_directory?: string | null }
-export interface TdlStatus { path: string; version: string }
-export interface TdlLoginStatus { id: string; phase: 'starting' | 'qr' | 'password' | 'verifying'; qr: boolean[][] | null }
-export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[]; tdl: TdlSettings }
+export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[] }
 export interface FilenamePreview { path: string; segments: { text: string; variable: string | null }[] }
+export type TelegramPurpose = 'download' | 'backup';
 export interface BackupUpdate { telegram?: { account_id: string; channel_id: string } | null; create_library: boolean; cleanup_deleted_records: boolean; deleted_record_retention_days: number; display_name?: string; provider_type: 's3' | 'telegram'; profile: 'r2' | 's3' | 'telegram'; endpoint: string; bucket: string; prefix: string; region: string; path_style: boolean; enabled: boolean; credentials?: { access_key_id: string; secret_access_key: string } }
 export interface BackupSettings extends Omit<BackupUpdate, 'credentials' | 'create_library'> { telegram_channel_title?: string | null; can_delete_owned_media?: boolean; space_id: string; library_id: string; credentials_configured: boolean; connection_pending?: boolean; last_error: string | null }
 export interface BackupConflict { image: number[] | null; id: string; field: string; value: string; device_id: string; can_adopt: boolean }
@@ -32,13 +30,13 @@ export interface AssetTranscript { asset_id: string; content_sha256: string | nu
 export interface TelegramStorageStatus { configured: boolean; operation_id: string | null; phase: 'signed_out' | 'connecting' | 'qr' | 'password' | 'ready'; account: { id: string; name: string } | null; last_error: string | null; qr: boolean[][] | null; qr_expires_at: number | null }
 export interface TelegramStorageChannel { id: string; title: string; can_post: boolean; can_delete: boolean }
 export const api = {
-  telegramStorageStatus: () => invoke<TelegramStorageStatus>('telegram_storage_status'),
-  telegramStorageResume: () => invoke<TelegramStorageStatus>('telegram_storage_resume'),
-  telegramStorageLoginQr: () => invoke<TelegramStorageStatus>('telegram_storage_login_qr'),
-  telegramStoragePassword: (operationId: string, password: string) => invoke<TelegramStorageStatus>('telegram_storage_password', { operationId, password }),
-  telegramStorageCancel: (operationId: string) => invoke<TelegramStorageStatus>('telegram_storage_cancel', { operationId }),
-  telegramStorageLogout: (operationId: string) => invoke<TelegramStorageStatus>('telegram_storage_logout', { operationId }),
-  telegramStorageChannels: (operationId: string) => invoke<TelegramStorageChannel[]>('telegram_storage_channels', { operationId }),
+  telegramStorageStatus: (purpose: TelegramPurpose = 'backup') => invoke<TelegramStorageStatus>('telegram_storage_status', { purpose }),
+  telegramStorageResume: (purpose: TelegramPurpose = 'backup') => invoke<TelegramStorageStatus>('telegram_storage_resume', { purpose }),
+  telegramStorageLoginQr: (purpose: TelegramPurpose = 'backup', otherAccount = false) => invoke<TelegramStorageStatus>('telegram_storage_login_qr', { purpose, otherAccount }),
+  telegramStoragePassword: (operationId: string, password: string, purpose: TelegramPurpose = 'backup') => invoke<TelegramStorageStatus>('telegram_storage_password', { operationId, password, purpose }),
+  telegramStorageCancel: (operationId: string, purpose: TelegramPurpose = 'backup') => invoke<TelegramStorageStatus>('telegram_storage_cancel', { operationId, purpose }),
+  telegramStorageLogout: (operationId: string, purpose: TelegramPurpose = 'backup') => invoke<TelegramStorageStatus>('telegram_storage_logout', { operationId, purpose }),
+  telegramStorageChannels: (operationId: string, purpose: TelegramPurpose = 'backup') => invoke<TelegramStorageChannel[]>('telegram_storage_channels', { operationId, purpose }),
   hideAsset: (assetId: string) => invoke<void>('hide_asset_history', { assetId }),
   releaseAsset: (assetId: string) => invoke<void>('release_local_video', { assetId }),
   deleteAsset: (spaceId: string, assetId: string) => invoke<void>('delete_asset_and_backup', { spaceId, assetId }),
@@ -80,13 +78,6 @@ export const api = {
   exportTranscript: (taskId: string) => invoke<string | null>('export_video_transcript', {taskId}),
   subscribeTranscripts: (callback: (snapshot: VideoTranscript) => void) => listen<VideoTranscript>('transcription_updated', event => callback(event.payload)),
   proxy: (platform: string) => invoke<string | null>('get_profile_proxy', { platform }),
-  saveTdlSettings: (config: TdlSettings) => invoke<Settings>('save_tdl_settings', { config }),
-  selectTdlExecutable: () => invoke<string | null>('select_tdl_executable'),
-  checkTdl: (path: string | null) => invoke<TdlStatus>('check_tdl', { path }),
-  loginTdl: (path: string | null) => invoke<Settings>('login_tdl', { path }),
-  cancelTdlLogin: () => invoke<void>('cancel_tdl_login'),
-  tdlLoginStatus: () => invoke<TdlLoginStatus | null>('tdl_login_status'),
-  submitTdlPassword: (loginId: string, password: string) => invoke<void>('submit_tdl_password', { loginId, password }),
   readClipboardText: () => invoke<string>('read_clipboard_text'),
   openProjectPage: (page: ProjectPage, releaseTag?: string) => invoke<void>('open_project_page', { page, releaseTag }),
   openReleaseNoteLink: (url: string) => invoke<void>('plugin:opener|open_url', { url }),
@@ -145,6 +136,7 @@ export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlyS
 }
 const errors: Record<string, string> = {
   TELEGRAM_APP_NOT_CONFIGURED: '此构建尚未配置 Telegram 应用身份',
+  TELEGRAM_RELOGIN_REQUIRED: '登录已失效，请重新扫码',
   TELEGRAM_QR_INVALID: '无法生成登录二维码，请重新扫码',
   TELEGRAM_QR_TIMEOUT: '扫码登录等待超过 5 分钟，连接已停止，请重新扫码',
   TELEGRAM_APP_INVALID: 'Telegram 应用身份无效，请检查构建配置',
@@ -155,7 +147,7 @@ const errors: Record<string, string> = {
   TELEGRAM_CODE_EXPIRED: '验证码已过期，请取消连接后重新发送',
   TELEGRAM_INVALID_PASSWORD: '两步验证密码错误，请重新输入',
   TELEGRAM_SIGN_UP_REQUIRED: '请先使用 Telegram 官方客户端注册账号',
-  TELEGRAM_AUTH_REQUIRED: 'Telegram 授权已失效，请退出存储账号后重新登录',
+  TELEGRAM_AUTH_REQUIRED: '请在系统设置 → 平台账号 → Telegram 中恢复登录或重新扫码',
   TELEGRAM_ACCOUNT_MISMATCH: '登录账号与已保存会话不符，请退出后重试',
   TELEGRAM_CHANNEL_FORBIDDEN: '无法访问频道，请检查频道成员与管理权限',
   TELEGRAM_CONNECTION_ERROR: 'Telegram 连接失败，请检查网络后重试',
@@ -171,7 +163,8 @@ const errors: Record<string, string> = {
   TELEGRAM_INDEX_CHANGED: 'Telegram 备份历史被修改或删除，已停止同步',
   TELEGRAM_OPERATION_MISMATCH: 'Telegram 操作记录不一致，已保留本机数据',
   TELEGRAM_SEND_UNCONFIRMED: 'Telegram 发送结果尚未确认，请重试',
-  TELEGRAM_MEDIA_CHANGED: 'Telegram 文件信息与备份记录不一致',
+  TELEGRAM_ALIAS_IDENTITY_MISMATCH: '链接对应的频道或消息已变化，请重新解析。',
+  TELEGRAM_MEDIA_CHANGED: 'Telegram 文件信息已变化，请重新解析或核对备份记录',
   TELEGRAM_MEDIA_MISSING: 'Telegram 备份文件不存在，本机数据已保留',
   TELEGRAM_FILE_REFERENCE_EXPIRED: 'Telegram 文件引用已过期，请重新恢复',
   TELEGRAM_FILE_TOO_LARGE: '文件超过当前 Telegram 账号的上传限制',
@@ -306,25 +299,6 @@ const errors: Record<string, string> = {
   FILE_MISSING: '文件已移动或删除',
   PLAYBACK_OPEN_FAILED: '无法启动系统默认播放器，请检查视频文件关联或播放器安装',
   PLAYBACK_SOURCE_FAILED: '无法读取本地视频，正在尝试系统播放器',
-  TDL_UNAVAILABLE: '未找到可用 tdl，请自行安装或在运行依赖中设置可执行路径。',
-  TDL_UNSUPPORTED: 'tdl 无法正常返回版本信息，或当前操作所需命令不可用。请检查安装与命令能力。',
-  TDL_EXPERIMENTAL_DISABLED: 'Telegram 实验模式尚未启用，请先在系统设置 → 平台账号 → Telegram 中阅读风险说明并启用。',
-  TDL_SERVICE_FAILED: 'tdl 服务启动失败或意外退出。请在平台账号 → Telegram 中登录 tdl，并确认没有其他命令占用当前会话。',
-  TDL_BUSY: 'tdl 正在登录，或有 Telegram 任务使用会话。请先结束登录或取消相关任务后重试。',
-  TDL_LOGIN_FAILED: 'tdl 登录未成功，原有会话配置已保留。请检查 Telegram 网络连接后重新扫码。',
-  TDL_2FA_INVALID: '两步验证密码错误，请重新扫码并输入正确密码。原有登录已保留。',
-  TDL_PASSWORD_INVALID: '请输入有效的两步验证密码，不支持换行或控制字符。',
-  TDL_PTY_UNAVAILABLE: '无法创建 tdl 登录会话，请检查系统权限；Windows 需要支持 ConPTY 的系统版本。',
-  TDL_LOGIN_TIMEOUT: 'tdl 登录等待超过 5 分钟，进程已停止，原有会话配置已保留。',
-  TDL_CHECK_TIMEOUT: 'tdl 依赖检测超时，进程已回收。',
-  TDL_START_TIMEOUT: 'tdl 服务启动超时，请检查本机 tdl 的登录状态和 Telegram 网络连接。',
-  TDL_PORT_CONFLICT: 'tdl 临时端口发生冲突，本次操作已停止，请重试。',
-  TDL_STOP_FAILED: '无法确认 tdl 服务已回收，请关闭应用并检查本机进程。',
-  TDL_HTTP_ERROR: 'tdl HTTP 请求失败或媒体传输中断，本次下载未完成。',
-  TDL_INVALID_RESPONSE: 'tdl 服务返回的媒体路径或 HTTP 元数据不符合已验证协议。',
-  TDL_CHANNEL_ID_REQUIRED: '当前 Telegram 服务正被其他任务占用，尚未确认这个频道的数字 ID。可加入待下载队列，服务空闲后自动解析并下载。',
-  TDL_IDENTITY_MISMATCH: 'tdl 返回的频道或消息身份不匹配，操作已拒绝。',
-  TDL_MEDIA_CHANGED: '原始文件大小、类型或文件名已变化，请重新解析后再下载。',
 };
 export const errorText = (error: unknown) => {
   const wait = /^TELEGRAM_FLOOD_WAIT:(\d+)$/.exec(String(error));

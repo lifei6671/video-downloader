@@ -59,15 +59,15 @@ async fn connect(
     config: &Config,
     create: bool,
 ) -> Result<Arc<dyn BackupProvider>> {
-    let view = core
-        .telegram_storage
-        .resume(core.telegram_storage_device_id()?)
+    let binding = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
+    let view = binding.session
+        .resume(binding.namespace)
         .await?;
     if !matches!(view.phase, Phase::Ready) {
         bail!("dedicated account must be logged in first");
     }
     let channels = core
-        .telegram_storage
+        .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
         .channels(
             view.operation_id
                 .as_deref()
@@ -303,11 +303,12 @@ async fn telegram_streaming_live_original_video_flag_and_hash() -> Result<()> {
         let bytes=signature["size"].as_u64().context("source size required")?;
         let video=VideoAttributes::from_metadata(&config.video_metadata).context("video dimensions and duration required")?;
         let device=core.telegram_storage_device_id()?;
-        let login=core.telegram_storage.resume(device.clone()).await?;
+        let binding=core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
+        let login=binding.session.resume(binding.namespace).await?;
         if !matches!(login.phase,Phase::Ready) { bail!("existing authorized session required"); }
         let id=login.operation_id.context("login operation required")?;
         let account=login.account.context("ready account required")?;
-        let channels=core.telegram_storage.channels(&id).await?;
+        let channels=core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.channels(&id).await?;
         let matching:Vec<_>=channels.iter().filter(|c|c.title==config.channel_name && c.can_post).collect();
         if matching.len()!=1 { bail!("one authorized writable private channel required"); }
         std::fs::create_dir_all(&config.work_directory)?;
@@ -322,18 +323,18 @@ async fn telegram_streaming_live_original_video_flag_and_hash() -> Result<()> {
         };
         if run.source_sha256!=hash || run.target.account_id!=account.id || run.target.channel_id!=matching[0].id { bail!("streaming fixture target/source changed"); }
         let (_cancel,rx)=tokio::sync::watch::channel(false);
-        let receipt=core.telegram_storage.upload_media(&core,UploadRequest {
+        let receipt=core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.upload_media(&core,UploadRequest {
             login_id:id.clone(),target:run.target.clone(),source:MediaSource {
                 video:Some(video),base_revision:None,recreate_revision:None,asset_id:run.asset_id.clone(),kind:"video".into(),path:config.source.clone(),bytes,sha256:hash.clone(),container:"mp4".into(),operation_id:run.operation_id.clone(),device_id:device,control:None,
             },
         },rx.clone()).await?;
         let MediaLocation::TelegramMessage {message_id,..}=&receipt.reference.location else {bail!("Telegram reference required");};
         let message_id=i32::try_from(*message_id)?;
-        let streaming=core.telegram_storage.with_transport(&core,&id,run.target.clone(),rx.clone(),None,move |_,transport,io|Box::pin(async move {io.run(transport.streaming_video_flag(message_id)).await})).await?;
+        let streaming=core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.with_transport(&core,&id,run.target.clone(),rx.clone(),None,move |_,transport,io|Box::pin(async move {io.run(transport.streaming_video_flag(message_id)).await})).await?;
         if !streaming {bail!("server document has no streaming video flag");}
         let destination=config.work_directory.join("restored-original.mp4");
         if !destination.exists() {
-            core.telegram_storage.restore_media(&core,RestoreRequest {login_id:id,target:run.target.clone(),reference:receipt.reference,destination:destination.clone()},rx).await?;
+            core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.restore_media(&core,RestoreRequest {login_id:id,target:run.target.clone(),reference:receipt.reference,destination:destination.clone()},rx).await?;
         }
         if repository::fingerprint(&destination)?.0!=hash || repository::fingerprint(&config.source)?.0!=hash {bail!("original/restored byte integrity failed");}
         std::fs::write(config.work_directory.join("playback-target.json"),serde_json::to_vec_pretty(&json!({"channel_id":run.target.channel_id,"message_id":message_id,"asset_id":run.asset_id}))?)?;
@@ -356,11 +357,13 @@ async fn telegram_busy_live_cold_resume_channel_reads_and_discovery() -> Result<
     for cycle in 1..=3 {
         let core=Core::open(&config.recovery_data_directory.join("yingqu.sqlite"),config.work_directory.join("recovery-downloads"),"unused-engine".into(),vec![], |_| {})?;
         let result=async {
-            let device=core.telegram_storage_device_id()?;
+            let binding=core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
+            let device=binding.namespace;
+            let session=binding.session;
             let (first, second, third)=tokio::join!(
-                core.telegram_storage.ready_for_backup(device.clone()),
-                core.telegram_storage.resume(device.clone()),
-                core.telegram_storage.ready_for_backup(device),
+                session.ready_for_backup(device.clone()),
+                session.resume(device.clone()),
+                session.ready_for_backup(device),
             );
             let first=first?;let second=second?;let third=third?;
             if !matches!(first.phase,Phase::Ready) || first.operation_id != second.operation_id || first.operation_id != third.operation_id { bail!("concurrent resume did not share a ready session"); }
@@ -370,15 +373,15 @@ async fn telegram_busy_live_cold_resume_channel_reads_and_discovery() -> Result<
             let provider=spaces::provider(&core,&space.space_id)?;
             let engine=SyncEngine::new(core.clone(),provider);
             let (first,pull,second)=tokio::join!(
-                core.telegram_storage.channels(&id),
+                session.channels(&id),
                 engine.pull(),
-                core.telegram_storage.channels(&id),
+                session.channels(&id),
             );
             let first=first?;pull?;let second=second?;
             for channels in [first,second] {
                 if !channels.iter().any(|c|c.title==config.channel_name) { bail!("expected dedicated channel was not discovered"); }
             }
-            if core.telegram_storage.status().last_error.is_some() || spaces::get(&core)?.and_then(|s|s.last_error).is_some() { bail!("successful reads retained a stale error"); }
+            if session.status().last_error.is_some() || spaces::get(&core)?.and_then(|s|s.last_error).is_some() { bail!("successful reads retained a stale error"); }
             println!("cold cycle {cycle}: concurrent resume, two channel reads and discovery passed; no retained error");
             Ok(())
         }.await;

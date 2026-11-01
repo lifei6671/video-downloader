@@ -13,7 +13,7 @@ async (page) => {
     window.tasks=[{id:'local-task',asset_id:'released-task',revision:1,status:'completed',video:{title:'释放过的本机任务',platform:'youtube',video_id:'12345678901',kind:'video',canonical_url:'https://www.youtube.com/watch?v=12345678901'},bytes:100,total_bytes:100,path:null,created_at:1,completed_at:2,file_missing:true,canceling:false,files:[],download_requested:true}];
     window.__TAURI_INTERNALS__={convertFileSrc:path=>`http://asset.localhost/${encodeURIComponent(path)}`,transformCallback:()=>1,unregisterCallback:()=>{},invoke:async(command,args)=>{
       window.calls.push({command,args});
-      if(command==='get_settings')return {download_directory:'C:/fixture',filename_template:'{title}',max_downloads:2,profiles:[],tdl:{enabled:false,path:null}};
+      if(command==='get_settings')return {download_directory:'C:/fixture',filename_template:'{title}',max_downloads:2,profiles:[]};
       if(command==='list_tasks')return window.tasks;
       if(command==='list_video_transcripts')return [];
       if(command==='get_video_transcript')return null;

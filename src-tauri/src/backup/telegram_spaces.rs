@@ -198,6 +198,9 @@ pub(super) async fn connect(core: &Arc<Core>, mut update: Update, save: bool) ->
         tx.execute("UPDATE backup_sync_checkpoints SET last_error=NULL WHERE space_id=?",[&space.space_id])?;
         if update.activate {tx.execute("INSERT INTO backup_sync_preference VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled",[update.enabled])?;}
         if select {spaces::select_in_transaction(&tx,&space.space_id,space.enabled)?;}
+        else if spaces::select_initial_default(&tx)?.as_deref()==Some(&space.space_id) {
+            spaces::select_in_transaction(&tx,&space.space_id,enabled)?;
+        }
         tx.commit()?;Ok(())
     })?;
     core.wake_backup();

@@ -32,12 +32,12 @@ fn entries(core: &Core, operation: &str) -> Result<Vec<Entry>> {
 }
 async fn presentation(core: &Arc<Core>, target: Target, message: i32) -> Result<serde_json::Value> {
     let login = core
-        .telegram_storage
+        .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
         .status()
         .operation_id
         .context("QA login missing")?;
     let (_stop, rx) = tokio::sync::watch::channel(false);
-    core.telegram_storage
+    core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
         .with_transport(core, &login, target, rx, None, move |_, t, _| {
             Box::pin(async move { t.bundle_presentation(message).await })
         })
@@ -343,13 +343,13 @@ async fn lifecycle_stage(
             .clone();
         let message = run.message.context("owned message missing")?;
         let login = core
-            .telegram_storage
+            .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
             .status()
             .operation_id
             .context("QA login missing")?;
         let (_stop, rx) = tokio::sync::watch::channel(false);
         let docs = core
-            .telegram_storage
+            .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
             .with_transport(core, &login, target, rx, None, move |_, t, _| {
                 Box::pin(async move { t.bundle_documents(message).await })
             })

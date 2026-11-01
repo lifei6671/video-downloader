@@ -53,9 +53,9 @@ impl TelegramProvider {
         work: impl for<'a> FnOnce(&'a Core, &'a GrammersTransport, &'a Io) -> ProviderFuture<'a, T>,
     ) -> Result<T> {
         let core = self.core.upgrade().context("CANCELED")?;
-        let view = core
-            .telegram_storage
-            .ready_for_backup(core.telegram_storage_device_id()?)
+        let binding = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
+        let view = binding.session
+            .ready_for_backup(binding.namespace)
             .await?;
         if !matches!(view.phase, super::telegram_session::Phase::Ready) {
             bail!("TELEGRAM_AUTH_REQUIRED");
@@ -64,7 +64,7 @@ impl TelegramProvider {
         if view.account.as_ref().map(|a| a.id.as_str()) != Some(&self.target.account_id) {
             bail!("TELEGRAM_ACCOUNT_MISMATCH");
         }
-        core.telegram_storage
+        binding.session
             .with_transport(
                 &core,
                 &id,

@@ -10,7 +10,7 @@ async (page) => {
       // Record command names only; fixture credentials are not persisted in the test report.
       window.calls.push(command);
       const ready = () => ({ configured: true, operation_id: 'login-1', phase: 'ready', account: { id: '123', name: '专用测试账号' }, last_error: null });
-      if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [], tdl: { enabled: false, path: null } };
+      if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [] };
       if (command === 'get_backup_settings') return null;
       if (command === 'get_backup_sync_enabled') return false;
       if (['list_tasks', 'list_video_transcripts', 'list_backup_spaces', 'list_backup_assets', 'list_backup_operations'].includes(command)) return [];
@@ -59,6 +59,13 @@ async (page) => {
     await selectProvider('Cloudflare R2'); await selectProvider('Telegram');
     await button('恢复登录').click();
     await p.getByText('没有可恢复的登录，请扫码登录。', { exact: true }).waitFor();
+    for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
+      await p.setViewportSize({ width, height });
+      assert(await p.evaluate(() => window.telegram.phase === 'signed_out' && !!window.telegram.operation_id), 'Missing stale restore operation fixture');
+      assert(await button('退出存储账号').count() === 0, 'Signed-out restore exposes account logout');
+      assert(await button('扫码登录').isEnabled() && await button('恢复登录').isEnabled(), 'Signed-out restore lost login actions');
+    }
+
     assert(await p.getByLabel('手机号', { exact: true }).count() === 0, 'QR login still asks for a phone number');
     await p.evaluate(() => { window.holdStatus = true; });
     await button('扫码登录').click();

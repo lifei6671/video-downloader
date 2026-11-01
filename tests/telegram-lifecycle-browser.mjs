@@ -14,7 +14,7 @@ async page => {
       window.__TAURI_INTERNALS__ = { convertFileSrc: x => x, transformCallback: () => 1, unregisterCallback() {}, invoke: async (command, args) => {
         window.calls.push({ command, args });
         const settings = { space_id: 'tg', library_id: 'lib', display_name: '知识库', provider_type: 'telegram', profile: 'telegram', endpoint: '', bucket: '', prefix: '', region: 'auto', path_style: true, enabled: true, credentials_configured: false, protocol: 2, connection_pending: false, last_error: null, can_delete_owned_media: canDelete };
-        if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [], tdl: { enabled: false, path: null } };
+        if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [] };
         if (command === 'get_backup_settings') return settings;
         if (command === 'list_backup_spaces') return [settings];
         if (command === 'get_backup_sync_enabled') return true;

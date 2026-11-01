@@ -14,7 +14,7 @@
 
 ## 2. SDK 选择与依赖策略
 
-采用 [grammers](https://codeberg.org/Lonami/grammers)：Rust 实现的 MTProto 客户端库，不是官方 C++ TDLib 的绑定。Rust 进程直接连接 Telegram，取消此前讨论中的 Go helper 和额外 JSON Lines 传输层；不新增 TDLib 动态库、Python Telegram 客户端或本地 HTTP 代理服务。现有 PythonBridge 继续负责原有下载和媒体处理，现有 `tdl_bridge` 继续负责平台下载，不用它承载备份。
+采用 [grammers](https://codeberg.org/Lonami/grammers)：Rust 实现的 MTProto 客户端库，不是官方 C++ TDLib 的绑定。Rust 进程直接连接 Telegram，取消此前讨论中的 Go helper 和额外 JSON Lines 传输层；不新增 TDLib 动态库、Python Telegram 客户端或本地 HTTP 代理服务。现有 PythonBridge 继续负责原有下载和媒体处理，平台下载也使用 grammers，默认复用备份账号；两处均可点击“切换其他账号”只切换当前用途，并独立持有任务连接，见 [Telegram 下载](telegram-download.md)。
 
 选型依据：与现有 Rust/Tokio 栈一致，可直接调用用户授权、频道历史和文件传输接口，减少独立运行时及跨进程生命周期维护。项目仓库已从 GitHub 迁移至 Codeberg，不能把旧 [GitHub 仓库](https://github.com/Lonami/grammers) 的归档状态解释为项目停更。源码采用 MIT/Apache-2.0 双许可；实施时核对锁定版本及传递依赖许可并保留声明。
 
@@ -30,6 +30,7 @@
 | --- | --- |
 | `backup/provider.rs` | 复用空间、媒体引用、能力、回执契约；补齐 Telegram 引用验证 |
 | `backup/telegram_provider.rs` | 消息与媒体映射、事件重放、上传恢复、精确删除 |
+| `telegram_accounts.rs` | 本机下载/备份账号选择、默认复用与独立切换 |
 | `backup/telegram_session.rs` | grammers 连接、独立授权、会话持久化与关闭；不另建任务队列 |
 | `backup/spaces.rs`、`settings.rs`、`library.rs` | 提供商配置、账号与频道身份、库初始化、凭据隔离 |
 | `backup/sync_engine.rs`、`scheduler.rs`、`lifecycle.rs` | 复用任务、退避、取消；补齐待确认发布状态 |
@@ -133,6 +134,6 @@ Rust 管理 grammers 连接及其后台任务，在现有 Tokio 生命周期内�
 
 最低集成场景：设备 A 上传 → 设备 B 在全新隔离数据目录登录同账号 → 自动发现资料且不预下载视频 → 按需恢复 → 摘要一致。还需覆盖每个上传/确认阶段终止进程后重启、空间切换取消、Telegram 手工删除媒体、退出账号和已有本机副本保留。
 
-后续基础检查沿用当前项目的 `npm run build`、`cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1`、`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings`，并运行受影响的备份、tdl 下载和浏览器用例。届时按实际分支功能调整 features，不照搬其他分支的 MCP 开关。
+后续基础检查沿用当前项目的 `npm run build`、`cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1`、`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings`，并运行受影响的备份、Telegram 下载和浏览器用例。届时按实际分支功能调整 features，不照搬其他分支的 MCP 开关。
 
 离线 fixture、真实 Telegram、Windows 原生、macOS Intel、macOS ARM64、安装包分别报告。账号可登录不等于大文件或恢复通过，SDK 文档不等于生产测试。解除 Telegram 门禁前必须有对应证据；实际结果以 [实施记录](telegram-storage-implementation.md) 为准。

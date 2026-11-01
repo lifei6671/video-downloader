@@ -6,6 +6,7 @@ pub mod parse_cache;
 pub mod python_bridge;
 pub mod runtime_dependencies;
 pub mod settings;
-pub mod tdl_bridge;
+pub mod telegram_accounts;
+pub mod telegram_download;
 pub mod update_download;
 pub mod updates;

@@ -17,7 +17,7 @@ async (page) => {
         unregisterCallback: () => {},
         invoke: async command => {
           if (command === 'list_tasks' || command === 'list_video_transcripts') return [];
-          if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [], tdl: { enabled: false, path: null } };
+          if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [] };
           if (command === 'check_for_updates') return { current_version: '1.9.1', latest_version: '99.0.0', release_tag: 'v99.0.0', has_update: true, release_notes: '## 启动回归测试\n\n| 项目 | 状态 |\n| --- | --- |\n| 延迟加载 | 正常 |', published_at: null, installer: null };
           return null;
         },

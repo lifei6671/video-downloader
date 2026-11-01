@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -22,34 +22,32 @@ use yingqu_core::{
 type AppCore = Arc<Core>;
 type TelegramStorageView = yingqu_core::backup::telegram_session::View;
 #[tauri::command]
-fn telegram_storage_status(core: State<AppCore>) -> TelegramStorageView {
-    core.telegram_storage.status()
+fn telegram_storage_status(core: State<AppCore>, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> TelegramStorageView {
+    core.telegram_accounts.status(purpose.unwrap_or_default())
 }
 #[tauri::command]
-async fn telegram_storage_resume(core: State<'_, AppCore>) -> Result<TelegramStorageView, String> {
-    let device = core.telegram_storage_device_id().map_err(error)?;
-    core.telegram_storage.resume(device).await.map_err(|e| e.to_string())
+async fn telegram_storage_resume(core: State<'_, AppCore>, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> Result<TelegramStorageView, String> {
+    core.telegram_accounts.resume(&core, purpose.unwrap_or_default()).await.map_err(|e| e.to_string())
 }
 #[tauri::command]
-async fn telegram_storage_login_qr(core: State<'_, AppCore>) -> Result<TelegramStorageView, String> {
-    let device = core.telegram_storage_device_id().map_err(error)?;
-    core.telegram_storage.login_qr(device).await.map_err(|e| e.to_string())
+async fn telegram_storage_login_qr(core: State<'_, AppCore>, purpose: Option<yingqu_core::telegram_accounts::Purpose>, other_account: Option<bool>) -> Result<TelegramStorageView, String> {
+    core.telegram_accounts.login(&core, purpose.unwrap_or_default(), if other_account.unwrap_or(false) { yingqu_core::telegram_accounts::LoginMode::OtherAccount } else { yingqu_core::telegram_accounts::LoginMode::Reuse }).await.map_err(|e| e.to_string())
 }
 #[tauri::command]
-async fn telegram_storage_password(core: State<'_, AppCore>, operation_id: String, password: String) -> Result<TelegramStorageView, String> {
-    core.telegram_storage.submit_password(&operation_id, password).await.map_err(|e| e.to_string())
+async fn telegram_storage_password(core: State<'_, AppCore>, operation_id: String, password: String, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> Result<TelegramStorageView, String> {
+    core.telegram_accounts.password(&core, purpose.unwrap_or_default(), &operation_id, password).await.map_err(|e| e.to_string())
 }
 #[tauri::command]
-async fn telegram_storage_cancel(core: State<'_, AppCore>, operation_id: String) -> Result<TelegramStorageView, String> {
-    core.telegram_storage.cancel(&operation_id).await.map_err(|e| e.to_string())
+async fn telegram_storage_cancel(core: State<'_, AppCore>, operation_id: String, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> Result<TelegramStorageView, String> {
+    core.telegram_accounts.cancel(purpose.unwrap_or_default(), &operation_id).await.map_err(|e| e.to_string())
 }
 #[tauri::command]
-async fn telegram_storage_logout(core: State<'_, AppCore>, operation_id: String) -> Result<TelegramStorageView, String> {
-    core.telegram_storage.logout(&operation_id).await.map_err(|e| e.to_string())
+async fn telegram_storage_logout(core: State<'_, AppCore>, operation_id: String, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> Result<TelegramStorageView, String> {
+    core.telegram_accounts.logout(&core, purpose.unwrap_or_default(), &operation_id).await.map_err(|e| e.to_string())
 }
 #[tauri::command]
-async fn telegram_storage_channels(core: State<'_, AppCore>, operation_id: String) -> Result<Vec<yingqu_core::backup::telegram_session::Channel>, String> {
-    core.telegram_storage.channels(&operation_id).await.map_err(|e| e.to_string())
+async fn telegram_storage_channels(core: State<'_, AppCore>, operation_id: String, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> Result<Vec<yingqu_core::backup::telegram_session::Channel>, String> {
+    core.telegram_accounts.binding(purpose.unwrap_or_default()).session.channels(&operation_id).await.map_err(|e| e.to_string())
 }
 fn error(error: anyhow::Error) -> String {
     error
@@ -271,71 +269,6 @@ async fn export_video_transcript(
 #[tauri::command]
 fn get_settings(core: State<AppCore>) -> Settings {
     core.settings()
-}
-#[tauri::command]
-fn save_tdl_settings(
-    core: State<AppCore>,
-    config: yingqu_core::tdl_bridge::TdlSettings,
-) -> Result<Settings, String> {
-    core.save_tdl(config).map_err(error)
-}
-#[tauri::command]
-async fn select_tdl_executable(
-    app: tauri::AppHandle,
-    core: State<'_, AppCore>,
-) -> Result<Option<String>, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let dialog = app.dialog().file().set_title("选择 tdl 可执行文件");
-    #[cfg(windows)]
-    let dialog = dialog.add_filter("可执行文件", &["exe"]);
-    let dialog = if let Some(parent) = core.settings().tdl.path.as_ref().and_then(|p| p.parent()) {
-        dialog.set_directory(parent)
-    } else {
-        dialog
-    };
-    dialog.pick_file(move |file| {
-        let _ = tx.send(file);
-    });
-    rx.await
-        .map_err(|_| "IO_ERROR")?
-        .map(|file| {
-            file.into_path()
-                .map(|p| p.to_string_lossy().into_owned())
-                .map_err(|_| "IO_ERROR".into())
-        })
-        .transpose()
-}
-#[tauri::command]
-async fn check_tdl(
-    path: Option<std::path::PathBuf>,
-) -> Result<yingqu_core::tdl_bridge::TdlStatus, String> {
-    yingqu_core::tdl_bridge::check(path.as_deref())
-        .await
-        .map_err(error)
-}
-#[tauri::command]
-async fn login_tdl(
-    core: State<'_, AppCore>,
-    path: Option<std::path::PathBuf>,
-) -> Result<Settings, String> {
-    core.login_tdl(path).await.map_err(error)
-}
-#[tauri::command]
-fn cancel_tdl_login(core: State<AppCore>) -> Result<(), String> {
-    core.cancel_tdl_login().map_err(error)
-}
-#[tauri::command]
-fn tdl_login_status(core: State<AppCore>) -> Option<yingqu_core::tdl_bridge::LoginStatus> {
-    core.tdl_login_status()
-}
-#[tauri::command]
-fn submit_tdl_password(
-    core: State<AppCore>,
-    login_id: String,
-    password: String,
-) -> Result<(), String> {
-    core.submit_tdl_password(&login_id, zeroize::Zeroizing::new(password))
-        .map_err(error)
 }
 #[tauri::command]
 fn read_clipboard_text(app: tauri::AppHandle) -> Result<String, String> {
@@ -813,13 +746,6 @@ fn main() {
             export_video_transcript,
             list_tasks,
             get_settings,
-            save_tdl_settings,
-            select_tdl_executable,
-            login_tdl,
-            cancel_tdl_login,
-            tdl_login_status,
-            submit_tdl_password,
-            check_tdl,
             read_clipboard_text,
             copy_cover_image,
             get_profile_cookie,

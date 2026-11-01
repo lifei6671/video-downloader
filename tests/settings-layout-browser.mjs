@@ -18,7 +18,7 @@ async (page) => {
       convertFileSrc: path => `http://asset.localhost/${encodeURIComponent(path)}`,
       transformCallback: () => 1, unregisterCallback: () => {},
       invoke: async command => {
-        if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [], tdl: { enabled: false, path: null } };
+        if (command === 'get_settings') return { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [] };
         if(command==='get_backup_sync_enabled')return true;
       if (command === 'get_backup_settings') return config;
         if (command === 'list_backup_spaces') return [config];
@@ -33,6 +33,7 @@ async (page) => {
   const results = [];
   try {
     await target.goto(page.url().split('/').slice(0, 3).join('/') + '/');
+    if (!await target.locator('link[rel=stylesheet][href*="/assets/"]').count()) throw new Error('Run this CSP regression against vite preview after npm run build');
     for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
       await target.setViewportSize({ width, height });
       // Sample layout on animation frames across route commits.
