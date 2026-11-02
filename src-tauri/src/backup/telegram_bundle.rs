@@ -398,8 +398,19 @@ impl crate::backup::telegram_lifecycle::OwnedMessageRemoval for GrammersTranspor
                 Err(error) if error.to_string() == "TELEGRAM_MEDIA_MISSING" => continue,
                 Err(error) => return Err(error),
             };
-            let loaded = read(&complete)?.context("TELEGRAM_MEDIA_CHANGED")?;
-            if expected.iter().any(|d| d.message_id != *id) || !owned_message_matches(&loaded, expected) {
+            if complete.id() != *id || expected.iter().any(|d| d.message_id != *id) {
+                bail!("TELEGRAM_MEDIA_CHANGED");
+            }
+            let matches = match read(&complete)? {
+                Some(loaded) => owned_message_matches(&loaded, expected),
+                None if matches!(&complete.raw, tl::enums::Message::Message(m) if m.rich_message.is_none() && m.grouped_id.is_none()) => {
+                    let [old] = expected.as_slice() else { bail!("TELEGRAM_MEDIA_CHANGED"); };
+                    let envelope: Envelope = serde_json::from_str(&old.caption)?;
+                    envelope.kind == "library" && document(&complete)?.0 == *old
+                }
+                None => false,
+            };
+            if !matches {
                 bail!("TELEGRAM_MEDIA_CHANGED");
             }
             verified.push(*id);

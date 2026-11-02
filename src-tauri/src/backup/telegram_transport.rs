@@ -275,6 +275,15 @@ fn checked_channel_reply(id: i64, mut chats: Vec<tl::enums::Chat>) -> Result<Opt
     }
 }
 
+async fn check_read_access(kind: &str, probe: impl Future<Output = Result<()>>) -> Result<()> {
+    // Both deletion stages read the actual mapped index before any remote mutation.
+    if matches!(kind, "publish_delete" | "remote_cleanup") {
+        return Ok(());
+    }
+    let _access = super::delete_timing::setup_span("channel_read_probe");
+    probe.await
+}
+
 impl GrammersTransport {
     pub(super) fn for_new_delete(&self, operation: &str) -> Self {
         let mut value = self.clone();
@@ -349,6 +358,7 @@ impl GrammersTransport {
             .run(async { history.next().await.map_err(rpc_error) })
             .await?
         {
+            super::delete_timing::record_history_message();
             io.touch();
             if message.id() > *high.get_or_insert(message.id()) {
                 continue;
@@ -458,6 +468,7 @@ impl GrammersTransport {
         client: Client,
         target: &Target,
         session: Option<&super::telegram_vault::VaultSession>,
+        request_kind: &str,
         upload_limit: impl Future<Output = Result<u64>>,
         io: &Io,
     ) -> Result<Self> {
@@ -502,11 +513,11 @@ impl GrammersTransport {
             .context("TELEGRAM_CHANNEL_FORBIDDEN")?;
         let channel_title = channel.title().to_owned();
         drop(lookup);
-        {
-            let _access = super::delete_timing::setup_span("channel_read_probe");
+        check_read_access(request_kind, async {
             let mut history = client.iter_messages(peer).limit(1);
             io.run(async { history.next().await.map_err(rpc_error) }).await?;
-        }
+            Ok(())
+        }).await?;
         let max_bytes = upload_limit.await?;
         Ok(Self {
             index_bodies: std::sync::Arc::default(),
@@ -640,7 +651,7 @@ impl Transport for GrammersTransport {
             if !self.can_delete {
                 bail!("BACKUP_DELETE_UNSUPPORTED");
             }
-            let read = super::delete_timing::activity("read_old_index");
+            let read = super::delete_timing::setup_span("read_old_index");
             let message = match self.message(expected.message_id).await {
                 Ok(message) => message,
                 Err(e) if e.to_string() == "TELEGRAM_MEDIA_MISSING" => return Ok(()),
@@ -659,13 +670,13 @@ impl Transport for GrammersTransport {
                 bail!("TELEGRAM_MEDIA_CHANGED");
             }
             drop(read);
-            let send = super::delete_timing::activity("delete_old_index");
+            let send = super::delete_timing::setup_span("delete_old_index");
             self.client
                 .delete_messages(self.peer, &[expected.message_id])
                 .await
                 .map_err(rpc_error)?;
             drop(send);
-            let _confirm = super::delete_timing::activity("confirm_old_index_gone");
+            let _confirm = super::delete_timing::setup_span("confirm_old_index_gone");
             match self.message(expected.message_id).await {
                 Err(e) if e.to_string() == "TELEGRAM_MEDIA_MISSING" => Ok(()),
                 Err(e) => Err(e),
@@ -769,9 +780,12 @@ impl Transport for GrammersTransport {
     ) -> ProviderFuture<'a, Option<RemoteDocument>> {
         Box::pin(async move {
             let caption = envelope.caption()?;
+            let _history = super::delete_timing::setup_span("history");
+            super::delete_timing::selected_full_scan("receipt_reconciliation", None);
             let mut history = self.client.iter_messages(self.peer);
             let mut found = None;
             while let Some(message) = history.next().await.map_err(rpc_error)? {
+                super::delete_timing::record_history_message();
                 io.check()?;
                 io.touch();
                 let message=io.run(self.complete_message(message)).await?;
@@ -902,6 +916,16 @@ impl AsyncRead for DownloadReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn only_delete_publication_and_cleanup_skip_the_preflight_history_read() {
+        for kind in ["publish_delete", "remote_cleanup"] {
+            check_read_access(kind, async { panic!("redundant history probe for {kind}") }).await.unwrap();
+        }
+        for kind in ["publish_change", "open_library", "pull_changes", "upload_media", "delete_media", "unknown"] {
+            let denied = check_read_access(kind, async { bail!("TELEGRAM_CHANNEL_FORBIDDEN") }).await.unwrap_err();
+            assert_eq!(denied.to_string(), "TELEGRAM_CHANNEL_FORBIDDEN");
+        }
+    }
     #[test]
     fn uploaded_video_includes_custom_thumbnail_without_forcing_document_mode() {
         let file=tl::types::InputFile {id:1,parts:1,name:"original.mov".into(),md5_checksum:String::new()}.into();

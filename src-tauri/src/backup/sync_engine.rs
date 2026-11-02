@@ -1122,7 +1122,14 @@ async fn discovery_loop(
         }
     }
 }
-const CLAIM_OPERATION_SQL: &str = "UPDATE backup_operations SET state='running',payload_json=CASE WHEN kind='delete' AND attempt=0 THEN json_set(payload_json,CASE WHEN COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)=1 THEN '$.timings.maintenance.queue' ELSE '$.timings.foreground.queue' END,json_object('elapsed_ms',max(0,unixepoch()-created_at)*1000,'outcome','ok','at',unixepoch(),'attempt',1)) ELSE payload_json END,attempt=attempt+1 WHERE operation_id=?";
+const CLAIM_OPERATION_SQL: &str = "UPDATE backup_operations SET state='running',
+    payload_json=CASE WHEN kind='delete' AND attempt=0 THEN json_set(
+        json_insert(payload_json,'$.first_claimed_ms',CAST(unixepoch('subsec')*1000 AS INTEGER)),
+        CASE WHEN COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)=1 THEN '$.timings.maintenance.queue' ELSE '$.timings.foreground.queue' END,
+        json_object('elapsed_ms',max(0,CAST(unixepoch('subsec')*1000 AS INTEGER)-COALESCE(json_extract(payload_json,'$.queued_at_ms'),created_at*1000)),
+                    'outcome','ok','at',unixepoch(),'attempt',1))
+        ELSE payload_json END,attempt=attempt+1 WHERE operation_id=? AND state IN ('pending','retry_wait')
+        AND (next_retry_at IS NULL OR next_retry_at<=unixepoch())";
 async fn queue_loop(
     core: Arc<Core>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
@@ -1143,28 +1150,33 @@ async fn queue_loop(
             if !settings.enabled {return Ok(false);}
             let provider=resolve(&core,&settings.space_id)?;
             let engine=SyncEngine::new(core.clone(),provider);
-            engine.enqueue()?;
-            let mut due=core.backup_db(|db|scheduler::next_sync_operation(db,&settings.space_id))?;
             // Canceled uploads retain their exact private resume state until own-session cleanup succeeds.
-            if !due.as_ref().is_some_and(|(_,foreground_delete)|*foreground_delete) {
-            for op in scheduler::operations(&core)?.into_iter().filter(|o|o.space_id==settings.space_id&&o.kind=="upload"&&(o.state=="canceled"||o.state=="blocked"&&o.last_error.as_deref()==Some("BACKUP_ASSET_DELETED"))&&o.phase!="cancel_cleaned") {
-                for kind in ["video","cover","transcript"] {
-                    if let Some(state)=op.payload.get(format!("resume_{kind}")).cloned() {
-                        scoped(&engine,&mut cancel,engine.provider.cancel_upload(serde_json::from_value(state)?,&op.operation_id)).await?;
+            let foreground_busy = || core.backup_db(|db| scheduler::foreground_delete_busy(db, &settings.space_id));
+            if !foreground_busy()? {
+                engine.enqueue()?;
+                for op in scheduler::uploads_to_clean(&core, &settings.space_id)? {
+                    if foreground_busy()? { break; }
+                    for kind in ["video","cover","transcript"] {
+                        if let Some(state)=op.payload.get(format!("resume_{kind}")).cloned() {
+                            scoped(&engine,&mut cancel,engine.provider.cancel_upload(serde_json::from_value(state)?,&op.operation_id)).await?;
+                        }
                     }
+                    core.backup_db(|db|{db.execute("UPDATE backup_operations SET phase='cancel_cleaned',state=CASE WHEN phase='superseded' THEN 'completed' ELSE state END WHERE operation_id=?",[&op.operation_id])?;Ok(())})?;
                 }
-                core.backup_db(|db|{db.execute("UPDATE backup_operations SET phase='cancel_cleaned',state=CASE WHEN phase='superseded' THEN 'completed' ELSE state END WHERE operation_id=?",[&op.operation_id])?;Ok(())})?;
-                due=core.backup_db(|db|scheduler::next_sync_operation(db,&settings.space_id))?;
-                if due.as_ref().is_some_and(|(_,foreground_delete)|*foreground_delete) {break;}
             }
-            }
-            let Some((operation,foreground_delete))=due else {return Ok(false);};
-            core.backup_db(|db|{
-                db.execute(CLAIM_OPERATION_SQL,[&operation])?;
+            // Select and claim under one DB lock. A delete can arrive while upload discovery
+            // or canceled-upload cleanup is running.
+            let claim=core.backup_db(|db|{
+                let Some((operation,foreground_delete))=scheduler::next_sync_operation(db,&settings.space_id)? else {return Ok(None);};
+                if db.execute(CLAIM_OPERATION_SQL,[&operation])? == 0 {return Ok(None);}
                 if foreground_delete { core.deferred_pulls.mark(&settings.space_id); }
-                Ok(())
+                Ok(Some((operation,foreground_delete)))
             })?;
+            let Some((operation,foreground_delete))=claim else {return Ok(false);};
             let kind:String=core.backup_db(|db|Ok(db.query_row("SELECT kind FROM backup_operations WHERE operation_id=?",[&operation],|r|r.get(0))?))?;
+            if kind == "delete" {
+                eprintln!("backup_delete operation={operation} phase=queue_claim at_ms={} foreground={foreground_delete}", chrono::Utc::now().timestamp_millis());
+            }
             let work=async {if kind=="delete" {super::sync_delete::execute(&core,engine.provider.as_ref(),&operation).await} else {engine.execute_upload(&operation).await}};tokio::pin!(work);
             let result=loop {
                 tokio::select! {
@@ -1173,9 +1185,8 @@ async fn queue_loop(
                     _=tokio::time::sleep(std::time::Duration::from_millis(100))=>{if let Err(error)=engine.check(&operation) {break Err(error);}}
                 }
             };
-            let succeeded = result.is_ok();
             if let Err(error)=result {
-                let op=scheduler::operations(&core)?.into_iter().find(|o|o.operation_id==operation).ok_or_else(||anyhow::anyhow!("BACKUP_INVALID_OPERATION"))?;
+                let op=scheduler::operation(&core,&operation)?;
                 let reason=error.to_string();
                 core.backup_db(|db|{
                     let state=if op.attempt>=5 || (engine.provider.scope().provider_type==ProviderType::Telegram && reason=="BACKUP_CHECKSUM_MISMATCH") || matches!(reason.as_str(),"BACKUP_ACCESS_DENIED"|"BACKUP_ASSET_DELETED"|"BACKUP_SOURCE_CHANGED"|"BACKUP_INVALID_OPERATION"|"BACKUP_REUPLOAD_STALE"|"BACKUP_DELETE_UNSUPPORTED"|"BACKUP_MEDIA_IN_USE"|"BACKUP_TOMBSTONE_REQUIRED"|"TELEGRAM_MEDIA_CHANGED"|"TELEGRAM_MEDIA_MISSING"|"TELEGRAM_AUTH_REQUIRED"|"TELEGRAM_ACCOUNT_MISMATCH"|"TELEGRAM_CHANNEL_FORBIDDEN"|"TELEGRAM_INDEX_INVALID"|"TELEGRAM_INDEX_CHANGED"|"TELEGRAM_OPERATION_MISMATCH"|"TELEGRAM_FILE_TOO_LARGE") {"blocked"} else {"retry_wait"};
@@ -1186,9 +1197,9 @@ async fn queue_loop(
             if foreground_delete && !core.backup_db(|db| scheduler::foreground_delete_busy(db, &settings.space_id))? {
                 core.deferred_pulls.finished.notify_one();
             }
-            Ok(succeeded)
+            Ok(true)
         }.await;
-        // Drain due work after success. An empty queue or failure still uses the normal pause.
+        // A handled failure has its own retry deadline. Drain other runnable work immediately.
         if matches!(result, Ok(true)) {
             continue;
         }
@@ -1327,9 +1338,9 @@ mod claim_timing_tests {
     #[test]
     fn maintenance_retry_preserves_foreground_queue_timing_and_upload_payload() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER)").unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER,next_retry_at INTEGER)").unwrap();
         let original = serde_json::json!({"local_cleanup_done":true,"timings":{"foreground":{"queue":{"elapsed_ms":1234}}}});
-        db.execute("INSERT INTO backup_operations VALUES('maintenance','delete','retry_wait',0,?1,unixepoch()-10)",[original.to_string()]).unwrap();
+        db.execute("INSERT INTO backup_operations VALUES('maintenance','delete','retry_wait',0,?1,unixepoch()-10,NULL)",[original.to_string()]).unwrap();
         db.execute(CLAIM_OPERATION_SQL, ["maintenance"]).unwrap();
         let (state,attempt,payload):(String,i64,String)=db.query_row("SELECT state,attempt,payload_json FROM backup_operations WHERE operation_id='maintenance'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
         let payload: Value = serde_json::from_str(&payload).unwrap();
@@ -1346,7 +1357,7 @@ mod claim_timing_tests {
                 >= 10000
         );
         db.execute(
-            "INSERT INTO backup_operations VALUES('upload','upload','pending',0,'{}',unixepoch())",
+            "INSERT INTO backup_operations VALUES('upload','upload','pending',0,'{}',unixepoch(),NULL)",
             [],
         )
         .unwrap();

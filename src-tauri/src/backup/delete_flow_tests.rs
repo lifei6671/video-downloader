@@ -189,6 +189,32 @@ async fn delete_resumes_finalizing_without_repeating_remote_deletion() {
 }
 
 #[tokio::test]
+async fn delete_finishes_while_another_asset_owns_the_restore_slot() {
+    let (f, provider, engine) = sync_fixture().await;
+    engine.execute_upload(&claim(&engine, &f.core)).await.unwrap();
+    let slot = f.core.backup_restore_lock.lock().await;
+    let other_file = f.core.restore_file_guard("other").await;
+    let same_file = f.core.restore_file_guard(&f.id).await;
+    let operation = sync_delete::delete(&f.core, &f.space.space_id, &f.id).await.unwrap();
+    let pass = delete_pass(&f.core, provider.as_ref(), &operation);
+    tokio::pin!(pass);
+    let reached_cleanup = async {
+        while scheduler::operation(&f.core, &operation).unwrap().phase != "local_cleanup" {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::select! {
+        result = &mut pass => panic!("same-file guard must block local removal: {result:?}"),
+        result = tokio::time::timeout(std::time::Duration::from_secs(5), reached_cleanup) => result.unwrap()
+    }
+    assert!(f.root.path().join("video.mp4").is_file());
+    drop(same_file);
+    tokio::time::timeout(std::time::Duration::from_secs(5), pass).await.unwrap().unwrap();
+    assert!(!f.root.path().join("video.mp4").exists());
+    drop((other_file, slot));
+}
+
+#[tokio::test]
 async fn legacy_cleanup_verification_finishes_hiding_the_original_asset() {
     let (f, provider, engine) = sync_fixture().await;
     engine

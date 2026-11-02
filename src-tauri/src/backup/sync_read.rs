@@ -188,6 +188,7 @@ pub async fn ensure(
     }
     let mut shutdown = core.backup_cancellation();
     let _slot = tokio::select! {_=shutdown.changed()=>bail!("CANCELED"),slot=core.backup_restore_lock.lock()=>slot};
+    let _files = tokio::select! {_=shutdown.changed()=>bail!("CANCELED"),guard=core.restore_file_guard(local)=>guard};
     if let Some(path) = restore::local(core, local).await? {
         return Ok(path);
     }

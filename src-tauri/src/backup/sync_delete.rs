@@ -25,6 +25,7 @@ fn scope(core: &Core, space: &str) -> Result<Scope> {
     })
 }
 pub fn intent(core: &Core, space: &str, local: &str) -> Result<String> {
+    let received_ms = chrono::Utc::now().timestamp_millis();
     let scope = scope(core, space)?;
     if scope.provider_type == ProviderType::Telegram
         && !spaces::config(core, space)?
@@ -47,14 +48,21 @@ pub fn intent(core: &Core, space: &str, local: &str) -> Result<String> {
         let previous:Option<(String,String,String)>=tx.query_row("SELECT operation_id,state,payload_json FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='delete' AND state<>'canceled' ORDER BY CASE WHEN state='completed' THEN 1 ELSE 0 END,rowid DESC LIMIT 1",params![space,local],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         if let Some((id,state,raw))=previous.filter(|(_,state,_)|!(scope.provider_type==ProviderType::Telegram && state=="completed")) {
             let mut payload:Value=serde_json::from_str(&raw)?;
-            if state=="completed" {payload["cleanup_pass"]=0.into();payload.as_object_mut().context("BACKUP_INVALID_OPERATION")?.remove("local_cleanup_done");}
             if let Some(saved)=payload.get("scope") {scope.check(&serde_json::from_value(saved.clone())?)?;}
+            // A duplicate click observes the original request, including its backoff or parked successor.
+            // Explicit recovery remains available through the queue retry command.
+            if scope.provider_type == ProviderType::Telegram && matches!(state.as_str(), "pending" | "running" | "retry_wait") {
+                if payload["remote_asset_id"] != remote { bail!("BACKUP_SCOPE_MISMATCH"); }
+                return Ok(id);
+            }
+            if state=="completed" {payload["cleanup_pass"]=0.into();payload.as_object_mut().context("BACKUP_INVALID_OPERATION")?.remove("local_cleanup_done");}
             payload["scope"]=serde_json::to_value(&scope)?;payload["remote_asset_id"]=remote.clone().into();
-            tx.execute("UPDATE backup_operations SET state=CASE WHEN state='running' THEN state ELSE 'pending' END,phase=CASE WHEN ?2 THEN 'tombstone' ELSE phase END,next_retry_at=NULL,last_error=NULL,attempt=0,payload_json=?3 WHERE operation_id=?1",params![id,state=="completed",payload.to_string()])?;
+            tx.execute("UPDATE backup_operations SET state=CASE WHEN state='running' THEN state ELSE 'pending' END,phase=CASE WHEN ?2 THEN 'tombstone' ELSE phase END,next_retry_at=NULL,last_error=NULL,attempt=CASE WHEN state='running' THEN attempt ELSE 0 END,payload_json=?3 WHERE operation_id=?1",params![id,state=="completed",payload.to_string()])?;
         } else {
             let mut payload = json!({"scope":scope,"remote_asset_id":remote,"cleanup_pass":0,"base":base});
             if scope.provider_type == ProviderType::Telegram {
                 payload["first_archive_publish"] = true.into();
+                payload["command_received_ms"] = received_ms.into();
                 let queued: i64 = tx.query_row("SELECT CAST(unixepoch('subsec')*1000 AS INTEGER)", [], |r| r.get(0))?;
                 payload["queued_at_ms"] = queued.into();
             }
@@ -66,18 +74,19 @@ pub fn intent(core: &Core, space: &str, local: &str) -> Result<String> {
         tx.commit()?;Ok(operation)
     })
 }
-pub async fn delete(core: &Arc<Core>, space: &str, local: &str) -> Result<()> {
-    intent(core, space, local)?;
+pub async fn delete(core: &Arc<Core>, space: &str, local: &str) -> Result<String> {
+    let operation = intent(core, space, local)?;
+    eprintln!("backup_delete operation={operation} phase=intent_committed at_ms={}", chrono::Utc::now().timestamp_millis());
     core.delete_queue_wake.notify_one();
     core.cancel_asset_restore(local)?;
     core.cancel_asset_transcription(local).await?;
-    Ok(())
+    Ok(operation)
 }
 
 // The caller owns backup_write_lock; the remote cleanup was confirmed before this phase.
 async fn finish_local(core: &Arc<Core>, op: &scheduler::Operation) -> Result<()> {
     let local = op.asset_id.as_deref().context("BACKUP_INVALID_OPERATION")?;
-    let _restore = core.backup_restore_lock.lock().await;
+    let _restore = core.restore_file_guard(local).await;
     lifecycle::remove_local(core, local).await?;
     core.backup_db(|db| {
         db.execute("UPDATE backup_operations SET phase='finalizing',last_error=NULL WHERE operation_id=?", [&op.operation_id])?;
@@ -150,14 +159,21 @@ pub(super) fn recover_cleanup(core: &Core, scope: &Scope, operation: &str, error
 }
 
 pub async fn execute(core:&Arc<Core>,provider:&dyn BackupProvider,operation:&str)->Result<()> {
-    let work = super::delete_timing::timed(core, operation, "total", super::telegram_session::with_delete_config(async {
+    let work = super::delete_timing::timed(core, operation, "total", async {
         let first_publish = provider.scope().provider_type == ProviderType::Telegram && core.backup_db(|db| {
-            db.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.foreground_started_ms',CAST(unixepoch('subsec')*1000 AS INTEGER))
-                WHERE operation_id=? AND json_extract(payload_json,'$.queued_at_ms') IS NOT NULL
+            db.execute("WITH clock(started) AS (SELECT CAST(unixepoch('subsec')*1000 AS INTEGER)),
+                queue(elapsed) AS (SELECT max(0,COALESCE(json_extract(payload_json,'$.first_claimed_ms'),started)-json_extract(payload_json,'$.queued_at_ms'))
+                    FROM clock,backup_operations WHERE operation_id=?1)
+                UPDATE backup_operations SET payload_json=json_set(payload_json,
+                    '$.foreground_started_ms',(SELECT started FROM clock),
+                    '$.initial_queue_ms',(SELECT elapsed FROM queue),
+                    '$.timings.foreground.queue',json_object('elapsed_ms',(SELECT elapsed FROM queue),
+                        'total_elapsed_ms',(SELECT elapsed FROM queue),'calls',1,'attempt',attempt,'outcome','ok','at',unixepoch()))
+                WHERE operation_id=?1 AND json_extract(payload_json,'$.queued_at_ms') IS NOT NULL
                 AND json_extract(payload_json,'$.foreground_started_ms') IS NULL",[operation])?;
             claim_archive_read(db, operation)
         })?;
-        let attempt = || Box::pin(execute_inner(core, provider, operation));
+        let attempt = || Box::pin(super::telegram_session::with_delete_config(execute_inner(core, provider, operation)));
         let result = super::telegram_transport::with_delete_archive_read(first_publish, attempt()).await;
         if let Err(error) = &result {
             if provider.scope().provider_type == ProviderType::Telegram
@@ -168,7 +184,7 @@ pub async fn execute(core:&Arc<Core>,provider:&dyn BackupProvider,operation:&str
             }
         }
         result
-    }));
+    });
     super::delete_timing::track_delete(core,operation,Box::pin(work)).await
 }
 async fn execute_inner(
@@ -176,10 +192,8 @@ async fn execute_inner(
     provider: &dyn BackupProvider,
     operation: &str,
 ) -> Result<()> {
-    let op = scheduler::operations(core)?
-        .into_iter()
-        .find(|o| o.operation_id == operation && o.kind == "delete")
-        .context("BACKUP_INVALID_OPERATION")?;
+    let op = scheduler::operation(core, operation)?;
+    anyhow::ensure!(op.kind == "delete", "BACKUP_INVALID_OPERATION");
     let owned: Scope = serde_json::from_value(op.payload["scope"].clone())?;
     provider.scope().check(&owned)?;
     scope(core, &op.space_id)?.check(&owned)?;
@@ -193,8 +207,7 @@ async fn execute_inner(
         return Ok(());
     }
     let published = if matches!(op.phase.as_str(), "archive_ready" | "objects" | "cleanup_verify" | "local_cleanup" | "finalizing") {
-        let current = provider
-            .read_asset(&remote)
+        let current = super::delete_timing::timed_setup(core,operation,"read_asset",provider.read_asset(&remote))
             .await?
             .context("BACKUP_RECORD_UNAVAILABLE")?;
         if !current.snapshot.deleted || op.payload["archive_revision"].as_u64().is_some_and(|r| r != current.snapshot.revision) {
@@ -261,7 +274,7 @@ async fn execute_inner(
         Ok(DeleteCleanup::ArchiveReady) => return Ok(()),
         Ok(DeleteCleanup::Complete) => {}
         Err(error) => {
-            if provider.read_asset(&remote).await?.is_some_and(|r| !r.snapshot.deleted) {
+            if super::delete_timing::timed_setup(core,operation,"read_asset",provider.read_asset(&remote)).await?.is_some_and(|r| !r.snapshot.deleted) {
                 complete_superseded(core, operation)?;
                 return Ok(());
             }
@@ -288,7 +301,8 @@ fn finish_pass(core: &Core, op: &scheduler::Operation) -> Result<()> {
             let end: i64 = db.query_row("SELECT CAST(unixepoch('subsec')*1000 AS INTEGER)", [], |r|r.get(0))?;
             payload["foreground_elapsed_ms"] = (end-start).into();
             if let Some(queued) = payload["queued_at_ms"].as_i64() {
-                payload["initial_queue_ms"] = (start-queued).into();
+                let claim = payload["first_claimed_ms"].as_i64().unwrap_or(start);
+                payload["initial_queue_ms"] = (claim-queued).max(0).into();
             }
         }
         let done=pass>=3;

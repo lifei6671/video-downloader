@@ -46,9 +46,30 @@ pub struct Operation {
 }
 
 pub fn operations(core: &Core) -> Result<Vec<Operation>> {
+    select_operations(core, "ORDER BY created_at DESC,rowid DESC", [])
+}
+
+pub(super) fn operation(core: &Core, id: &str) -> Result<Operation> {
+    select_operations(core, "WHERE operation_id=?1", [id])?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("BACKUP_INVALID_OPERATION"))
+}
+
+pub(super) fn uploads_to_clean(core: &Core, space: &str) -> Result<Vec<Operation>> {
+    select_operations(core, "WHERE space_id=?1 AND kind='upload' AND phase<>'cancel_cleaned'
+        AND (state='canceled' OR (state='blocked' AND last_error='BACKUP_ASSET_DELETED'))
+        ORDER BY created_at DESC,rowid DESC", [space])
+}
+
+pub(super) fn unfinished_restores(core: &Core, asset: &str) -> Result<Vec<Operation>> {
+    select_operations(core, "WHERE asset_id=?1 AND kind='restore' AND state<>'completed'
+        ORDER BY created_at DESC,rowid DESC", [asset])
+}
+
+fn select_operations(core: &Core, clause: &str, params: impl rusqlite::Params) -> Result<Vec<Operation>> {
     core.backup_db(|db| {
-        let mut q=db.prepare("SELECT operation_id,space_id,asset_id,kind,state,phase,payload_json,attempt,last_error FROM backup_operations ORDER BY created_at DESC,rowid DESC")?;
-        let rows=q.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get::<_,String>(6)?,r.get(7)?,r.get(8)?)))?;
+        let mut q=db.prepare(&format!("SELECT operation_id,space_id,asset_id,kind,state,phase,payload_json,attempt,last_error FROM backup_operations {clause}"))?;
+        let rows=q.query_map(params,|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get::<_,String>(6)?,r.get(7)?,r.get(8)?)))?;
         rows.map(|r|{let(operation_id,space_id,asset_id,kind,state,phase,payload,attempt,last_error)=r?;Ok(Operation{operation_id,space_id,asset_id,kind,state,phase,payload:serde_json::from_str(&payload)?,attempt,last_error})}).collect()
     })
 }

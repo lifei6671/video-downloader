@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::{
     future::Future,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, Weak,
     },
     time::Duration,
@@ -93,47 +93,40 @@ struct Control {
 }
 pub(crate) type ProxySettings = Arc<Mutex<Option<crate::settings::Profile>>>;
 
-struct DeleteUploadLimit {
+struct DeleteConfig {
     login: String,
-    account: String,
+    target: super::telegram_transfer::Target,
+    generation: u64,
     premium: bool,
     bytes: u64,
 }
 
 tokio::task_local! {
-    static DELETE_UPLOAD_LIMIT: std::cell::RefCell<Option<DeleteUploadLimit>>;
+    static DELETE_CONFIG: std::cell::RefCell<Option<DeleteConfig>>;
 }
 
 pub(super) async fn with_delete_config<F: Future>(work: F) -> F::Output {
-    DELETE_UPLOAD_LIMIT.scope(Default::default(), work).await
+    DELETE_CONFIG.scope(Default::default(), work).await
 }
 
-async fn request_upload_limit(
-    kind: &str, login: &str, account: &str, premium: bool,
-    fetch: impl Future<Output = Result<u64>>,
-) -> Result<u64> {
-    if kind == "remote_cleanup" {
-        let cached = DELETE_UPLOAD_LIMIT.try_with(|slot| {
-            slot.borrow_mut().take().filter(|v| {
-                v.login == login && v.account == account && v.premium == premium
-            }).map(|v| v.bytes)
-        }).ok().flatten();
-        if let Some(bytes) = cached {
-            drop(super::delete_timing::setup_span("app_config_reuse"));
-            return Ok(bytes);
-        }
+impl DeleteConfig {
+    fn take_for(kind: &str) -> Option<Self> {
+        let previous = DELETE_CONFIG.try_with(|slot| slot.take()).ok().flatten();
+        previous.filter(|_| kind == "remote_cleanup")
     }
-    let _read = super::delete_timing::setup_span("app_config");
-    let bytes = fetch.await?;
-    if kind == "publish_change" {
-        let _ = DELETE_UPLOAD_LIMIT.try_with(|slot| slot.replace(Some(DeleteUploadLimit {
-            login: login.to_owned(), account: account.to_owned(), premium, bytes,
+    fn matches(&self, login: &str, target: &super::telegram_transfer::Target, generation: u64) -> bool {
+        self.login == login && self.target == *target && self.generation == generation
+    }
+    fn save(login: &str, target: &super::telegram_transfer::Target, generation: u64, premium: bool, bytes: u64) {
+        let _ = DELETE_CONFIG.try_with(|slot| slot.replace(Some(Self {
+            login: login.to_owned(), target: target.clone(), generation, premium, bytes,
         })));
     }
-    Ok(bytes)
 }
 
 struct Connection {
+    api_id: i32,
+    generation: u64,
     proxy_url: Option<String>,
     client: Client,
     session: Arc<VaultSession>,
@@ -141,6 +134,7 @@ struct Connection {
     runner: Mutex<Option<JoinHandle<()>>>,
     revoked: AtomicBool,
     stopped: AtomicBool,
+    reader_stop: watch::Sender<bool>,
     updates: tokio::sync::Mutex<
         tokio::sync::mpsc::Receiver<grammers_client::session::updates::UpdatesLike>,
     >,
@@ -156,6 +150,7 @@ impl Connection {
         Ok(Self::start(session, api_id, proxy_url))
     }
     fn start(session: Arc<VaultSession>, api_id: i32, proxy_url: Option<String>) -> Self {
+        static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
         let SenderPool {
             runner,
             handle,
@@ -173,6 +168,8 @@ impl Connection {
         );
         let thin = handle.thin.clone();
         Self {
+            api_id,
+            generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
             proxy_url,
             client: Client::new(handle),
             session,
@@ -180,10 +177,12 @@ impl Connection {
             runner: Mutex::new(Some(tokio::spawn(runner.run()))),
             revoked: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
+            reader_stop: watch::channel(false).0,
             updates: tokio::sync::Mutex::new(updates),
         }
     }
     async fn close(&self) {
+        self.reader_stop.send_replace(true);
         self.stopped.store(true, Ordering::SeqCst);
         self.handle.quit();
         let runner = self
@@ -259,6 +258,7 @@ struct ConnectingPool<'a> { connection: &'a Connection, completed: bool }
 impl Drop for ConnectingPool<'_> {
     fn drop(&mut self) {
         if !self.completed {
+            self.connection.reader_stop.send_replace(true);
             self.connection.stopped.store(true, Ordering::SeqCst);
             self.connection.handle.quit();
             if let Some(runner) = self.connection.runner.lock().expect("telegram runner lock poisoned").as_ref() { runner.abort(); }
@@ -300,7 +300,7 @@ impl super::telegram_qr::Transport for QrConnection<'_> {
     }
     async fn account(&self) -> Result<Account> {
         let user = self.connection.client.get_me().await.map_err(rpc_error)?;
-        save_account(self.connection, &user).await
+        save_account(&self.connection.session, &user).await
     }
     async fn scan_update(&self) -> Result<()> {
         let mut updates = self.connection.updates.lock().await;
@@ -327,6 +327,8 @@ pub struct TelegramSession {
     closed: AtomicBool,
     transfer: Mutex<Option<watch::Sender<bool>>>,
     downloads: Mutex<Option<DownloadAuthorization>>,
+    backup_read: tokio::sync::Mutex<()>,
+    backup_read_stop: watch::Sender<()>,
 }
 impl Default for TelegramSession {
     fn default() -> Self {
@@ -341,6 +343,8 @@ impl Default for TelegramSession {
             closed: AtomicBool::new(false),
             transfer: Mutex::new(None),
             downloads: Mutex::new(None),
+            backup_read: Default::default(),
+            backup_read_stop: watch::channel(()).0,
         }
     }
 }
@@ -476,6 +480,8 @@ impl TelegramSession {
             self.state.try_lock().map_err(|_| anyhow::anyhow!("TELEGRAM_BUSY"))?
         } else {
             // Another backup worker may already be restoring this same session.
+            let wait = super::delete_timing::setup_span("session_lock");
+            let _owners = wait.as_ref().map(|_| self.lock_usage.observe_wait());
             tokio::time::timeout(REQUEST_TIMEOUT, self.state.lock()).await
                 .map_err(|_| anyhow::anyhow!("TELEGRAM_TIMEOUT"))?
         };
@@ -602,7 +608,7 @@ impl TelegramSession {
                     .map_err(sign_in_error)
             })
             .await?;
-            let account = save_account(connection, &user).await?;
+            let account = save_account(&connection.session, &user).await?;
             self.set_view(&cancel, Phase::Ready, Some(account), None);
             Ok(())
         }
@@ -784,8 +790,11 @@ impl TelegramSession {
         use super::{
             telegram_transfer as transfer,
             telegram_transfer_journal::{CoreJournal, Journal},
-            telegram_transport::GrammersTransport,
         };
+        if matches!(kind, "download_media" | "restore_media" | "verify_media") {
+            return self.with_media_reader(core, id, &target, cancel, kind, work).await;
+        }
+        let previous = DeleteConfig::take_for(kind);
         if *cancel.borrow() {
             bail!("TELEGRAM_TRANSFER_CANCELED");
         }
@@ -828,36 +837,30 @@ impl TelegramSession {
             connection,
             stop: stop.clone(),
             completed: false,
+            delete: matches!(kind, "publish_delete" | "remote_cleanup")
+                || DELETE_CONFIG.try_with(|_| ()).is_ok(),
         };
-        let result = async {
-            let user = {
-                let _identity = super::delete_timing::setup_span("account_check");
-                let user = io.run(async { connection.client.get_me().await.map_err(rpc_error) }).await?;
-                let account = save_account(connection, &user).await?;
-                if account.id != target.account_id {
-                    bail!("TELEGRAM_ACCOUNT_MISMATCH");
-                }
-                user
-            };
-            let premium = matches!(&user.raw, tl::enums::User::User(user) if user.premium);
-            let upload_limit = request_upload_limit(kind, id, &target.account_id, premium,
-                super::telegram_transport::fetch_upload_limit(&connection.client, premium, &io));
-            let transport = GrammersTransport::connect(
-                connection.client.clone(),
-                &target,
-                matches!(kind, "publish_change" | "remote_cleanup").then_some(connection.session.as_ref()),
-                upload_limit,
-                &io,
-            )
-            .await?;
+        let result: Result<T> = async {
+            let cached = previous.filter(|v| v.matches(id, &target, connection.generation)
+                && !connection.revoked.load(Ordering::SeqCst)
+                && connection.session.account_id().is_some_and(|account| target.account_id == account.to_string()));
+            let (transport, premium) = prepare_transport(&connection.client, &connection.session, &target, kind, cached, &io).await?;
             super::telegram_spaces::remember_channel_title(core, &target, transport.channel_title())?;
-            work(core, &transport, &io).await
+            let result = work(core, &transport, &io).await?;
+            if kind == "publish_delete" && io.check().is_ok() {
+                use transfer::Transport;
+                DeleteConfig::save(id, &target, connection.generation, premium, transport.max_bytes());
+            }
+            Ok(result)
         }
         .await;
         if let Err(error) = &result {
             if error.to_string() == "TELEGRAM_AUTH_REQUIRED" { self.authorization_failed(id).await; }
             journal.failure(&target.account_id, &error.to_string())?;
-            connection.close().await;
+            // A rejected deletion does not invalidate the shared sender or a concurrent media read.
+            if !registration.delete || reset_after_delete_error(&error.to_string()) {
+                connection.close().await;
+            }
             if error.to_string() != "TELEGRAM_TRANSFER_CANCELED" {
                 self.record_error(&stop, error.to_string());
             }
@@ -865,14 +868,100 @@ impl TelegramSession {
         registration.completed = true;
         result
     }
+    /// Multiplex one media reader on the authenticated sender; only leasing it takes the control lock.
+    async fn with_media_reader<T>(
+        &self,
+        core: &crate::desktop_core::Core,
+        id: &str,
+        target: &super::telegram_transfer::Target,
+        mut cancel: watch::Receiver<bool>,
+        kind: &'static str,
+        work: impl for<'a> FnOnce(
+            &'a crate::desktop_core::Core,
+            &'a super::telegram_transport::GrammersTransport,
+            &'a super::telegram_transfer::Io,
+        ) -> super::provider::ProviderFuture<'a, T>,
+    ) -> Result<T> {
+        use super::telegram_transfer_journal::{CoreJournal, Journal};
+        let mut binding_stop = self.backup_read_stop.subscribe();
+        let mut login_stop = self.operation(id)?;
+        let _slot = tokio::select! { biased;
+            _ = binding_stop.changed() => bail!("TELEGRAM_TRANSFER_CANCELED"),
+            _ = login_stop.wait_for(|v| *v) => bail!("TELEGRAM_TRANSFER_CANCELED"),
+            _ = cancel.wait_for(|v| *v) => bail!("TELEGRAM_TRANSFER_CANCELED"),
+            slot = self.backup_read.lock() => slot,
+        };
+        let (client, session, generation_stop) = {
+            let mut state = tokio::select! { biased;
+                _ = binding_stop.changed() => bail!("TELEGRAM_TRANSFER_CANCELED"),
+                _ = login_stop.wait_for(|v| *v) => bail!("TELEGRAM_TRANSFER_CANCELED"),
+                _ = cancel.wait_for(|v| *v) => bail!("TELEGRAM_TRANSFER_CANCELED"),
+                state = self.state.lock() => state,
+            };
+            let _holder = self.lock_usage.hold("lease_media_reader");
+            let active = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
+            if !std::ptr::eq(self, active.session.as_ref()) {
+                bail!("TELEGRAM_STALE_OPERATION");
+            }
+            let view = self.status();
+            if view.operation_id.as_deref() != Some(id) || !matches!(view.phase, Phase::Ready) {
+                bail!("TELEGRAM_AUTH_REQUIRED");
+            }
+            if view.account.as_ref().map(|account| account.id.as_str()) != Some(&target.account_id) {
+                bail!("TELEGRAM_ACCOUNT_MISMATCH");
+            }
+            let connection = state.connection.as_mut().context("TELEGRAM_NOT_CONNECTED")?;
+            connection.reconnect_if_stopped(connection.api_id, self.proxy_url()?).await;
+            if connection.revoked.load(Ordering::SeqCst) || connection.session.revoked() {
+                bail!("TELEGRAM_AUTH_REQUIRED");
+            }
+            (connection.client.clone(), connection.session.clone(), connection.reader_stop.subscribe())
+        };
+        target.validate()?;
+        let journal = CoreJournal(core);
+        let wait = journal.cooldown(&target.account_id)?.saturating_sub(super::telegram_transfer::now());
+        if wait > 0 {
+            bail!("TELEGRAM_FLOOD_WAIT:{wait}");
+        }
+
+        let io = super::telegram_transfer::Io::new(cancel, generation_stop, None);
+        let read = async {
+            let (transport, _) = prepare_transport(&client, &session, target, kind, None, &io).await?;
+            super::telegram_spaces::remember_channel_title(core, target, transport.channel_title())?;
+            work(core, &transport, &io).await
+        };
+        let result = tokio::select! { biased;
+            _ = binding_stop.changed() => Err(anyhow::anyhow!("TELEGRAM_TRANSFER_CANCELED")),
+            _ = login_stop.wait_for(|v| *v) => Err(anyhow::anyhow!("TELEGRAM_TRANSFER_CANCELED")),
+            result = read => result,
+        };
+        if let Err(error) = &result {
+            let message = error.to_string();
+            if message == "TELEGRAM_AUTH_REQUIRED" {
+                self.authorization_failed(id).await;
+            }
+            journal.failure(&target.account_id, &message)?;
+            if message != "TELEGRAM_TRANSFER_CANCELED" {
+                self.record_error(&login_stop, message);
+            }
+        }
+        result
+    }
+    pub(crate) fn invalidate_backup_reads(&self) {
+        self.backup_read_stop.send_replace(());
+    }
+
     /// Stop only backup I/O. Shared download authorization and its sender pools remain valid.
     pub(crate) async fn cancel_backup_transfer(&self) {
+        self.invalidate_backup_reads();
         let transfer = self.transfer.lock().expect("telegram transfer lock poisoned").clone();
         if let Some(cancel) = transfer {
             cancel.send_replace(true);
             let _state = self.state.lock().await; // The transfer owns the lock until request/pool cleanup.
             let _holder = self.lock_usage.hold("cancel_transfer");
         }
+        // Only backup reads occupy this slot. User download pools on a shared account keep running.
+        let _drained = self.backup_read.lock().await;
     }
     /// Signal first so an in-flight network request cannot hold cancellation behind the state lock.
     pub async fn cancel(&self, id: &str) -> Result<View> {
@@ -984,6 +1073,7 @@ impl TelegramSession {
         self.close_downloads().await;
     }
     async fn close_downloads(&self) {
+        self.invalidate_backup_reads();
         let downloads = self.downloads.lock().expect("telegram downloads lock poisoned").take();
         if let Some(downloads) = downloads {
             downloads.cancel.send_replace(true);
@@ -1019,11 +1109,16 @@ impl DownloadConnection {
     pub(crate) fn cancellation(&self) -> watch::Receiver<bool> { self.cancel.clone() }
     pub(crate) async fn close(self) { self.connection.close().await; }
 }
+fn reset_after_delete_error(code: &str) -> bool {
+    matches!(code, "TELEGRAM_CONNECTION_ERROR" | "TELEGRAM_AUTH_REQUIRED")
+}
+
 struct TransferRegistration<'a> {
     session: &'a TelegramSession,
     connection: &'a Connection,
     stop: watch::Receiver<bool>,
     completed: bool,
+    delete: bool,
 }
 impl Drop for TransferRegistration<'_> {
     fn drop(&mut self) {
@@ -1032,9 +1127,10 @@ impl Drop for TransferRegistration<'_> {
             .lock()
             .expect("telegram transfer lock poisoned")
             .take();
-        if !self.completed {
+        if !self.completed && !self.delete {
             // A caller can abandon a future. Stop its actual sender and retain the join handle for shutdown.
             self.connection.handle.quit();
+            self.connection.reader_stop.send_replace(true);
             self.connection.stopped.store(true, Ordering::SeqCst);
             if let Some(runner) = self
                 .connection
@@ -1055,19 +1151,62 @@ impl Drop for TransferRegistration<'_> {
     }
 }
 
+async fn prepare_transport(
+    client: &Client,
+    session: &VaultSession,
+    target: &super::telegram_transfer::Target,
+    kind: &str,
+    cached: Option<DeleteConfig>,
+    io: &super::telegram_transfer::Io,
+) -> Result<(super::telegram_transport::GrammersTransport, bool)> {
+    use super::telegram_transport::GrammersTransport;
+    let premium = if let Some(config) = &cached {
+        drop(super::delete_timing::setup_span("account_check_reuse"));
+        config.premium
+    } else {
+        let _identity = super::delete_timing::setup_span("account_check");
+        let user = io.run(async { client.get_me().await.map_err(rpc_error) }).await?;
+        let account = save_account(session, &user).await?;
+        if account.id != target.account_id {
+            bail!("TELEGRAM_ACCOUNT_MISMATCH");
+        }
+        matches!(&user.raw, tl::enums::User::User(user) if user.premium)
+    };
+    let upload_limit = async {
+        if let Some(config) = &cached {
+            drop(super::delete_timing::setup_span("app_config_reuse"));
+            return Ok(config.bytes);
+        }
+        let _read = super::delete_timing::setup_span("app_config");
+        super::telegram_transport::fetch_upload_limit(client, premium, io).await
+    };
+    let transport = GrammersTransport::connect(
+        client.clone(),
+        target,
+        matches!(kind, "publish_change" | "publish_delete" | "remote_cleanup")
+            .then_some(session),
+        kind,
+        upload_limit,
+        io,
+    )
+    .await?;
+    Ok((transport, premium))
+}
+
 async fn checked_account(
     connection: &Connection,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<Account> {
+    let _identity = super::delete_timing::setup_span("account_check");
     let user: User = bounded(cancel, async {
         connection.client.get_me().await.map_err(rpc_error)
     })
     .await?;
-    save_account(connection, &user).await
+    save_account(&connection.session, &user).await
 }
-async fn save_account(connection: &Connection, user: &User) -> Result<Account> {
+async fn save_account(session: &VaultSession, user: &User) -> Result<Account> {
     use grammers_client::session::{types::PeerInfo, Session};
-    let account = account(connection, user)?;
+    let account = account(session, user)?;
     let peer = PeerInfo::from(&user.raw);
     if !matches!(
         &peer,
@@ -1080,12 +1219,12 @@ async fn save_account(connection: &Connection, user: &User) -> Result<Account> {
     }
     // Raw QR RPCs bypass Client::complete_login; get_me itself does not cache the self peer.
     // Persist the stable identity before publishing Ready, including during session recovery.
-    connection.session.cache_peer(peer).await?;
+    session.cache_peer(peer).await?;
     Ok(account)
 }
-fn account(connection: &Connection, user: &User) -> Result<Account> {
+fn account(session: &VaultSession, user: &User) -> Result<Account> {
     let id = user.id().bare_id_unchecked();
-    if user.is_bot() || connection.session.account_id().is_some_and(|old| old != id) {
+    if user.is_bot() || session.account_id().is_some_and(|old| old != id) {
         bail!("TELEGRAM_ACCOUNT_MISMATCH");
     }
     Ok(Account {
@@ -1123,6 +1262,7 @@ pub(crate) fn rpc_error(error: InvocationError) -> anyhow::Error {
                 "PASSWORD_HASH_INVALID" => "TELEGRAM_INVALID_PASSWORD",
                 "API_ID_INVALID" => "TELEGRAM_APP_INVALID",
                 "AUTH_KEY_UNREGISTERED"
+                | "AUTH_KEY_DUPLICATED"
                 | "SESSION_REVOKED"
                 | "SESSION_EXPIRED"
                 | "USER_DEACTIVATED" => "TELEGRAM_AUTH_REQUIRED",
@@ -1295,6 +1435,77 @@ mod tests {
         session.shutdown().await;
     }
     #[tokio::test]
+    async fn backup_reads_multiplex_the_owned_sender_and_switch_drains_only_readers() {
+        use super::super::{provider::{ProviderType, Scope}, telegram_transfer::Target};
+        use crate::{desktop_core::Core, telegram_accounts::Purpose};
+
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::open(&root.path().join("qa.sqlite"), root.path().join("downloads"),
+            "unused-engine".into(), vec![], |_| {}).unwrap();
+        // Stall a real SDK request at a local SOCKS server. No Telegram network or login is used.
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        core.telegram_accounts.configure_proxy(Some(serde_json::from_value(serde_json::json!({
+            "platform":"telegram", "user_agent":"test", "proxy":format!("socks5://{}",proxy.local_addr().unwrap()),
+            "cookie_configured":false, "cookie":"", "credential_ref":null
+        })).unwrap()));
+        let session = core.telegram_accounts.binding(Purpose::Backup).session;
+        let keys = VaultSession::load("offline-media-read".into(), Arc::new(DownloadVault)).await.unwrap();
+        *session.downloads.lock().unwrap() = Some(DownloadAuthorization {
+            session: keys.clone(), cancel: watch::channel(false).0, connections: vec![],
+        });
+        session.state.lock().await.connection = Some(Connection::start(keys, 12, session.proxy_url().unwrap()));
+        session.set_test_view(Phase::Ready, "123");
+        let login = session.status().operation_id.unwrap();
+        let target = Target {
+            scope: Scope { space_id:"space".into(), library_id:"library".into(), provider_type:ProviderType::Telegram, protocol:2 },
+            account_id:"123".into(), channel_id:"456".into(),
+        };
+        let (_cancel, rx) = watch::channel(false);
+        let independent = session.register_download(12).unwrap();
+        let run = |kind| session.with_transport(&core, &login, target.clone(), rx.clone(), (kind, None),
+            |_, _, _| Box::pin(async { Err::<(), _>(anyhow::anyhow!("unexpected transport")) }));
+        let active = run("download_media");
+        tokio::pin!(active);
+        let socket = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! { result = &mut active => panic!("read ended before proxy handshake: {result:?}"), accepted = proxy.accept() => accepted.unwrap().0 }
+        }).await.unwrap();
+        let control = session.state.try_lock().expect("control must be free during media I/O");
+        let waiting = run("restore_media");
+        tokio::pin!(waiting);
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut waiting).await.is_err());
+        assert_eq!(session.downloads.lock().unwrap().as_ref().unwrap().connections.len(), 1,
+                   "only the unrelated user download owns a separate pool");
+        let ((), first, second) = tokio::join!(session.cancel_backup_transfer(), active, waiting);
+        drop(socket);
+        for result in [first, second] {
+            assert_eq!(result.unwrap_err().to_string(), "TELEGRAM_TRANSFER_CANCELED");
+        }
+        assert!(!*independent.cancellation().borrow());
+        assert!(!independent.connection.stopped.load(Ordering::SeqCst));
+        assert!(!control.connection.as_ref().unwrap().stopped.load(Ordering::SeqCst),
+                "canceling backup reads must not stop the shared sender");
+        drop(control);
+        independent.close().await;
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn delete_business_error_and_abandoned_delete_keep_the_sender_for_readers() {
+        let keys = VaultSession::load("offline-delete-abandon".into(), Arc::new(DownloadVault)).await.unwrap();
+        let connection = Connection::start(keys, 12, None);
+        let session = TelegramSession::default();
+        let stop = session.start_operation().unwrap();
+        let reader = connection.reader_stop.subscribe();
+        for error in ["TELEGRAM_MEDIA_CHANGED", "BACKUP_TOMBSTONE_REQUIRED", "TELEGRAM_TRANSFER_CANCELED", "TELEGRAM_TRANSFER_TIMEOUT"] {
+            assert!(!reset_after_delete_error(error));
+        }
+        drop(TransferRegistration { session:&session, connection:&connection, stop, completed:false, delete:true });
+        assert!(!*reader.borrow() && !connection.stopped.load(Ordering::SeqCst));
+        assert!(reset_after_delete_error("TELEGRAM_CONNECTION_ERROR"));
+        connection.close().await;
+        assert!(*reader.borrow());
+    }
+    #[tokio::test]
     async fn abandoned_login_restore_stops_its_pool_before_reconnect() {
         let keys = VaultSession::load("offline-connect-cancel".into(), Arc::new(DownloadVault)).await.unwrap();
         let mut connection = Connection::start(keys, 12, None);
@@ -1442,10 +1653,13 @@ mod tests {
             connection: &connection,
             stop,
             completed: false,
+            delete: false,
         });
         assert!(connection.stopped.load(Ordering::SeqCst));
         // This is the exact reconnect path used by logout, without issuing a real sign-out RPC.
+        let previous_generation = connection.generation;
         connection.reconnect_if_stopped(12, None).await;
+        assert_ne!(connection.generation, previous_generation);
         assert!(old_runner.is_finished());
         assert!(!connection.stopped.load(Ordering::SeqCst));
         assert!(Arc::ptr_eq(&connection.session, &keys));
@@ -1460,28 +1674,47 @@ mod tests {
         assert!(connection.runner.lock().unwrap().is_none());
     }
     #[tokio::test]
-    async fn delete_config_reuses_a_successful_fetch_only_within_the_same_delete_and_login() {
-        async fn get(kind: &str, login: &str, account: &str, premium: bool) -> Result<u64> {
-            request_upload_limit(kind, login, account, premium, async {
-                if kind == "publish_change" { Ok(123) } else { bail!("fetch required") }
-            }).await
-        }
-        for (login, account, premium, reused) in [
-            ("login", "a", false, true), ("other", "a", false, false),
-            ("login", "b", false, false), ("login", "a", true, false),
-        ] {
-            with_delete_config(async {
-                get("publish_change", "login", "a", false).await.unwrap();
-                assert_eq!(get("remote_cleanup", login, account, premium).await.ok(), reused.then_some(123));
-                assert!(get("remote_cleanup", login, account, premium).await.is_err());
-            }).await;
-        }
-        with_delete_config(get("publish_change", "login", "a", false)).await.unwrap();
-        assert!(with_delete_config(get("remote_cleanup", "login", "a", false)).await.is_err());
+    async fn delete_config_only_matches_one_cleanup_for_the_same_login_target_and_connection() {
+        use super::super::{provider::{ProviderType, Scope}, telegram_transfer::Target};
+        let target = Target {
+            scope: Scope { space_id: "space".into(), library_id: "library".into(), provider_type: ProviderType::Telegram, protocol: 2 },
+            account_id: "100".into(), channel_id: "200".into(),
+        };
+        let publish = || DeleteConfig::save("login", &target, 1, true, 123);
         with_delete_config(async {
-            assert!(request_upload_limit("publish_change", "login", "a", false, async { bail!("offline") }).await.is_err());
-            assert!(get("remote_cleanup", "login", "a", false).await.is_err());
+            publish();
+            let evidence = DeleteConfig::take_for("remote_cleanup").unwrap();
+            assert!(evidence.matches("login", &target, 1));
+            assert!(evidence.premium);
+            assert_eq!(evidence.bytes, 123);
+            assert!(!evidence.matches("next-login", &target, 1));
+            assert!(!evidence.matches("login", &target, 2));
+            for field in ["account", "channel", "space", "library"] {
+                let mut other = target.clone();
+                match field {
+                    "account" => other.account_id.push('1'),
+                    "channel" => other.channel_id.push('1'),
+                    "space" => other.scope.space_id.push('1'),
+                    _ => other.scope.library_id.push('1'),
+                }
+                assert!(!evidence.matches("login", &other, 1));
+            }
+            assert!(DeleteConfig::take_for("remote_cleanup").is_none());
+            publish();
+            assert!(DeleteConfig::take_for("publish_change").is_none());
+            // A failed replacement publication cannot leave older successful evidence behind.
+            assert!(DeleteConfig::take_for("remote_cleanup").is_none());
         }).await;
+        // Drop an in-flight deletion after publication. The next attempt gets a new scope.
+        {
+            let pending = with_delete_config(async {
+                publish();
+                std::future::pending::<()>().await;
+            });
+            tokio::pin!(pending);
+            tokio::select! { biased; _ = &mut pending => unreachable!(), _ = std::future::ready(()) => {} }
+        }
+        with_delete_config(async {assert!(DeleteConfig::take_for("remote_cleanup").is_none());}).await;
     }
 
     #[test]

@@ -81,7 +81,8 @@ pub(super) async fn reconcile_deleted_messages(
             bail!("BACKUP_MEDIA_IN_USE");
         }
         if known.is_none() {
-            verify(transport, target, &reference, io).await?;
+            let timing = super::delete_timing::setup_span("unknown_media_verify");
+            verify_body(transport, target, &reference, io, timing).await?;
         }
         groups
             .entry(document.message_id)
@@ -194,6 +195,13 @@ pub(super) async fn verify(
     reference: &MediaRef,
     io: &Io,
 ) -> Result<()> {
+    verify_body(transport, target, reference, io, None).await
+}
+
+async fn verify_body(
+    transport: &impl Transport, target: &Target, reference: &MediaRef, io: &Io,
+    mut timing: Option<super::delete_timing::StepSpan>,
+) -> Result<()> {
     for attempt in 0..2 {
         let result = async {
             let document = io
@@ -211,6 +219,7 @@ pub(super) async fn verify(
                 if count == 0 {
                     break;
                 }
+                if let Some(span) = &mut timing { span.add_bytes(count); }
                 bytes += count as u64;
                 if bytes > reference.bytes {
                     bail!("BACKUP_CHECKSUM_MISMATCH");

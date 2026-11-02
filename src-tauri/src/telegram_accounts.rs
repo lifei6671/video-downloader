@@ -190,6 +190,10 @@ impl TelegramAccounts {
                     }
                     match Self::save(core, purpose, binding) {
                         Ok(()) => {
+                            // A media read may have entered after stop_current drained the old binding.
+                            if matches!(purpose, Purpose::Backup) {
+                                choices.active[purpose.index()].session.invalidate_backup_reads();
+                            }
                             let old = std::mem::replace(
                                 &mut choices.active[purpose.index()],
                                 binding.clone(),

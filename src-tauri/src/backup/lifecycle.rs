@@ -54,10 +54,7 @@ pub(crate) async fn remove_local_checked(
 }
 
 async fn cleanup_restore_files(core: &Core, id: &str) -> Result<()> {
-    let operations = scheduler::operations(core)?.into_iter().filter(|o| {
-        o.asset_id.as_deref() == Some(id) && o.kind == "restore" && o.state != "completed"
-    });
-    for op in operations {
+    for op in scheduler::unfinished_restores(core, id)? {
         let Some(raw) = op.payload["part"].as_str() else {
             continue;
         };
@@ -116,7 +113,7 @@ pub async fn delete_task(core: &Arc<Core>, task_id: &str) -> Result<()> {
         if let Some(current) = super::spaces::get(core)? {
             let member:bool=core.backup_db(|db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2)",params![current.space_id,id],|r|r.get(0))?))?;
             if current.enabled && member {
-                return super::sync_delete::delete(core, &current.space_id, id).await;
+                return super::sync_delete::delete(core, &current.space_id, id).await.map(|_| ());
             } else {
                 stop_readers(core, id).await?;
                 let _writer = core.backup_write_lock.lock().await;

@@ -460,7 +460,30 @@ pub(super) async fn upload(
     source: MediaSource,
     io: &Io,
 ) -> Result<UploadReceipt> {
-    upload_with_timing(transport, journal, target, source, io, Default::default()).await
+    upload_with_timing(transport, journal, target, source, io, Default::default(), ReceiptCheck::ReadBack).await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReceiptCheck {
+    ReadBack,
+    FreshDeleteArchive,
+}
+
+async fn read_receipt(
+    transport: &impl Transport,
+    io: &Io,
+    id: i32,
+    envelope: &Envelope,
+) -> Result<RemoteDocument> {
+    let document = io.run(async {
+        let _read = super::delete_timing::setup_span("receipt_by_id");
+        transport.inspect_envelope(id, envelope).await
+    }).await?;
+    if document.message_id != id {
+        bail!("TELEGRAM_MEDIA_CHANGED");
+    }
+    document.check(envelope)?;
+    Ok(document)
 }
 
 pub(super) async fn upload_with_timing(
@@ -470,6 +493,7 @@ pub(super) async fn upload_with_timing(
     source: MediaSource,
     io: &Io,
     timing: super::delete_timing::IndexTiming<'_>,
+    check: ReceiptCheck,
 ) -> Result<UploadReceipt> {
     allowed(journal, target)?;
     io.check()?;
@@ -488,20 +512,9 @@ pub(super) async fn upload_with_timing(
     let result = async {
         if entry.state == SendState::Confirmed {
             let document = timing.run("receipt", async {
-                let document = io
-                    .run(
-                        transport.inspect_envelope(
-                            entry
-                                .document
-                                .as_ref()
-                                .context("TELEGRAM_SEND_EVIDENCE_INVALID")?
-                                .message_id,
-                            &entry.envelope,
-                        ),
-                    )
-                    .await?;
-                document.check(&entry.envelope)?;
-                if Some(&document) != entry.document.as_ref() {
+                let expected = entry.document.as_ref().context("TELEGRAM_SEND_EVIDENCE_INVALID")?;
+                let document = read_receipt(transport, io, expected.message_id, &entry.envelope).await?;
+                if &document != expected {
                     bail!("TELEGRAM_MEDIA_CHANGED");
                 }
                 Ok(document)
@@ -575,15 +588,21 @@ pub(super) async fn upload_with_timing(
         // Sending also covers a response lost before a crash/cancel. Never retransmit without evidence.
         let document = timing.run("receipt", async {
             let document = if let Some(id) = sent_message {
-                io.run(transport.inspect_envelope(id,&entry.envelope)).await?
+                let document = read_receipt(transport, io, id, &entry.envelope).await?;
+                // Direct deletion separately reads the archive body and replays it before cleanup.
+                if check == ReceiptCheck::FreshDeleteArchive && entry.envelope.kind == "library" {
+                    return Ok(document);
+                }
+                document
             } else {
-                io.run(transport.find(&entry.envelope, io))
-                    .await?
-                    .context("TELEGRAM_SEND_UNCONFIRMED")?
+                let document = io.run(async {
+                    let _find = super::delete_timing::setup_span("receipt_find");
+                    transport.find(&entry.envelope, io).await
+                }).await?.context("TELEGRAM_SEND_UNCONFIRMED")?;
+                document.check(&entry.envelope)?;
+                document
             };
-            document.check(&entry.envelope)?;
-            let readback = io.run(transport.inspect_envelope(document.message_id,&entry.envelope)).await?;
-            readback.check(&entry.envelope)?;
+            let readback = read_receipt(transport, io, document.message_id, &entry.envelope).await?;
             if readback != document {
                 bail!("TELEGRAM_MEDIA_CHANGED");
             }

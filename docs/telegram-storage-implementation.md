@@ -173,7 +173,9 @@ Windows 真实扫码、冷启动恢复、三类附件传输和 T3 重建/懒恢�
 
 ## 删除批处理与耗时记录
 
-本机按备份空间、账号、频道和库保存消息映射。映射包含素材、库索引和删除记录的消息 ID、附件身份，以及已验证的索引正文。归档前、归档确认和清理后均检查 Telegram 的频道更新位置 `pts`。收到完整增量且频道位置前进时，将发送回执（`updateMessageID`）里的正式消息 ID 与新增、编辑和删除的消息 ID 合并去重，按 ID 分批回读，并在同一 SQLite 事务内更新对应条目和位置。普通删除无需翻页读取频道历史。新设备、升级后首次建立映射、变更记录不完整时完整扫描。全量扫描以远端消息清单为准。仅当备份目标、消息 ID、附件 ID、大小和完整 caption 均匹配，且本地正文的长度与 SHA-256 通过核验，才复用正文；其余索引从 Telegram 读取。同次删除的发布刷新若实际下载并校验了新归档，清理前按 ID 向 Telegram 核对同一消息与附件，再重放已回读的正文。重试、后台复查或只有本地映射时重新下载归档。遇到远端身份或归档确认不一致时，删除操作可丢弃该空间的映射，从已持久化阶段重建核对一次。权限和网络错误沿原任务传播。
+2026-11-02 的基线、RPC 对照、回归结果与测量口径见[删除性能验证](telegram-delete-performance-validation.md)。
+
+本机按备份空间、账号、频道和库保存消息映射。映射包含素材、库索引和删除记录的消息 ID、附件身份，以及已验证的索引正文。归档前、归档确认和清理后均检查 Telegram 的频道更新位置 `pts`。收到完整增量且频道位置前进时，将发送回执（`updateMessageID`）里的正式消息 ID 与新增、编辑和删除的消息 ID 合并去重，按 ID 分批回读，并在同一 SQLite 事务内更新对应条目和位置。`getChannelDifference` 每次请求 100 条。收到非末页时沿临时 `pts` 续页，最多 16 页、累计 1600 个不同消息 ID。只有收齐末页并校验按 ID 回读的索引正文后才提交映射；断网或取消保留原位置，位置无效、非末页无进展、频道不符、未知更新、TooLong 或超限走全量重建。新设备、升级后首次建立映射、变更记录不完整时完整扫描。全量扫描以远端消息清单为准。仅当备份目标、消息 ID、附件 ID、大小和完整 caption 均匹配，且本地正文的长度与 SHA-256 通过核验，才复用正文；其余索引从 Telegram 读取。同次删除的发布刷新若实际下载并校验了新归档，清理前按 ID 向 Telegram 核对同一消息与附件，再重放已回读的正文。重试、后台复查或只有本地映射时重新下载归档。遇到远端身份或归档确认不一致时，删除操作可丢弃该空间的映射，从已持久化阶段重建核对一次。权限和网络错误沿原任务传播。
 
 
 归档原始事件并确认后，按物理消息 ID 合并该资产的视频、封面、文案与已归档事件。批处理前校验同库删除修订、引用和代次，未知旧引用仍完整回读校验；执行时重新读取每条消息，要求全部附件的文档 ID、大小和 caption 与计划完全相同，才一次删除整条消息并回读确认。包含未知附件或新代次时停止，不退化为盲删。最后刷新频道变更并确认删除修订不变，之后才清理本机文件和隐藏原卡片。失败沿原操作重试；已消失的消息幂等处理，已完成删除不因启动而重新排队。
@@ -182,7 +184,14 @@ Windows 真实扫码、冷启动恢复、三类附件传输和 T3 重建/懒恢�
 
 Telegram 删除的明细使用 `publish_` 和 `archive_` 前缀，均保存在发起删除的操作下。`upload` 记录上传索引文件，`send` 记录发布对应消息，`receipt` 记录按 ID 回查或对账并核对附件。发布前定位用 `publish_locate`，发布后的索引回读和重放用 `publish_refresh`。直写归档的上传、发送及首次重放计入 `publish_` 各步骤；清理复用该归档。需要另行归并旧格式时的映射刷新用 `archive_refresh`，确认归档用 `archive_confirm`，复用发布回读时在远端清理明细中记 `archive_identity_check`，重新下载时记 `archive_body_download`，清理全部被取代的旧库索引用 `archive_delete_old`。各子项包含在父阶段总耗时内。只记录实际执行的步骤，按 attempt 和时间区分最近一次执行与之前的重试。
 
-发布和归档后的两次刷新各自把分解写入父计时的 `details` 字段。`steps.channel_changes` 记录等待 Telegram 返回频道变更，`steps.by_id` 记录按 ID 分批回读消息（含补读富消息和解析），`steps.index_download` 仅在索引正文缓存未命中时累计下载、校验及文件引用重试。每项含累计毫秒数和调用次数，未执行的项省略。`full_scan` 表示本次是否选择全量扫描，原因区分缺少映射和增量不可用；`steps.history` 单独计量读取起点和遍历历史，不含索引正文下载。`reused_index_bodies` 记录全量扫描复用的本地正文数。增量不可用时，`difference_reason` 区分返回不完整、位置过期或异常、删除更新频道不符，以及无法处理的更新类型（只记录 Telegram 构造器名或错误名）。发布和远端清理父阶段各自的 `details.steps` 另记会话就绪、等待会话锁、检查重连、账号核对、频道定位、频道可读性探测及上传限制配置请求的耗时和次数。`details.session_lock_holders_ms` 按请求类型记录与等待区间重叠的持锁毫秒数。发布与远端清理优先用当前账号会话的频道引用按 ID 获取最新频道资料、核对私有状态和权限；缺少可用引用时才遍历会话列表。`channel_by_id` 和 `channel_dialogs` 是 `channel_lookup` 的子计时。父耗时还包含本地数据库及其余处理。同一次删除的清理阶段可以复用发布阶段从 Telegram 取得的上传限制，命中记为 `app_config_reuse`。会话、账号或 Premium 状态变化，以及单独恢复清理时，重新请求配置。独立旧库索引按 ID 读取一次，使用同一条消息识别类型和核对附件；删除后再次按 ID 确认消失。资产和事件消息的 `remove_messages.details.steps` 分别记录删除前回读核对（`read_owned_message`）、删除请求（`delete_message`）和确认消失（`confirm_message_gone`）的累计耗时和批次数。一次视频删除先按物理消息 ID 分组，每批至多 100 个 ID；确认所有仍存在的消息都与预期附件完全匹配后，再批量删除并按 ID 确认全部消失。回读时已消失的消息直接跳过，残留或未确认时保留前台任务重试。
+定位、发布后刷新、清理前定位、恢复时读取资产和最后复查分别记录自己的索引请求。`details.steps.channel_changes` 是差异 RPC 的次数与累计耗时，包含失败的调用；`difference_pages` 是返回的页数，`difference_changed_ids` 是跨页去重 ID 数。`by_id` 按最多 100 个 ID 一批，含富消息补读；`index_download` 计下载和验证。全量重建记 `full_scan_calls`、`full_scan_reason`、`difference_fallback_reason`、`steps.history`、`history_messages` 和 `reused_index_bodies`。
+
+清理以实际增量或全量读取验证频道可读性。发布与清理均实时按 ID 核对频道私有状态及权限，引用失效时遍历会话。`channel_by_id`、`channel_dialogs` 是 `channel_lookup` 的子项。仅当本次发布成功、登录操作、账号、频道、备份空间与连接代际相同，紧随其后的清理可复用账户核对与上传限制，记为 `account_check_reuse` 和 `app_config_reuse`。重连、异常重试和独立恢复清理走完整验证。`session_lock_holders_ms` 记录与等待重叠的持锁请求类型和时间。
+
+新发送的直写删除归档若已返回确定消息 ID，回执阶段按 ID 核对一次完整信封及附件身份，随后仍回读索引并重放确认墓碑。发送结果未知时沿原 journal 对账并核对回读，Confirmed 恢复时对照已保存的回执。回执明细为 `receipt_by_id` 与 `receipt_find`。发送结果未知而需要遍历历史对账时，在回执阶段另记 `receipt_reconciliation`、扫描次数、耗时和消息数。旧索引清理分别记读取、删除和消失确认。资产清理的 `remove_messages.details.steps` 记录 `read_owned_message`、`delete_message`、`confirm_message_gone` 的批次数与耗时。未登记引用的完整 SHA-256 校验计入 `unknown_media_verify`，`unknown_media_verify_bytes` 是实际读出的字节数，包含失败和文件引用续期前已读取的字节。
+
+`elapsed_ms` 保留最近一次调用口径，`calls` 和 `total_elapsed_ms` 累计同一 attempt 的同名阶段。前台与后台分开。完成的网络步骤在父阶段运行期间即持久化，进程突然退出可能留下 `running`。首次队列等待见 `initial_queue_ms`，入队到本机清理完成为它与 `foreground_elapsed_ms` 之和。父子计时有重叠，不可直接相加；批量删除的共享 RPC 只归属执行清理的任务。
+
 
 Telegram 视频尺寸/时长探测和无远端封面时的抽帧均由 Rust 直接执行 FFprobe/FFmpeg，沿用本机工具安装与取消回收规则；这些传输辅助操作不启动 Python。原视频和封面字节、上传媒体属性、预览缩略图与备份恢复协议保持不变。
 
@@ -290,3 +299,5 @@ T1 验证当时，隔离 SQLite 中 `backup_spaces` 与 `backup_operations` 均�
 从频道发现库并重放后出现 1 项资料，视频路径为空且没有恢复任务。文案与 PNG 从远端读取，视频仍未下载；随后显式调用现有按需恢复入口，20,498,841 B MP4 的 SHA-256 与源文件一致，再次调用直接复用同一路径。完整恢复阶段用时 56.06 秒。本机原件、恢复文件和频道测试消息均保留，两个独立验证授权未撤销。
 
 脱敏证据：`.local/telegram-t3-{full-tests,unit-final,clippy-final,frontend-build,auth-browser,space-browser,s3-browser}.log`；各进程阶段日志、就绪标记与不含账号/频道 ID 的恢复报告位于 `.local/telegram-t3-validation/`。真实 API 配置、会话密钥和登录二维码不进入这些日志。上述 T3 阶段未进行在线限流/过期注入、Premium 或 2/4 GB 边界、大规模历史性能、删除、跨平台和安装包验收；后续 T4 证据单独记录。
+
+本轮双端删除增量见[桌面删除性能验收](telegram-delete-performance-validation.md#本轮验收)。备份长媒体读取使用同一登录的 SDK sender，在释放控制锁后传输。前台删除按本地资产隔离文件清理，并将可淘汰的旧索引和原媒体合批核对、删除和确认。采样中的旧版本请求数和持久化频率按各自版本解读。

@@ -71,10 +71,27 @@ export function useBackupTasks() {
     finally { if (live.current) setRefreshing(false); }
   }, [settings, reload]);
   useEffect(() => {
-    let running = false;
-    const tick = async () => { if (running) return; running = true; try { await reload(); pollError.current = ''; } catch (e) { const message = errorText(e); if (live.current && pollError.current !== message) { pollError.current = message; toast.error(message, { id: 'backup-error' }); } } finally { running = false; } };
-    void tick(); const timer = setInterval(() => void tick(), 1000); return () => clearInterval(timer);
-  }, [reload, refresh]);
+    if (!settings) return;
+    let running = false, refreshAfterRead = false, disposed = false;
+    const tick = async () => {
+      if (running || disposed) return;
+      running = true;
+      try { await reload(); pollError.current = ''; }
+      catch (e) { const message = errorText(e); if (live.current && pollError.current !== message) { pollError.current = message; toast.error(message, { id: 'backup-error' }); } }
+      finally {
+        running = false;
+        if (refreshAfterRead) { refreshAfterRead = false; void tick(); }
+      }
+    };
+    // A read already in progress may predate the committed deletion.
+    const stop = api.onBackupAssetDeleted(() => {
+      if (running) refreshAfterRead = true;
+      else void tick();
+    }).catch(() => undefined);
+    void tick();
+    const timer = setInterval(() => void tick(), 1000);
+    return () => { disposed = true; clearInterval(timer); void stop.then(off => off?.()); };
+  }, [settings, reload]);
   async function run(action: () => Promise<unknown>, message?: string) {
     try { await action(); await reload(); if (live.current && message) toast.success(message); }
     catch (e) { if (live.current && e !== 'CANCELED') toast.error(errorText(e), { id: 'backup-error' }); }

@@ -21,6 +21,7 @@ async page => {
           listeners.get('backup_delete_activity')?.({event:'backup_delete_activity',id:2,payload:value});
         };
         window.emitRemoved=()=>listeners.get('task_removed')?.({event:'task_removed',id:1,payload:'task'});
+        window.emitBackupDeleted=()=>listeners.get('backup_asset_deleted')?.({event:'backup_asset_deleted',id:3,payload:'delete-operation'});
         window.__TAURI_INTERNALS__={convertFileSrc:x=>x,transformCallback:callback=>{callbacks.set(++next,callback);return next;},unregisterCallback(){},invoke:async(command,args)=>{
           window.calls.push({command,args});
           if(command==='plugin:event|listen'){listeners.set(args.event,callbacks.get(args.handler));return next;}
@@ -37,7 +38,7 @@ async page => {
           if(command==='delete_asset_and_backup'){
             if(window.pauseDelete){await new Promise(resolve=>window.releaseDelete=resolve);window.pauseDelete=false;}
             window.operation??={operation_id:'delete-operation',space_id:'space',asset_id:'asset',kind:'delete',state:'pending',phase:'tombstone',payload:{},attempt:0,last_error:null};
-            window.operation.state='pending';window.operation.last_error=null;window.asset.remote_state='pending_delete';return;
+            window.operation.state='pending';window.operation.last_error=null;window.asset.remote_state='pending_delete';return window.operation.operation_id;
           }
           return null;
         }};
@@ -127,7 +128,12 @@ async page => {
         if(!taskBacked) {
           await row.getByText('删除完成',{exact:true}).first().waitFor();await sameRow();
           check(await row.getByText('远端待删除',{exact:true}).count()===0,'mixed task/asset polls revert a completed deletion to pending');
-          await p.evaluate(()=>window.assetHidden=true);
+          await p.evaluate(()=>{
+            window.assetHidden=true;
+            const before=window.calls.filter(call=>call.command==='list_backup_assets').length;
+            window.emitBackupDeleted();
+            if(window.calls.filter(call=>call.command==='list_backup_assets').length===before)throw Error('post-commit event did not refresh visible assets');
+          });
         }
         await p.locator('.task-list > [role=listitem]').waitFor({state:'hidden'});
         check(await p.locator('[data-asset-id="asset"]').count()===0,'a stale backup poll recreates the deleted task');

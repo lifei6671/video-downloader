@@ -164,6 +164,7 @@ pub struct DeleteActivity {
 
 pub enum TaskEvent {
     DeleteActivity(Option<DeleteActivity>),
+    BackupAssetDeleted(String),
     Updated(Box<Task>),
     Removed(String),
     Transcription(Box<transcription::Snapshot>),
@@ -205,6 +206,7 @@ pub struct Core {
     pub(crate) backup_active_probes: Mutex<HashSet<String>>,
     pub(crate) backup_config_lock: tokio::sync::Mutex<()>,
     pub(crate) backup_restore_lock: tokio::sync::Mutex<()>,
+    restore_file_locks: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     pub(crate) backup_write_lock: tokio::sync::Mutex<()>,
     _instance_lock: std::fs::File,
     inner: Mutex<Inner>,
@@ -566,6 +568,7 @@ impl Core {
             backup_active_probes:Mutex::new(HashSet::new()),
             backup_config_lock: tokio::sync::Mutex::new(()),
             backup_restore_lock: tokio::sync::Mutex::new(()),
+            restore_file_locks: Mutex::default(),
             backup_write_lock: tokio::sync::Mutex::new(()),
             _instance_lock: instance_lock,
             inner: Mutex::new(Inner {
@@ -801,6 +804,22 @@ impl Core {
         };
         let result=receiver.wait_for(|r|r.is_some()).await.context("CANCELED")?.clone().context("CANCELED")?;
         result.map_err(anyhow::Error::msg)
+    }
+
+    /// A foreground delete waits only for file work on the same asset.
+    pub(crate) async fn restore_file_guard(&self, asset: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.restore_file_locks.lock().unwrap();
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(asset).and_then(std::sync::Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(asset.into(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
     }
 
     pub fn cancel_asset_restore(&self,id:&str)->Result<()> {
@@ -1188,9 +1207,12 @@ impl Core {
             let space: String = tx.query_row("SELECT space_id FROM backup_operations WHERE operation_id=?1 AND asset_id=?2 AND kind='delete'",params![operation,asset],|row|row.get(0))?;
             tx.execute("INSERT OR IGNORE INTO asset_hidden_history(asset_id) VALUES(?)",[asset])?;
             tx.execute("UPDATE asset_remote_objects SET remote_state='deleted' WHERE space_id=?1 AND asset_id=?2",params![space,asset])?;
-            tx.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.local_cleanup_done',json('true')) WHERE operation_id=?",[operation])?;
+            tx.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.local_cleanup_done',json('true'),'$.local_cleanup_ms',CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE operation_id=?",[operation])?;
             Ok(())
-        }).map(|_| ())
+        })?;
+        drop(inner);
+        (self.emit)(TaskEvent::BackupAssetDeleted(operation.to_owned()));
+        Ok(())
     }
 
     fn remove_history_records_with(&self, inner: &mut Inner, ids: Vec<String>, update: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>) -> Result<Vec<String>> {

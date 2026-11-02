@@ -367,6 +367,8 @@ async fn telegram_t4_release_delete_lost_response_recreate_and_late_cleanup() {
             .to_string(),
         "TELEGRAM_CONNECTION_ERROR"
     );
+    let unknown_bytes: i64 = core.backup_db(|db| Ok(db.query_row("SELECT json_extract(payload_json,'$.timings.foreground.remote_cleanup.details.unknown_media_verify_bytes') FROM backup_operations WHERE operation_id=?",[&delete],|r|r.get(0))?)).unwrap();
+    assert_eq!(unknown_bytes,0,"a registered media reference needs no full-file download for cleanup");
     assert!(a.path().join("original.mp4").is_file(), "unconfirmed remote cleanup retains the local video");
     for _ in 0..3 {
         delete_pass(&core, &p, &delete).await.unwrap();
@@ -614,6 +616,9 @@ async fn telegram_t4_owned_cleanup_keeps_published_replaced_foreign_and_next_gen
         }
     }
     delete_pass(&core, &p, &delete).await.unwrap();
+    let stats: (i64,i64) = core.backup_db(|db| Ok(db.query_row("SELECT json_extract(payload_json,'$.timings.foreground.remote_cleanup.details.unknown_media_verify_bytes'),json_extract(payload_json,'$.timings.foreground.remote_cleanup.details.steps.unknown_media_verify.calls') FROM backup_operations WHERE operation_id=?",[&delete],|r|Ok((r.get(0)?,r.get(1)?)))?)).unwrap();
+    let verified_size = net.data.lock().unwrap().media[&11].len() as i64;
+    assert_eq!(stats,(verified_size,1),"only the unregistered asset in the deleted generation needs a full SHA-256 read");
     let remaining: Vec<_> = net.data.lock().unwrap().documents.keys().copied().collect();
     assert_eq!(
         remaining,
@@ -1718,9 +1723,23 @@ async fn two_confirmed_deletions_share_one_message_batch_and_retry_only_the_surv
     assert_eq!(videos.len(),2);
     let survivor = videos[0].message_id;
     net.keep_message.store(survivor, Ordering::SeqCst);
-    let cleanup = || telegram_lifecycle::reconcile_deleted_messages(&transport,&provider.target,&deletions,&io,&projected,videos.clone(),vec![]);
+    let mut old_index = videos[0].clone();
+    old_index.message_id = 1999;
+    let mut envelope: Envelope = serde_json::from_str(&old_index.caption)?;
+    envelope.kind = "library".into();
+    envelope.asset_id.clone_from(&provider.target.scope.library_id);
+    old_index.caption = envelope.caption()?;
+    let mut edited = old_index.clone();
+    edited.document_id += 1;
+    net.data.lock().unwrap().documents.insert(old_index.message_id, edited);
+    let cleanup = || telegram_lifecycle::reconcile_deleted_messages(&transport,&provider.target,&deletions,&io,
+        &projected,videos.clone(),vec![(old_index.message_id, vec![old_index.clone()])]);
+    assert_eq!(cleanup().await.unwrap_err().to_string(),"TELEGRAM_MEDIA_CHANGED");
+    assert!(net.delete_batches.lock().unwrap().is_empty());
+    net.data.lock().unwrap().documents.insert(old_index.message_id, old_index.clone());
     assert_eq!(cleanup().await.unwrap_err().to_string(),"BACKUP_CLEANUP_PENDING");
     let mut ids:Vec<_> = videos.iter().map(|v| v.message_id).collect();
+    ids.push(old_index.message_id);
     ids.sort();
     assert_eq!(net.delete_batches.lock().unwrap().as_slice(), &[ids]);
     net.keep_message.store(0, Ordering::SeqCst);

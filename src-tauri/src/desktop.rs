@@ -62,7 +62,7 @@ fn hide_asset_history(core:State<AppCore>,asset_id:String)->Result<(),String>{yi
 #[tauri::command]
 async fn release_local_video(core:State<'_,AppCore>,asset_id:String)->Result<(),String>{yingqu_core::backup::lifecycle::release(&core,&asset_id).await.map_err(error)}
 #[tauri::command]
-async fn delete_asset_and_backup(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<(),String>{yingqu_core::backup::sync_delete::delete(&core,&space_id,&asset_id).await.map_err(error)}
+async fn delete_asset_and_backup(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<String,String>{yingqu_core::backup::sync_delete::delete(&core,&space_id,&asset_id).await.map_err(error)}
 #[tauri::command]
 async fn ensure_local_video(core:State<'_,AppCore>,asset_id:String)->Result<String,String>{core.ensure_local_video(&asset_id).await.map(|p|p.to_string_lossy().into_owned()).map_err(error)}
 #[tauri::command]
@@ -695,6 +695,9 @@ fn main() {
                 move |event| match event {
                     TaskEvent::DeleteActivity(activity) => {
                         let _ = handle.emit("backup_delete_activity", activity);
+                    }
+                    TaskEvent::BackupAssetDeleted(operation) => {
+                        let _ = handle.emit("backup_asset_deleted", operation);
                     }
                     TaskEvent::Updated(task) => {
                         let _ = handle.emit("task_updated", task);

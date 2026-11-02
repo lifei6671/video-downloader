@@ -1,5 +1,6 @@
 //! Explicit real queue acceptance, limited to one persisted synthetic asset in the QA channel.
 use super::*;
+use crate::backup::telegram_transfer_journal::Journal;
 use crate::backup::{
     telegram_transfer::{RemoteDocument, Target},
     telegram_transfer_journal::Entry,
@@ -156,6 +157,12 @@ async fn stage(core: &Arc<Core>, cfg: &Config, mode: &str) -> Result<()> {
             "production {mode}: one message / four original attachments; title and author verified"
         );
     } else if mode == "delete" {
+        // Keep a complete snapshot of unrelated assets, including prior tombstones.
+        let unrelated = |page: ChangeBatch| -> Result<std::collections::BTreeMap<String,serde_json::Value>> {
+            page.assets.into_iter().filter(|a| a.snapshot.asset_id != run.asset_id)
+                .map(|a| Ok((a.snapshot.asset_id.clone(),serde_json::to_value(a.snapshot)?))).collect()
+        };
+        let before = unrelated(p.pull_changes(None).await?)?;
         let manifest = cfg.work_directory.join("deletion.private.json");
         let deletion: String = if manifest.exists() {
             serde_json::from_slice(&std::fs::read(&manifest)?)?
@@ -172,23 +179,54 @@ async fn stage(core: &Arc<Core>, cfg: &Config, mode: &str) -> Result<()> {
             Ok(())
         })?;
         super::super::sync_delete::execute(core, p.as_ref(), &deletion).await?;
-        shape(core, p.as_ref(), op, 1).await?;
-        if !p
-            .read_asset(&run.asset_id)
-            .await?
-            .context("tombstone absent")?
-            .snapshot
-            .deleted
-        {
-            bail!("delete did not converge");
-        }
-        std::fs::write(
-            cfg.work_directory.join("delete-report.json"),
-            serde_json::to_vec_pretty(
-                &json!({"result":"PASSED","media_removed":3,"event_retained":true,"replay_after_delete":true}),
-            )?,
-        )?;
-        println!("production delete: removed three media documents, retained original event and replayable tombstone");
+        let original = crate::backup::telegram_transfer_journal::CoreJournal(core)
+            .get(op, "event")?.and_then(|e| e.document).context("missing original event receipt")?;
+        let target = entries_target(core, op)?;
+        let expected_asset = run.asset_id.clone();
+        let upload_operation = op.to_owned();
+        let delete_operation = deletion.clone();
+        let binding = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
+        let login = binding.session.status().operation_id.context("missing QA session")?;
+        let (_stop, rx) = tokio::sync::watch::channel(false);
+        let archive_revision = binding.session.with_transport(core, &login, target.clone(), rx,
+            ("rich_archive_acceptance", None), move |_, transport, io| Box::pin(async move {
+                match io.run(transport.bundle_documents(original.message_id)).await {
+                    Err(e) if e.to_string() == "TELEGRAM_MEDIA_MISSING" => {}
+                    Err(e) => return Err(e),
+                    Ok(_) => bail!("original rich message still present"),
+                }
+                let (_, indexes) = transport.indexes(io).await?;
+                let mut history = std::collections::BTreeMap::new();
+                let mut high = 0;
+                for index in indexes {
+                    let envelope: crate::backup::telegram_transfer::Envelope =
+                        serde_json::from_str(&index.document.caption)?;
+                    if envelope.kind != "library" || envelope.library_id != target.scope.library_id { continue; }
+                    let body = transport.index_body(&index, io).await?;
+                    let carrier: crate::backup::telegram_provider::Library = serde_json::from_slice(&body)?;
+                    let mut records = Vec::new();
+                    carrier.append_archived_events(&target, index.document.message_id, &mut high, &mut records)?;
+                    for (revision, bytes) in records {
+                        let event = crate::backup::telegram_replay::Event::decode(&target, &bytes)?;
+                        if event.change.asset_id == expected_asset {
+                            if let Some(previous) = history.insert(revision, bytes.clone()) {
+                                anyhow::ensure!(previous == bytes, "archive rewrote fixture history");
+                            }
+                        }
+                    }
+                }
+                let replay = crate::backup::telegram_replay::replay(&target, high, history.into_iter().collect(), None)?;
+                anyhow::ensure!(replay.operations.contains_key(&upload_operation)
+                    && replay.operations.contains_key(&delete_operation), "original or deletion event missing from archive");
+                Ok(replay.assets.get(&expected_asset).filter(|s| s.deleted).context("archive tombstone missing")?.revision)
+            })).await?;
+        let live = p.read_asset(&run.asset_id).await?.context("live tombstone absent")?;
+        anyhow::ensure!(live.snapshot.deleted && live.snapshot.revision == archive_revision, "archive replay differs from live state");
+        anyhow::ensure!(unrelated(p.pull_changes(None).await?)? == before, "unrelated asset history changed");
+        std::fs::write(cfg.work_directory.join("delete-report.json"),serde_json::to_vec_pretty(
+            &json!({"result":"PASSED","media_removed":3,"original_message_gone":true,
+            "original_and_delete_events_replayed_from_archive":true,"unrelated_assets_unchanged":true}))?)?;
+        println!("production delete: original message gone, archived events replayed, unrelated assets preserved");
     } else {
         bail!("unsupported source stage");
     }

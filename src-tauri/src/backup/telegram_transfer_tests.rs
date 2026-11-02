@@ -870,6 +870,30 @@ async fn telegram_video_probe_respects_canceled_io_before_launch() {
 }
 
 #[tokio::test]
+async fn lost_direct_archive_receipt_finds_and_rereads_before_confirming() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let net = Mock::new();
+    let (_cancel, _stop, io) = io();
+    let target = target();
+    let source = source(root.path(), "library", b"archive");
+    let publish = || upload_with_timing(&net, &journal, &target, source.clone(), &io, Default::default(), ReceiptCheck::FreshDeleteArchive);
+    net.lost_response.store(true, Ordering::SeqCst);
+    assert_eq!(publish().await.unwrap_err().to_string(), "TELEGRAM_CONNECTION_ERROR");
+    assert_eq!(journal.entry(&source).state, SendState::Sending);
+    net.hidden.store(true, Ordering::SeqCst);
+    assert_eq!(publish().await.unwrap_err().to_string(), "TELEGRAM_SEND_UNCONFIRMED");
+    net.hidden.store(false, Ordering::SeqCst);
+    publish().await.unwrap();
+    assert_eq!(journal.entry(&source).state, SendState::Confirmed);
+    assert_eq!(net.finds.load(Ordering::SeqCst), 2);
+    assert_eq!(net.inspects.load(Ordering::SeqCst), 1);
+    assert_eq!(net.sends.load(Ordering::SeqCst), 1);
+    net.documents.lock().unwrap().get_mut(&1).unwrap().0.document_id += 1;
+    assert_eq!(publish().await.unwrap_err().to_string(), "TELEGRAM_MEDIA_CHANGED");
+}
+
+#[tokio::test]
 async fn delete_index_transfer_timings_follow_parent_and_skip_reused_uploads() {
     use crate::{backup::delete_timing::IndexTiming, desktop_core::Core};
     let root = tempfile::tempdir().unwrap();
@@ -882,10 +906,17 @@ async fn delete_index_transfer_timings_follow_parent_and_skip_reused_uploads() {
     let journal = TestJournal::open(&root.path().join("journal.sqlite"));
     let net = Mock::new();
     let (_cancel, _stop, io) = io();
-    for (kind, stage) in [("event", "publish"), ("library", "archive")] {
-        let source = source(root.path(), kind, b"{}");
+    for (kind, stage, check, reads) in [
+        ("event", "publish", ReceiptCheck::ReadBack, 2),
+        ("library", "archive", ReceiptCheck::ReadBack, 2),
+        ("library", "publish", ReceiptCheck::FreshDeleteArchive, 1),
+    ] {
+        let mut source = source(root.path(), kind, b"{}");
+        source.operation_id = format!("{kind}-{stage}");
         let timing = IndexTiming::new(&core, "deletion", stage);
-        upload_with_timing(&net, &journal, &target(), source.clone(), &io, timing).await.unwrap();
+        let before = net.inspects.load(Ordering::SeqCst);
+        upload_with_timing(&net, &journal, &target(), source.clone(), &io, timing, check).await.unwrap();
+        assert_eq!(net.inspects.load(Ordering::SeqCst) - before, reads);
         let read = || core.backup_db(|db| {
             let raw: String = db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id='deletion'", [], |r| r.get(0))?;
             Ok(serde_json::from_str::<serde_json::Value>(&raw)?)
@@ -896,18 +927,23 @@ async fn delete_index_transfer_timings_follow_parent_and_skip_reused_uploads() {
             assert_eq!(metric["outcome"], "ok");
             assert!(metric["elapsed_ms"].is_u64());
         }
+        let steps = &first["timings"]["foreground"][format!("{stage}_receipt")]["details"]["steps"];
+        assert_eq!(steps["receipt_by_id"]["calls"], reads);
+        assert!(steps["receipt_by_id"]["elapsed_ms"].is_u64());
         core.backup_db(|db| {
             db.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.local_cleanup_done',json('true')) WHERE operation_id='deletion'", [])?;
             Ok(())
         }).unwrap();
-        upload_with_timing(&net, &journal, &target(), source, &io, timing).await.unwrap();
+        upload_with_timing(&net, &journal, &target(), source, &io, timing, check).await.unwrap();
+        assert_eq!(net.inspects.load(Ordering::SeqCst) - before, reads + 1);
         let retry = read();
         let maintenance = &retry["timings"]["maintenance"];
         assert_eq!(maintenance[format!("{stage}_receipt")]["outcome"], "ok");
+        assert_eq!(maintenance[format!("{stage}_receipt")]["details"]["steps"]["receipt_by_id"]["calls"], 1);
         assert!(maintenance.get(format!("{stage}_upload")).is_none());
         assert!(maintenance.get(format!("{stage}_send")).is_none());
         core.backup_db(|db| {
-            db.execute("UPDATE backup_operations SET payload_json=json_remove(payload_json,'$.local_cleanup_done') WHERE operation_id='deletion'", [])?;
+            db.execute("UPDATE backup_operations SET attempt=attempt+1,payload_json=json_remove(payload_json,'$.local_cleanup_done') WHERE operation_id='deletion'", [])?;
             Ok(())
         }).unwrap();
     }

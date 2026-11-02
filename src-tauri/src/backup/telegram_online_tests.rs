@@ -1,4 +1,6 @@
 //! Opt-in synthetic integration; separate processes can be terminated at durable boundaries.
+#[path = "telegram_delete_perf_online_tests.rs"]
+mod delete_perf_tests;
 #[path = "telegram_bundle_online_tests.rs"]
 mod bundle_tests;
 #[path = "telegram_transcript_online_tests.rs"]
@@ -461,6 +463,37 @@ async fn telegram_t4_live_release_delete_recreate_and_preserve_history() -> Resu
         let p=connect(&a,&config,false).await?;let q=connect(&b,&config,false).await?;
         if !p.capabilities().can_delete_owned_media || !q.capabilities().can_delete_owned_media {bail!("dedicated channel delete permission required");}
         let stage=std::env::var("YINGQU_TELEGRAM_T4_TEST_STAGE").unwrap_or_else(|_|"start".into());
+        if stage == "verify_completed" {
+            // Recovery-only verification for a previous run which finished both physical deletions.
+            // Its reader committed unrelated snapshots before the second deletion; do not reissue either delete.
+            let run: Run = serde_json::from_slice(&std::fs::read(config.work_directory.join("run.json"))?)?;
+            anyhow::ensure!(config.work_directory.join("release-report.json").is_file(),"missing prior T4 release evidence");
+            for (owner, state) in [(&a,"superseded"),(&b,"completed")] {
+                let complete = super::scheduler::operations(owner)?.into_iter().any(|op|
+                    op.asset_id.as_deref()==Some(run.asset_id.as_str()) && op.kind=="delete"
+                    && op.phase==state && op.payload["cleanup_pass"].as_u64().is_some_and(|v|v>=3));
+                anyhow::ensure!(complete, "expected both prior physical deletions to be complete");
+            }
+            let recorded = b.backup_db(|db| {
+                let mut stmt = db.prepare("SELECT a.remote_asset_id,CASE WHEN a.remote_deleted THEN t.record_json ELSE a.baseline_json END FROM backup_space_assets a
+                    LEFT JOIN backup_tombstones t USING(space_id,remote_asset_id)
+                    WHERE a.space_id=?1 AND a.remote_asset_id<>?2")?;
+                let rows = stmt.query_map(params![q.scope().space_id,run.asset_id],|r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })?;
+            let current = q.pull_changes(None).await?.assets.into_iter().map(|s|
+                (s.snapshot.asset_id.clone(),s.snapshot)).collect::<std::collections::BTreeMap<_,_>>();
+            anyhow::ensure!(current.get(&run.asset_id).is_some_and(|s|s.deleted),"missing final tombstone");
+            for (id, body) in &recorded {
+                let before: serde_json::Value=serde_json::from_str(body)?;
+                anyhow::ensure!(serde_json::to_value(current.get(id).context("unrelated history missing")?)? == before,
+                    "unrelated history changed");
+            }
+            std::fs::write(config.work_directory.join("retained-peer-verification.json"),serde_json::to_vec_pretty(
+                &json!({"completed_deletions":2,"unrelated_records_checked":recorded.len(),"final_tombstone":true,
+                "comparison_source":"peer full pull prior to second deletion, original initial snapshot not persisted"}))?)?;
+            return Ok(());
+        }
         if !matches!(stage.as_str(),"start"|"resume_delete"|"resume_recreated") {bail!("unsupported T4 stage");}
         let resume=stage!="start";
         let resume_recreated=stage=="resume_recreated";
@@ -505,6 +538,9 @@ async fn telegram_t4_live_release_delete_recreate_and_preserve_history() -> Resu
             for _ in 0..3 {pass(&a,p.as_ref(),&delete).await?;}
             reader.pull().await?;
             if !q.read_asset(&asset).await?.context("missing tombstone")?.snapshot.deleted || repository::fingerprint(&path)?.0!=hash {bail!("T4 tombstone/local preservation failed");}
+            let restore = sync_read::ensure(&a, p.as_ref(), &asset).await;
+            anyhow::ensure!(restore.is_err_and(|error| error.to_string() == "BACKUP_ASSET_DELETED"),
+                "T4 missing local video must not restore after deletion");
             println!("T4 confirmed tombstone and exact media cleanup; other device retained local video");
             sync_engine::request_upload_with(&b,q.clone(),&asset)?;
             let upload=super::scheduler::operations(&b)?.into_iter().find(|o|o.asset_id.as_deref()==Some(&asset)&&o.kind=="upload"&&o.state=="pending").context("missing T4 reupload")?;
@@ -522,9 +558,13 @@ async fn telegram_t4_live_release_delete_recreate_and_preserve_history() -> Resu
         let second=super::sync_delete::intent(&b,&q.scope().space_id,&asset)?;
         if second==delete {bail!("T4 reused deletion operation");}
         for _ in 0..3 {pass(&b,q.as_ref(),&second).await?;}
+        // One complete read witnesses every prior asset without a separate network pass per record.
+        let after = p.pull_changes(None).await?.assets.into_iter()
+            .map(|asset| (asset.snapshot.asset_id.clone(), asset.snapshot))
+            .collect::<std::collections::BTreeMap<_,_>>();
         for original in before {
-            let after=p.read_asset(&original.snapshot.asset_id).await?.context("unrelated history missing")?;
-            if serde_json::to_value(after.snapshot)?!=serde_json::to_value(original.snapshot)? {bail!("unrelated history changed");}
+            let current = after.get(&original.snapshot.asset_id).context("unrelated history missing")?;
+            if serde_json::to_value(current)?!=serde_json::to_value(original.snapshot)? {bail!("unrelated history changed");}
         }
         std::fs::write(config.work_directory.join("lifecycle-report.json"),serde_json::to_vec_pretty(&json!({"full_hash_before_release":true,"release_restore_sha256":hash,"other_device_local_preserved":true,"recreate_survived_old_delete":true,"exact_owned_cleanup":true,"unrelated_history_preserved":true}))?)?;
         println!("T4 second delete completed; prior assets, events and library preserved");

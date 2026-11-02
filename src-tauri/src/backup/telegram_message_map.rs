@@ -20,25 +20,49 @@ impl ChannelSnapshot {
     }
 }
 
+const MAX_DIFFERENCE_PAGES: usize = 16;
+const MAX_DIFFERENCE_IDS: usize = 1600;
+
 #[derive(Debug, PartialEq, Eq)]
-enum ChannelChanges {
-    Delta(i32, BTreeSet<i32>),
+enum DifferencePage {
+    Changes {
+        pts: i32,
+        ids: BTreeSet<i32>,
+        deleted: BTreeSet<i32>,
+        complete: bool,
+    },
     Unusable(&'static str),
+    LostPosition(&'static str),
 }
 
-/// A non-final or unrecognized difference cannot prove completeness for a destructive operation.
+fn channel_message_id(message: &tl::enums::Message, channel: i64) -> Option<i32> {
+    let peer = match message {
+        tl::enums::Message::Empty(m) => m.peer_id.as_ref(),
+        tl::enums::Message::Message(m) => Some(&m.peer_id),
+        tl::enums::Message::Service(m) => Some(&m.peer_id),
+    };
+    match peer {
+        Some(tl::enums::Peer::Channel(p)) if p.channel_id == channel => Some(message.id()),
+        _ => None,
+    }
+}
+
 fn changed_messages(
     difference: tl::enums::updates::ChannelDifference,
     channel: i64,
     previous: i32,
-) -> ChannelChanges {
+) -> DifferencePage {
     use tl::enums::{updates::ChannelDifference, Update};
     let mut ids = BTreeSet::new();
-    let pts = match difference {
-        ChannelDifference::Empty(d) if d.r#final => d.pts,
-        ChannelDifference::Difference(d) if d.r#final => {
+    let mut deleted = BTreeSet::new();
+    let (pts, complete) = match difference {
+        ChannelDifference::Empty(d) => (d.pts, d.r#final),
+        ChannelDifference::Difference(d) => {
             for message in d.new_messages {
-                ids.insert(message.id());
+                let Some(id) = channel_message_id(&message, channel) else {
+                    return DifferencePage::Unusable("message_channel_mismatch");
+                };
+                ids.insert(id);
             }
             for update in d.other_updates {
                 match update {
@@ -46,41 +70,46 @@ fn changed_messages(
                         ids.insert(receipt.id);
                     }
                     Update::EditChannelMessage(edit) => {
-                        ids.insert(edit.message.id());
+                        let Some(id) = channel_message_id(&edit.message, channel) else {
+                            return DifferencePage::Unusable("edit_channel_mismatch");
+                        };
+                        ids.insert(id);
                     }
                     Update::NewChannelMessage(new) => {
-                        ids.insert(new.message.id());
+                        let Some(id) = channel_message_id(&new.message, channel) else {
+                            return DifferencePage::Unusable("new_channel_mismatch");
+                        };
+                        ids.insert(id);
                     }
-                    Update::DeleteChannelMessages(deleted) if deleted.channel_id == channel => {
-                        ids.extend(deleted.messages);
+                    Update::DeleteChannelMessages(update) if update.channel_id == channel => {
+                        deleted.extend(update.messages);
                     }
                     Update::DeleteChannelMessages(_) => {
-                        return ChannelChanges::Unusable("delete_channel_mismatch")
+                        return DifferencePage::Unusable("delete_channel_mismatch")
                     }
                     other => {
-                        // The boxed TL constructor is the first word. Only its schema name is recorded.
                         let encoded = tl::Serializable::to_bytes(&other);
                         let id = u32::from_le_bytes(
                             encoded[..4].try_into().expect("boxed TL constructor"),
                         );
-                        return ChannelChanges::Unusable(tl::name_for_id(id));
+                        return DifferencePage::Unusable(tl::name_for_id(id));
                     }
                 }
             }
-            d.pts
+            (d.pts, d.r#final)
         }
-        ChannelDifference::TooLong(_) => return ChannelChanges::Unusable("difference_too_long"),
-        ChannelDifference::Empty(_) => return ChannelChanges::Unusable("empty_not_final"),
-        ChannelDifference::Difference(_) => {
-            return ChannelChanges::Unusable("difference_not_final")
-        }
+        ChannelDifference::TooLong(_) => return DifferencePage::Unusable("difference_too_long"),
     };
-    if pts < previous {
-        ChannelChanges::Unusable("pts_regressed")
-    } else if pts == previous && !ids.is_empty() {
-        ChannelChanges::Unusable("changed_ids_without_pts_advance")
+    if ids.first().into_iter().chain(deleted.first()).any(|id| *id <= 0) {
+        DifferencePage::Unusable("invalid_message_id")
+    } else if pts < previous {
+        DifferencePage::Unusable("pts_regressed")
+    } else if !complete && pts == previous {
+        DifferencePage::Unusable("non_final_pts_stalled")
+    } else if pts == previous && !(ids.is_empty() && deleted.is_empty()) {
+        DifferencePage::Unusable("changed_ids_without_pts_advance")
     } else {
-        ChannelChanges::Delta(pts, ids)
+        DifferencePage::Changes { pts, ids, deleted, complete }
     }
 }
 
@@ -161,7 +190,7 @@ fn save(
 }
 
 impl GrammersTransport {
-    async fn changed_since(&self, pts: i32, io: &Io) -> Result<ChannelChanges> {
+    async fn changed_since(&self, pts: i32, io: &Io) -> Result<DifferencePage> {
         io.run(async {
             let result = self
                 .client
@@ -180,10 +209,10 @@ impl GrammersTransport {
                     pts,
                 )),
                 Err(InvocationError::Rpc(e)) if e.name == "PERSISTENT_TIMESTAMP_EMPTY" => {
-                    Ok(ChannelChanges::Unusable("PERSISTENT_TIMESTAMP_EMPTY"))
+                    Ok(DifferencePage::LostPosition("PERSISTENT_TIMESTAMP_EMPTY"))
                 }
                 Err(InvocationError::Rpc(e)) if e.name == "PERSISTENT_TIMESTAMP_INVALID" => {
-                    Ok(ChannelChanges::Unusable("PERSISTENT_TIMESTAMP_INVALID"))
+                    Ok(DifferencePage::LostPosition("PERSISTENT_TIMESTAMP_INVALID"))
                 }
                 Err(error) => Err(rpc_error(error)),
             }
@@ -229,14 +258,14 @@ impl GrammersTransport {
 }
 
 trait MessageSource {
-    async fn changes(&self, pts: i32, io: &Io) -> Result<ChannelChanges>;
+    async fn changes(&self, pts: i32, io: &Io) -> Result<DifferencePage>;
     async fn full(&self, io: &Io) -> Result<(i32, ChannelSnapshot)>;
     async fn read_body(&self, index: &IndexDocument, io: &Io) -> Result<Vec<u8>>;
     async fn by_id(&self, ids: &BTreeSet<i32>, io: &Io) -> Result<ChannelSnapshot>;
 }
 
 impl MessageSource for GrammersTransport {
-    async fn changes(&self, pts: i32, io: &Io) -> Result<ChannelChanges> {
+    async fn changes(&self, pts: i32, io: &Io) -> Result<DifferencePage> {
         self.changed_since(pts, io).await
     }
     async fn full(&self, io: &Io) -> Result<(i32, ChannelSnapshot)> {
@@ -272,7 +301,7 @@ impl MessageSource for GrammersTransport {
                 }
             }
         }
-        verify_indexes(self, snapshot, io).await
+        Ok(snapshot)
     }
 }
 
@@ -303,6 +332,9 @@ fn reuse_index_bodies(
     let mut reused = 0;
     for index in &mut snapshot.indexes {
         io.check()?;
+        if !matches!(index.source, IndexSource::Scanned(_)) {
+            continue;
+        }
         let doc = &index.document;
         let body: Option<Vec<u8>> = core.backup_db(|db| {
             let mut query = db.prepare_cached(
@@ -348,29 +380,65 @@ async fn refresh(
         params![space,serde_json::to_string(target)?], |r|Ok((r.get(0)?,r.get(1)?))).optional()?)
     })?;
     if let Some((old_pts, old_high)) = previous {
-        let difference = {
-            let _changes = delete_timing::refresh_span("channel_changes");
-            source.changes(old_pts, io).await?
-        };
-        match difference {
-            ChannelChanges::Delta(pts, ids) => {
-                let fresh = if ids.is_empty() {
-                    ChannelSnapshot::default()
-                } else {
-                    source.by_id(&ids, io).await?
-                };
-                let high = old_high.max(fresh.high);
-                io.check()?;
-                return core.backup_db(|db| {
-                    if pts != old_pts {
-                        save(db, target, pts, high, Some(&ids), &fresh)?;
+        let mut ids = BTreeSet::new();
+        let mut read_ids = BTreeSet::new();
+        let mut cursor = old_pts;
+        // Telegram returns an intermediate pts for non-final pages. Keep it in memory until
+        // the complete difference and the by-ID readback can be committed together.
+        for page in 1..=MAX_DIFFERENCE_PAGES {
+            io.check()?;
+            let pts = {
+                let _changes = delete_timing::refresh_span("channel_changes");
+                let (pts, new_ids, deleted, complete) = match source.changes(cursor, io).await? {
+                    DifferencePage::Changes { pts, ids, deleted, complete } => (pts, ids, deleted, complete),
+                    DifferencePage::LostPosition(reason) => {
+                        delete_timing::selected_full_scan("difference_unusable", Some(reason));
+                        break;
                     }
-                    load(db, space, high)
-                });
-            }
-            ChannelChanges::Unusable(reason) => {
-                delete_timing::selected_full_scan("difference_unusable", Some(reason))
-            }
+                    DifferencePage::Unusable(reason) => {
+                        delete_timing::record_difference_page(0);
+                        delete_timing::selected_full_scan("difference_unusable", Some(reason));
+                        break;
+                    }
+                };
+                let previous_count = ids.len();
+                // An explicit channel deletion already identifies the missing message. If any
+                // page also reports an edit, send receipt or creation, fetch its current state.
+                read_ids.extend(new_ids.iter().copied());
+                ids.extend(new_ids);
+                ids.extend(deleted);
+                delete_timing::record_difference_page(ids.len() - previous_count);
+                if ids.len() > MAX_DIFFERENCE_IDS {
+                    delete_timing::selected_full_scan("difference_unusable", Some("difference_id_limit"));
+                    break;
+                }
+                if !complete {
+                    if page == MAX_DIFFERENCE_PAGES {
+                        delete_timing::selected_full_scan("difference_unusable", Some("difference_page_limit"));
+                        break;
+                    }
+                    cursor = pts;
+                    continue;
+                }
+                pts
+            };
+            let fresh = if read_ids.is_empty() {
+                ChannelSnapshot::default()
+            } else {
+                let mut snapshot = source.by_id(&read_ids, io).await?;
+                // An edit to a rich message can retain most of its event attachments.
+                let reused = reuse_index_bodies(core, target, &mut snapshot, io)?;
+                delete_timing::record_index_reuse(reused);
+                verify_indexes(source, snapshot, io).await?
+            };
+            let high = old_high.max(fresh.high);
+            io.check()?;
+            return core.backup_db(|db| {
+                if pts != old_pts {
+                    save(db, target, pts, high, Some(&ids), &fresh)?;
+                }
+                load(db, space, high)
+            });
         }
     } else {
         delete_timing::selected_full_scan("missing_mapping", None);

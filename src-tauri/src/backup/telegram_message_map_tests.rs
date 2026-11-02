@@ -7,6 +7,7 @@ enum Step {
     Full(i32, ChannelSnapshot),
     Body(i32),
     Changes(i32, Option<(i32, Vec<i32>)>),
+    Page(i32, Result<DifferencePage>),
     Read(Vec<i32>, Result<ChannelSnapshot>),
 }
 struct Channel(Mutex<VecDeque<Step>>);
@@ -26,15 +27,26 @@ impl MessageSource for Channel {
         };
         Ok((pts, snapshot))
     }
-    async fn changes(&self, pts: i32, _: &Io) -> Result<ChannelChanges> {
-        let Step::Changes(expected, result) = self.take() else {
-            panic!("unexpected difference request")
-        };
-        assert_eq!(pts, expected);
-        Ok(match result {
-            Some((pts, ids)) => ChannelChanges::Delta(pts, ids.into_iter().collect()),
-            None => ChannelChanges::Unusable("difference_too_long"),
-        })
+    async fn changes(&self, pts: i32, _: &Io) -> Result<DifferencePage> {
+        match self.take() {
+            Step::Changes(expected, result) => {
+                assert_eq!(pts, expected);
+                Ok(match result {
+                    Some((pts, ids)) => DifferencePage::Changes {
+                        pts,
+                        ids: ids.into_iter().collect(),
+                        deleted: BTreeSet::new(),
+                        complete: true,
+                    },
+                    None => DifferencePage::Unusable("difference_too_long"),
+                })
+            }
+            Step::Page(expected, result) => {
+                assert_eq!(pts, expected);
+                result
+            }
+            _ => panic!("unexpected difference request"),
+        }
     }
     async fn read_body(&self, index: &IndexDocument, _: &Io) -> Result<Vec<u8>> {
         let Step::Body(expected) = self.take() else {
@@ -185,7 +197,7 @@ async fn mapped_delete_restart_only_reads_changed_ids_and_rebuilds_on_lost_posit
 }
 
 #[test]
-fn partial_channel_differences_never_advance_the_saved_position() {
+fn channel_difference_marks_pages_and_rejects_unusable_updates() {
     let difference = |complete, channel| {
         tl::enums::updates::ChannelDifference::Difference(tl::types::updates::ChannelDifference {
             r#final: complete,
@@ -205,23 +217,33 @@ fn partial_channel_differences_never_advance_the_saved_position() {
     };
     assert_eq!(
         changed_messages(difference(true, 2), 2, 10),
-        ChannelChanges::Delta(11, [5, 7].into_iter().collect())
+        DifferencePage::Changes {
+            pts: 11,
+            ids: BTreeSet::new(),
+            deleted: [5, 7].into_iter().collect(),
+            complete: true
+        }
     );
     assert_eq!(
         changed_messages(difference(false, 2), 2, 10),
-        ChannelChanges::Unusable("difference_not_final")
+        DifferencePage::Changes {
+            pts: 11,
+            ids: BTreeSet::new(),
+            deleted: [5, 7].into_iter().collect(),
+            complete: false
+        }
     );
     assert_eq!(
         changed_messages(difference(true, 3), 2, 10),
-        ChannelChanges::Unusable("delete_channel_mismatch")
+        DifferencePage::Unusable("delete_channel_mismatch")
     );
     assert_eq!(
         changed_messages(difference(true, 2), 2, 12),
-        ChannelChanges::Unusable("pts_regressed")
+        DifferencePage::Unusable("pts_regressed")
     );
     assert_eq!(
         changed_messages(difference(true, 2), 2, 11),
-        ChannelChanges::Unusable("changed_ids_without_pts_advance")
+        DifferencePage::Unusable("changed_ids_without_pts_advance")
     );
     let mut with_receipts = difference(true, 2);
     let tl::enums::updates::ChannelDifference::Difference(d) = &mut with_receipts else {
@@ -238,11 +260,16 @@ fn partial_channel_differences_never_advance_the_saved_position() {
     }
     assert_eq!(
         changed_messages(with_receipts.clone(), 2, 10),
-        ChannelChanges::Delta(11, [5, 7, 8].into_iter().collect())
+        DifferencePage::Changes {
+            pts: 11,
+            ids: [7, 8].into_iter().collect(),
+            deleted: [5, 7].into_iter().collect(),
+            complete: true
+        }
     );
     assert_eq!(
         changed_messages(with_receipts.clone(), 2, 11),
-        ChannelChanges::Unusable("changed_ids_without_pts_advance")
+        DifferencePage::Unusable("changed_ids_without_pts_advance")
     );
     let tl::enums::updates::ChannelDifference::Difference(d) = &mut with_receipts else {
         unreachable!()
@@ -250,8 +277,232 @@ fn partial_channel_differences_never_advance_the_saved_position() {
     d.other_updates.push(tl::enums::Update::PtsChanged);
     assert_eq!(
         changed_messages(with_receipts, 2, 10),
-        ChannelChanges::Unusable("updatePtsChanged")
+        DifferencePage::Unusable("updatePtsChanged")
     );
+}
+
+#[test]
+fn difference_requires_usable_pts_and_positive_channel_message_ids() {
+    let empty = |complete, pts| {
+        tl::types::updates::ChannelDifferenceEmpty {
+            r#final: complete,
+            pts,
+            timeout: None,
+        }
+        .into()
+    };
+    assert_eq!(
+        changed_messages(empty(false, 9), 2, 9),
+        DifferencePage::Unusable("non_final_pts_stalled")
+    );
+    assert_eq!(
+        changed_messages(empty(false, 10), 2, 9),
+        DifferencePage::Changes {
+            pts: 10,
+            ids: BTreeSet::new(),
+            deleted: BTreeSet::new(),
+            complete: false
+        }
+    );
+    assert_eq!(
+        changed_messages(empty(true, 9), 2, 9),
+        DifferencePage::Changes {
+            pts: 9,
+            ids: BTreeSet::new(),
+            deleted: BTreeSet::new(),
+            complete: true
+        }
+    );
+    let peer = |channel_id| Some(tl::types::PeerChannel { channel_id }.into());
+    let message = |id, peer_id| tl::types::MessageEmpty { id, peer_id }.into();
+    let page = |new_messages, other_updates| {
+        tl::types::updates::ChannelDifference {
+            r#final: true,
+            pts: 10,
+            timeout: None,
+            new_messages,
+            other_updates,
+            chats: vec![],
+            users: vec![],
+        }
+        .into()
+    };
+    assert_eq!(
+        changed_messages(page(vec![message(1, peer(3))], vec![]), 2, 9),
+        DifferencePage::Unusable("message_channel_mismatch")
+    );
+    assert_eq!(
+        changed_messages(
+            page(
+                vec![],
+                vec![tl::types::UpdateEditChannelMessage {
+                    message: message(1, peer(3)),
+                    pts: 10,
+                    pts_count: 1
+                }
+                .into()]
+            ),
+            2,
+            9
+        ),
+        DifferencePage::Unusable("edit_channel_mismatch")
+    );
+    assert_eq!(
+        changed_messages(
+            page(
+                vec![],
+                vec![tl::types::UpdateNewChannelMessage {
+                    message: message(1, peer(3)),
+                    pts: 10,
+                    pts_count: 1
+                }
+                .into()]
+            ),
+            2,
+            9
+        ),
+        DifferencePage::Unusable("new_channel_mismatch")
+    );
+    assert_eq!(
+        changed_messages(page(vec![message(0, peer(2))], vec![]), 2, 9),
+        DifferencePage::Unusable("invalid_message_id")
+    );
+}
+
+fn page(expected: i32, pts: i32, ids: impl IntoIterator<Item = i32>, complete: bool) -> Step {
+    Step::Page(
+        expected,
+        Ok(DifferencePage::Changes {
+            pts,
+            ids: ids.into_iter().collect(),
+            deleted: BTreeSet::new(),
+            complete,
+        }),
+    )
+}
+
+#[tokio::test]
+async fn paginated_channel_refresh_retries_from_saved_pts_and_reads_each_changed_id_once(
+) -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let core = open(root.path());
+    let target = setup_target(&core);
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    let io = Io::new(rx.clone(), rx, None);
+    let first = || Step::Page(12, Ok(DifferencePage::Changes {
+        pts: 14, ids: BTreeSet::new(), deleted: [42, 43].into(), complete: false,
+    }));
+    let second = || page(14, 15, [43, 44], false);
+    let channel = Channel(Mutex::new(VecDeque::from([
+        Step::Full(12, image(1, &[42, 43, 44, 45])),
+        first(),
+        Step::Page(14, Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR"))),
+        first(),
+        second(),
+        page(15, 15, [], true),
+        Step::Read(vec![43, 44], Err(anyhow::anyhow!("CANCELED"))),
+        first(),
+        second(),
+        page(15, 15, [], true),
+        Step::Read(vec![43, 44], Ok(ChannelSnapshot::default())),
+        Step::Page(15, Ok(DifferencePage::Changes {
+            pts: 16, ids: BTreeSet::new(), deleted: [45].into(), complete: true,
+        })),
+    ])));
+    refresh(&core, &target, &io, &channel).await?;
+    for expected in ["TELEGRAM_CONNECTION_ERROR", "CANCELED"] {
+        assert_eq!(
+            refresh(&core, &target, &io, &channel)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            expected
+        );
+        assert_eq!(
+            core.backup_db(|db| load(db, &target.scope.space_id, 1))?
+                .media
+                .len(),
+            4
+        );
+    }
+    assert_eq!(refresh(&core, &target, &io, &channel).await?.media, vec![doc(45, "video")]);
+    assert!(refresh(&core, &target, &io, &channel).await?.media.is_empty());
+    assert!(channel.0.lock().unwrap().is_empty());
+    core.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn paginated_refresh_falls_back_on_invalid_or_excessive_pages() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let core = open(root.path());
+    let target = setup_target(&core);
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    let io = Io::new(rx.clone(), rx, None);
+    core.backup_db(|db| {
+        db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES('d','mapped','delete','running','objects','{}')", [])?;
+        Ok(())
+    })?;
+    let mut steps = VecDeque::from([
+        Step::Full(10, image(1, &[2])),
+        page(10, 11, [2], false),
+        Step::Page(11, Ok(DifferencePage::Unusable("difference_too_long"))),
+        Step::Full(20, image(2, &[3])),
+        page(20, 21, 1..=800, false),
+        page(21, 22, 801..=1601, true),
+        Step::Full(30, image(3, &[4])),
+    ]);
+    for n in 0..MAX_DIFFERENCE_PAGES as i32 {
+        steps.push_back(page(30 + n, 31 + n, [4], false));
+    }
+    steps.push_back(Step::Full(50, image(4, &[5])));
+    // The last allowed page may be final, and IDs repeated across pages count once.
+    for n in 0..MAX_DIFFERENCE_PAGES as i32 {
+        steps.push_back(page(
+            50 + n,
+            51 + n,
+            1..=1600,
+            n + 1 == MAX_DIFFERENCE_PAGES as i32,
+        ));
+    }
+    steps.push_back(Step::Read(
+        (1..=1600).collect(),
+        Ok(ChannelSnapshot::default()),
+    ));
+    let channel = Channel(Mutex::new(steps));
+    refresh(&core, &target, &io, &channel).await?;
+    let timing = delete_timing::IndexTiming::new(&core, "d", "archive");
+    for (stage, reason, video, pages, unique_ids) in [
+        ("later_too_long", "difference_too_long", 3, 2, 1),
+        ("too_many_ids", "difference_id_limit", 4, 2, 1601),
+        ("too_many_pages", "difference_page_limit", 5, 16, 1),
+    ] {
+        assert_eq!(
+            delete_timing::IndexTiming::new(&core,"d",stage)
+                .refresh(refresh(&core, &target, &io, &channel))
+                .await?
+                .media,
+            vec![doc(video, "video")]
+        );
+        let detail = details(&core, stage);
+        assert_eq!(detail["difference_reason"], reason);
+        assert_eq!(detail["difference_pages"], pages);
+        assert_eq!(detail["difference_changed_ids"], unique_ids);
+    }
+    assert!(timing
+        .refresh(refresh(&core, &target, &io, &channel))
+        .await?
+        .media
+        .is_empty());
+    let detail = details(&core, "archive");
+    assert_eq!(detail["full_scan"], false);
+    assert_eq!(detail["steps"]["channel_changes"]["calls"], 16);
+    assert_eq!(detail["difference_pages"], 16);
+    assert_eq!(detail["difference_changed_ids"], 1600);
+    assert!(channel.0.lock().unwrap().is_empty());
+    core.shutdown().await;
+    Ok(())
 }
 
 fn scanned(docs: Vec<RemoteDocument>) -> ChannelSnapshot {
@@ -347,6 +598,11 @@ async fn full_refresh_reuses_only_verified_matching_bodies_from_this_target() {
     .unwrap();
     let mut other = target.clone();
     other.channel_id = "3".into();
+    // This is a new attempt against a different channel. Same-attempt metrics accumulate.
+    core.backup_db(|db| {
+        db.execute("UPDATE backup_operations SET attempt=attempt+1 WHERE operation_id='d'", [])?;
+        Ok(())
+    }).unwrap();
     timing
         .refresh(refresh(&core, &other, &io, &channel))
         .await
@@ -356,6 +612,37 @@ async fn full_refresh_reuses_only_verified_matching_bodies_from_this_target() {
     assert!(channel.0.lock().unwrap().is_empty());
     core.shutdown().await;
 }
+#[tokio::test]
+async fn incremental_edit_reuses_only_unchanged_verified_attachments() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let core = open(root.path());
+    let target = setup_target(&core);
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    let io = Io::new(rx.clone(), rx, None);
+    let first = doc(10, "event");
+    let mut second = doc(11, "event");
+    second.message_id = first.message_id;
+    let mut replaced = second.clone();
+    replaced.document_id += 1;
+    let original = scanned(vec![first.clone(), second]);
+    let mut edited = scanned(vec![first.clone(), replaced.clone()]);
+    edited.indexes[0].revision += 2; // Membership and revision must come from the live edit.
+    let channel = Channel(Mutex::new(VecDeque::from([
+        Step::Full(1, original), Step::Body(10), Step::Body(10),
+        Step::Changes(1, Some((2, vec![10]))), Step::Read(vec![10], Ok(edited)),
+        Step::Body(10), // Only the replacement requires a download.
+    ])));
+    refresh(&core, &target, &io, &channel).await?;
+    let fresh = refresh(&core, &target, &io, &channel).await?;
+    assert_eq!(fresh.indexes.len(), 2);
+    assert_eq!(fresh.indexes[0].document, replaced);
+    assert_eq!(fresh.indexes[1].document, first);
+    assert_eq!(fresh.indexes[1].revision, 12);
+    assert!(channel.0.lock().unwrap().is_empty());
+    core.shutdown().await;
+    Ok(())
+}
+
 fn details(core: &Core, stage: &str) -> serde_json::Value {
     core.backup_db(|db| {
         let raw: String = db.query_row(
@@ -403,6 +690,116 @@ async fn segmented_delete_rotates_legacy_archive_recovers_lost_reply_and_rebuild
     exercise_archive_upgrade(true).await
 }
 
+fn index(id: i32, kind: &str, asset: &str, operation: &str, device: &str, body: Vec<u8>) -> IndexDocument {
+    use sha2::{Digest, Sha256};
+    let mut document = doc(id, kind);
+    let mut envelope: Envelope = serde_json::from_str(&document.caption).unwrap();
+    envelope.asset_id = asset.into();
+    envelope.operation_id = operation.into();
+    envelope.device_id = device.into();
+    envelope.sha256 = format!("{:x}", Sha256::digest(&body));
+    envelope.bytes = body.len() as u64;
+    document.bytes = envelope.bytes;
+    document.caption = envelope.caption().unwrap();
+    IndexDocument { revision: if kind == "event" { (i64::from(id)<<32)|1 } else { i64::from(id) },
+        document, source: IndexSource::Verified(body.into()) }
+}
+
+#[tokio::test]
+async fn complete_delete_deltas_preserve_projection_across_history_sizes() -> Result<()> {
+    use crate::backup::{
+        provider::{AssetChange, MediaLocation, MediaRef, ReferenceChange},
+        telegram_provider::TelegramProvider as Provider,
+        telegram_replay::Event,
+    };
+    for count in [20, 200, 2000] {
+        let root = tempfile::tempdir()?;
+        let core = open(root.path());
+        let target = setup_target(&core);
+        let library = &target.scope.library_id;
+        let (_stop, rx) = tokio::sync::watch::channel(false);
+        let io = Io::new(rx.clone(), rx, None);
+        let device = uuid::Uuid::from_u128(9000).to_string();
+        let mut creates = vec![];
+        let mut history = vec![];
+        let mut media: Vec<_> = (1..count).map(|id| doc(id, "video")).collect();
+        // Eleven live assets share the original descriptor. Ten will be deleted, one must survive.
+        for document in media.iter_mut().take(11) {
+            let mut envelope: Envelope = serde_json::from_str(&document.caption)?;
+            envelope.asset_id = uuid::Uuid::from_u128(3000 + document.message_id as u128).to_string();
+            envelope.device_id.clone_from(&device);
+            envelope.container = "mp4".into();
+            document.caption = envelope.caption()?;
+            let change = AssetChange {
+                asset_id: envelope.asset_id, operation_id: envelope.operation_id, device_id: device.clone(),
+                base: None, delete: false, recreate: false, fields: [("original_filename".into(), "video.mp4".into())].into(),
+                media: Some(MediaRef { scope: target.scope.clone(), location: MediaLocation::TelegramMessage {
+                    account_id: target.account_id.clone(), channel_id: target.channel_id.clone(),
+                    message_id: i64::from(document.message_id), document_id: document.document_id,
+                }, bytes: document.bytes, sha256: envelope.sha256, container: "mp4".into() }),
+                cover: ReferenceChange::Unchanged, transcript: ReferenceChange::Unchanged,
+                conflicts: vec![], resolved_conflicts: vec![], field_bases: Default::default(),
+            };
+            history.push(serde_json::json!({
+                "revision": (i64::from(document.message_id) << 32) | 1, "body": Event::encode(&target,&change)?,
+            }));
+            creates.push(change);
+        }
+        let body = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2, "library_id": library, "provider_type": "telegram", "mode": "single_writer",
+            "account_id": target.account_id, "channel_id": target.channel_id, "archived_events": history,
+        }))?;
+        let initial = ChannelSnapshot {
+            high: i64::from(count), media: media.clone(),
+            indexes: vec![index(count, "library", library, library, &device, body)],
+        };
+        let channel = Channel(Mutex::new([Step::Full(100, initial)].into()));
+        let mut mapped = refresh(&core, &target, &io, &channel).await?;
+        let mut projection = Provider::project_snapshot(&core, &target, &io, None, &mapped)?;
+        let mut expected = projection.assets.clone();
+        assert_eq!(expected.len(), 11);
+        let mut timings = vec![];
+        for (offset, create) in (0..10).zip(creates) {
+            let video = offset + 1;
+            let old_head = count + offset;
+            let new_head = old_head + 1;
+            let change = AssetChange {
+                base: Some(expected[&create.asset_id].clone()), delete: true, media: None, fields: Default::default(),
+                operation_id: uuid::Uuid::from_u128(6000 + offset as u128).to_string(), ..create
+            };
+            let body = Provider::direct_archive_body(&io, &target, &change.asset_id, &mapped, Event::encode(&target, &change)?)?;
+            let head = index(new_head, "library", library, &change.operation_id, &device, body);
+            let ids = vec![video, old_head, new_head];
+            let pts = 100 + offset * 3;
+            channel.0.lock().unwrap().extend([
+                Step::Changes(pts, Some((pts + 3, ids.clone()))),
+                Step::Read(ids, Ok(ChannelSnapshot { indexes: vec![head.clone()], ..Default::default() })),
+            ]);
+            let started = std::time::Instant::now();
+            mapped = refresh(&core, &target, &io, &channel).await?;
+            timings.push(started.elapsed().as_micros());
+            assert!(channel.0.lock().unwrap().is_empty());
+            assert_eq!(mapped.media, media[video as usize..]);
+            assert_eq!(mapped.indexes.len(), 1);
+            assert_eq!(mapped.indexes[0].document, head.document);
+            assert_eq!(mapped.indexes[0].verified_body()?, head.verified_body()?);
+            projection = Provider::project_snapshot(&core, &target, &io, Some(&projection.cursor), &mapped)?;
+            let tombstone = expected.get_mut(&change.asset_id).unwrap();
+            tombstone.deleted = true;
+            tombstone.operation_id = change.operation_id;
+            tombstone.revision = ((new_head as u64) << 32) | 1;
+            assert_eq!(projection.assets, expected);
+        }
+        timings.sort_unstable();
+        // Interpolate at (n - 1) * p, using the same convention as the online samples.
+        let p50 = (timings[4] + timings[5]) as f64 / 2.0;
+        let p95 = timings[8] as f64 + 0.55 * (timings[9] - timings[8]) as f64;
+        println!("offline refresh initial_messages={count} n=10 p50_us={p50:.2} p95_us={p95:.2}");
+        core.shutdown().await;
+    }
+    Ok(())
+}
+
 async fn exercise_archive_upgrade(rollover: bool) -> Result<()> {
     use crate::backup::{
         provider::{AssetChange, Checkpoint, MediaLocation, MediaRef, ReferenceChange},
@@ -410,20 +807,6 @@ async fn exercise_archive_upgrade(rollover: bool) -> Result<()> {
         telegram_transfer::tests::send_archive_losing_reply,
         telegram_transfer_journal::{CoreJournal, Journal, SendState},
     };
-    use sha2::{Digest, Sha256};
-    fn index(id: i32, kind: &str, asset: &str, operation: &str, device: &str, body: Vec<u8>) -> IndexDocument {
-        let mut document = doc(id, kind);
-        let mut envelope: Envelope = serde_json::from_str(&document.caption).unwrap();
-        envelope.asset_id = asset.into();
-        envelope.operation_id = operation.into();
-        envelope.device_id = device.into();
-        envelope.sha256 = format!("{:x}", Sha256::digest(&body));
-        envelope.bytes = body.len() as u64;
-        document.bytes = envelope.bytes;
-        document.caption = envelope.caption().unwrap();
-        IndexDocument { revision: if kind == "event" { (i64::from(id)<<32)|1 } else { i64::from(id) },
-            document, source: IndexSource::Verified(body.into()) }
-    }
     fn snapshot(indexes: Vec<IndexDocument>) -> ChannelSnapshot {
         let mut snapshot = ChannelSnapshot { indexes, ..Default::default() };
         snapshot.order();

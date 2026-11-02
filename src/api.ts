@@ -40,7 +40,9 @@ export const api = {
   telegramStorageChannels: (operationId: string, purpose: TelegramPurpose = 'backup') => invoke<TelegramStorageChannel[]>('telegram_storage_channels', { operationId, purpose }),
   hideAsset: (assetId: string) => invoke<void>('hide_asset_history', { assetId }),
   releaseAsset: (assetId: string) => invoke<void>('release_local_video', { assetId }),
-  deleteAsset: (spaceId: string, assetId: string) => invoke<void>('delete_asset_and_backup', { spaceId, assetId }),
+  deleteAsset: (spaceId: string, assetId: string) => invoke<string>('delete_asset_and_backup', { spaceId, assetId }),
+  onBackupAssetDeleted: (callback: (operation: string) => void) =>
+    listen<string>('backup_asset_deleted', event => callback(event.payload)),
   ensureAsset: (assetId: string) => invoke<string>('ensure_local_video', { assetId }),
   cancelAssetRestore: (assetId: string) => invoke<void>('cancel_asset_restore', { assetId }),
   assetPlaybackSource: async (assetId: string) => convertFileSrc(await invoke<string>('prepare_asset_playback', { assetId })),
