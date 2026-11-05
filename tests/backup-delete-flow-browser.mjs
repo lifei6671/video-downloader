@@ -95,19 +95,28 @@ async page => {
         };
         await stage('objects');await assertStage('正在删除远端备份');await sameRow();
         await p.evaluate(()=>window.emitActivity({operation_id:'delete-operation',companion:null,step:'archive_identity_check'}));
+        const statusLine=row.locator('.task-card-feedback .task-card-message');
+        await statusLine.filter({hasText:'正在按 ID 核对归档附件'}).waitFor();
+        await p.evaluate(()=>window.emitActivity({operation_id:'unrelated-operation',companion:null,step:'delete_message'}));
+        await statusLine.filter({hasText:'正在清理远端备份'}).waitFor();
+        await p.evaluate(()=>window.emitActivity({operation_id:'delete-operation',companion:null,step:'archive_identity_check'}));
+        await statusLine.filter({hasText:'正在按 ID 核对归档附件'}).waitFor();
+        check(await p.getByRole('tooltip').count()===0,'progress requires opening an icon tooltip');
         const icon=view==='feed'?row.locator('.backup-delete-progress'):headingIcon;
         if(taskBacked)await icon.hover();else await icon.focus();
         const tip=p.getByRole('tooltip');
         await tip.filter({hasText:'正在按 ID 核对归档附件'}).waitFor();
         await p.evaluate(()=>window.emitActivity({operation_id:'peer',companion:'delete-operation',step:'confirm_message_gone'}));
         await tip.filter({hasText:'正在确认同批视频消息均已删除'}).waitFor();
+        await statusLine.filter({hasText:'正在确认同批视频消息均已删除'}).waitFor();
         const bounds=await p.locator('[data-slot=tooltip-content]').boundingBox();
         check(bounds && bounds.x>=0 && bounds.y>=0 && bounds.x+bounds.width<=width && bounds.y+bounds.height<=height,'delete tooltip outside viewport');
         await p.evaluate(()=>{window.emitActivity(null);window.operation.phase='archive_ready';window.operation.state='pending';window.operation.payload.archive_next='peer';});
         await tip.filter({hasText:'归档已确认，等待同批清理完成'}).waitFor();
+        await statusLine.filter({hasText:'归档已确认，等待同批清理完成'}).waitFor();
         await p.keyboard.press('Escape');await p.mouse.move(0,0);
         await stage('cleanup_verify','blocked','BACKUP_ACCESS_DENIED');await assertStage('远端备份删除失败');await row.getByRole('alert').waitFor();await sameRow();
-        await row.locator('[role=status]').getByRole('button',{name:'重试删除',exact:true}).click();
+        await row.locator('.backup-sync-button[aria-label="重试删除"]').click();
         await assertStage('等待删除远端备份');
         await stage('local_cleanup');await p.evaluate(()=>window.asset.remote_deleted=true);
         await assertStage('正在删除本地文件');await sameRow();
@@ -117,7 +126,7 @@ async page => {
         await assertStage('正在删除本地文件');
         await stage('finalizing');await p.evaluate(()=>{window.asset.path=null;window.asset.local_state='missing';});
         await assertStage('正在移除记录');await sameRow();
-        await row.screenshot({path:`.local/delete-progress-consolidation/delete-${width}-${view}-${taskBacked?'task':'asset'}.png`});
+        await row.screenshot({path:`.local/backup-retry-download-stability/delete-${width}-${view}-${taskBacked?'task':'asset'}.png`});
         const keepOutsideFocus=!taskBacked&&view==='feed';
         if(keepOutsideFocus)await p.getByRole('button',{name:'下载任务',exact:true}).focus();else await context.focus();
         // Simulate the authoritative remove event before a stale asset snapshot refreshes.

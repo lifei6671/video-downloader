@@ -178,6 +178,19 @@ fn checkpoint(
     })
 }
 
+async fn recover_restore_network(core: &Core, scope: &Scope, cancel: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+    let work = crate::telegram_accounts::recover_network(core, crate::telegram_accounts::Purpose::Backup, cancel);
+    tokio::pin!(work);
+    loop {
+        let current = super::spaces::get(core)?.context("BACKUP_SPACE_INACTIVE")?;
+        if !super::spaces::enabled(core)? || !current.enabled || current.space_id != scope.space_id || current.library_id != scope.library_id { bail!("CANCELED"); }
+        tokio::select! {
+            result = &mut work => return result,
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+        }
+    }
+}
+
 pub async fn ensure(
     core: &Arc<Core>,
     provider: &dyn BackupProvider,
@@ -193,19 +206,6 @@ pub async fn ensure(
         return Ok(path);
     }
     let scope = provider.scope();
-    let remote = latest(core, provider, local).await?;
-    if remote.snapshot.deleted {
-        if let Some(path) = restore::local(core, local).await? {
-            return Ok(path);
-        }
-        super::sync_delete::confirm_on_read(core, provider, local, &remote).await?;
-        bail!("BACKUP_ASSET_DELETED");
-    }
-    let reference = remote
-        .snapshot
-        .media
-        .clone()
-        .context("BACKUP_RECORD_UNAVAILABLE")?;
     let existing = scheduler::operations(core)?.into_iter().find(|o| {
         o.space_id == scope.space_id
             && o.asset_id.as_deref() == Some(local)
@@ -219,8 +219,32 @@ pub async fn ensure(
         .context("BACKUP_INVALID_OPERATION")?;
     scope.check(&owned)?;
     core.backup_db(|db|{let tx=db.unchecked_transaction()?;tx.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'restore','running','preparing',?4) ON CONFLICT(operation_id) DO UPDATE SET state='running',last_error=NULL",params![operation,scope.space_id,local,payload.to_string()])?;tx.execute("UPDATE asset_local_files SET local_state='restoring' WHERE asset_id=?",[local])?;tx.commit()?;Ok(())})?;
+    let preparation_stop = shutdown.clone();
+    let mut work = Box::pin(async {
+    let remote = loop {
+        match latest(core, provider, local).await {
+            Err(error) if scope.provider_type == ProviderType::Telegram && crate::telegram_reconnect::network_error(&error.to_string()) => {
+                checkpoint(core, scope, &operation, "reconnecting", &payload)?;
+                recover_restore_network(core, scope, preparation_stop.clone()).await?;
+            }
+            result => break result?,
+        }
+    };
+    if remote.snapshot.deleted {
+        if let Some(path) = restore::local(core, local).await? {
+            core.backup_db(|db| { db.execute("UPDATE backup_operations SET state='completed',phase='completed',last_error=NULL WHERE operation_id=?", [&operation])?; Ok(()) })?;
+            return Ok(path);
+        }
+        super::sync_delete::confirm_on_read(core, provider, local, &remote).await?;
+        bail!("BACKUP_ASSET_DELETED");
+    }
+    let reference = remote
+        .snapshot
+        .media
+        .clone()
+        .context("BACKUP_RECORD_UNAVAILABLE")?;
     let (_stop, cancel) = tokio::sync::watch::channel(false);
-    let work = transfer(
+    Box::pin(transfer(
         core,
         provider,
         local,
@@ -229,8 +253,8 @@ pub async fn ensure(
         &operation,
         &mut payload,
         cancel,
-    );
-    tokio::pin!(work);
+    )).await
+    });
     let result = loop {
         tokio::select! {result=&mut work=>break result,_=shutdown.changed()=>break Err(anyhow::anyhow!("CANCELED")),_=tokio::time::sleep(Duration::from_millis(100))=>{if let Err(error)=active(core,scope,&operation) {break Err(error);}}}
     };
@@ -242,17 +266,28 @@ pub async fn ensure(
 
 #[allow(clippy::too_many_arguments)]
 async fn transfer(core:&Arc<Core>,provider:&dyn BackupProvider,local:&str,record:&AssetSnapshot,reference:&MediaRef,operation:&str,payload:&mut Value,cancel:tokio::sync::watch::Receiver<bool>)->Result<PathBuf> {
-    for attempt in 0..2 {
+    let mut refreshed = false;
+    loop {
         match transfer_once(core,provider,local,record,reference,operation,payload,cancel.clone()).await {
-            Err(error) if attempt==0 && provider.scope().provider_type==ProviderType::Telegram && error.to_string()=="TELEGRAM_FILE_REFERENCE_EXPIRED"=>{
+            Err(error) if !refreshed && provider.scope().provider_type==ProviderType::Telegram && error.to_string()=="TELEGRAM_FILE_REFERENCE_EXPIRED"=>{
                 // A newly fetched source message supplies a new file reference. Restart the owned part at zero.
                 payload["reference"]=Value::Null;
+                refreshed = true;
                 checkpoint(core,provider.scope(),operation,"refreshing_reference",payload)?;
+            },
+            Err(error) if provider.scope().provider_type == ProviderType::Telegram && crate::telegram_reconnect::network_error(&error.to_string()) => {
+                active(core, provider.scope(), operation)?;
+                checkpoint(core, provider.scope(), operation, "reconnecting", payload)?;
+                recover_restore_network(core, provider.scope(), cancel.clone()).await?;
+            },
+            Err(error) if provider.scope().provider_type==ProviderType::Telegram && error.to_string()=="TELEGRAM_NETWORK_CHANGED"=>{
+                active(core,provider.scope(),operation)?;
+                checkpoint(core,provider.scope(),operation,"reconnecting",payload)?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
             },
             result=>return result,
         }
     }
-    unreachable!("bounded media reference refresh always returns")
 }
 #[allow(clippy::too_many_arguments)]
 async fn transfer_once(
@@ -327,9 +362,9 @@ async fn transfer_once(
             .await
             {
                 Ok(Ok(n)) => n,
-                Ok(Err(error)) if error.to_string()=="TELEGRAM_FILE_REFERENCE_EXPIRED"=>{
+                Ok(Err(error)) if scope.provider_type == ProviderType::Telegram && error.to_string().starts_with("TELEGRAM_")=>{
                     file.flush().await?;file.sync_all().await?;
-                    bail!("TELEGRAM_FILE_REFERENCE_EXPIRED");
+                    return Err(error.into());
                 },
                 _ => {
                     file.flush().await?;

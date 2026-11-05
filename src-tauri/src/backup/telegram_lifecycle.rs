@@ -74,16 +74,14 @@ pub(super) async fn reconcile_deleted_messages(
                     && r.bytes == document.bytes
                     && envelope.sha256 == r.sha256 && envelope.container == r.container
             });
-        let Some(reference) = candidate(target, asset, deletion, &document, known)? else {
+        if candidate(target, asset, deletion, &document, known)?.is_none() {
             continue;
-        };
+        }
         if in_use(target, projected, document.message_id) {
             bail!("BACKUP_MEDIA_IN_USE");
         }
-        if known.is_none() {
-            let timing = super::delete_timing::setup_span("unknown_media_verify");
-            verify_body(transport, target, &reference, io, timing).await?;
-        }
+        // Deletion is based on the tombstoned incarnation and a fresh exact
+        // message/document readback below. Do not download attachment bodies.
         groups
             .entry(document.message_id)
             .or_default()
@@ -123,19 +121,16 @@ pub(super) async fn cancel(
     {
         return Ok(());
     }
-    let (document, identity) = if let Some(original) = &entry.document {
+    let document = if let Some(original) = &entry.document {
         let current = match io.run(transport.inspect_document(original.message_id,original.document_id)).await {
             Err(e) if e.to_string() == "TELEGRAM_MEDIA_MISSING" => return Ok(()),
             other => other?,
         };
-        (current, Some(original.document_id))
+        current
     } else if entry.state == SendState::Sending {
-        (
-            io.run(transport.find(&entry.envelope, io))
+        io.run(transport.find(&entry.envelope, io))
                 .await?
-                .context("TELEGRAM_SEND_UNCONFIRMED")?,
-            None,
-        )
+                .context("TELEGRAM_SEND_UNCONFIRMED")?
     } else {
         return Ok(());
     };
@@ -162,7 +157,6 @@ pub(super) async fn cancel(
         sha256: entry.envelope.sha256.clone(),
         container: entry.envelope.container.clone(),
     };
-    if identity.is_none() {verify(transport,target,&reference,io).await?;}
     remove(transport, target, &reference, io).await
 }
 

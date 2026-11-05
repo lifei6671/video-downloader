@@ -14,6 +14,8 @@ tauri-build = { version = "2", optional = true , features = [] }
 
 [dependencies]
 anyhow = "1"
+futures-util = "0.3"
+md5 = "0.8"
 base64 = "0.22"
 qrcode = { version = "0.14.1", default-features = false }
 mime_guess = "2"
@@ -31,7 +33,7 @@ tempfile = "3"
 same-file = "1"
 zeroize = "1.9.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "io-std", "fs", "net", "time", "signal", "sync"] }
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 sha2 = "0.10"
@@ -61,3 +63,6 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 
 [patch.crates-io]
 grammers-mtsender = { path = "../vendor/grammers-mtsender" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

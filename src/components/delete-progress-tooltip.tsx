@@ -66,7 +66,7 @@ const batchSteps: Record<string, string> = {
   confirm_message_gone: '正在确认同批视频消息均已删除',
 };
 
-function detail(deletion: Deletion, activity: DeleteActivity | null, retryHint: boolean) {
+export function deleteProgressDetail(deletion: Deletion, activity: DeleteActivity | null, retryHint = false) {
   const { operation, label, failed, phase } = deletion;
   if (failed) return retryHint ? label + '，点击重试删除' : label;
   if (!operation || phase === 'complete') return label;
@@ -82,13 +82,8 @@ function detail(deletion: Deletion, activity: DeleteActivity | null, retryHint: 
   return label;
 }
 
-export function DeleteProgressTooltip({ deletion, retryHint = false, children }: {
-  deletion: Deletion; retryHint?: boolean; children: ReactElement;
-}) {
-  const [open, setOpen] = useState(false);
+export function useDeleteActivity(active: boolean, spaceId?: string) {
   const [activity, setActivity] = useState<DeleteActivity | null>(null);
-  const operation = deletion.operation?.operation_id;
-  const active = open && !!operation && !deletion.failed && deletion.phase !== 'complete';
   useEffect(() => {
     setActivity(null);
     if (!active) return;
@@ -107,9 +102,15 @@ export function DeleteProgressTooltip({ deletion, retryHint = false, children }:
     // The persisted operation phase remains visible if the live IPC connection is unavailable.
     void subscribe().catch(() => {});
     return () => { disposed = true; stop?.(); };
-  }, [active, operation, deletion.operation?.attempt]);
-  return <Tooltip onOpenChange={value => { setOpen(value); if (!value) setActivity(null); }}>
+  }, [active, spaceId]);
+  return activity;
+}
+
+export function DeleteProgressTooltip({ deletion, activity, retryHint = false, children }: {
+  deletion: Deletion; activity: DeleteActivity | null; retryHint?: boolean; children: ReactElement;
+}) {
+  return <Tooltip>
     <TooltipTrigger asChild>{children}</TooltipTrigger>
-    <TooltipContent collisionPadding={8}>{detail(deletion, activity, retryHint)}</TooltipContent>
+    <TooltipContent collisionPadding={8}>{deleteProgressDetail(deletion, activity, retryHint)}</TooltipContent>
   </Tooltip>;
 }

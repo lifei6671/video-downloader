@@ -15,7 +15,7 @@ re-encoding ``params``: a single extra percent-escape invalidates the signature.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -43,6 +43,8 @@ class SignatureAlgorithm(StrEnum):
     A_BOGUS = "a_bogus"
     X_BOGUS = "X-Bogus"
     SIGNATURE = "_signature"
+    #: Bilibili's. Computed from two public keys, so native is the only signer.
+    WBI = "w_rid"
 
 
 #: Query parameter carrying the session token on both platforms.
@@ -57,26 +59,95 @@ DEFAULT_ALGORITHMS: Mapping[Platform, SignatureAlgorithm] = MappingProxyType(
     {
         Platform.DOUYIN: SignatureAlgorithm.A_BOGUS,
         Platform.TIKTOK: SignatureAlgorithm.X_BOGUS,
+        Platform.BILIBILI: SignatureAlgorithm.WBI,
     }
 )
+
+#: Platforms browser-rpc can sign for. Its page knows Douyin's and TikTok's
+#: SDKs and nobody else's; Bilibili's WBI needs no browser at all, so a
+#: request for it must never be routed there, whatever `signing.mode` says.
+RPC_PLATFORMS: frozenset[Platform] = frozenset({Platform.DOUYIN, Platform.TIKTOK})
 
 
 def encode_query(params: Mapping[str, str], algorithm: SignatureAlgorithm) -> str:
     """The exact byte sequence signed for ``algorithm``, and sent on the wire.
 
-    A-Bogus is computed over the form-encoded query; X-Bogus over the raw
-    ``key=value`` join, which is what V4 sent in production and what the platform
-    accepts (a base64 ``msToken`` ends in ``==``, and percent-escaping it changes
-    the signed bytes).
+    A-Bogus is computed over the form-encoded query; X-Bogus - TikTok - over
+    the query as a browser would send it, :func:`encode_browser_query`.
 
     Both signers must go through this function. When they encode differently they
     sign different bytes for the same request, which sends a wrong signature on
     the fallback path and makes the shadow comparison report a mismatch for a
     reason that has nothing to do with the algorithm.
+
+    That happened. TikTok's native signer moved to the browser's encoding when
+    ``/api/user/detail/`` was found to check it, and this function kept the raw
+    ``key=value`` join it had before - which only the browser signer still
+    used. The page escaped ``browser_version=5.0 (Windows)`` to ``5.0%20...``
+    before its SDK hashed it, the request went out with the space, and every
+    endpoint that checks that hash answered with an empty body. Measured on
+    2026-10-21 by decoding a browser-signed ``/api/post/item_list/``: both
+    seals covered a query other than the one sent, and covered the sent one
+    once this encoder was used.
     """
     if algorithm is SignatureAlgorithm.X_BOGUS:
-        return "&".join(f"{key}={value}" for key, value in params.items())
+        return encode_browser_query(params.items())
     return urlencode(params)
+
+
+#: The only characters a browser escapes inside a query string. Chrome leaves
+#: everything else - parentheses, slashes, colons, commas, ``=`` - literal, and
+#: the `#` is here because it would otherwise start the fragment.
+_BROWSER_MUST_ESCAPE: Mapping[str, str] = MappingProxyType(
+    {" ": "%20", '"': "%22", "<": "%3C", ">": "%3E", "`": "%60", "#": "%23"}
+)
+
+
+def encode_browser_query(pairs: Iterable[tuple[str, str]]) -> str:
+    """Serialize query parameters exactly as a browser would send them.
+
+    This is NOT ``urlencode``, and the difference is the whole reason
+    ``/api/user/detail/`` used to fail while its neighbours worked.
+
+    TikTok's X-Dynosaur field 0x2E is a hash of the query, and the SDK hashes
+    the string the browser handed it - which is the URL after the browser's own
+    normalisation, not after a library's. Chrome escapes a space to ``%20`` and
+    leaves parentheses, slashes and colons alone, so the real page hashes
+    ``browser_version=5.0%20(Windows)&root_referer=https://www.tiktok.com/``.
+    Percent-encoding everything produced ``5.0%20%28Windows%29`` and
+    ``https%3A%2F%2F...`` - a different string, a different hash, and a
+    signature bound to bytes the platform never sees.
+
+    Recovered by capturing a browser-signed request, decoding its X-Dynosaur and
+    searching for the input that reproduces 0x2E: only-escape-the-space matches
+    byte for byte, and nothing else tried does. TikTok verifies that binding on
+    ``/api/user/detail/`` and ``/api/post/item_list/`` and ignores it on
+    ``/api/item/detail/`` and ``/api/comment/list/``, which is why the symptom
+    is one endpoint silently returning nothing.
+
+    The same string is hashed and sent, so this must stay the only encoder in
+    the path.
+    """
+    return "&".join(f"{_browser_escape(key)}={_browser_escape(value)}" for key, value in pairs)
+
+
+def _browser_escape(text: str) -> str:
+    """Percent-escape only what a browser has to, leaving the rest literal.
+
+    Printable ASCII passes through untouched apart from the handful in
+    :data:`_BROWSER_MUST_ESCAPE`. Everything else - control characters and
+    anything non-ASCII - is percent-encoded from its UTF-8 bytes, which is what
+    a browser puts on the wire for a query it was handed as text.
+    """
+    out: list[str] = []
+    for ch in text:
+        if ch in _BROWSER_MUST_ESCAPE:
+            out.append(_BROWSER_MUST_ESCAPE[ch])
+        elif " " < ch <= "~":
+            out.append(ch)
+        else:
+            out.extend(f"%{byte:02X}" for byte in ch.encode("utf-8"))
+    return "".join(out)
 
 
 #: Host suffix to platform. Used to infer the platform when a caller does not
@@ -88,6 +159,8 @@ HOST_PLATFORMS: Mapping[str, Platform] = MappingProxyType(
         "amemv.com": Platform.DOUYIN,
         "tiktok.com": Platform.TIKTOK,
         "tiktokv.com": Platform.TIKTOK,
+        "bilibili.com": Platform.BILIBILI,
+        "b23.tv": Platform.BILIBILI,
     }
 )
 
@@ -141,8 +214,30 @@ class RequestSpec:
         params: Mapping[str, str] | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> RequestSpec:
-        """Convenience constructor: every signed platform call today is a GET."""
+        """Convenience constructor for the common case, a GET with no body.
+
+        Not every signed call is one: Douyin's ``listcollection`` is a form POST
+        and a_bogus hashes its body, so the fetch pipeline builds the spec in
+        full rather than through here.
+        """
         return cls(method="GET", url=url, params=params, headers=headers)
+
+    @classmethod
+    def of(cls, request: Mapping[str, Any]) -> RequestSpec:
+        """Everything a platform request description says that a signature covers.
+
+        Takes the mapping ``dtk.platforms`` builds, read structurally so that
+        signing stays free of platform types. The worker used to hand over the
+        URL and the parameters alone - everything a GET has - so a POST's body
+        could never have reached the signer that hashes it.
+        """
+        return cls(
+            method=str(request.get("method") or "GET"),
+            url=str(request["url"]),
+            params={key: str(value) for key, value in (request.get("params") or {}).items()},
+            headers=request.get("headers"),
+            body=request.get("body"),
+        )
 
     @property
     def platform(self) -> Platform | None:
@@ -174,6 +269,10 @@ class SignedParams:
         headers: Extra headers the signature requires (empty on the web APIs).
         signer: ``native`` or ``browser``; goes straight into ``request_log``.
         algorithm: Which scheme produced the signature.
+        cookies: Cookies the signature was computed under, which the request
+            must carry in place of the identity's own values for those names.
+            Empty unless the signer worked in a session other than the jar's -
+            see ``RpcSigner``, whose page seals its own ``msToken``.
     """
 
     query: str
@@ -181,10 +280,12 @@ class SignedParams:
     headers: Mapping[str, str] = _EMPTY
     signer: str = SIGNER_NATIVE
     algorithm: SignatureAlgorithm = SignatureAlgorithm.A_BOGUS
+    cookies: Mapping[str, str] = _EMPTY
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "params", _freeze(self.params))
         object.__setattr__(self, "headers", _freeze(self.headers))
+        object.__setattr__(self, "cookies", _freeze(self.cookies))
 
     def signed_url(self, base_url: str) -> str:
         """``base_url`` with the signed query attached, ready for transport."""
@@ -326,6 +427,7 @@ __all__ = [
     "DEFAULT_ALGORITHMS",
     "HOST_PLATFORMS",
     "MS_TOKEN_PARAM",
+    "RPC_PLATFORMS",
     "SIGNER_BROWSER",
     "SIGNER_NATIVE",
     "RequestSpec",
@@ -336,6 +438,7 @@ __all__ = [
     "SigningFingerprint",
     "SigningSession",
     "StaticFingerprint",
+    "encode_browser_query",
     "encode_query",
     "endpoint_of",
     "platform_of",

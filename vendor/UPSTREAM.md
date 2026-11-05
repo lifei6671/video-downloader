@@ -2,23 +2,27 @@
 
 ## Telegram 存储 grammers
 
-Telegram 存储采用 [grammers](https://codeberg.org/Lonami/grammers)，直接使用 crates.io 的 `grammers-client` / `grammers-session` 0.11.0，精确解析版本及校验值由 `src-tauri/Cargo.lock` 固定。发布 crate 的 `.cargo_vcs_info.json` 指向提交 `15b7afa46a9c6853aa9d8efc9d70a0f46b1781c3`。选型沿用 [已确认方案](../docs/telegram-storage-plan.md)，不使用归档 GitHub 镜像判断维护状态，仅对代理认证 URL 解码做下述本地修补，不修改 MTProto 协议实现。
+Telegram 存储采用 [grammers](https://codeberg.org/Lonami/grammers)，直接使用 crates.io 的 `grammers-client` / `grammers-session` 0.11.0，精确解析版本及校验值由 `src-tauri/Cargo.lock` 固定。发布 crate 的 `.cargo_vcs_info.json` 指向提交 `15b7afa46a9c6853aa9d8efc9d70a0f46b1781c3`。选型沿用 [已确认方案](../docs/telegram-storage-plan.md)，不使用归档 GitHub 镜像判断维护状态。本地补丁包括下述代理解码、已取消文件请求的内存回收及显式启用的媒体 TCP 池，不改变 MTProto 编码、加密或会话规则。
 
 grammers 使用 MIT OR Apache-2.0。新增解析依赖（含 Tokio 必要升级）的许可证及版本收录于 [telegram-storage-licenses.txt](telegram-storage-licenses.txt)，随安装包分发。grammers 发布 crate 没有附带许可证文件，文本从上述精确提交的 `LICENSE-MIT` / `LICENSE-APACHE` 获取；`grammers-tl-parser` 1.2.2 对应提交 `5c6d44ff30e02d6c9295bcf1fcb51403ad77c981`，已核对两份许可文本一致。其余新增依赖文本来自对应 crate 包，许可均为 MIT、MIT OR Apache-2.0 或 Apache-2.0 OR MIT。
 
 扫码授权按 [Telegram 官方流程](https://core.telegram.org/api/qr-login) 实现。二维码编码复用 [kennytm/qrcode-rust](https://github.com/kennytm/qrcode-rust) 发布 crate `qrcode` 0.14.1（MIT OR Apache-2.0），关闭默认 features，只生成矩阵，不引入 image 编码栈；base64url 复用已在锁文件中的 `base64` 0.22.1（MIT OR Apache-2.0），提升为直接依赖。两者许可证已加入同一分发清单。
 
-`grammers-mtsender` 0.11.0 的 crates.io 源码保留于 `vendor/grammers-mtsender`，由 Cargo `[patch.crates-io]` 使用。与该发布包相比，仅在 `src/net/tcp.rs` 将 SOCKS5 用户名和密码做 UTF-8 percent-decode，并在其 manifest 的 `proxy` feature 增加已有 `percent-encoding` 依赖；原始 header 与上述精确提交的 LICENSE 均保留。回归测试以本地 SOCKS5 认证握手确认 `@`、`:`、`%` 正确解码；升级时重验并在上游支持后移除此补丁。代理功能同时引入 tokio-socks/hickory 等传递依赖，许可原文一并分发。
+`grammers-mtsender` 0.11.0 的 crates.io 源码保留于 `vendor/grammers-mtsender`，由 Cargo `[patch.crates-io]` 使用。`src/net/tcp.rs` 将 SOCKS5 用户名和密码做 UTF-8 percent-decode，manifest 的 `proxy` feature 增加已有 `percent-encoding` 依赖。`src/sender.rs` 在有文件 RPC 时每 100 ms 清理调用方已放弃的 GetFile/SaveFilePart/SaveBigFilePart 请求，`sender_pool.rs` 跳过已关闭的排队调用；保留控制、发布和 keepalive 请求。已写入 TCP 的数据不能撤回，此补丁停止保留/重发取消请求，不宣称终止服务端已开始的执行。原始 header、LICENSE 均保留；回归测试覆盖代理特殊字符和文件取消不误删控制/保活。升级时重验并在上游提供同等能力后移除补丁。
+
+媒体 TCP 补丁通过 `enable_media_pool` 显式启用，默认 SDK 路由保持原样；按 DC 缓存 media_only 端点，仅文件 RPC 进入两槽媒体连接，独立 MTProto 状态复用同 DC 授权 key，全账号共享连接许可并有空闲回收。下载租借已有主池，取消不关闭其它任务；媒体 404 及建连失败先退回普通 DC 路径，10 秒后按真实文件请求做单连接探测，每轮至多 3 次，失败按 30/60/300 秒冷却；收到有效 RPC 响应才恢复双槽，401/403 不算恢复，其他 RPC 拒绝仍原样返回调用方，不表示文件传输成功。`media_recovery.rs` 为本地独立实现，监控器与连接均由原 JoinSet 回收；SDK 不主动登录或生成后台文件请求。池/连接生命周期日志写入 stderr，只含本地编号、DC、静态原因和计数；断开记录另含静态错误类别、系统错误码及传输状态码，区分 reset、EOF、超时、帧错误和 MTProto 解码错误，不输出错误原文，复用及回退限频，不记录密钥、用户/频道、代理或 RPC 内容。没有复制 tdl 的 AGPL 源码，按公开协议独立实现，复用现有 Tokio/grammers 加密和传输。新增 dev-only sha2 和 Tokio test-util 仅供合成 key 的回环测试，未增加运行依赖；升级时重验媒体身份、白名单、会话 ID、授权恢复和生命周期并在上游提供等价能力后移除补丁。
+
+分片引擎复用既有 [futures-rs](https://github.com/rust-lang/futures-rs) 的有界 `FuturesUnordered` 调度与既有 [md5](https://github.com/stainless-steel/md5) 的流式摘要，将锁定的 `futures-util` 0.3.34 / `md5` 0.8.1 提升为直接依赖，没有引入新的传递包或替换 SDK 版本。文件协议依据 [Telegram 官方文档](https://core.telegram.org/api/files)独立实现；tdl 只用于机制参考，没有复制其 AGPL 实现。许可证随同一清单分发。
 
 两个直接依赖均关闭默认 features，`grammers-client` 开启原生 `proxy`，`grammers-session` 只开启 `serde`；不引入默认 `libsql` SQLite 存储，与应用现有 `rusqlite` 保持独立。SDK 要求 Tokio 至少 1.53.3，当前锁定 1.54.1。会话适配器仅把非持久缓存留在内存，授权数据通过独立系统凭据服务保存；不读取 tdl 或 Telegram Desktop 的会话。真实传输、文件限制、扫码和跨平台验收见实施记录，依赖编译成功不代表这些能力通过。
 
-当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.8.19` 的运行时版本为 `2026.08.19`；协议 v3，引擎版本 `0.6.0`。
+当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.10.26` 的运行时版本为 `2026.10.26`；协议 v3，引擎版本 `0.14.2`。
 
-- 来源：https://github.com/yt-dlp/yt-dlp/tree/2026.08.19
-- PyPI：https://pypi.org/project/yt-dlp/2026.8.19/
-- 官方 wheel：`yt_dlp-2026.8.19-py3-none-any.whl`
-- wheel SHA-256：`1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf`（PyPI 发布元数据核对）
-- sdist SHA-256：`9e213e48cea35c66b378e4447903f118f6392a5fa380a2b6d7070ec86f4e0af1`
+- 来源：https://github.com/yt-dlp/yt-dlp/tree/2026.10.26
+- PyPI：https://pypi.org/project/yt-dlp/2026.10.26/
+- 官方 wheel：`yt_dlp-2026.10.26-py3-none-any.whl`
+- wheel SHA-256：`a05c5b5d8562f7e8a62f5334348b406af4930d56d3a65f8021d14af0e22339ae`（PyPI 发布元数据核对）
+- sdist SHA-256：`abe5c6b94c3b2f0560500add1c42e0a97641752743a5b65588ac2007a6e23eb6`
 - Unlicense 原文保留于 `yt-dlp-LICENSE`，从已安装的对应 wheel 许可证复制。
 
 不修改已安装的 yt-dlp 包；经用户明确批准，在自有适配层覆盖 DouyinIE 的单一详情请求构造，补丁范围见下文。`python-engine/engine.py` 使用 `YoutubeDL` 嵌入接口；`network.py` 为本应用的双平台网络边界适配，固定依赖该版本的 `UrllibRH`、`HTTPHandler` 和请求 director。沿用上游 Cookie、HTTP 解码、重定向及 SOCKS 实现，只增加逐跳目标校验与直连 DNS 结果固定；按 2026-10-14 用户 TUN 决策，不检查 DNS 返回 IP 的公网属性，私有/保留地址交由系统路由；升级须重测这些内部接入点。显式 HTTP 代理由适配层设置路由，避免环境 NO_PROXY 或系统 bypass 改走直连；SOCKS 保留上游实现。远端 DNS 代理的实际目的 IP 无法由本客户端验证。
@@ -29,10 +33,12 @@ YouTube 额外锁定 `yt-dlp-ejs==0.8.0`（yt-dlp 此版本的匹配版本），
 
 PyInstaller 使用官方 yt-dlp hook，收集 DTK 的具体平台模块、完整 onedir 及实际运行依赖的许可证；DTK Apache LICENSE / NOTICE 一同分发。运行时不加载上游 RPC、签名 registry、身份池或后台服务。开发锁文件另有 pytest、PyInstaller，含 Windows/macOS 平台标记。旧 M1 引擎已退役，新切片不是恢复旧服务架构。
 
+2026-11-04 已核对并同步上游最新稳定发布：yt-dlp `2026.10.26`、DTK `v5.1.10`。yt-dlp 当前要求 Python ≥3.11，本项目构建环境为 3.12；匹配的 EJS 仍为 `0.8.0`，证书包同步至该发布锁定的 `certifi==2026.10.23`。没有启用额外浏览器、curl-cffi 或服务端组件。DTK 新签名器导入 WBI 的两个模块，白名单只补入 `wbi.py` / `wbi_keys.py` 以保持上游源码完整；这些模块导入时没有网络操作，抖音/TikTok 路径不会构造 Bilibili 的 `NavKeySource`，应用没有新增 Bilibili 功能。
+
 ## DTK 固定切片与补丁
 
-- 来源：[Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/tree/4f0bed8483c35a980315d9c7b3a1d4a1119ad2b2)，版本 5.1.3，提交 `4f0bed8483c35a980315d9c7b3a1d4a1119ad2b2`。
-- [manifest](dtk/manifest.json) 保存 31 个 Python 文件及 LICENSE / NOTICE 的原始、安装后 SHA-256，补丁 SHA-256 和允许的运行依赖。
+- 来源：[Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/tree/26299ef8649a12be82c3769b05b316fdeec8d40d)，版本 5.1.10，提交 `26299ef8649a12be82c3769b05b316fdeec8d40d`。
+- [manifest](dtk/manifest.json) 保存 33 个 Python 文件及 LICENSE / NOTICE 的原始、安装后 SHA-256，补丁 SHA-256 和允许的运行依赖。
 - [desktop-imports.patch](dtk/patches/desktop-imports.patch) 仅隔离 signing 包初始化的 registry / RPC 聚合导入；签名算法、参数构造和 parser 保留上游原文。自有业务编排位于 `python-engine/dtk_adapter.py`。
 - `vendor/dtk/upstream/` 由 [同步脚本](../scripts/update_dtk_vendor.py) 生成，不手改。`_desktop_revision.py` 是脚本生成的版本文件。
 - 更新先校验已安装源文件，再从指定完整 commit 读取白名单、校验原始 hash、执行补丁 apply --check、审计导入与语法；全部通过才替换源码和 manifest。冲突、未审核依赖或本地修改不会被覆盖。

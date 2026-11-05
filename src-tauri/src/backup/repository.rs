@@ -1,4 +1,4 @@
-//! Canonical SQLite schema and asset persistence; no network calls are made here.
+//! SQLite initialization, compatible local migration and asset persistence; no network calls.
 use super::model::{Asset, AssetTranscript, Space};
 use crate::desktop_core::{transcription::Snapshot, Status, Task};
 use anyhow::{bail, Context, Result};
@@ -9,19 +9,22 @@ use std::{fs, io::Read, path::Path, time::UNIX_EPOCH};
 use uuid::Uuid;
 
 pub fn init(db: &Connection) -> Result<()> {
+    init_prepared(db, super::schema_migration::prepare(db)?)
+}
+
+pub(crate) fn init_prepared(
+    db: &Connection,
+    prepared: super::schema_migration::Prepared,
+) -> Result<()> {
     if !db.is_autocommit() {
         bail!("BACKUP_SCHEMA_REQUIRES_AUTOCOMMIT");
     }
     let tx = db.unchecked_transaction()?;
+    super::schema_migration::apply(&tx, &prepared)?;
     tx.execute_batch(include_str!("schema.sql"))?;
-    let version: i64 = tx.query_row("SELECT version FROM backup_schema WHERE id=1", [], |r| {
-        r.get(0)
-    })?;
-    if version != 1 {
-        bail!("BACKUP_UNSUPPORTED_SCHEMA");
-    }
     tx.execute_batch(include_str!("sync-schema.sql"))?;
     tx.execute_batch(include_str!("telegram-schema.sql"))?;
+    super::schema_migration::finish(&tx, &prepared)?;
     super::spaces::select_initial_default(&tx)?;
     tx.execute(
         "INSERT OR IGNORE INTO backup_device(id,device_id) VALUES(1,?)",

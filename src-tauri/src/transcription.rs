@@ -83,7 +83,7 @@ pub(super) struct ActiveTranscription {
     pub cancel: watch::Sender<bool>,
     pub done: watch::Receiver<bool>,
 }
-fn load(db: &Connection, id: &str) -> Result<Option<Snapshot>> {
+pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Snapshot>> {
     let value: Option<String> = db
         .query_row(
             "SELECT snapshot FROM video_transcripts WHERE task_id=?",

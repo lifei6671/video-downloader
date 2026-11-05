@@ -13,6 +13,28 @@ async page => {
   };
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]){
     await page.setViewportSize({width,height});await load();
+    const toolbar=page.getByRole('tablist',{name:'按平台筛选下载任务',exact:true});
+    const toolbarBefore=await toolbar.boundingBox();
+    await page.evaluate(async()=>{
+      const {api}=await import(performance.getEntriesByType('resource').find(e=>e.name.includes('/src/api.ts')).name);
+      window.cardRemoveCalls=0;
+      const remove=api.remove;
+      api.remove=async id=>{window.cardRemoveCalls++;await new Promise(resolve=>window.releaseCardRemove=resolve);return remove(id);};
+    });
+    await row(3).locator('.task-row-title').click({button:'right'});
+    await page.getByRole('menuitem',{name:'从列表移除',exact:true}).click();
+    await row(3).getByRole('button',{name:'取消等待',exact:true}).waitFor();
+    check(await row(3).locator('.task-feed-status').innerText()==='等待中','resource wait kept the completed badge');
+    await page.waitForTimeout(600);
+    check(await page.locator('[data-sonner-toast][data-type="error"]').count()===0,'resource wait created an error Toast: '+(await page.locator('[data-sonner-toast][data-type="error"]').allTextContents()).join(' | '));
+    check(await row(3).count()===1 && await page.evaluate(()=>window.cardRemoveCalls)===1,'waiting removal was replayed or removed early');
+    check(await row(1).getByRole('button',{name:'取消下载',exact:true,includeHidden:true}).isEnabled(),'waiting disabled unrelated cancellation');
+    check(Math.abs((await toolbar.boundingBox()).y-toolbarBefore.y)<1,'resource wait shifted task filters');
+    await page.evaluate(()=>window.releaseCardRemove());
+    await row(3).waitFor({state:'detached'});
+    check(await page.locator('[data-sonner-toast][data-type="error"]').count()===0,'successful wait created an error Toast');
+    results.push(`${width}: quiet task-local resource wait, single IPC request, cancellation reachable, no layout shift`);
+    await load();
     const cover=row(1).getByRole('button',{name:'查看封面',exact:true});
     check(await cover.isDisabled(),'downloading cover is enabled');
     await row(1).hover();
@@ -21,9 +43,11 @@ async page => {
     check(await page.getByRole('dialog').count()===0,'downloading cover opened details');
     check(await row(1).getByRole('progressbar',{name:'下载进度',exact:true}).count()===1 && await row(1).locator('.task-row-footer').count()===0,'progress missing or downloading footer remains');
     const error=row(4).getByRole('alert');
-    check(await error.count()===1 && await error.evaluate(n=>n.parentElement.classList.contains('task-row-cover')),'error is not exclusively inside cover');
-    const eb=await error.boundingBox(),cb=await row(4).locator('.task-row-cover').boundingBox();
-    check(eb.y>=cb.y && eb.y<cb.y+20 && eb.x>=cb.x && eb.x+eb.width<=cb.x+cb.width,'error placement escaped cover top');
+    check(await error.count()===1 && await error.evaluate(n=>!!n.closest('.task-row-information .task-card-feedback')),'error is not persistently visible below metadata');
+    check(await row(4).locator('.task-feed-status').innerText()==='下载失败' && await row(4).locator('.task-row-footer').count()===0,'failed card still uses footer status/actions');
+    const retry=row(4).getByRole('button',{name:'重试下载',exact:true});
+    const rb=await retry.boundingBox(),cb=await row(4).locator('.task-row-cover').boundingBox();
+    check(rb.y>=cb.y && rb.y<cb.y+12 && rb.x+rb.width>cb.x+cb.width-12,'retry is not at cover top right');
     const gallery=row(6).getByRole('button',{name:'查看图集',exact:true});
     check(await gallery.count()===1 && await gallery.locator('svg.lucide-images').count()===1,'gallery icon missing or duplicated');
     check(await row(6).locator('.task-row-footer button').count()===0,'footer gallery action remains');
@@ -68,9 +92,76 @@ async page => {
     await page.waitForFunction(()=>!document.querySelector('[data-task-id="visual-3"] .task-play').disabled);
     check(await page.evaluate(()=>window.otherButtonChanges.length===0),'play completion flickered other buttons');
     await page.evaluate(()=>window.cardButtonObserver.disconnect());
-    await page.screenshot({path:`.local/task-paging/cards-${width}.png`});
-    results.push(`${width}: disabled cover, top error, top-right gallery/keyboard, absolute path clipboard, play busy isolation/deduplication`);
+    await page.screenshot({path:`.local/card-layout-unification/regression-${width}.png`});
+    results.push(`${width}: disabled cover, failed corner controls and persistent error, top-right gallery/keyboard, absolute path clipboard, play busy isolation/deduplication`);
   }
+  await load();
+  await page.evaluate(async()=>{
+    const {api}=await import(performance.getEntriesByType('resource').find(e=>e.name.includes('/src/api.ts')).name);
+    window.waitRetryCalls=0; window.waitCancelCalls=0;
+    api.retry=async()=>{window.waitRetryCalls++;return new Promise((_,reject)=>window.cancelWaitRetry=()=>reject('CANCELED'));};
+    api.cancel=async()=>{window.waitCancelCalls++;window.cancelWaitRetry();};
+  });
+  const failedCardHeightBeforeWait=await row(4).evaluate(node=>node.getBoundingClientRect().height);
+  const previousFailure=await page.evaluate(()=>window.backgroundTest.snapshot().find(task=>task.id==='visual-4').error);
+  await row(4).getByRole('button',{name:'重试下载',exact:true}).click();
+  await row(4).getByRole('button',{name:'取消等待',exact:true}).waitFor();
+  check(await row(4).locator('.task-feed-status').innerText()==='等待中','resource wait kept the failed badge');
+  check(await row(4).getAttribute('data-status')==='failed','waiting badge mutated the persisted task state');
+  check(await row(4).getByRole('alert').count()===0,'waiting still displays the previous failure');
+  check(await row(4).locator('.task-card-feedback').evaluate(node=>node.childElementCount===0),'waiting feedback slot is not blank');
+  check(Math.abs((await row(4).evaluate(node=>node.getBoundingClientRect().height))-failedCardHeightBeforeWait)<1,'blank feedback changed the card height');
+  check(await page.evaluate(()=>window.backgroundTest.snapshot().find(task=>task.id==='visual-4').error)===previousFailure,'presentation cleared the authoritative failure');
+  const waitingButton=await row(4).getByRole('button',{name:'取消等待',exact:true}).boundingBox();
+  const waitingCover=await row(4).locator('.task-row-cover').boundingBox();
+  check(waitingButton.y<waitingCover.y+12&&waitingButton.x+waitingButton.width>waitingCover.x+waitingCover.width-12,'cancel wait moved away from top right');
+  await page.getByRole('button',{name:'切换为列表',exact:true}).click();
+  check(await row(4).locator('.task-row-status').innerText()==='等待中','list and feed disagree about the resource wait');
+  check(await row(4).getByRole('alert').count()===0,'list still displays the previous failure during wait');
+  check(await row(4).getByRole('button',{name:'取消等待',exact:true}).isEnabled(),'list lost the cancel wait action');
+  await page.getByRole('button',{name:'切换为信息流',exact:true}).click();
+  await row(4).locator('.task-row-title').click({button:'right'});
+  await page.getByRole('menuitem',{name:'取消等待',exact:true}).click();
+  await row(4).getByRole('button',{name:'重试下载',exact:true}).waitFor();
+  await page.waitForTimeout(600);
+  check(await page.evaluate(()=>window.waitRetryCalls===1&&window.waitCancelCalls===1),'waiting retry duplicated IPC or failed to cancel');
+  check(await page.locator('[data-sonner-toast][data-type="error"]').count()===0,'canceling resource wait displayed a Toast');
+  check(await row(4).getAttribute('data-status')==='failed','canceling a wait changed the original task');
+  check(await row(4).locator('.task-feed-status').innerText()==='下载失败','canceling a wait did not restore the failure badge');
+  check(await row(4).getByRole('alert').count()===0,'canceling a wait restored the stale error');
+  check(Math.abs((await row(4).evaluate(node=>node.getBoundingClientRect().height))-failedCardHeightBeforeWait)<1,'canceling wait changed the card height');
+  await page.getByRole('button',{name:'切换为列表',exact:true}).click();
+  check(await row(4).getByRole('alert').count()===0,'switching to list restored the stale error');
+  await page.getByRole('button',{name:'切换为信息流',exact:true}).click();
+  check(await row(4).getByRole('alert').count()===0,'switching back restored the stale error');
+  results.push('waiting retry cancels through context menu without Toast or task mutation');
+  await load();
+  await page.evaluate(()=>window.backgroundTest.fail('visual-4'));
+  const errorBeforeAcceptedRetry=await row(4).getByRole('alert').innerText();
+  await page.evaluate(async()=>{
+    const {api}=await import(performance.getEntriesByType('resource').find(e=>e.name.includes('/src/api.ts')).name);
+    api.retry=async id=>new Promise(resolve=>window.continueWaitingRetry=()=>{
+      const original=window.backgroundTest.snapshot().find(task=>task.id===id);
+      resolve({...original,revision:original.revision+1,status:'downloading',error:null,bytes:1024});
+    });
+  });
+  await row(4).getByRole('button',{name:'重试下载',exact:true}).click();
+  await row(4).getByRole('button',{name:'取消等待',exact:true}).waitFor();
+  check(await row(4).locator('.task-feed-status').innerText()==='等待中','retry admission did not show waiting');
+  await page.evaluate(()=>window.continueWaitingRetry());
+  await page.waitForFunction(()=>document.querySelector('[data-task-id="visual-4"]')?.dataset.status==='downloading');
+  check(await row(4).locator('.task-feed-status').innerText()==='下载中','accepted retry kept the waiting badge');
+  check(await row(4).getByRole('button',{name:'取消等待',exact:true}).count()===0,'accepted retry kept cancel wait');
+  check(await row(4).getByRole('button',{name:'取消下载',exact:true,includeHidden:true}).isEnabled(),'accepted retry lost download cancellation');
+  results.push('waiting badge becomes downloading after resource admission');
+  check(await row(4).getByRole('alert').count()===0,'accepted retry restored the previous error');
+  await page.evaluate(()=>{window.backgroundTest.fail('visual-4');window.backgroundTest.fail('visual-4');});
+  await row(4).getByRole('alert').waitFor();
+  check(await row(4).getByRole('alert').innerText()===errorBeforeAcceptedRetry,'a new failure with the same code was incorrectly hidden');
+  check(await row(4).locator('.task-feed-status').innerText()==='下载失败','new failure did not restore the failure badge');
+  results.push('empty feedback slot preserves height; canceled/view-switched retries keep old errors hidden; a new failure is visible even with the same error code');
+
+
   await load();
   await page.evaluate(async()=>{
     const {api}=await import(performance.getEntriesByType('resource').find(e=>e.name.includes('/src/api.ts')).name);
@@ -104,7 +195,9 @@ async page => {
   await cancelDialog.getByRole('button',{name:'确认取消',exact:true}).click();
   await cancelDialog.waitFor({state:'detached'});
   await page.waitForFunction(()=>window.backgroundTest.calls.some(c=>c.type==='cancel'&&c.id==='visual-1'));
-  check(await row(1).getAttribute('data-status')==='canceled','menu cancellation did not update task');
+  await row(1).waitFor({state:'detached'});
+  check(await page.evaluate(()=>window.backgroundTest.snapshot().find(t=>t.id==='visual-1').status)==='canceled','menu cancellation did not update authoritative task state');
+  await page.waitForFunction(()=>document.activeElement?.getAttribute('role')==='tabpanel');
   await load();
   await page.getByRole('button',{name:'切换为列表',exact:true}).click();
   check(await row(1).getByRole('button',{name:'取消',exact:true}).isEnabled() && await row(1).locator('.task-row-status').innerText()==='下载中','list download controls changed');

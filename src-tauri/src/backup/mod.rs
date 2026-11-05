@@ -5,6 +5,7 @@ pub mod provider;
 pub mod reconcile;
 pub mod record;
 pub mod repository;
+pub(crate) mod schema_migration;
 pub mod restore;
 pub mod s3_client;
 pub mod scheduler;
@@ -29,6 +30,10 @@ mod telegram_spaces;
 mod telegram_lifecycle;
 #[cfg(test)]
 mod telegram_online_tests;
+#[cfg(test)]
+mod compatibility_online_audit;
+#[cfg(test)]
+mod compatibility_online_recovery;
 #[cfg(test)]
 mod tests;
 

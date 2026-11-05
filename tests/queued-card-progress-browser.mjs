@@ -35,7 +35,7 @@ async page => {
         if(id!=='downloading') {
           const badge=target.locator('.task-feed-status');
           check(await badge.innerText()===(id==='queued'?'等待中':'等待解析'),id+' corner status wrong');
-          const badgeBox=await badge.boundingBox();check(Math.abs(badgeBox.x-cover.x-8)<1&&Math.abs(badgeBox.y-cover.y-8)<1,id+' status not at top left');
+          const badgeBox=await badge.boundingBox();check(Math.abs(badgeBox.x-cover.x-8)<1&&Math.abs(badgeBox.y-cover.y-12)<1,id+' status not aligned with the corner action');
           const progress=target.getByRole('progressbar',{name:'等待下载',exact:true});
           check(await progress.getAttribute('aria-valuenow')===null&&await progress.innerText()==='等待',id+' has a fake percentage');
         } else check(await target.getByRole('progressbar',{name:'下载进度',exact:true}).getAttribute('aria-valuenow')==='30','download progress changed');

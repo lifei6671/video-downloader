@@ -39,9 +39,9 @@ async page => {
       for(const view of ['list','feed']) {
         if(view==='feed')await p.getByRole('button',{name:'切换为信息流',exact:true}).click();
         await p.evaluate(()=>{window.asset.remote_state='pending';window.operation.state='pending';window.operation.payload={completed_bytes:0};});
-        await hint('待上传，点击取消上传');
+        await hint('待备份，点击取消上传');
         await p.evaluate(()=>window.operation.state='running');
-        await hint('待上传，点击取消上传'); // validation/preparation has not transferred bytes
+        await hint('待备份，点击取消上传'); // validation/preparation has not transferred bytes
         await p.evaluate(()=>{window.operation.payload={completed_bytes:1,transfer_started:true};});
         await hint('备份中 0%，点击取消上传');
         check(await row.locator('.backup-sync-button [data-slot="spinner"]').count()===0,'first byte still shows queued spinner');
@@ -54,7 +54,7 @@ async page => {
         await hint('备份中，点击取消上传'); // metadata-only upload has no video-byte denominator
         check(await row.locator('.backup-sync-button [data-slot="spinner"]').count()===1,'unknown progress should remain indeterminate');
         await p.evaluate(()=>window.operation.state='retry_wait');
-        await hint('待上传，点击取消上传');
+        await hint('等待重试，点击取消上传');
         await p.evaluate(()=>{window.operation.state='completed';window.asset.remote_state='backed_up';});
         await row.getByRole('img',{name:'已备份',exact:true}).waitFor();
         await hint('已备份');results.push({width,view,passed:true});

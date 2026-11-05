@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryMetadata {
+    #[serde(default)]
     pub deletion_indexes: bool,
     pub schema_version: u32,
     pub library_id: String,

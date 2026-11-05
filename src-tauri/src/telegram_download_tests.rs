@@ -1,4 +1,5 @@
 use super::*;
+use grammers_client::media::Downloadable;
 use crate::desktop_core::{Core, Status, Task};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -14,10 +15,14 @@ struct Fixture {
     public_only: std::sync::atomic::AtomicBool,
     public_channel: AtomicUsize,
     auth_denied: std::sync::atomic::AtomicBool,
+    inspect_failures: AtomicUsize,
+    next_failures: AtomicUsize,
+    inspect_error: Mutex<Option<String>>,
     inspected: Mutex<Vec<u32>>,
     cover: Mutex<Option<Vec<u8>>>,
     cover_reads: AtomicUsize,
     native_attributes: std::sync::atomic::AtomicBool,
+    channel_title: Mutex<Option<String>>,
 }
 struct Fake {
     fixture: Arc<Fixture>,
@@ -35,6 +40,7 @@ impl Drop for Fake {
 fn media(message: u32) -> Media {
     Media {
         channel: 100,
+        channel_title: None,
         message,
         document: message as i64,
         size: 4096,
@@ -87,6 +93,60 @@ fn metadata_fill_preserves_native_values_and_newer_cache_identity() {
     assert!(cached["width"].is_null());
     assert_eq!(cached["title"],"new caption");
     assert_eq!(cover,new_cover);
+}
+
+#[test]
+fn channel_names_are_display_metadata_and_cannot_change_document_identity() {
+    let link = message_link("https://t.me/c/100/9").unwrap();
+    let original = media(9);
+    let mut renamed = original.clone();
+    renamed.channel_title = Some("频道新名称".into());
+    assert_eq!(original, renamed);
+    let mut different = renamed.clone();
+    different.document += 1;
+    assert_ne!(original, different);
+    let fresh = preview(&renamed, &link);
+    assert_eq!(fresh["author_profile"]["id"], "100");
+    assert_eq!(fresh["author_profile"]["nickname"], "频道新名称");
+    let mut legacy = preview(&original, &link);
+    legacy["author_profile"]["handle"] = "known_public_name".into();
+    merge_attributes(&mut legacy, &fresh);
+    assert_eq!(legacy["author"], "频道新名称");
+    assert_eq!(legacy["author_profile"]["handle"], "known_public_name");
+    let mut foreign = fresh;
+    foreign["author_profile"]["id"] = "999".into();
+    foreign["author_profile"]["nickname"] = "其它频道".into();
+    merge_attributes(&mut legacy, &foreign);
+    assert_eq!(legacy["author_profile"]["nickname"], "频道新名称");
+}
+
+#[tokio::test]
+async fn channel_title_is_refreshed_on_download_and_persisted_without_renaming_the_file() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    *fixture.channel_title.lock().unwrap() = Some("最初频道名".into());
+    let app = app(root.path(), &fixture);
+    let task = resolve(&app, 9).await;
+    assert_eq!(task.video.as_ref().unwrap()["author_profile"]["nickname"], "最初频道名");
+    *fixture.channel_title.lock().unwrap() = Some("改名后的频道".into());
+    app.download(&task.id, false).unwrap();
+    let done = wait(&app, &task.id, Status::Completed).await;
+    let video = done.video.as_ref().unwrap();
+    assert_eq!(video["author_profile"]["nickname"], "改名后的频道");
+    assert_eq!(video["author_profile"]["id"], "100");
+    assert_eq!(video["video_id"], "100_9");
+    assert_eq!(std::fs::read(done.path.as_ref().unwrap()).unwrap(), body());
+    let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
+    let raw: String = db.query_row("SELECT metadata FROM parse_cache WHERE platform='telegram'", [], |r| r.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&raw).unwrap()["author_profile"]["nickname"], "改名后的频道");
+    drop(db);
+    app.shutdown().await;
+    drop(app);
+    let reopened = super::tests::app(root.path(), &fixture);
+    let stored = reopened.list().into_iter().find(|t| t.id == task.id).unwrap();
+    assert_eq!(stored.video.unwrap()["author_profile"]["nickname"], "改名后的频道");
+    assert_eq!(stored.path, done.path);
+    reopened.shutdown().await;
 }
 
 fn sdk_document(
@@ -315,10 +375,14 @@ impl Transport for Fake {
         Box::pin(async move {
             if self.fixture.auth_denied.load(Ordering::SeqCst) { bail!("TELEGRAM_AUTH_REQUIRED"); }
             self.fixture.inspected.lock().unwrap().push(link.message);
+            if self.fixture.inspect_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+                bail!(self.fixture.inspect_error.lock().unwrap().clone().unwrap_or_else(|| "TELEGRAM_CONNECTION_ERROR".into()));
+            }
             if self.fixture.public_only.load(Ordering::SeqCst) && link.channel.is_some() {
                 bail!("TELEGRAM_CHANNEL_FORBIDDEN");
             }
             let mut value = media(link.message);
+            value.channel_title = self.fixture.channel_title.lock().unwrap().clone();
             if self.fixture.native_attributes.load(Ordering::SeqCst) {
                 value.width = Some(1080);
                 value.height = Some(1920);
@@ -332,7 +396,7 @@ impl Transport for Fake {
             Ok(value)
         })
     }
-    fn next(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> {
+    fn next(&mut self, offset: u64) -> ProviderFuture<'_, Option<ReceivedPart>> {
         Box::pin(async move {
             if self.delivered {
                 return Ok(None);
@@ -350,17 +414,21 @@ impl Transport for Fake {
             if let Some(gate) = gate {
                 let _permit = gate.acquire().await.unwrap();
             }
+            if self.fixture.next_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() { bail!("TELEGRAM_CONNECTION_ERROR"); }
             self.delivered = true;
-            Ok(Some(body()))
+            Ok(Some(ReceivedPart {offset, bytes: body()}))
         })
     }
 }
 fn app(root: &Path, fixture: &Arc<Fixture>) -> Arc<Core> {
+    app_with_engine(root, fixture, "python-must-not-run")
+}
+fn app_with_engine(root: &Path, fixture: &Arc<Fixture>, program: &str) -> Arc<Core> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let app = Core::open(
         &root.join("tasks.sqlite"),
         root.join("downloads"),
-        "python-must-not-run".into(),
+        program.into(),
         vec![project
             .join("tests/fixtures/desktop_engine.py")
             .to_string_lossy()
@@ -368,6 +436,7 @@ fn app(root: &Path, fixture: &Arc<Fixture>) -> Arc<Core> {
         |_| {},
     )
     .unwrap();
+    *app.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download).session.reconnect_probe.lock().unwrap() = Some(|| Ok(()));
     let fixture_root = root.to_path_buf();
     *app.local_media_fixture.lock().unwrap() = Some(Arc::new(move |operation, source| {
         if operation == "probe" {
@@ -432,6 +501,152 @@ fn links_reject_ambiguous_and_unsupported_targets() {
     assert!(!validate_identity("100_9", "https://t.me/c/101/9"));
 }
 #[tokio::test]
+async fn metadata_parse_retries_transient_errors_with_three_downloads_in_progress() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let app = app(root.path(), &fixture);
+    app.set_max_downloads(3).unwrap();
+    for message in 1..=3 {
+        fixture
+            .gates
+            .lock()
+            .unwrap()
+            .insert(message, Arc::new(Semaphore::new(0)));
+        let task = resolve(&app, message).await;
+        app.download(&task.id, false).unwrap();
+    }
+    timeout(Duration::from_secs(2), async {
+        while fixture.active.load(Ordering::SeqCst) != 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    fixture.inspect_failures.store(2, Ordering::SeqCst);
+    let parsed = resolve(&app, 4).await;
+    assert_eq!(parsed.status, Status::Ready);
+    assert_eq!(
+        fixture
+            .inspected
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| **m == 4)
+            .count(),
+        3
+    );
+    assert_eq!(fixture.active.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        app.list()
+            .iter()
+            .filter(|t| t.status == Status::Downloading)
+            .count(),
+        3
+    );
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn metadata_parse_does_not_retry_fatal_errors() {
+    for error in [
+        "TELEGRAM_AUTH_REQUIRED",
+        "TELEGRAM_CHANNEL_FORBIDDEN",
+        "TELEGRAM_MEDIA_CHANGED",
+        "TELEGRAM_FLOOD_WAIT:30",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(Fixture::default());
+        fixture.inspect_failures.store(9, Ordering::SeqCst);
+        *fixture.inspect_error.lock().unwrap() = Some(error.into());
+        let app = app(root.path(), &fixture);
+        let task = app.resolve("https://t.me/c/100/9".into()).unwrap();
+        let failed = wait(&app, &task.id, Status::Failed).await;
+        assert_eq!(failed.error.as_deref(), error.split(':').next());
+        let attempts = if matches!(error, "TELEGRAM_CONNECTION_ERROR" | "TELEGRAM_TIMEOUT") {
+            3
+        } else {
+            1
+        };
+        assert_eq!(fixture.inspected.lock().unwrap().len(), attempts);
+        assert_eq!(app.list().len(), 1);
+        app.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn metadata_parse_cancel_stops_retry_backoff_without_canceling_other_downloads() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let app = app(root.path(), &fixture);
+    fixture
+        .gates
+        .lock()
+        .unwrap()
+        .insert(1, Arc::new(Semaphore::new(0)));
+    let downloading = resolve(&app, 1).await;
+    app.download(&downloading.id, false).unwrap();
+    timeout(Duration::from_secs(2), async {
+        while fixture.active.load(Ordering::SeqCst) != 1 { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    fixture.inspect_failures.store(9, Ordering::SeqCst);
+    let task = app.resolve("https://t.me/c/100/9".into()).unwrap();
+    timeout(Duration::from_secs(2), async {
+        while !fixture.inspected.lock().unwrap().contains(&9) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    app.cancel(&task.id).await.unwrap();
+    assert_eq!(
+        app.list().iter().find(|t| t.id == task.id).unwrap().status,
+        Status::Canceled
+    );
+    assert_eq!(
+        fixture
+            .inspected
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| **m == 9)
+            .count(),
+        1
+    );
+    assert_eq!(
+        app.list()
+            .iter()
+            .find(|t| t.id == downloading.id)
+            .unwrap()
+            .status,
+        Status::Downloading
+    );
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn metadata_parse_shutdown_stops_retry_backoff_as_interrupted() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    fixture.inspect_failures.store(9, Ordering::SeqCst);
+    let app = app(root.path(), &fixture);
+    let task = app.resolve("https://t.me/c/100/9".into()).unwrap();
+    timeout(Duration::from_secs(2), async {
+        while fixture.inspected.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(1), app.shutdown())
+        .await
+        .unwrap();
+    let interrupted = app.list().into_iter().find(|t| t.id == task.id).unwrap();
+    assert_eq!(interrupted.status, Status::Failed);
+    assert_eq!(interrupted.error.as_deref(), Some("INTERRUPTED"));
+    assert_eq!(fixture.inspected.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn revoked_download_authorization_clears_the_shared_account_view() {
     use crate::{backup::telegram_session::Phase, telegram_accounts::Purpose};
     let root = tempfile::tempdir().unwrap();
@@ -475,6 +690,104 @@ async fn account_logout_cancels_download_and_queue_without_signing_out_backup() 
     assert_eq!(app.telegram_accounts.status(Purpose::Backup).account.unwrap().id, "account-a");
     app.shutdown().await;
 }
+#[tokio::test]
+async fn proxy_change_retries_same_download_and_user_cancel_still_stops_it() {
+    use crate::telegram_accounts::Purpose;
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let gate = Arc::new(Semaphore::new(0));
+    fixture.gates.lock().unwrap().insert(1, gate.clone());
+    let app = app(root.path(), &fixture);
+    let task = resolve(&app, 1).await;
+    app.download(&task.id, false).unwrap();
+    let session = app.telegram_accounts.binding(Purpose::Download).session;
+    for expected_inspections in [2, 3] {
+        timeout(Duration::from_secs(3), async {
+            while fixture.active.load(Ordering::SeqCst) != 1 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let pause = session.pause_network().await.unwrap();
+        drop(pause);
+        timeout(Duration::from_secs(3), async {
+            while fixture.inspected.lock().unwrap().len() < expected_inspections + 1
+                || fixture.active.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let current = app.list().into_iter().find(|value| value.id == task.id).unwrap();
+        assert_eq!(current.status, Status::Downloading);
+        assert!(current.error.is_none());
+    }
+    gate.add_permits(1);
+    let done = wait(&app, &task.id, Status::Completed).await;
+    assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
+    let another = resolve(&app, 2).await;
+    fixture.gates.lock().unwrap().insert(2, Arc::new(Semaphore::new(0)));
+    app.download(&another.id, false).unwrap();
+    timeout(Duration::from_secs(3), async {
+        while fixture.active.load(Ordering::SeqCst) != 1 { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    let pause = session.pause_network().await.unwrap();
+    app.cancel(&another.id).await.unwrap();
+    drop(pause);
+    wait(&app, &another.id, Status::Canceled).await;
+    assert_eq!(fixture.active.load(Ordering::SeqCst), 0);
+    assert_eq!(app.list().len(), 2, "proxy retries cannot create extra tasks");
+    app.shutdown().await;
+}
+#[tokio::test]
+async fn duplicate_telegram_in_progress_needs_confirmation_before_creating_another_transfer() {
+    for queued in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(Fixture::default());
+        let gate = Arc::new(Semaphore::new(0));
+        fixture.gates.lock().unwrap().insert(9, gate.clone());
+        let app = app(root.path(), &fixture);
+        app.set_max_downloads(1).unwrap();
+        let blocker_gate = Arc::new(Semaphore::new(0));
+        if queued {
+            fixture
+                .gates
+                .lock()
+                .unwrap()
+                .insert(8, blocker_gate.clone());
+            let blocker = resolve(&app, 8).await;
+            app.download(&blocker.id, false).unwrap();
+            wait(&app, &blocker.id, Status::Downloading).await;
+        }
+        let first = resolve(&app, 9).await;
+        app.download(&first.id, false).unwrap();
+        let second = resolve(&app, 9).await;
+        assert_eq!(
+            app.download(&second.id, false).unwrap_err().to_string(),
+            "ALREADY_DOWNLOADED"
+        );
+        assert_eq!(
+            app.list()
+                .iter()
+                .find(|t| t.id == second.id)
+                .unwrap()
+                .status,
+            Status::Ready
+        );
+        assert!(
+            !app.list()
+                .iter()
+                .find(|t| t.id == second.id)
+                .unwrap()
+                .download_requested
+        );
+        app.download(&second.id, true).unwrap();
+        blocker_gate.add_permits(1);
+        gate.add_permits(2);
+        let first = wait(&app, &first.id, Status::Completed).await;
+        let second = wait(&app, &second.id, Status::Completed).await;
+        assert_ne!(first.path, second.path);
+        assert_eq!(std::fs::read(first.path.unwrap()).unwrap(), body());
+        assert_eq!(std::fs::read(second.path.unwrap()).unwrap(), body());
+        app.shutdown().await;
+    }
+}
+
 #[tokio::test]
 async fn original_bytes_cover_cache_noclobber_and_restart() {
     let root = tempfile::tempdir().unwrap();
@@ -630,6 +943,92 @@ struct Script {
     parts: VecDeque<Result<Option<Vec<u8>>>>,
     refreshes: usize,
 }
+
+#[test]
+fn progress_reports_once_per_second_and_uses_real_five_second_bytes() {
+    let now = Instant::now();
+    let mut meter = DownloadProgress::new(now);
+    assert!(meter
+        .sample(now + Duration::from_millis(250), 900, 100_000)
+        .is_none());
+    assert_eq!(
+        meter
+            .sample(now + Duration::from_secs(1), 1000, 100_000)
+            .unwrap()["speed_bps"],
+        1000.0
+    );
+    // A burst changes the real rolling average, rather than displaying its instantaneous peak.
+    assert_eq!(
+        meter
+            .sample(now + Duration::from_secs(2), 4000, 100_000)
+            .unwrap()["speed_bps"],
+        2000.0
+    );
+    for second in 3..=7 {
+        meter
+            .sample(now + Duration::from_secs(second), 4000, 100_000)
+            .unwrap();
+    }
+    assert_eq!(
+        meter
+            .sample(now + Duration::from_secs(8), 4000, 100_000)
+            .unwrap()["speed_bps"],
+        0.0
+    );
+    assert!(
+        meter
+            .sample(now + Duration::from_millis(8250), 100_000, 100_000)
+            .is_some(),
+        "completion is immediate"
+    );
+}
+
+struct PositionedScript(VecDeque<ReceivedPart>);
+impl Transport for PositionedScript {
+    fn inspect<'a>(&'a mut self, _: &'a MessageLink) -> ProviderFuture<'a, Media> {
+        Box::pin(async { Ok(media(9)) })
+    }
+    fn next(&mut self, _: u64) -> ProviderFuture<'_, Option<ReceivedPart>> {
+        Box::pin(async { Ok(self.0.pop_front()) })
+    }
+}
+
+#[tokio::test]
+async fn completed_chunks_write_their_offsets_and_commit_only_the_complete_file() {
+    for complete in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let link = message_link("https://t.me/c/100/9").unwrap();
+        let mut data = body();
+        data[2048..].fill(123);
+        let mut source = PositionedScript(VecDeque::from([ReceivedPart {
+            offset: 2048,
+            bytes: data[2048..].to_vec(),
+        }]));
+        if complete {
+            source.0.push_back(ReceivedPart {
+                offset: 0,
+                bytes: data[..2048].to_vec(),
+            });
+        }
+        let result = transfer(
+            &mut source,
+            &link,
+            Some(&preview(&media(9), &link)),
+            Some(root.path()),
+            |_| {},
+        )
+        .await;
+        if complete {
+            result.unwrap();
+            assert_eq!(std::fs::read(root.path().join("video.mp4")).unwrap(), data);
+        } else {
+            assert_eq!(result.unwrap_err().to_string(), "INCOMPLETE_MEDIA");
+            assert!(!root.path().join("video.mp4").exists());
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        }
+    }
+}
+
 impl Transport for Script {
     fn inspect<'a>(&'a mut self, _: &'a MessageLink) -> ProviderFuture<'a, Media> {
         Box::pin(async {
@@ -637,8 +1036,8 @@ impl Transport for Script {
             Ok(self.media.clone())
         })
     }
-    fn next(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> {
-        Box::pin(async { self.parts.pop_front().unwrap_or(Ok(None)) })
+    fn next(&mut self, offset: u64) -> ProviderFuture<'_, Option<ReceivedPart>> {
+        Box::pin(async move { self.parts.pop_front().unwrap_or(Ok(None)).map(|part|part.map(|bytes|ReceivedPart {offset, bytes})) })
     }
 }
 #[tokio::test]
@@ -670,6 +1069,27 @@ async fn reference_expiry_restarts_once_and_checks_full_original_bytes() {
         std::fs::read(root.path().join("video.mp4")).unwrap(),
         body()
     );
+}
+
+#[tokio::test]
+async fn interrupted_native_attempt_cleans_only_its_own_partial_before_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join("video.mp4.part");
+    std::fs::write(&legacy, b"unowned previous part").unwrap();
+    let link = message_link("https://t.me/c/100/9").unwrap();
+    let mut source = Script {
+        media: media(9),
+        parts: VecDeque::from([Err(anyhow::anyhow!("TELEGRAM_NETWORK_CHANGED"))]),
+        refreshes: 0,
+    };
+    let expected = preview(&source.media, &link);
+    assert_eq!(transfer(&mut source, &link, Some(&expected), Some(root.path()), |_| {}).await.unwrap_err().to_string(), "TELEGRAM_NETWORK_CHANGED");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    source.parts = VecDeque::from([Ok(Some(body())), Ok(None)]);
+    transfer(&mut source, &link, Some(&expected), Some(root.path()), |_| {}).await.unwrap();
+    assert_eq!(std::fs::read(&legacy).unwrap(), b"unowned previous part");
+    assert_eq!(std::fs::read(root.path().join("video.mp4")).unwrap(), body());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
 }
 #[tokio::test]
 async fn rejects_truncation_invalid_header_and_changed_document_before_commit() {
@@ -758,5 +1178,191 @@ async fn public_channel_retry_keeps_username_and_rejects_changed_owner() {
             assert_eq!(done.video.unwrap()["resolver"], "grammers");
         }
         reopened.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn network_failure_auto_recovers_same_download_without_partial_files() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let application = app(root.path(), &fixture);
+    let task = resolve(&application, 9).await;
+    fixture.next_failures.store(2, Ordering::SeqCst);
+    application.download(&task.id, false).unwrap();
+    let done = wait(&application, &task.id, Status::Completed).await;
+    assert!(done.error.is_none());
+    assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
+    assert_eq!(application.list().len(), 1);
+    let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM task_staging", [], |r|r.get::<_,i64>(0)).unwrap(), 0);
+    application.shutdown().await;
+}
+
+#[tokio::test]
+async fn startup_recovers_old_network_failures_without_starting_parse_only_download() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let application = app(root.path(), &fixture);
+    *fixture.inspect_error.lock().unwrap() = Some("TELEGRAM_CHANNEL_FORBIDDEN".into());
+    fixture.inspect_failures.store(1, Ordering::SeqCst);
+    let task = application.resolve("https://t.me/c/100/9".into()).unwrap();
+    wait(&application, &task.id, Status::Failed).await;
+    application.shutdown().await;
+    drop(application);
+    let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
+    db.execute("UPDATE download_tasks SET snapshot=json_set(snapshot,'$.error','TELEGRAM_CONNECTION_ERROR')", []).unwrap();
+    drop(db);
+    let application = app(root.path(), &fixture);
+    application.start_backup_service();
+    timeout(Duration::from_secs(2), async {
+        while application.list().iter().any(|t| t.id == task.id && t.status == Status::Failed) { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    let done = wait(&application, &task.id, Status::Ready).await;
+    assert!(!done.download_requested);
+    assert!(done.error.is_none());
+    assert_eq!(application.list().len(), 1);
+    application.shutdown().await;
+}
+
+#[tokio::test]
+async fn metadata_network_errors_keep_waiting_beyond_previous_retry_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    fixture.inspect_failures.store(6, Ordering::SeqCst);
+    let application = app(root.path(), &fixture);
+    let task = resolve(&application, 9).await;
+    assert_eq!(fixture.inspected.lock().unwrap().len(), 7);
+    assert!(task.error.is_none());
+    assert_eq!(application.list().len(), 1);
+    application.shutdown().await;
+}
+
+#[tokio::test]
+async fn reconnect_releases_download_slot_for_other_platform_and_then_resumes() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let application = app_with_engine(root.path(), &fixture, "python");
+    application.set_max_downloads(1).unwrap();
+    let telegram = resolve(&application, 9).await;
+    let queued = resolve(&application, 10).await;
+    let other = application.resolve("valid".into()).unwrap();
+    wait(&application, &other.id, Status::Ready).await;
+    let session = application.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download).session;
+    *session.reconnect_probe.lock().unwrap() = Some(|| Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR")));
+    fixture.next_failures.store(1, Ordering::SeqCst);
+    application.download(&telegram.id, false).unwrap();
+    timeout(Duration::from_secs(2), async {
+        while !application.list().iter().any(|t|t.id==telegram.id && t.error.as_deref()==Some("TELEGRAM_RECONNECTING")) { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    application.download(&queued.id, false).unwrap();
+    application.download(&other.id, false).unwrap();
+    wait(&application, &other.id, Status::Completed).await;
+    assert_eq!(application.list().iter().find(|t|t.id==queued.id).unwrap().status, Status::Queued);
+    assert_eq!(application.list().iter().find(|t|t.id==telegram.id).unwrap().error.as_deref(), Some("TELEGRAM_RECONNECTING"));
+    *session.reconnect_probe.lock().unwrap() = Some(|| Ok(()));
+    let done = wait(&application, &telegram.id, Status::Completed).await;
+    assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
+    wait(&application, &queued.id, Status::Completed).await;
+    assert_eq!(fixture.peak.load(Ordering::SeqCst), 1);
+    application.shutdown().await;
+}
+
+#[tokio::test]
+async fn canceling_reconnect_owner_allows_queued_task_to_take_over_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let application = app(root.path(), &fixture);
+    application.set_max_downloads(1).unwrap();
+    let first = resolve(&application, 9).await;
+    let queued = resolve(&application, 10).await;
+    let session = application.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download).session;
+    *session.reconnect_probe.lock().unwrap() = Some(|| Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR")));
+    fixture.next_failures.store(1, Ordering::SeqCst);
+    application.download(&first.id, false).unwrap();
+    timeout(Duration::from_secs(2), async {
+        while !session.reconnect.waiting() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    application.download(&queued.id, false).unwrap();
+    application.cancel(&first.id).await.unwrap();
+    timeout(Duration::from_secs(2), async {
+        while !application.list().iter().any(|t|t.id==queued.id && t.error.as_deref()==Some("TELEGRAM_RECONNECTING")) { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    *session.reconnect_probe.lock().unwrap() = Some(|| Ok(()));
+    wait(&application, &queued.id, Status::Completed).await;
+    assert_eq!(application.list().iter().find(|t|t.id==first.id).unwrap().status,Status::Canceled);
+    assert_eq!(fixture.peak.load(Ordering::SeqCst),1);
+    application.shutdown().await;
+}
+
+#[tokio::test]
+async fn startup_restores_interrupted_telegram_with_and_without_resolved_metadata() {
+    for deferred in [false,true] {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(Fixture::default());
+        fixture.gates.lock().unwrap().insert(9,Arc::new(Semaphore::new(0)));
+        let application = app(root.path(),&fixture);
+        let task = resolve(&application,9).await;
+        application.download(&task.id,false).unwrap();
+        timeout(Duration::from_secs(2),async {
+            while fixture.active.load(Ordering::SeqCst)==0 {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        application.shutdown().await;
+        drop(application);
+        if deferred {
+            let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
+            db.execute("UPDATE download_tasks SET snapshot=json_set(snapshot,'$.video',NULL) WHERE id=?",[&task.id]).unwrap();
+        }
+        fixture.gates.lock().unwrap().clear();
+        let application = app(root.path(),&fixture);
+        application.start_backup_service();
+        let done = wait(&application,&task.id,Status::Completed).await;
+        assert_eq!(done.insertion_id,task.insertion_id);
+        assert_eq!(std::fs::read(done.path.unwrap()).unwrap(),body());
+        assert_eq!(application.list().len(),1);
+        application.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn startup_keeps_duplicate_consent_for_deferred_telegram_recovery() {
+    for confirmed in [false,true] {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(Fixture::default());
+        let application = app(root.path(),&fixture);
+        let first = resolve(&application,9).await;
+        application.download(&first.id,false).unwrap();
+        let first = wait(&application,&first.id,Status::Completed).await;
+        let original = std::fs::read(first.path.as_ref().unwrap()).unwrap();
+        let repeat = resolve(&application,9).await;
+        if confirmed {
+            fixture.gates.lock().unwrap().insert(9,Arc::new(Semaphore::new(0)));
+            application.download(&repeat.id,true).unwrap();
+            timeout(Duration::from_secs(2),async {while fixture.active.load(Ordering::SeqCst)==0 {tokio::task::yield_now().await;}}).await.unwrap();
+        }
+        application.shutdown().await;
+        drop(application);
+        let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
+        db.execute("UPDATE download_tasks SET snapshot=json_set(snapshot,'$.video',NULL,'$.download_requested',json('true'),'$.status','failed','$.error','INTERRUPTED') WHERE id=?",[&repeat.id]).unwrap();
+        drop(db);
+        fixture.gates.lock().unwrap().clear();
+        let application = app(root.path(),&fixture);
+        application.start_backup_service();
+        let status = if confirmed {Status::Completed} else {Status::Ready};
+        let resumed = wait(&application,&repeat.id,status).await;
+        assert_eq!(resumed.duplicate_confirmed,confirmed);
+        assert_eq!(resumed.insertion_id,repeat.insertion_id);
+        assert_eq!(std::fs::read(first.path.unwrap()).unwrap(),original);
+        assert_eq!(application.list().iter().filter(|task|task.status==Status::Completed).count(),if confirmed {2}else{1});
+        application.shutdown().await;
+        drop(application);
+        if !confirmed {
+            let application = app(root.path(),&fixture);
+            application.start_backup_service();
+            let waiting = application.list().into_iter().find(|task|task.id==repeat.id).unwrap();
+            assert_eq!(waiting.status,Status::Ready);
+            assert!(!waiting.duplicate_confirmed);
+            assert_eq!(fixture.active.load(Ordering::SeqCst),0);
+            application.shutdown().await;
+        }
     }
 }

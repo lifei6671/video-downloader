@@ -8,8 +8,8 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.14.1";
-pub const YTDLP_VERSION: &str = "2026.08.19";
+pub const ENGINE_VERSION: &str = "0.14.2";
+pub const YTDLP_VERSION: &str = "2026.10.26";
 
 async fn cancellation() -> Result<()> {
     #[cfg(windows)]

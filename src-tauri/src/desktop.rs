@@ -385,7 +385,7 @@ fn get_task_image(core: State<AppCore>, task_id: String, index: usize) -> Result
 }
 #[tauri::command]
 async fn save_profile(core: State<'_, AppCore>, update: ProfileUpdate) -> Result<Settings, String> {
-    core.save_profile(update).map_err(error)
+    core.save_profile_with_network(update).await.map_err(error)
 }
 #[tauri::command]
 async fn set_max_downloads(core: State<'_, AppCore>, value: u8) -> Result<Settings, String> {
@@ -427,14 +427,26 @@ async fn start_download(
 }
 #[tauri::command]
 async fn retry_task(core: State<'_, AppCore>, task_id: String) -> Result<Task, String> {
-    core.retry(&task_id).map_err(error)
+    core.task_action(
+        &task_id,
+        yingqu_core::desktop_core::task_actions::Action::Retry,
+    )
+    .await
+    .map_err(error)?
+    .ok_or_else(|| "TASK_NOT_FOUND".to_owned())
 }
+
 #[tauri::command]
 async fn remove_history(core: State<'_, AppCore>, task_id: String) -> Result<(), String> {
-    core.remove_after_transcription(&task_id, false)
-        .await
-        .map_err(error)
+    core.task_action(
+        &task_id,
+        yingqu_core::desktop_core::task_actions::Action::Remove,
+    )
+    .await
+    .map(|_| ())
+    .map_err(error)
 }
+
 #[tauri::command]
 fn clear_download_history(
     core: State<AppCore>,
@@ -444,10 +456,15 @@ fn clear_download_history(
 }
 #[tauri::command]
 async fn delete_local_file(core: State<'_, AppCore>, task_id: String) -> Result<(), String> {
-    yingqu_core::backup::lifecycle::delete_task(&core,&task_id)
-        .await
-        .map_err(error)
+    core.task_action(
+        &task_id,
+        yingqu_core::desktop_core::task_actions::Action::Delete,
+    )
+    .await
+    .map(|_| ())
+    .map_err(error)
 }
+
 #[tauri::command]
 async fn cancel_task(core: State<'_, AppCore>, task_id: String) -> Result<(), String> {
     core.cancel(&task_id).await.map_err(error)
@@ -712,6 +729,8 @@ fn main() {
             )?;
             let backup_core = core.clone();
             tauri::async_runtime::spawn(async move { backup_core.start_backup_service(); });
+            let account_core = core.clone();
+            tauri::async_runtime::spawn(async move { account_core.telegram_accounts.restore_saved().await; });
             app.manage(core);
             let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出映取", true, None::<&str>)?;

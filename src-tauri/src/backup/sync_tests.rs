@@ -4,8 +4,14 @@ mod flat_upload_tests;
 mod retention_tests;
 #[path = "delete_flow_tests.rs"]
 mod delete_flow_tests;
+#[path = "history_registration_tests.rs"]
+mod history_registration_tests;
+#[path = "cleanup_isolation_tests.rs"]
+mod cleanup_isolation_tests;
+#[path = "parallel_upload_tests.rs"]
+mod parallel_upload_tests;
 use super::*;
-use crate::backup::conflicts;
+use crate::backup::{conflicts, sync_read};
 use crate::backup::spaces;
 
 fn stored_fixture_credentials(f: &Fixture, vault: &Vault) {
@@ -874,6 +880,8 @@ async fn p6_transcript_conflicts_can_be_read_adopted_and_resumed_after_database_
 struct ReceiptProvider {
     inner: Arc<S3Provider<Memory>>,
     accepted: std::sync::atomic::AtomicBool,
+    cleanup_error: Option<&'static str>,
+    cleanup_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 impl BackupProvider for ReceiptProvider {
     fn scope(&self) -> &Scope {
@@ -914,6 +922,21 @@ impl BackupProvider for ReceiptProvider {
         self.inner.upload_media(s, r)
     }
     fn cancel_upload(&self, r: ResumeState, o: &str) -> ProviderFuture<'_, ()> {
+        if let Some(error) = self.cleanup_error {
+            if error == "HANG" {
+                let activity = self.cleanup_activity.clone().expect("hanging fixture activity");
+                return Box::pin(async move {
+                    struct Held(Arc<std::sync::atomic::AtomicUsize>);
+                    impl Drop for Held {
+                        fn drop(&mut self) { self.0.fetch_add(1000, std::sync::atomic::Ordering::SeqCst); }
+                    }
+                    activity.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _held = Held(activity);
+                    std::future::pending().await
+                });
+            }
+            return Box::pin(async move { bail!(error) });
+        }
         self.inner.cancel_upload(r, o)
     }
     fn download_media(&self, r: MediaRef, o: u64) -> ProviderFuture<'_, MediaStream> {
@@ -936,6 +959,8 @@ async fn p6_accepted_receipt_cannot_acknowledge_changes_or_prove_uploaded_video(
     let proxy = Arc::new(ReceiptProvider {
         inner: p,
         accepted: std::sync::atomic::AtomicBool::new(true),
+        cleanup_error: None,
+        cleanup_activity: None,
     });
     let engine = SyncEngine::new(f.core.clone(), proxy.clone());
     let op = claim(&engine, &f.core);
@@ -2185,7 +2210,7 @@ async fn p3_space_names_are_local_persistent_and_do_not_change_library_or_queue(
         db.query_row("SELECT version FROM backup_schema WHERE id=1", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        1
+        6
     );
     let after = scheduler::operations(&f.core)
         .unwrap()
@@ -3237,7 +3262,7 @@ async fn p4_release_rechecks_tombstone_space_and_delete_intent_after_waiting_for
         engine.execute_upload(&op).await.unwrap();
         let (_root, othercore, other, _) = second_device(&f).await;
         let otherid = othercore.backup_assets().unwrap()[0].asset_id.clone();
-        let held = f.core.backup_write_lock.lock().await;
+        let held = f.core.backup_write_lock.write().await;
         let before = f.store.0.lock().unwrap().head_count;
         let core = f.core.clone();
         let provider = a.clone();
@@ -3488,10 +3513,11 @@ async fn current_wire_record_enforces_metadata_identity_and_canonical_object_key
             4 => wire["media"]["container"] = "exe".into(),
             5 => wire["media"]["key"] = "foreign/media/file.mp4".into(),
             6 => {
+                let wrong_hash = if wire["media"]["sha256"].as_str().unwrap().starts_with('a') { "b".repeat(64) } else { "a".repeat(64) };
                 wire["media"]["key"] = format!(
                     "test/media/{}/{}/video.mp4",
                     f.id,
-                    wire["media"]["sha256"].as_str().unwrap()
+                    wrong_hash
                 )
                 .into()
             }
@@ -3521,7 +3547,7 @@ async fn current_wire_record_enforces_metadata_identity_and_canonical_object_key
     }
 }
 #[test]
-fn current_sqlite_schema_is_idempotent_and_rejects_other_versions_without_rebuilding() {
+fn current_sqlite_schema_is_idempotent_and_rejects_unknown_versions() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     repository::init(&db).unwrap();
     let device = repository::device_id(&db).unwrap();
@@ -3531,7 +3557,7 @@ fn current_sqlite_schema_is_idempotent_and_rejects_other_versions_without_rebuil
         db.query_row("SELECT version FROM backup_schema", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        1
+        6
     );
     db.execute("UPDATE backup_schema SET version=99", [])
         .unwrap();
@@ -3582,4 +3608,171 @@ async fn current_restore_rejects_corruption_and_preserves_user_file_then_recover
             .unwrap()
             .0
     );
+}
+
+#[tokio::test]
+async fn telegram_reconnect_blocks_queue_claims_and_shutdown_drops_probe() {
+    let (f, _, _) = sync_fixture().await;
+    f.core.backup_db(|db| {
+        db.execute("UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?", [&f.space.space_id])?;
+        Ok(())
+    }).unwrap();
+    let session = f.core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session;
+    *session.reconnect_probe.lock().unwrap() = Some(|| Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR")));
+    let (stop, cancel) = tokio::sync::watch::channel(false);
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = attempts.clone();
+    let worker = tokio::spawn(sync_engine::run_with(f.core.clone(), cancel, Arc::new(move |_,_| {
+        observed.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+        bail!("TELEGRAM_CONNECTION_ERROR")
+    })));
+    tokio::time::timeout(std::time::Duration::from_secs(2),async {
+        while !session.reconnect.waiting() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(scheduler::operations(&f.core).unwrap().iter().all(|op|op.attempt==0 && op.state=="pending"));
+    stop.send_replace(true);
+    tokio::time::timeout(std::time::Duration::from_secs(1),worker).await.unwrap().unwrap();
+    let count = attempts.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(count > 0);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst),count);
+    f.core.shutdown().await;
+}
+
+/// Uses the existing in-memory byte store through a Telegram-shaped read boundary.
+struct TelegramReadFixture {
+    inner: Arc<S3Provider<Memory>>,
+    scope: Scope,
+    source: MediaRef,
+    read_failures: std::sync::atomic::AtomicUsize,
+    pull_failures: std::sync::atomic::AtomicUsize,
+}
+impl BackupProvider for TelegramReadFixture {
+    fn scope(&self) -> &Scope { &self.scope }
+    fn capabilities(&self) -> ProviderCapabilities { self.inner.capabilities() }
+    fn open_library(&self, _: bool) -> ProviderFuture<'_, LibraryDescriptor> { panic!("unexpected write/setup") }
+    fn pull_changes(&self, checkpoint: Option<Checkpoint>) -> ProviderFuture<'_, ChangeBatch> {
+        Box::pin(async move {
+            if self.pull_failures.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|n.checked_sub(1)).is_ok() { bail!("TELEGRAM_TRANSFER_TIMEOUT"); }
+            let checkpoint = checkpoint.map(|mut value| { value.scope = self.inner.scope().clone(); value });
+            let mut batch = self.inner.pull_changes(checkpoint).await?;
+            batch.checkpoint.scope = self.scope.clone();
+            for remote in &mut batch.assets {
+                remote.version.scope = self.scope.clone();
+                for reference in remote.snapshot.media.iter_mut().chain(remote.snapshot.cover.iter_mut()).chain(remote.snapshot.transcript.iter_mut()) {
+                    reference.scope = self.scope.clone();
+                    reference.location = MediaLocation::TelegramMessage { account_id:"fixture".into(),channel_id:"fixture".into(),message_id:1,document_id:1 };
+                }
+            }
+            Ok(batch)
+        })
+    }
+    fn read_asset(&self, id: &str) -> ProviderFuture<'_, Option<RemoteAsset>> {
+        let id = id.to_owned();
+        Box::pin(async move {
+            if self.read_failures.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|n.checked_sub(1)).is_ok() { bail!("TELEGRAM_CONNECTION_ERROR"); }
+            let mut remote = self.inner.read_asset(&id).await?;
+            if let Some(remote) = &mut remote {
+                remote.version.scope = self.scope.clone();
+                for reference in remote.snapshot.media.iter_mut().chain(remote.snapshot.cover.iter_mut()).chain(remote.snapshot.transcript.iter_mut()) {
+                    reference.scope = self.scope.clone();
+                    reference.location = MediaLocation::TelegramMessage { account_id:"fixture".into(),channel_id:"fixture".into(),message_id:1,document_id:1 };
+                }
+            }
+            Ok(remote)
+        })
+    }
+    fn publish_change(&self, _: AssetChange, _: Option<VersionToken>) -> ProviderFuture<'_, PublishReceipt> { panic!("unexpected write") }
+    fn upload_media(&self, _: MediaSource, _: Option<ResumeState>) -> ProviderFuture<'_, UploadReceipt> { panic!("unexpected upload") }
+    fn cancel_upload(&self, _: ResumeState, _: &str) -> ProviderFuture<'_, ()> { panic!("unexpected cleanup") }
+    fn download_media(&self, reference: MediaRef, offset: u64) -> ProviderFuture<'_, MediaStream> {
+        reference.validate_scope(&self.scope).unwrap();
+        assert_eq!(reference.sha256,self.source.sha256);
+        self.inner.download_media(self.source.clone(),offset)
+    }
+    fn verify_media(&self, _: MediaRef) -> ProviderFuture<'_, ()> { panic!("unexpected verify") }
+    fn delete_media(&self, _: MediaRef, _: &str) -> ProviderFuture<'_, ()> { panic!("unexpected delete") }
+    fn reconcile_deleted_asset(&self, _: &str, _: &str) -> ProviderFuture<'_, DeleteCleanup> { panic!("unexpected reconcile") }
+}
+
+#[tokio::test]
+async fn telegram_restore_recovers_midstream_disconnect_with_same_operation_and_offset() {
+    let (f, _, engine) = sync_fixture().await;
+    engine.execute_upload(&claim(&engine,&f.core)).await.unwrap();
+    let (_root, core, inner, _) = second_device(&f).await;
+    let id = core.backup_assets().unwrap()[0].asset_id.clone();
+    let remote_id = sync_read::remote_id(&core,&inner.scope().space_id,&id).unwrap();
+    let source = inner.read_asset(&remote_id).await.unwrap().unwrap().snapshot.media.unwrap();
+    let mut scope = inner.scope().clone();
+    scope.provider_type = ProviderType::Telegram;
+    core.backup_db(|db| {
+        db.execute("UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?", [&scope.space_id])?;
+        Ok(())
+    }).unwrap();
+    *core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.reconnect_probe.lock().unwrap() = Some(||Ok(()));
+    let provider = TelegramReadFixture { inner,scope,source:source.clone(),read_failures:std::sync::atomic::AtomicUsize::new(1),pull_failures:std::sync::atomic::AtomicUsize::new(0) };
+    f.store.0.lock().unwrap().break_stream = Some(8);
+    let work = sync_read::ensure(&core,&provider,&id);
+    tokio::pin!(work);
+    tokio::select! {
+        result = &mut work => panic!("restore returned before reconnect: {result:?}"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+    }
+    let waiting = scheduler::operations(&core).unwrap().into_iter().find(|op|op.kind=="restore").unwrap();
+    assert_eq!((waiting.state.as_str(),waiting.phase.as_str()),("running","reconnecting"));
+    let path = tokio::time::timeout(std::time::Duration::from_secs(4),&mut work).await.unwrap().unwrap();
+    assert_eq!(tag(&std::fs::read(path).unwrap()),source.sha256);
+    assert!(f.store.0.lock().unwrap().stream_offsets.contains(&8));
+    let operations: Vec<_> = scheduler::operations(&core).unwrap().into_iter().filter(|op|op.kind=="restore").collect();
+    assert_eq!(operations.len(),1);
+    assert_eq!(operations[0].state,"completed");
+    assert_eq!(operations[0].operation_id,waiting.operation_id);
+    core.shutdown().await;
+    f.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn telegram_discovery_timeout_reconnects_and_clears_settings_error() {
+    for terminal_auth in [false, true] {
+        let (f, inner, engine) = sync_fixture().await;
+        engine.execute_upload(&claim(&engine,&f.core)).await.unwrap();
+        let source = inner.read_asset(&f.id).await.unwrap().unwrap().snapshot.media.unwrap();
+        let mut scope = inner.scope().clone(); scope.provider_type = ProviderType::Telegram;
+        f.core.backup_db(|db| { db.execute("UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?", [&scope.space_id])?; Ok(()) }).unwrap();
+        let session = f.core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session;
+        session.set_test_view(crate::backup::telegram_session::Phase::Ready,"fixture");
+        *session.reconnect_probe.lock().unwrap() = Some(if terminal_auth { ||Err(anyhow::anyhow!("TELEGRAM_AUTH_REQUIRED")) } else { ||Ok(()) });
+        let provider = Arc::new(TelegramReadFixture {inner,scope,source,read_failures:std::sync::atomic::AtomicUsize::new(0),pull_failures:std::sync::atomic::AtomicUsize::new(2)});
+        let (stop,cancel) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(sync_engine::run_with(f.core.clone(),cancel,Arc::new(move |_,_|Ok(provider.clone()))));
+        tokio::time::timeout(std::time::Duration::from_secs(2),async {
+            while spaces::get(&f.core).unwrap().unwrap().last_error.as_deref()!=Some("TELEGRAM_RECONNECTING") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            loop {
+                let error = spaces::get(&f.core).unwrap().unwrap().last_error;
+                if terminal_auth && error.as_deref()==Some("TELEGRAM_AUTH_REQUIRED") || !terminal_auth && error.is_none() {break;}
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        stop.send_replace(true);
+        tokio::time::timeout(std::time::Duration::from_secs(1),worker).await.unwrap().unwrap();
+        f.core.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn telegram_space_summary_maps_only_active_network_errors_to_reconnecting() {
+    let (f, _, _) = sync_fixture().await;
+    f.core.backup_db(|db| {db.execute("UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?",[&f.space.space_id])?; Ok(())}).unwrap();
+    for reason in ["TELEGRAM_TRANSFER_TIMEOUT","TELEGRAM_AUTH_REQUIRED","TELEGRAM_INDEX_CHANGED"] {
+        f.core.backup_db(|db| {db.execute("INSERT INTO backup_sync_checkpoints(space_id,last_error) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET last_error=excluded.last_error",params![f.space.space_id,reason])?;Ok(())}).unwrap();
+        let expected = if crate::telegram_reconnect::network_error(reason) {"TELEGRAM_RECONNECTING"} else {reason};
+        assert_eq!(spaces::get(&f.core).unwrap().unwrap().last_error.as_deref(),Some(expected));
+        spaces::set_enabled(&f.core,false).await.unwrap();
+        assert_eq!(spaces::get(&f.core).unwrap().unwrap().last_error.as_deref(),Some(reason));
+        f.core.backup_db(|db| {db.execute("UPDATE backup_sync_preference SET enabled=1",[])?; db.execute("UPDATE backup_spaces SET enabled=1 WHERE space_id=?",[&f.space.space_id])?;Ok(())}).unwrap();
+    }
+    f.core.shutdown().await;
 }

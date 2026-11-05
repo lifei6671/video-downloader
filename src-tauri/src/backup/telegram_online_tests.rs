@@ -5,6 +5,8 @@ mod delete_perf_tests;
 mod bundle_tests;
 #[path = "telegram_transcript_online_tests.rs"]
 mod transcript_tests;
+#[path = "telegram_transfer_perf_online_tests.rs"]
+mod transfer_perf_tests;
 use super::{
     provider::*,
     repository, spaces,

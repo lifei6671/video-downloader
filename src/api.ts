@@ -14,7 +14,7 @@ export interface ImageMeta { width?: number | null; height?: number | null; qual
 export interface VideoFormat { requires_merge?: boolean; format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
 export interface AuthorProfile { id?: string | null; nickname?: string | null; handle?: string | null; kind: 'user' | 'channel'; avatar_cached?: boolean }
 export interface Video { author_profile?: AuthorProfile; cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
-export interface Task { asset_id?: string | null; total_bytes_estimate?: number | null; telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
+export interface Task { insertion_id?: number; asset_id?: string | null; total_bytes_estimate?: number | null; telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; download_requested_at?: number | null; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; duplicate_confirmed?: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
 export interface Profile { http_chunk_size?: number | null; platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
 export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[] }
 export interface FilenamePreview { path: string; segments: { text: string; variable: string | null }[] }
@@ -24,11 +24,11 @@ export interface BackupSettings extends Omit<BackupUpdate, 'credentials' | 'crea
 export interface BackupConflict { image: number[] | null; id: string; field: string; value: string; device_id: string; can_adopt: boolean }
 export interface BackupLocalData { title: string; transcript: string | null; pending: boolean; remote_deleted: boolean; conflicts: BackupConflict[] }
 export interface DeleteActivity { operation_id: string; companion: string | null; step: string }
-export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number; transfer_started?: boolean; local_cleanup_done?: boolean; archive_next?: string }; attempt: number; last_error: string | null }
+export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number; transfer_started?: boolean; local_cleanup_done?: boolean; archive_next?: string; cleanup_dependency?: string; cleanup_error?: string; cleanup_blocked?: boolean }; attempt: number; last_error: string | null }
 export interface BackupLocation { space_id: string; profile: 'r2' | 's3' | 'telegram'; display_name: string; channel_title: string | null }
 export interface BackupAsset { in_current_space?: boolean; backup_locations?: BackupLocation[]; asset_id: string; task_id: string | null; metadata: Partial<Video>; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean; remote_revision: number; remote_deleted: boolean; has_pending_local_changes: boolean; conflict_count: number }
 export interface AssetTranscript { asset_id: string; content_sha256: string | null; text: string; model_revision: string; model_name: string | null; pipeline_revision: string; completed_at: number }
-export interface TelegramStorageStatus { configured: boolean; operation_id: string | null; phase: 'signed_out' | 'connecting' | 'qr' | 'password' | 'ready'; account: { id: string; name: string } | null; last_error: string | null; qr: boolean[][] | null; qr_expires_at: number | null }
+export interface TelegramStorageStatus { configured: boolean; operation_id: string | null; phase: 'disconnected' | 'signed_out' | 'connecting' | 'qr' | 'password' | 'ready'; account: { id: string; name: string } | null; last_error: string | null; qr: boolean[][] | null; qr_expires_at: number | null }
 export interface TelegramStorageChannel { id: string; title: string; can_post: boolean; can_delete: boolean }
 export const api = {
   telegramStorageStatus: (purpose: TelegramPurpose = 'backup') => invoke<TelegramStorageStatus>('telegram_storage_status', { purpose }),
@@ -132,13 +132,17 @@ export const api = {
     } catch (error) { stopUpdates(); throw error; }
   },
 };
+export function compareTaskInsertion(a: Task, b: Task): number {
+  return (b.insertion_id ?? 0) - (a.insertion_id ?? 0) || b.created_at - a.created_at;
+}
+
 export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlySet<string>): Task[] {
   const map = new Map(current.filter(t => !removed.has(t.id)).map(t => [t.id, t]));
   for (const task of incoming) {
     if (removed.has(task.id)) continue;
     if (!map.has(task.id) || map.get(task.id)!.revision <= task.revision) map.set(task.id, task);
   }
-  return [...map.values()].sort((a, b) => b.created_at - a.created_at);
+  return [...map.values()].sort(compareTaskInsertion);
 }
 const errors: Record<string, string> = {
   TELEGRAM_APP_NOT_CONFIGURED: '此构建尚未配置 Telegram 应用身份',
@@ -174,9 +178,14 @@ const errors: Record<string, string> = {
   TELEGRAM_MEDIA_MISSING: 'Telegram 备份文件不存在，本机数据已保留',
   TELEGRAM_FILE_REFERENCE_EXPIRED: 'Telegram 文件引用已过期，请重新恢复',
   TELEGRAM_FILE_TOO_LARGE: '文件超过当前 Telegram 账号的上传限制',
+  TELEGRAM_UPLOAD_PART_MISSING: 'Telegram 上传文件不完整，请重新上传',
+  TELEGRAM_UPLOAD_PART_REJECTED: 'Telegram 未能保存上传数据，请重试',
+  TELEGRAM_CDN_UNSUPPORTED: '当前版本暂不支持此 Telegram 文件的下载方式',
   TELEGRAM_LIMIT_UNAVAILABLE: '暂时无法读取 Telegram 上传限制，请重试',
   TELEGRAM_TRANSFER_CANCELED: 'Telegram 传输已取消',
+  TELEGRAM_NETWORK_CHANGED: 'Telegram 正在切换网络',
   TELEGRAM_TRANSFER_TIMEOUT: 'Telegram 传输超时，请重试',
+  TELEGRAM_RECONNECTING: '正在重连 Telegram，连接恢复后自动继续',
   TELEGRAM_TRANSFER_IO: 'Telegram 文件传输失败，请重试',
   NAMING_INVALID: '请使用相对路径，路径最多 4 段，不含空目录、反斜杠或上级目录',
   TRANSCRIPTION_BUSY: '已有视频正在提取文案，请完成或取消后再开始',
@@ -301,9 +310,10 @@ const errors: Record<string, string> = {
   INVALID_MEDIA_CONTENT: '下载内容不是有效的媒体文件',
   INVALID_ENGINE_RESULT: '下载结果校验失败',
   TASK_BUSY: '任务仍在执行或清理，请稍后再试',
+    TASK_ACTION_STALE: '任务已更新，请重新操作',
   REPARSE_REQUIRED: '请重新粘贴链接解析',
   INVALID_STATE: '当前任务状态不支持此操作',
-  ALREADY_DOWNLOADED: '该作品已有成功下载记录，请确认是否重新下载',
+  ALREADY_DOWNLOADED: '该规格已有下载任务或成功记录，请确认是否重新下载',
   FILE_MISSING: '文件已移动或删除',
   PLAYBACK_OPEN_FAILED: '无法启动系统默认播放器，请检查视频文件关联或播放器安装',
   PLAYBACK_SOURCE_FAILED: '无法读取本地视频，正在尝试系统播放器',

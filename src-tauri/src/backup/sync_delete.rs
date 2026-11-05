@@ -220,7 +220,7 @@ async fn execute_inner(
     };
     core.cancel_asset_restore(local)?;
     core.cancel_asset_transcription(local).await?;
-    let _writer = super::delete_timing::timed(core,operation,"wait_writer",async {Ok(core.backup_write_lock.lock().await)}).await?;
+    let _writer = super::delete_timing::timed(core,operation,"wait_writer",async {Ok(core.backup_write_lock.write().await)}).await?;
     if matches!(op.phase.as_str(), "local_cleanup" | "finalizing") {
         super::delete_timing::timed(core,operation,"local_cleanup",finish_local(core,&op)).await?;
         return finish_pass(core, &op);
@@ -452,7 +452,7 @@ pub async fn release_with(
     }
     core.cancel_asset_restore(local)?;
     core.cancel_asset_transcription(local).await?;
-    let _writer = core.backup_write_lock.lock().await;
+    let _writer = core.backup_write_lock.write().await;
     let _restore = core.backup_restore_lock.lock().await;
     let pending: String = core.backup_db(|db| {
         Ok(db.query_row(

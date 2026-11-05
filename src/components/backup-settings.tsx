@@ -18,6 +18,11 @@ import { TelegramStorageSettings } from '@/components/telegram-storage-settings'
 type Editor = { form: BackupUpdate; key: string; secret: string; credentialsChanged: boolean; savedTarget: string };
 type RenameEditor = { id: string; value: string; saving: boolean; error: string };
 
+function BackupConnectionNotice({ code }: { code: string }) {
+  const reconnecting = code === 'TELEGRAM_RECONNECTING';
+  return <p role={reconnecting ? 'status' : 'alert'} className={`flex items-center gap-2 ${reconnecting ? 'text-muted-foreground' : 'text-destructive'}`}>{reconnecting && <Spinner aria-hidden="true" />}{errorText(code)}</p>;
+}
+
 export function BackupSettingsForm({ saved }: { saved: (value: BackupSettings | null) => void }) {
   const formRef = useRef<HTMLFormElement>(null);
   const [form, setForm] = useState<BackupUpdate>(draft());
@@ -138,9 +143,9 @@ export function BackupSettingsForm({ saved }: { saved: (value: BackupSettings | 
     return () => { live = false; };
   }, []);
   const currentSpace = spaces.find(space => space.space_id === current);
-  // Read local worker status while connecting or cleanup is enabled; keep form and credentials intact.
+  // Keep Telegram connection feedback current using local status only.
   useEffect(() => {
-    if (!loaded || busy || !enabled || !(currentSpace?.connection_pending || currentSpace?.cleanup_deleted_records)) return;
+    if (!loaded || busy || !enabled || !(currentSpace?.connection_pending || currentSpace?.cleanup_deleted_records || currentSpace?.provider_type === 'telegram')) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
@@ -148,14 +153,14 @@ export function BackupSettingsForm({ saved }: { saved: (value: BackupSettings | 
         const [active, all] = await Promise.all([api.backupSettings(), api.backupSpaces()]);
         if (!live) return;
         setSpaces(all); saved(active);
-        if (active?.connection_pending || active?.cleanup_deleted_records) timer = setTimeout(() => void refresh(), active.connection_pending ? 1000 : 5000);
+        if (active?.connection_pending || active?.cleanup_deleted_records || active?.provider_type === 'telegram') timer = setTimeout(() => void refresh(), active.connection_pending || active.last_error === 'TELEGRAM_RECONNECTING' ? 1000 : 5000);
       } catch (error) {
         if (live) { setActionError(errorText(error)); timer = setTimeout(() => void refresh(), 5000); }
       }
     }
-    timer = setTimeout(() => void refresh(), currentSpace.connection_pending ? 1000 : 5000);
+    timer = setTimeout(() => void refresh(), currentSpace.connection_pending || currentSpace.last_error === 'TELEGRAM_RECONNECTING' ? 1000 : 5000);
     return () => { live = false; clearTimeout(timer); };
-  }, [loaded, busy, enabled, current, currentSpace?.connection_pending, currentSpace?.cleanup_deleted_records, saved]);
+  }, [loaded, busy, enabled, current, currentSpace?.connection_pending, currentSpace?.cleanup_deleted_records, currentSpace?.provider_type, currentSpace?.last_error, saved]);
   async function run(kind: 'save' | 'test') {
     if (busy || !loaded || !validate()) return;
     const started = performance.now();
@@ -274,7 +279,7 @@ export function BackupSettingsForm({ saved }: { saved: (value: BackupSettings | 
     <header className="flex shrink-0 flex-col gap-1"><div className="flex items-center justify-between gap-4"><h2 className="text-sm font-semibold">远端备份</h2><Button type="button" className="backup-save-button backup-feedback-button" variant={enabled ? 'secondary' : 'default'} disabled={disabled} aria-label={enabled ? '停用远端备份' : '启用远端备份'} aria-pressed={enabled} aria-busy={busy === 'toggle'} onClick={() => void toggleEnabled()}><span aria-hidden="true" className="backup-save-label" data-visible={busy !== 'toggle'}><Power />{enabled ? '停用远端备份' : '启用远端备份'}</span><span aria-hidden="true" className="backup-save-progress" data-visible={busy === 'toggle'}><Spinner />{enabled ? '正在停用…' : '正在启用…'}</span></Button></div><p className="text-xs text-muted-foreground">备份视频与文案，视频按需下载。</p></header>
     <div className="backup-settings-scroll min-h-0 overflow-y-auto p-1 pr-3"><div className="flex min-w-0 flex-col gap-5">
     {actionError && <p role="alert" className="text-xs text-destructive">{actionError}</p>}
-    {enabled && currentSpace?.connection_pending && <div className="flex items-center gap-2 text-xs text-muted-foreground">{currentSpace.last_error ? <><p role="alert" className="text-destructive">{errorText(currentSpace.last_error)}</p><Button type="button" variant="outline" size="sm" className="backup-save-button backup-feedback-button" disabled={disabled} aria-label="重新连接" aria-busy={busy === 'retry'} onClick={() => void toggleEnabled(true)}><span aria-hidden="true" className="backup-save-label" data-visible={busy !== 'retry'}>重新连接</span><span aria-hidden="true" className="backup-save-progress" data-visible={busy === 'retry'}><Spinner />正在重试…</span></Button></> : <p role="status" className="flex items-center gap-2"><Spinner aria-hidden="true" />正在连接备份存储…</p>}</div>}
+    {enabled && currentSpace?.connection_pending && <div className="flex items-center gap-2 text-xs text-muted-foreground">{currentSpace.last_error ? <><BackupConnectionNotice code={currentSpace.last_error} />{currentSpace.last_error !== 'TELEGRAM_RECONNECTING' && <Button type="button" variant="outline" size="sm" className="backup-save-button backup-feedback-button" disabled={disabled} aria-label="重新连接" aria-busy={busy === 'retry'} onClick={() => void toggleEnabled(true)}><span aria-hidden="true" className="backup-save-label" data-visible={busy !== 'retry'}>重新连接</span><span aria-hidden="true" className="backup-save-progress" data-visible={busy === 'retry'}><Spinner />正在重试…</span></Button>}</> : <p role="status" className="flex items-center gap-2"><Spinner aria-hidden="true" />正在连接备份存储…</p>}</div>}
     <Tabs value={selected} onValueChange={id => void choose(id)} className="min-w-0 gap-5">
     <TabsList variant="line" aria-label="备份空间" className={`${settingsTabsListClassName} max-w-full overflow-x-auto overflow-y-hidden`}>
       {spaces.map(space => {
@@ -287,7 +292,7 @@ export function BackupSettingsForm({ saved }: { saved: (value: BackupSettings | 
       })}
       <TabsTrigger value="new" disabled={disabled} className={`${settingsTabsTriggerClassName} gap-1.5`}><Plus aria-hidden="true" />新建空间</TabsTrigger>
     </TabsList>
-    <TabsContent value={selected}>{selectedSpace?.last_error && !(enabled && selected === current && currentSpace?.connection_pending) && <p role="alert" className="text-sm text-destructive">{errorText(selectedSpace.last_error)}</p>}<div className="max-w-xl space-y-4 mb-5">{selected === 'new' && <Field><FieldLabel htmlFor="backup-space-name">空间名称</FieldLabel><Input id="backup-space-name" maxLength={64} disabled={disabled} value={form.display_name ?? ''} placeholder="例如：个人备份" onChange={event => setForm({ ...form, display_name: event.target.value })} /></Field>}{providerField}</div>{form.profile === 'telegram' ? <div className="max-w-xl space-y-5"><TelegramStorageSettings key={selected} space={selectedSpace?.provider_type === 'telegram' ? selectedSpace : undefined} name={form.display_name} saving={value => setBusy(value ? 'telegram' : null)} connected={async value => {
+    <TabsContent value={selected}>{selectedSpace?.last_error && !(enabled && selected === current && currentSpace?.connection_pending) && <div className="text-sm"><BackupConnectionNotice code={selectedSpace.last_error} /></div>}<div className="max-w-xl space-y-4 mb-5">{selected === 'new' && <Field><FieldLabel htmlFor="backup-space-name">空间名称</FieldLabel><Input id="backup-space-name" maxLength={64} disabled={disabled} value={form.display_name ?? ''} placeholder="例如：个人备份" onChange={event => setForm({ ...form, display_name: event.target.value })} /></Field>}{providerField}</div>{form.profile === 'telegram' ? <div className="max-w-xl space-y-5"><TelegramStorageSettings key={selected} space={selectedSpace?.provider_type === 'telegram' ? selectedSpace : undefined} name={form.display_name} saving={value => setBusy(value ? 'telegram' : null)} connected={async value => {
         const [all, active] = await Promise.all([api.backupSpaces(), api.backupSettings()]);
         drafts.current.delete(selected); drafts.current.delete(value.space_id); setSpaces(all); setCurrent(active?.space_id ?? null); setSelected(value.space_id);
         restore({ form: update(value), key: '', secret: '', savedTarget: target(value), credentialsChanged: false }); saved(active); toast.success('备份配置已保存');

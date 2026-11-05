@@ -166,11 +166,14 @@ impl Library {
     }
 
     pub(super) fn append_archived_events(&self, target: &Target, message: i32, high: &mut i64, events: &mut Vec<(i64, Vec<u8>)>) -> Result<()> {
+        self.append_archived_events_resolved(target, message, high, events, &[])
+    }
+    pub(super) fn append_archived_events_resolved(&self, target: &Target, message: i32, high: &mut i64, events: &mut Vec<(i64, Vec<u8>)>, documents: &[super::telegram_transfer::RemoteDocument]) -> Result<()> {
         for archived in &self.archived_events {
             if archived.revision <= 0 || archived.revision >= (i64::from(message) << 32) {
                 bail!("TELEGRAM_INDEX_INVALID");
             }
-            Event::decode(target, &archived.body)?;
+            Event::decode_with_documents(target, &archived.body, documents)?;
             // An archive-only channel no longer has a physical rich event to establish this range.
             *high = (*high).max(archived.revision);
             events.push((archived.revision, archived.body.clone()));
@@ -288,7 +291,7 @@ impl TelegramProvider {
         self.request(kind, None, move |core, transport, io| {
             Box::pin(
                 async move {
-                    let work = Self::project(core, &target, transport, io, previous.as_ref());
+                    let work = Box::pin(Self::project(core, &target, transport, io, previous.as_ref()));
                     if kind == "read_asset" { super::delete_timing::read_asset_snapshot(work).await }
                     else { work.await }
                 },
@@ -303,8 +306,9 @@ impl TelegramProvider {
         io: &Io,
         previous: Option<&Cursor>,
     ) -> Result<Projection> {
-        let snapshot=transport.mapped_snapshot(core,target,io).await?;
-        Self::project_snapshot(core,target,io,previous,&snapshot)
+        transport.with_mapped_snapshot(core, target, io, |snapshot| {
+            Self::project_snapshot(core, target, io, previous, &snapshot)
+        }).await
     }
     pub(super) fn project_snapshot(core:&Core,target:&Target,io:&Io,previous:Option<&Cursor>,snapshot:&ChannelSnapshot)->Result<Projection> {
         let mut high = snapshot.high;
@@ -327,7 +331,7 @@ impl TelegramProvider {
             if envelope.kind == "event" {
                 let id = index.revision;
                 let body = index.verified_body()?;
-                let event = Event::decode(target, body)?;
+                let event = Event::decode_with_documents(target, body, &snapshot.media)?;
                 if event.change.operation_id != envelope.operation_id
                     || event.change.asset_id != envelope.asset_id
                     || event.change.device_id != envelope.device_id
@@ -337,7 +341,7 @@ impl TelegramProvider {
                 events.push((id, body.to_vec()));
             }
         }
-        let projected = telegram_replay::replay(target, high, merge_events(events)?, previous)?;
+        let projected = telegram_replay::replay_decoded(target, high, merge_events(events)?, previous, |body| Event::decode_with_documents(target, body, &snapshot.media))?;
         Self::observe(core, &target.scope.space_id, &projected.cursor)?;
         Ok(projected)
     }
@@ -586,7 +590,7 @@ impl TelegramProvider {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn send_index(
+    pub(super) async fn send_index(
         core: &Core,
         transport: &GrammersTransport,
         io: &Io,
@@ -728,7 +732,8 @@ impl BackupProvider for TelegramProvider {
                     } else {
                         IndexTiming::default()
                     };
-                    let snapshot = timing.run("locate", transport.mapped_snapshot(core, &target, io)).await?;
+                    // Keep nested SDK futures off the debug poll stack (Windows threads use 2 MiB).
+                    let snapshot = timing.run("locate", Box::pin(transport.mapped_snapshot(core, &target, io))).await?;
                     // An upgraded writer must finish a previously reserved rich tombstone with its original send identity.
                     let legacy_delete = change.delete && CoreJournal(core).get(&change.operation_id, "event")?.is_some();
                     let mut projected = Self::project_snapshot(core, &target, io, previous.as_ref(), &snapshot)?;
@@ -757,8 +762,8 @@ impl BackupProvider for TelegramProvider {
                         if change.delete && !legacy_delete {
                             let archive = Self::direct_archive_body(io, &target, &change.asset_id, &snapshot, body)?;
                             Self::prepare_archive_retry(core, &target, &change, &archive)?;
-                            Self::send_index(core, transport, io, &target, "library", &target.scope.library_id,
-                                &change.operation_id, &change.device_id, archive, timing, ReceiptCheck::FreshDeleteArchive).await?;
+                            Box::pin(Self::send_index(core, transport, io, &target, "library", &target.scope.library_id,
+                                &change.operation_id, &change.device_id, archive, timing, ReceiptCheck::FreshDeleteArchive)).await?;
                         } else {
                             let merged = super::sync_engine::merge(&change, projected.assets.get(&change.asset_id))?;
                             let mut fields = projected.assets.get(&change.asset_id)
@@ -798,7 +803,7 @@ impl BackupProvider for TelegramProvider {
                             } else {
                                 destination
                             };
-                            Self::send_index(
+                            Box::pin(Self::send_index(
                                 core,
                                 &destination,
                                 io,
@@ -810,10 +815,10 @@ impl BackupProvider for TelegramProvider {
                                 body,
                                 timing,
                                 ReceiptCheck::ReadBack,
-                            )
+                            ))
                             .await?;
                         }
-                        let refresh = timing.refresh(Self::project(core, &target, transport, io, Some(&projected.cursor)));
+                        let refresh = timing.refresh(Box::pin(Self::project(core, &target, transport, io, Some(&projected.cursor))));
                         projected = if change.delete && !legacy_delete {
                             super::telegram_transport::capture_publish_refresh(&target, &change.operation_id, refresh).await?
                         } else {
@@ -1041,7 +1046,7 @@ impl BackupProvider for TelegramProvider {
             uuid::Uuid::parse_str(&operation).context("BACKUP_INVALID_OPERATION")?;
             self.request("remote_cleanup", None, move |core, transport, io| {
                 Box::pin(async move {
-                    let snapshot=super::delete_timing::timed_refresh(core,&operation,"locate_messages",transport.mapped_snapshot(core,&target,io)).await?;
+                    let snapshot=super::delete_timing::timed_refresh(core,&operation,"locate_messages",Box::pin(transport.mapped_snapshot(core,&target,io))).await?;
                     let projected=super::delete_timing::timed(core,&operation,"read_index",async {Self::project_snapshot(core,&target,io,None,&snapshot)}).await?;
                     let deletion=projected.assets.get(&asset).filter(|s|s.deleted).context("BACKUP_TOMBSTONE_REQUIRED")?.revision;
                     let parked = core.backup_db(|db| super::sync_delete::parked_archive(db, &target.scope.space_id, &operation))?;
@@ -1050,15 +1055,15 @@ impl BackupProvider for TelegramProvider {
                     if let Some(peer) = &parked {
                         deletions.push((&peer.asset,u64::try_from(peer.revision)?));
                     }
-                    let archive = super::delete_timing::timed(core,&operation,"archive",Self::archive_deleted_events(core,transport,io,&target,&operation,&deletions,snapshot,IndexTiming::new(core,&operation,"archive"))).await?;
+                    let archive = super::delete_timing::timed(core,&operation,"archive",Box::pin(Self::archive_deleted_events(core,transport,io,&target,&operation,&deletions,snapshot,IndexTiming::new(core,&operation,"archive")))).await?;
                     let Some((archived,snapshot)) = archive else { return Ok(DeleteCleanup::ArchiveReady) };
                     let media=snapshot.media.clone();
                     let fresh=super::delete_timing::timed(core,&operation,"prepare_cleanup",async {Self::project_snapshot(core,&target,io,Some(&projected.cursor),&snapshot)}).await?;
                     if !fresh.assets.get(&asset).is_some_and(|s|s.deleted&&s.revision==deletion) {bail!("BACKUP_REUPLOAD_STALE");}
-                    let remove = super::delete_timing::timed_setup(core,&operation,"remove_messages",super::telegram_lifecycle::reconcile_deleted_messages(transport,&target,&deletions,io,&fresh,media,archived));
+                    let remove = super::delete_timing::timed_setup(core,&operation,"remove_messages",Box::pin(super::telegram_lifecycle::reconcile_deleted_messages(transport,&target,&deletions,io,&fresh,media,archived)));
                     let messages = super::delete_timing::with_companion(parked.as_ref().map(|p| p.operation.as_str()),remove).await?;
                     eprintln!("telegram_delete operation={} messages={messages}",operation);
-                    let final_state=super::delete_timing::timed_refresh(core,&operation,"verify",Self::project(core,&target,transport,io,Some(&fresh.cursor))).await?;
+                    let final_state=super::delete_timing::timed_refresh(core,&operation,"verify",Box::pin(Self::project(core,&target,transport,io,Some(&fresh.cursor)))).await?;
                     if !deletions.iter().all(|&(id,rev)| final_state.assets.get(id).is_some_and(|s|s.deleted && s.revision==rev)) {
                         bail!("BACKUP_REUPLOAD_STALE");
                     }

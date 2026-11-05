@@ -14,7 +14,7 @@ const original = {id:'original',revision:1,status:'ready',video,bytes:0,total_by
 const completed = {...structuredClone(original),id:'previous',revision:2,status:'completed',path:'C:\\TestVideos\\previous.mp4',download_requested:true,completed_at:9};
 if(scenario==='variant-missing')completed.file_missing=true;
 if(scenario==='variant-legacy')completed.video.selected_format_id=null;
-let tasks = [structuredClone(original), ...(scenario === 'duplicate' ? [completed] : []), ...(scenario === 'multiple' ? [{...structuredClone(original),id:'older-preview',created_at:1,video:{...video,title:'更早的未提交预览'}}] : []), ...(scenario === 'queued' ? [{...structuredClone(original),id:'running',status:'downloading',download_requested:true,video:{...video,title:'其他正在下载的作品'}}] : [])];
+let tasks = [structuredClone(original), ...(scenario === 'duplicate' ? [completed] : []), ...(scenario === 'multiple' ? [{...structuredClone(original),id:'older-preview',created_at:1,video:{...video,title:'更早的未提交预览'}}] : []), ...(scenario === 'queued' ? [{...structuredClone(original),id:'running',status:'downloading',download_requested:true,video:{...video,video_id:'100_8',canonical_url:'https://t.me/c/100/8',title:'其他正在下载的作品'}}] : [])];
 let listener = () => {}; let removedListener = () => {}; let next = 0; const pendingUpdates = [], pendingSnapshots = [];
 const control = {loaded:false,calls:[],holdEvents:scenario === 'delayed',holdRefresh:scenario === 'delayed',race:scenario === 'race',release:()=>{},snapshot:()=>structuredClone(tasks),flush:()=>{control.holdEvents=false;control.holdRefresh=false;for(const task of pendingUpdates.splice(0))listener(task);for(const [resolve,snapshot] of pendingSnapshots.splice(0))resolve(snapshot)},complete:id=>{const task=tasks.find(t=>t.id===id);Object.assign(task,{revision:task.revision+1,status:'completed',bytes:65536,path:'C:\\TestVideos\\'+id+'.mp4',completed_at:20});listener(structuredClone(task))},stale:()=>listener(structuredClone(original))};
 window.backgroundTest = control;
@@ -91,6 +91,8 @@ control.fail = id => {
 };
 api.subscribe = async (callback,removed=()=>{}) => {listener=callback;removedListener=removed;return ()=>{if(listener===callback){listener=()=>{};removedListener=()=>{}}}};
 api.tasks = async () => {control.loaded=true;const snapshot=structuredClone(tasks);if(control.holdRefresh && control.calls.some(c=>c.type==='download'))return new Promise(resolve=>pendingSnapshots.push([resolve,snapshot]));if(scenario==='refresh-error' && control.calls.some(c=>c.type==='download'))throw 'NETWORK_ERROR';return snapshot};
+// This task-only fixture has no configured remote backup space.
+api.backupSettings = async () => null;
 api.settings = async () => ({download_directory:'C:\\TestVideos',max_downloads:1,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'test-only',proxy:null,cookie_configured:false}))});
 api.resolve = async input => {control.calls.push({type:'resolve',input});if(scenario==='parse-controls')await new Promise(resolve=>control.releaseResolve=resolve);const task={...structuredClone(original),id:'next-'+(++next),created_at:10+next,video:{...structuredClone(video),video_id:['duplicate','race'].includes(scenario)||scenario.startsWith('variant')?video.video_id:'100_'+(9+next),canonical_url:input,title:'新作品 '+next}};if(['cancel-preview-parsing','parse-controls'].includes(scenario))Object.assign(task,{status:'parsing',video:null});tasks.unshift(task);return structuredClone(task)};
 api.cancel = async id => {control.calls.push({type:'cancel',id});if(scenario==='cancel-preview-pending')await new Promise(resolve=>control.release=resolve);if(scenario==='cancel-preview-error')throw 'NETWORK_ERROR';const task=tasks.find(t=>t.id===id);Object.assign(task,{status:'canceled',revision:task.revision+1});if(scenario!=='cancel-preview-no-event')listener(structuredClone(task))};
@@ -243,6 +245,99 @@ if (scenario.startsWith('visual')) {
   api.openProjectPage=async page=>control.calls.push({type:'open-project',page});
   api.updateDownload=async()=>null;api.subscribeUpdateDownload=async()=>()=>{};
   api.checkForUpdates=async()=>({current_version:'1.8.0',latest_version:'1.8.1',release_tag:'v1.8.1',has_update:true,published_at:'2026-10-24T01:00:00Z',installer:{name:'yingqu_1.8.1_x64-setup.exe',size:104857600},release_notes:'## 更清楚的作品预览\n\n保持真实封面比例，优化下载任务与状态反馈。\n\n- 精致媒体列表\n- 更便捷的任务操作\n\n'.repeat(12)+(scenario.startsWith('visual-list')?'\n- [x] 已完成项目\n- [ ] 后续项目\n':'')});
+}
+
+if (scenario.startsWith('preview-restart-')) {
+  const mode = scenario.slice('preview-restart-'.length);
+  const older = {...structuredClone(original),id:'older-preview',insertion_id:1,created_at:50,video:{...structuredClone(video),title:'更早的解析结果',video_id:'100_8',canonical_url:'https://t.me/c/100/8'}};
+  const active = {...structuredClone(original),insertion_id:2,created_at:10,video:{...structuredClone(video),title:'后台任务',video_id:'100_9'}};
+  tasks = [older,active]; // Deliberately not in database ID order.
+  control.resumeRestart = () => {const task=tasks.find(task=>task.id==='original');Object.assign(task,{status:'downloading',error:null,bytes:10,revision:task.revision+1});listener(structuredClone(task));};
+  if(mode==='live') {
+    const saved = sessionStorage.getItem('preview-restart-tasks');
+    if(saved) tasks = JSON.parse(saved);
+    control.saveRestart = () => sessionStorage.setItem('preview-restart-tasks',JSON.stringify(tasks.map(task=>task.download_requested ? {...task,status:'failed',error:'INTERRUPTED',revision:task.revision+1} : task)));
+  } else {
+    Object.assign(active,{download_requested:true,status:mode==='draft'||mode==='auto'?'failed':mode,error:['failed','draft','auto'].includes(mode)?'INTERRUPTED':null,queue_order:1});
+    if(mode==='draft') tasks.push({...structuredClone(older),id:'new-draft',insertion_id:3,created_at:1,video:{...structuredClone(video),title:'尚未提交的最新预览',video_id:'100_10',canonical_url:'https://t.me/c/100/10'}});
+  }
+}
+
+if (scenario === 'task-request-order') {
+  tasks = [
+    ['parsed-first',1,4000,'queued'],['parsed-last',999,1000,'downloading'],
+    ['middle',40,3000,'completed'],['legacy',2,null,'failed'],
+    ['canceled',500,5000,'canceled'],['interrupted',6,6000,'failed'],
+  ].map(([id,created_at,download_requested_at,status],index)=>({...structuredClone(original),id,insertion_id:100-index,created_at,download_requested_at,status,
+    download_requested:true,error:id==='reconnecting'?'TELEGRAM_RECONNECTING':id==='interrupted'?'INTERRUPTED':status==='failed'?'NETWORK_ERROR':null,
+    video:{...structuredClone(video),video_id:id,title:id},path:status==='completed'?'C:\\TestVideos\\'+id+'.mp4':null}));
+  const retry=api.retry;
+  control.progress=(id,data)=>{const task=tasks.find(t=>t.id===id);Object.assign(task,data,{revision:task.revision+1});listener(structuredClone(task));};
+  api.retry=async id=>{tasks.find(t=>t.id===id).download_requested_at=9000;return retry(id);};
+  control.insert=()=>{const task={...structuredClone(tasks[0]),id:'new-insertion',insertion_id:101,created_at:0,download_requested_at:0,revision:1,video:{...structuredClone(video),video_id:'new-insertion',title:'新入库'}};tasks.push(task);listener(structuredClone(task));};
+}
+
+if (scenario.startsWith('unified-card-status')) {
+  const qa={settings:{space_id:'status-space',library_id:'status-library',provider_type:'telegram',profile:'telegram',enabled:true,credentials_configured:true,connection_pending:false,can_delete_owned_media:true,display_name:'状态测试',last_error:null},enabled:true,calls:[],assets:[],operations:[],holdCancel:false,releaseCancel:()=>{}};
+  const definitions=[
+    ['reconnecting','downloading'],['backup-reconnecting','completed',['retry_wait','captured','TELEGRAM_RECONNECTING']],['restore-reconnecting','completed',null],
+    ['waiting','queued'],['download','downloading'],['merge','downloading',null,true],
+    ['pending','completed',['pending','queued']],['preparing','completed',['running','queued']],
+    ['upload','completed',['running','captured',null,{transfer_started:true,completed_bytes:40}]],
+    ['confirm','completed',['running','publishing']],['done','completed',null],
+    ['download-failed','failed'],['canceling','downloading'],['canceled','canceled'],['interrupted','failed'],
+    ['retry','completed',['retry_wait','captured','TELEGRAM_CONNECTION_ERROR']],
+    ['backup-canceled','completed',['canceled','cancel_cleaned']],
+    ['backup-failed','completed',['blocked','captured','BACKUP_SOURCE_CHANGED']],
+    ['unknown','completed',['blocked','captured','TELEGRAM_SEND_UNCONFIRMED']],
+    ['cleaning','completed',['canceled','captured']],
+    ['confirm-video','completed',['running','captured',null,{transfer_started:true,completed_bytes:100}]],
+    ['attachment','completed',['running','media_uploaded',null,{transfer_started:true,completed_bytes:100}]],
+    ['foreign','completed',null],['unregistered','completed',null],
+    ['download-wins','downloading',['blocked','captured','BACKUP_SOURCE_CHANGED']],
+    ['restore','completed',null],['dependency','completed',['retry_wait','queued','BACKUP_CLEANUP_PENDING',{cleanup_dependency:'old-dependency'}]],
+    ['old-operation','completed',null]
+  ];
+  tasks=definitions.map(([id,status,operation,merging],index)=>{
+    const task={...structuredClone(original),id,asset_id:'asset-'+id,status,created_at:1000-index,download_requested:true,merging:!!merging,canceling:id==='canceling',error:id==='reconnecting'?'TELEGRAM_RECONNECTING':id==='interrupted'?'INTERRUPTED':status==='failed'?'NETWORK_ERROR':null,path:status==='completed'?'C:\\TestVideos\\'+id+'.mp4':null,video:{...structuredClone(video),video_id:'video-'+id,title:id,formats:[{format_id:'original',container:'mp4',width:1920,height:1080}],width:1920,height:1080},bytes:status==='completed'?100:30,total_bytes:100};
+    if(id!=='unregistered')qa.assets.push({asset_id:task.asset_id,task_id:id,metadata:task.video,original_filename:id+'.mp4',content_sha256:'a'.repeat(64),content_bytes:100,asset_state:'active',path:task.path,local_state:task.path?'present':'missing',space_id:qa.settings.space_id,remote_state:['done','foreign','restore','old-operation'].includes(id)?'backed_up':'pending',has_cover:false,has_transcript:false,remote_revision:1,remote_deleted:false,has_pending_local_changes:false,conflict_count:0,in_current_space:id!=='foreign',backup_locations:[]});
+    if(operation)qa.operations.push({operation_id:'op-'+id,space_id:qa.settings.space_id,asset_id:task.asset_id,kind:'upload',state:operation[0],phase:operation[1],last_error:operation[2]??null,payload:{operation_nonce:'nonce-'+id,...operation[3]},attempt:1});
+    return task;
+  });
+  qa.operations.push({operation_id:'restore-reconnecting-op',space_id:qa.settings.space_id,asset_id:'asset-restore-reconnecting',kind:'restore',state:'running',phase:'reconnecting',last_error:null,payload:{},attempt:1});
+  qa.operations.push({operation_id:'old-dependency',space_id:qa.settings.space_id,asset_id:'asset-dependency',kind:'upload',state:'canceled',phase:'captured',last_error:null,payload:{cleanup_blocked:true,cleanup_error:'TELEGRAM_SEND_UNCONFIRMED'},attempt:1});
+  qa.operations.push({operation_id:'restore-op',space_id:qa.settings.space_id,asset_id:'asset-restore',kind:'restore',state:'running',phase:'downloading',last_error:null,payload:{completed_bytes:40},attempt:1});
+  qa.operations.push({operation_id:'foreign-op',space_id:'other-space',asset_id:'asset-old-operation',kind:'upload',state:'blocked',phase:'captured',last_error:'TELEGRAM_SEND_UNCONFIRMED',payload:{},attempt:1});
+
+  for (const [id,path,current,deleted] of [['cloud-only',null,true,false],['remote-upload','C:\\TestVideos\\remote.mp4',true,false],['cloud-unavailable',null,false,false]]) {
+    qa.assets.push({asset_id:id,task_id:null,metadata:{...structuredClone(video),title:id,width:1920,height:1080},original_filename:id+'.mp4',content_sha256:'a'.repeat(64),content_bytes:100,asset_state:'active',path,local_state:path?'present':'missing',space_id:qa.settings.space_id,remote_state:id==='remote-upload'?'pending':'backed_up',has_cover:false,has_transcript:false,remote_revision:1,remote_deleted:deleted,has_pending_local_changes:false,conflict_count:0,in_current_space:current,backup_locations:[]});
+  }
+  qa.operations.unshift({operation_id:'op-remote-upload',space_id:qa.settings.space_id,asset_id:'remote-upload',kind:'upload',state:'running',phase:'captured',payload:{transfer_started:true,completed_bytes:40},last_error:null,attempt:1});
+  if(scenario.endsWith('-connecting')){qa.settings.enabled=false;qa.settings.connection_pending=true;tasks=tasks.filter(t=>t.id==='done'||t.id==='pending');qa.assets=qa.assets.filter(a=>tasks.some(t=>t.asset_id===a.asset_id));}
+  if(scenario.endsWith('-off')){qa.enabled=false;qa.settings.enabled=false;tasks=tasks.filter(t=>t.id==='pending'||t.id==='done');qa.assets=qa.assets.filter(a=>tasks.some(t=>t.asset_id===a.asset_id));}
+  api.backupSettings=async()=>structuredClone(qa.settings);
+  api.backupSyncEnabled=async()=>qa.enabled;
+  api.backupAssets=async()=>structuredClone(qa.assets);
+  api.backupOperations=async()=>structuredClone(qa.operations);
+  api.onBackupAssetDeleted=async()=>()=>{};
+  api.assetCover=async()=>api.image();
+  api.cancelBackup=async id=>{qa.calls.push({type:'cancel',id});if(qa.holdCancel)await new Promise(resolve=>qa.releaseCancel=resolve);const op=qa.operations.find(o=>o.operation_id===id);op.state='canceled';op.last_error=null;};
+  api.retryBackup=async id=>{qa.calls.push({type:'retry',id});const op=qa.operations.find(o=>o.operation_id===id);op.state='pending';op.last_error=null;};
+  api.startAssetBackup=async(space,id)=>{qa.calls.push({type:'start',space,id});};
+  api.deleteAsset=async(space,id)=>{
+    qa.calls.push({type:'delete',space,id});
+    qa.operations.unshift({operation_id:'delete-'+id,space_id:space,asset_id:id,kind:'delete',state:'pending',phase:'tombstone',payload:{remote_asset_id:id},attempt:0,last_error:null});
+    for(const op of qa.operations.filter(o=>o.kind==='upload'&&o.asset_id===id))Object.assign(op,{state:'blocked',last_error:'BACKUP_DELETE_PENDING'});
+    qa.assets.find(a=>a.asset_id===id).remote_state='pending_delete';
+  };
+  qa.finishDelete=id=>{
+    Object.assign(qa.assets.find(a=>a.asset_id===id),{remote_deleted:true,asset_state:'deleted'});
+    for(const op of qa.operations.filter(o=>o.kind==='upload'&&o.asset_id===id))op.last_error='BACKUP_ASSET_DELETED';
+    Object.assign(qa.operations.find(o=>o.operation_id==='delete-'+id),{state:'completed',phase:'completed',payload:{local_cleanup_done:true}});
+  };
+  api.playbackSource=async()=>'/tests/fixtures/media/player.webm';
+  qa.change=(id,patch)=>Object.assign(qa.operations.find(o=>o.operation_id===id),patch);
+  window.unifiedTest=qa;
 }
 await import('/src/main');
 </script></body></html>

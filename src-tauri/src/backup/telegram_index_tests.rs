@@ -1,4 +1,6 @@
 use super::*;
+use std::{pin::Pin, task::{Context as TaskContext, Poll}};
+use tokio::io::ReadBuf;
 use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -88,6 +90,68 @@ fn document(body: &[u8]) -> RemoteDocument {
         bytes: body.len() as u64,
         caption: envelope.caption().unwrap(),
     }
+}
+
+#[test]
+fn legacy_standalone_reads_keep_document_and_size_checks() {
+    let original = document(b"original bytes");
+    for kind in ["video", "cover", "transcript", "event", "library"] {
+        let mut evidence = original.clone();
+        let mut envelope: Envelope = serde_json::from_str(&evidence.caption).unwrap();
+        envelope.kind = kind.into();
+        evidence.caption = envelope.caption().unwrap();
+        check_standalone_read(&evidence, evidence.document_id).unwrap();
+        assert_eq!(check_standalone_read(&evidence, evidence.document_id + 1).unwrap_err().to_string(), "TELEGRAM_MEDIA_CHANGED");
+        evidence.bytes += 1;
+        assert_eq!(check_standalone_read(&evidence, evidence.document_id).unwrap_err().to_string(), "TELEGRAM_MEDIA_CHANGED");
+    }
+}
+
+#[test]
+fn legacy_standalone_reads_reject_unknown_formats() {
+    for (version, kind) in [(1, "video"), (2, "unknown")] {
+        let mut evidence = document(b"original bytes");
+        let mut envelope: Envelope = serde_json::from_str(&evidence.caption).unwrap();
+        envelope.yingqu_media = version;
+        envelope.kind = kind.into();
+        evidence.caption = envelope.caption().unwrap();
+        assert_eq!(check_standalone_read(&evidence, evidence.document_id).unwrap_err().to_string(), "TELEGRAM_INDEX_INVALID");
+    }
+    let mut evidence = document(b"original bytes");
+    evidence.caption = "not an envelope".into();
+    assert_eq!(check_standalone_read(&evidence, evidence.document_id).unwrap_err().to_string(), "TELEGRAM_INDEX_INVALID");
+}
+
+#[test]
+fn legacy_video_is_readable_without_broadening_mutation_or_receipt_selection() {
+    use grammers_client::{message::{InputMessage, Message}, session::{SessionData, storages::MemorySession, types::{PeerAuth, PeerId, PeerRef}}, SenderPool};
+    // Construct SDK data without running a sender or issuing a request.
+    let pool = SenderPool::new(std::sync::Arc::new(MemorySession::from(SessionData::default())), 1);
+    let client = Client::new(pool.handle);
+    let peer = PeerRef { id: PeerId::channel(1).unwrap(), auth: PeerAuth::from_hash(1) };
+    let evidence = document(b"legacy video");
+    let mut envelope: Envelope = serde_json::from_str(&evidence.caption).unwrap();
+    envelope.kind = "video".into();
+    let media = tl::types::MessageMediaDocument {
+        nopremium: false, spoiler: false, video: true, round: false, voice: false,
+        document: Some(tl::types::Document {
+            id: evidence.document_id, access_hash: 1, file_reference: vec![], date: 1,
+            mime_type: "video/mp4".into(), size: evidence.bytes as i64,
+            thumbs: None, video_thumbs: None, dc_id: 1, attributes: vec![],
+        }.into()),
+        alt_documents: None, video_cover: None, video_timestamp: None, ttl_seconds: None,
+    };
+    let mut message = Message::from_raw_short_updates(&client, tl::types::UpdateShortSentMessage {
+        out: false, id: evidence.message_id, pts: 1, pts_count: 1, date: 1,
+        media: Some(media.into()), entities: None, ttl_period: None,
+    }, InputMessage::new().text(envelope.caption().unwrap()), peer);
+    assert_eq!(select_read_document(&message, evidence.document_id).unwrap().0.document_id, evidence.document_id);
+    assert_eq!(select_document(&message, Some(evidence.document_id), None).unwrap_err().to_string(), "TELEGRAM_INDEX_INVALID");
+    assert_eq!(select_document(&message, None, Some(&envelope)).unwrap_err().to_string(), "TELEGRAM_INDEX_INVALID");
+    assert!(select_read_document(&message, evidence.document_id + 1).is_err());
+    let tl::enums::Message::Message(raw) = &mut message.raw else { unreachable!() };
+    raw.rich_message = Some(tl::types::RichMessage { rtl: false, part: false, blocks: vec![], photos: vec![], documents: vec![] }.into());
+    assert_eq!(select_read_document(&message, evidence.document_id).unwrap_err().to_string(), "TELEGRAM_INDEX_INVALID");
 }
 
 #[tokio::test]

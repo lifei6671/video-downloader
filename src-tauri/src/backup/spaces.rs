@@ -101,6 +101,11 @@ pub fn list(core: &Core) -> Result<Vec<View>> {
                 Ok((last_error, display_name))
             })?;
             let (cleanup_deleted_records,deleted_record_retention_days,cleanup_error)=retention(core,&s.space_id)?;
+            let last_error = if c.provider_type == ProviderType::Telegram && enabled(core)?
+                && current_id(core)?.as_deref() == Some(&s.space_id)
+                && last_error.as_deref().is_some_and(crate::telegram_reconnect::network_error) {
+                Some("TELEGRAM_RECONNECTING".into())
+            } else { last_error };
             Ok(View {
                 telegram: super::telegram_spaces::binding(core,&s.space_id)?.map(|(target,_)|target),
                 telegram_channel_title: core.backup_db(|db| Ok(db.query_row("SELECT channel_title FROM telegram_space_labels WHERE space_id=?", [&s.space_id], |r| r.get(0)).optional()?))?,

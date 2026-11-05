@@ -1,12 +1,13 @@
 import '@/lib/style-nonce';
 import { RefreshCw } from 'lucide-react';
+import { bytes } from '@/lib/format-bytes';
 import { BackupSettingsForm } from '@/components/backup-settings';
-import { backupAssetStatus, backupDeletion, BackupDeleteProgress, BackupAssetCoverBadge, BackupTaskStatus, BackupTaskError, BackupTransferMenuItems, BackupAssetRow, BackupDialogs, useBackupTasks, useBackupDialogs } from '@/components/backup-tasks';
+import { backupAssetStatus, backupDeletion, BackupDeleteProgress, BackupRestoreProgress, BackupAssetCoverBadge, UnifiedTaskBadge, BackupCardAction, backupCardStatus, BackupTaskStatus, BackupTaskFeedback, BackupTransferMenuItems, BackupAssetRow, BackupDialogs, useBackupTasks, useBackupDialogs } from '@/components/backup-tasks';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Download, Play, ListVideo, ListX, CircleCheck, Settings as SettingsIcon, Link, FolderOpen, Film, Eye, EyeOff, Copy, ClipboardPaste, AlertCircle, HardDrive, Search, RotateCcw, Trash2, Info, KeyRound, PackageCheck, Monitor, CalendarClock, Images, X } from 'lucide-react';
+import { Download, Play, ListVideo, ListX, CircleCheck, CircleX, Settings as SettingsIcon, Link, FolderOpen, Film, Eye, EyeOff, Copy, ClipboardPaste, AlertCircle, HardDrive, Search, RotateCcw, Trash2, Info, KeyRound, PackageCheck, Monitor, CalendarClock, Images, X } from 'lucide-react';
 import { cn } from 'cn';
-import { api, errorText, mergeTasks, type Task, type Settings, type Profile, type Resolver } from './api';
+import { api, errorText, mergeTasks, compareTaskInsertion, type Task, type Settings, type Profile, type Resolver } from './api';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter, CardAction } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -52,16 +53,22 @@ import { useTaskImage, forgetTaskImages } from '@/lib/task-image-cache';
 const taskViewStorageKey = 'yingqu.task-view';
 const brandIcon = new URL('../src-tauri/icons/64x64.png', import.meta.url).href;
 const platformName = (platform?: string) => platform === 'douyin' ? '抖音' : platform === 'tiktok' ? 'TikTok' : platform === 'youtube' ? 'YouTube' : platform === 'telegram' ? 'Telegram' : '平台未知';
-function bytes(value: number | null) {
-  if (value === null) return '—';
-  if (value < 1024) return value + ' B';
-  if (value < 1048576) return (value / 1024).toFixed(1) + ' KB';
-  return (value / 1048576).toFixed(1) + ' MB';
-}
 function duration(ms?: number) {
   if (ms == null) return '—';
   const seconds = Math.floor(ms / 1000);
   return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+}
+function remainingTime(seconds: number) {
+  const total = Math.ceil(seconds);
+  if (seconds <= 300) return `${total} 秒`;
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor(total % 3600 / 60);
+  const remainder = total % 60;
+  const parts = [];
+  if (hours) parts.push(`${hours} 小时`);
+  if (minutes) parts.push(`${minutes} 分`);
+  if (remainder || !parts.length) parts.push(`${remainder} 秒`);
+  return parts.join(' ');
 }
 function resolutionLabel(width?: number | null, height?: number | null) {
   return width && height ? `${Math.min(width, height)}P` : '清晰度未知';
@@ -74,7 +81,7 @@ function downloadTime(timestamp: number | null) {
 function TaskMetadataItem({ label, children, ...props }: React.ComponentProps<'span'> & { label: string }) {
   return <Tooltip><TooltipTrigger asChild><span tabIndex={0} {...props}>{children}</span></TooltipTrigger><TooltipContent collisionPadding={8}>{label}</TooltipContent></Tooltip>;
 }
-function TaskMetadata({ task, details = false, compact = false }: { task: Task; details?: boolean; compact?: boolean }) {
+function TaskMetadata({ task, details = false, compact = false, hideMissing = false }: { task: Task; details?: boolean; compact?: boolean; hideMissing?: boolean }) {
   const video = task.video;
   const selected = video?.formats?.find(format => format.format_id === video.selected_format_id);
   const width = selected?.width ?? video?.width;
@@ -85,11 +92,11 @@ function TaskMetadata({ task, details = false, compact = false }: { task: Task; 
   const size = task.status === 'completed' ? bytes(task.bytes) : exactSize != null ? bytes(exactSize) : approximateSize != null ? `约 ${bytes(approximateSize)}` : '大小未知';
   const downloadedAt = downloadTime(task.completed_at);
   return <div role="group" aria-label="下载信息" className={cn("flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground", compact && "task-row-metadata")} >
-    {task.file_missing && <Alert variant="destructive" className="inline-flex w-auto shrink-0 items-center gap-1.5 border-0 bg-transparent p-0 text-xs [&>svg]:size-3.5! [&>svg]:translate-y-0!"><AlertCircle aria-hidden="true" /><AlertDescription>文件不存在</AlertDescription></Alert>}
+    {task.file_missing && !hideMissing && <Alert variant="destructive" className="inline-flex w-auto shrink-0 items-center gap-1.5 border-0 bg-transparent p-0 text-xs [&>svg]:size-3.5! [&>svg]:translate-y-0!"><AlertCircle aria-hidden="true" /><AlertDescription>文件不存在</AlertDescription></Alert>}
     {video?.kind === 'image_album' ? <TaskMetadataItem label="图片数量" className="inline-flex items-center gap-1.5"><Images aria-hidden="true" className="size-3.5 shrink-0" />{task.files.length || video.images?.length || 0} 张图片</TaskMetadataItem>
       : <TaskMetadataItem label={width && height ? `清晰度：${width} × ${height}` : '清晰度未知'} aria-label={`清晰度：${resolution}`} className="inline-flex items-center gap-1.5"><Monitor aria-hidden="true" className="size-3.5 shrink-0" />{resolution}</TaskMetadataItem>}
     <TaskMetadataItem label="文件大小" aria-label={`文件大小：${size}`} className="inline-flex items-center gap-1.5"><HardDrive aria-hidden="true" className="size-3.5 shrink-0" />{size}</TaskMetadataItem>
-    {(details || (compact && task.completed_at != null)) && <TaskMetadataItem label="下载时间" aria-label={`下载时间：${downloadedAt}`} className="inline-flex items-center gap-1.5"><CalendarClock aria-hidden="true" className="size-3.5 shrink-0" />{downloadedAt}</TaskMetadataItem>}
+    {(details || (compact && task.completed_at != null)) && <TaskMetadataItem label={`下载时间：${downloadedAt}`} aria-label={`下载时间：${downloadedAt}`} className="inline-flex items-center gap-1.5"><CalendarClock aria-hidden="true" className="size-3.5 shrink-0" />{downloadedAt}</TaskMetadataItem>}
   </div>;
 }
 function taskTitle(task: Task) {
@@ -204,11 +211,17 @@ function downloadPercent(task: Task) {
   return total ? Math.max(0, Math.min(99, Math.floor(task.bytes / total * 100))) : null;
 }
 function DownloadProgress({ task, hideIndicator = false }: { task: Task; hideIndicator?: boolean }) {
-  if (task.merging) return <div className="download-progress flex flex-wrap items-center gap-4 text-xs tabular-nums text-muted-foreground" role="status"><span className="flex items-center gap-2"><Spinner aria-hidden="true" />正在合并音视频…</span><span>已下载 {bytes(task.bytes)}</span></div>;
+  if (task.merging) return <div className={cn("download-progress flex flex-wrap items-center gap-4 text-xs tabular-nums text-muted-foreground", hideIndicator && "task-feed-telemetry")} role="status"><span className="flex items-center gap-2"><Spinner aria-hidden="true" />正在合并音视频…</span><span>已下载 {bytes(task.bytes)}</span></div>;
   const total = task.total_bytes ?? task.total_bytes_estimate;
   const percent = downloadPercent(task);
-  return <div className="download-progress flex flex-col gap-2">{!hideIndicator && <Progress aria-label="下载进度" value={percent} />}<div className="flex flex-wrap items-center gap-4 text-xs tabular-nums text-muted-foreground">
-    {percent == null ? <span className="flex items-center gap-2"><Spinner />正在下载</span> : !hideIndicator && <span>{percent}%</span>}{task.total_items != null && <span>{task.completed_items ?? 0} / {task.total_items} 张</span>}<span>{bytes(task.bytes)} / {task.total_bytes == null && task.total_bytes_estimate != null ? '约 ' : ''}{bytes(total ?? null)}</span><span>{task.speed_bps == null ? '速度 —' : bytes(task.speed_bps) + '/s'}</span>{task.eta_seconds != null && <span>预计剩余 {Math.ceil(task.eta_seconds)} 秒</span>}
+  if (hideIndicator) {
+    const transferred = `${bytes(task.bytes)} / ${task.total_bytes == null && task.total_bytes_estimate != null ? '约 ' : ''}${bytes(total ?? null)}`;
+    const speed = task.speed_bps == null ? '速度 —' : bytes(task.speed_bps) + '/s';
+    const eta = task.eta_seconds == null ? '剩余时间 —' : `预计剩余 ${remainingTime(task.eta_seconds)}`;
+    return <div className="download-progress task-feed-telemetry text-xs tabular-nums text-muted-foreground"><TaskMetadataItem label={transferred} className="truncate">{transferred}</TaskMetadataItem>{task.total_items != null && <TaskMetadataItem label="图片数量" className="shrink-0">{task.completed_items ?? 0} / {task.total_items} 张</TaskMetadataItem>}<TaskMetadataItem label={speed} className="shrink-0">{speed}</TaskMetadataItem><TaskMetadataItem label={eta} className="ml-auto truncate">{eta}</TaskMetadataItem></div>;
+  }
+  return <div className="download-progress flex flex-col gap-2">{!hideIndicator && <Progress aria-label="下载进度" value={percent} updateIntervalMs={1000} />}<div className="flex flex-wrap items-center gap-4 text-xs tabular-nums text-muted-foreground">
+    {percent == null ? <span className="flex items-center gap-2"><Spinner />正在下载</span> : !hideIndicator && <span>{percent}%</span>}{task.total_items != null && <span>{task.completed_items ?? 0} / {task.total_items} 张</span>}<span>{bytes(task.bytes)} / {task.total_bytes == null && task.total_bytes_estimate != null ? '约 ' : ''}{bytes(total ?? null)}</span><span>{task.speed_bps == null ? '速度 —' : bytes(task.speed_bps) + '/s'}</span>{task.eta_seconds != null && <span>预计剩余 {remainingTime(task.eta_seconds)}</span>}
   </div></div>;
 }
 type SettingsSection = 'download' | 'accounts' | 'dependencies' | 'backup';
@@ -328,8 +341,10 @@ function App() {
   // Hide previews after acknowledged handoff/cancellation, even before the
   // corresponding task event arrives. Rust still owns their task state.
   const [dismissedPreviewIds, setDismissedPreviewIds] = useState(() => new Set<string>());
-  const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const pendingTaskActions = useRef(new Set<string>());
+  const [waitingTaskActions, setWaitingTaskActions] = useState(() => new Set<string>());
+  const [dismissedTaskErrorRevisions, setDismissedTaskErrorRevisions] = useState(() => new Map<string, number>());
   const [connected, setConnected] = useState(false);
   const [confirm, setConfirm] = useState<{task: Task; resetPreview: boolean; input: string} | null>(null);
   const [duplicate, setDuplicate] = useState<{task: Task; previous: Task; background?: boolean} | null>(null);
@@ -356,7 +371,9 @@ function App() {
   const removedAssetIds = useRef(new Set<string>());
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const cancelTrigger = useRef<HTMLElement | null>(null);
-  const preview = tasks.find(t => !dismissedPreviewIds.has(t.id) && (t.status === 'ready' || (t.status === 'parsing' && !t.download_requested)));
+  const latestTask = tasks[0];
+  const preview = latestTask && !latestTask.download_requested && !dismissedPreviewIds.has(latestTask.id)
+    && (latestTask.status === 'ready' || latestTask.status === 'parsing') ? latestTask : undefined;
   const runningCount = tasks.filter(t => t.status === 'downloading').length;
   const queued = tasks.filter(t => t.status === 'queued').sort((a, b) => (a.queue_order ?? 0) - (b.queue_order ?? 0));
   const activeCount = runningCount + queued.length + tasks.filter(t => t.download_requested && t.status === 'parsing').length;
@@ -380,7 +397,7 @@ function App() {
     lastStatuses.current = new Map(tasks.map(task => [task.id, task.status]));
     if (selectedTask?.status === 'completed') {
       setSelected(null);
-      if (input === submittedInput.current) { setInput(''); setError(''); }
+      if (input === submittedInput.current) { setInput(''); }
     }
   }, [tasks, connected, selectedTask, input]);
   useEffect(() => {
@@ -419,10 +436,16 @@ function App() {
     await api.cancel(intent.task.id);
     if (intent.resetPreview) {
       setDismissedPreviewIds(old => new Set(old).add(intent.task.id));
-      setSelected(null); setPreviewReset(true); setError('');
+      setSelected(null); setPreviewReset(true);
       setInput(value => value === intent.input ? '' : value);
       submittedInput.current = '';
       requestAnimationFrame(() => inputRef.current?.focus());
+    } else {
+      requestAnimationFrame(() => {
+        if (document.activeElement === document.body || cancelTrigger.current?.contains(document.activeElement)) {
+          taskListRef.current?.focus({preventScroll: true});
+        }
+      });
     }
   }
   useEffect(() => {
@@ -441,25 +464,43 @@ function App() {
         const [snapshot, config] = await Promise.all([api.tasks(), api.settings()]);
         if (!disposed) {
           setTasks(old => mergeTasks(old, snapshot, removedIds.current)); setSettings(config); setConnected(true);
-          const restored = snapshot.find(task => task.status === 'ready' && task.video);
-          if (restored?.video) {
-            promptedDuplicates.current.add(duplicatePromptKey(restored));
-            setInput(restored.video.canonical_url);
+          // Restored previews must not open unsolicited duplicate dialogs when
+          // a different preview is handed to the background queue.
+          for (const restored of snapshot) {
+            if (restored.status === 'ready' && restored.video) promptedDuplicates.current.add(duplicatePromptKey(restored));
+          }
+          const restored = [...snapshot].sort(compareTaskInsertion)[0];
+          if (restored?.status === 'ready' && !restored.download_requested && restored.video) {
+            const source = restored.video.canonical_url;
+            setInput(value => value || source);
           }
         }
-      } catch { if (!disposed) setError('无法连接本地应用，请通过桌面程序启动映取。'); }
+      } catch { if (!disposed) toast.error('无法连接本地应用，请通过桌面程序启动映取。', { id: 'connection-error', duration: 8000 }); }
     })();
     const refresh = () => { api.tasks().then(snapshot => { if (!disposed) setTasks(old => mergeTasks(old, snapshot, removedIds.current)); }).catch(() => {}); };
     window.addEventListener('focus', refresh);
     return () => { disposed = true; unsubscribe?.(); window.removeEventListener('focus', refresh); };
   }, []);
   async function run(action: () => Promise<unknown>) {
-    setError(''); setBusy(true);
+    setBusy(true);
     try { await action(); } catch (e) { reportActionError(e); } finally { setBusy(false); }
+  }
+  async function runTaskAction(id: string, action: () => Promise<unknown>) {
+    if (pendingTaskActions.current.has(id)) return;
+    pendingTaskActions.current.add(id);
+    setWaitingTaskActions(new Set(pendingTaskActions.current));
+    try { await action(); }
+    catch (error) { if (String(error) !== 'CANCELED') reportActionError(error); }
+    finally {
+      pendingTaskActions.current.delete(id);
+      setWaitingTaskActions(new Set(pendingTaskActions.current));
+    }
+  }
+  function waitingTaskAction(task: Task) {
+    return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="task-feed-play" aria-label="取消等待" onClick={() => void api.cancel(task.id).catch(reportActionError)}><X aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>等待资源释放，点击取消</TooltipContent></Tooltip>;
   }
   function reportActionError(error: unknown) {
     const message = errorText(error);
-    setError(message);
     toast.error('操作失败', { id: 'action-error', description: message, duration: 8000 });
   }
   function playTask(task: Task, trigger?: HTMLElement) {
@@ -477,13 +518,19 @@ function App() {
       const text = await api.readClipboardText();
       if (inputRef.current !== field || field.disabled) return;
       if (!text.trim()) { toast.info('剪贴板中没有文本内容'); return; }
-      setInput(text); setError(''); inputRef.current?.focus();
+      setInput(text); inputRef.current?.focus();
     } catch { toast.error('无法读取剪贴板，请使用 Ctrl / ⌘ + V 粘贴。'); }
     finally { setPasting(false); }
   }
   function removeTasks(ids: string[]) {
     const fresh = new Set(ids.filter(id => !removedIds.current.has(id)));
     if (!fresh.size) return;
+    setDismissedTaskErrorRevisions(old => {
+      if (![...fresh].some(id => old.has(id))) return old;
+      const next = new Map(old);
+      fresh.forEach(id => next.delete(id));
+      return next;
+    });
     const list = taskListRef.current;
     const rows = Array.from(list?.querySelectorAll<HTMLElement>('[data-task-row]') ?? []);
     const focusedRow = rows.find(row => fresh.has(row.dataset.taskRow!) && row.contains(document.activeElement));
@@ -544,9 +591,9 @@ function App() {
     });
   }
   const nav = [{id:'download',label:'下载作品',Icon:Download},{id:'tasks',label:'下载任务',Icon:ListVideo},{id:'settings',label:'系统设置',Icon:SettingsIcon},{id:'about',label:'关于软件',Icon:Info}];
-  // Equal timestamps must retain row order while removed snapshots animate.
+  // Retain row order for legacy snapshots and removal animations.
   for (const task of [...tasks, ...exitingTasks]) if (!taskOrder.current.has(task.id)) taskOrder.current.set(task.id, taskOrder.current.size);
-  const filteredTasks = [...tasks, ...exitingTasks].filter(t => authorQuery || t.download_requested).filter(t => taskPlatform === 'all' || (t.video?.platform ?? (t.telegram_link ? 'telegram' : undefined)) === taskPlatform).filter(t => authorQuery ? matchesAuthor(t.video, authorQuery) : !search || ((t.video?.title ?? '') + (t.video?.author ?? '') + (t.video?.author_profile?.nickname ?? '') + (t.video?.author_profile?.id ?? '') + (t.telegram_link ?? '')).includes(search));
+  const filteredTasks = [...tasks, ...exitingTasks].filter(t => t.status !== 'canceled').filter(t => authorQuery || t.download_requested).filter(t => taskPlatform === 'all' || (t.video?.platform ?? (t.telegram_link ? 'telegram' : undefined)) === taskPlatform).filter(t => authorQuery ? matchesAuthor(t.video, authorQuery) : !search || ((t.video?.title ?? '') + (t.video?.author ?? '') + (t.video?.author_profile?.nickname ?? '') + (t.video?.author_profile?.id ?? '') + (t.telegram_link ?? '')).includes(search));
   const statusCounts: Record<TaskStatusFilter, number> = {all: 0, downloading: 0, queued: 0, completed: 0, failed: 0};
   for (const task of filteredTasks) {
     if (removedIds.current.has(task.id)) continue;
@@ -554,7 +601,7 @@ function App() {
     if (task.status === 'parsing' || task.status === 'downloading') statusCounts.downloading++;
     else if (task.status === 'queued' || task.status === 'completed' || task.status === 'failed') statusCounts[task.status]++;
   }
-  const visible = filteredTasks.filter(t => page !== 'tasks' || taskStatus === 'all' || (taskStatus === 'downloading' ? t.status === 'downloading' || t.status === 'parsing' : t.status === taskStatus)).sort((a, b) => (a.status === 'queued' && b.status === 'queued' ? (a.queue_order ?? 0) - (b.queue_order ?? 0) : a.status === 'queued' ? -1 : b.status === 'queued' ? 1 : b.created_at - a.created_at) || taskOrder.current.get(a.id)! - taskOrder.current.get(b.id)!);
+  const visible = filteredTasks.filter(t => page !== 'tasks' || taskStatus === 'all' || (taskStatus === 'downloading' ? t.status === 'downloading' || t.status === 'parsing' : t.status === taskStatus)).sort((a, b) => compareTaskInsertion(a, b) || taskOrder.current.get(a.id)! - taskOrder.current.get(b.id)!);
   const remoteAssets = [...backup.assets, ...backup.exitingAssets].filter(a => !removedAssetIds.current.has(a.asset_id) && ![...tasks, ...exitingTasks].some(t => t.asset_id === a.asset_id) && (a.asset_state === 'active' || !!a.path || a.remote_state === 'pending_delete'));
   for (const asset of remoteAssets) if (!taskOrder.current.has('asset-' + asset.asset_id)) taskOrder.current.set('asset-' + asset.asset_id, taskOrder.current.size);
   remoteAssets.sort((a,b) => taskOrder.current.get('asset-' + a.asset_id)! - taskOrder.current.get('asset-' + b.asset_id)!);
@@ -571,7 +618,7 @@ function App() {
     setAuthorQuery(query); setSearch(query.name); setTaskPlatform('all'); setPage('search');
     requestAnimationFrame(() => taskSearchRef.current?.focus());
   }
-  const historyCount = tasks.filter(t => t.download_requested && (taskPlatform === 'all' || (t.video?.platform ?? (t.telegram_link ? 'telegram' : undefined)) === taskPlatform) && ['completed', 'failed', 'canceled'].includes(t.status)).length;
+  const historyCount = tasks.filter(t => t.download_requested && (taskPlatform === 'all' || (t.video?.platform ?? (t.telegram_link ? 'telegram' : undefined)) === taskPlatform) && ['completed', 'failed'].includes(t.status)).length;
   function requestCancel(task: Task, returnFocus: HTMLElement | null) {
     cancelTrigger.current = returnFocus;
     setConfirm({task, resetPreview: page === 'download' && !task.download_requested, input});
@@ -581,7 +628,7 @@ function App() {
     const deleting = task.asset_id ? backupDeletion(backup, task.asset_id) : null;
     const deleteFromBackup = !!task.asset_id && !!backupSettings?.enabled && (backupSettings.provider_type !== 'telegram' || backupSettings.can_delete_owned_media) && !!member && !member.remote_deleted;
     const deleteUnavailable = !!member && backupSettings?.enabled && backupSettings.provider_type === 'telegram' && !backupSettings.can_delete_owned_media;
-    return <TaskMoreMenu children={children} backupActions={task.asset_id ? <BackupTransferMenuItems backup={backup} assetId={task.asset_id} context={children !== undefined} /> : undefined} coverActions={coverActions} onOpenChange={open => { if (open) React.startTransition(() => setSelectedRow(task.id)); }} task={task} deleteBackup={deleteFromBackup} release={member?.remote_state === 'backed_up' && !member.remote_deleted ? () => { void run(async () => { await api.releaseAsset(task.asset_id!); setTasks(await api.tasks()); toast.success('本机副本已释放'); }); } : undefined} busy={busy || !!deleting} cancel={taskListPage && task.status === 'downloading' ? returnFocus => requestCancel(task, returnFocus) : undefined} transcript={task.status === 'completed' && task.video?.kind !== 'image_album' && (!task.file_missing || videoTranscripts.values[task.id]?.has_result || backup.assets.some(a => a.asset_id === task.asset_id && (a.has_transcript || a.in_current_space !== false && !a.remote_deleted))) ? { label: videoTranscripts.values[task.id]?.state === 'running' ? '正在提取文案' : videoTranscripts.values[task.id]?.has_result || backup.assets.some(a => a.asset_id === task.asset_id && a.has_transcript) ? '查看文案' : '提取文案', open: returnFocus => videoTranscripts.open(task.id, returnFocus) } : undefined} reveal={() => { void run(() => api.reveal(task.id)); }} copy={() => { void run(() => navigator.clipboard.writeText(task.video?.canonical_url ?? task.telegram_link!)); }} copyPath={() => { void run(async () => { await navigator.clipboard.writeText(displayPath(task.path)); toast.success('本地地址已复制'); }); }} remove={() => { void run(() => removeTask(task.id)); }} deleteFile={deleteUnavailable ? undefined : deleteFromBackup ? () => { void backup.deleteAsset(task.asset_id!); } : () => { void run(() => removeTask(task.id, true)); }} />;
+    return <TaskMoreMenu children={children} backupActions={task.asset_id ? <BackupTransferMenuItems backup={backup} assetId={task.asset_id} context={children !== undefined} /> : undefined} coverActions={coverActions} onOpenChange={open => { if (open) React.startTransition(() => setSelectedRow(task.id)); }} task={task} play={canPlayTask(task) ? () => playTask(task) : undefined} deleteBackup={deleteFromBackup} release={member?.remote_state === 'backed_up' && !member.remote_deleted ? () => { void run(async () => { await api.releaseAsset(task.asset_id!); setTasks(await api.tasks()); toast.success('本机副本已释放'); }); } : undefined} busy={busy || !!deleting || waitingTaskActions.has(task.id)} waitingCancel={waitingTaskActions.has(task.id) ? () => { void api.cancel(task.id).catch(reportActionError); } : undefined} cancel={taskListPage && ['parsing','ready','queued','downloading'].includes(task.status) ? returnFocus => requestCancel(task, returnFocus) : undefined} transcript={task.status === 'completed' && task.video?.kind !== 'image_album' && (!task.file_missing || videoTranscripts.values[task.id]?.has_result || backup.assets.some(a => a.asset_id === task.asset_id && (a.has_transcript || a.in_current_space !== false && !a.remote_deleted))) ? { label: videoTranscripts.values[task.id]?.state === 'running' ? '正在提取文案' : videoTranscripts.values[task.id]?.has_result || backup.assets.some(a => a.asset_id === task.asset_id && a.has_transcript) ? '查看文案' : '提取文案', open: returnFocus => videoTranscripts.open(task.id, returnFocus) } : undefined} reveal={() => { void run(() => api.reveal(task.id)); }} copy={() => { void run(() => navigator.clipboard.writeText(task.video?.canonical_url ?? task.telegram_link!)); }} copyPath={() => { void run(async () => { await navigator.clipboard.writeText(displayPath(task.path)); toast.success('本地地址已复制'); }); }} remove={() => { void runTaskAction(task.id, () => removeTask(task.id)); }} deleteFile={deleteUnavailable ? undefined : deleteFromBackup ? () => { void backup.deleteAsset(task.asset_id!); } : () => { void runTaskAction(task.id, () => removeTask(task.id, true)); }} />;
   }
   function canPlayTask(task: Task) {
     if (task.asset_id && backupDeletion(backup, task.asset_id)) return false;
@@ -590,27 +637,67 @@ function App() {
   function playAction(task: Task, overlay = false) {
     return <Tooltip><TooltipTrigger asChild><Button size={taskListPage ? 'icon' : 'sm'} variant={taskListPage ? 'ghost' : 'outline'} className={cn('task-play', overlay && 'task-feed-play cursor-pointer')} aria-label="播放视频" disabled={busy || playback?.id === task.id} onClick={event => playTask(task, event.currentTarget)}><Play aria-hidden="true" />{!taskListPage && '播放'}</Button></TooltipTrigger><TooltipContent>在应用内播放</TooltipContent></Tooltip>;
   }
-  function cancelAction(task: Task) {
-    return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" aria-label={task.canceling ? '正在取消…' : '取消'} disabled={busy || task.canceling} onClick={event => requestCancel(task, event.currentTarget)}>{task.canceling ? <Spinner aria-hidden="true" /> : <X aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent>{task.canceling ? '正在取消…' : '取消下载'}</TooltipContent></Tooltip>;
+  function cancelAction(task: Task, overlay = false) {
+    return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className={overlay ? 'task-feed-play' : undefined} aria-label={task.canceling ? '正在取消…' : overlay ? '取消解析' : '取消'} disabled={busy || task.canceling} onClick={event => requestCancel(task, event.currentTarget)}>{task.canceling ? <Spinner aria-hidden="true" /> : <X aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent>{task.canceling ? '正在取消…' : overlay ? '取消解析' : '取消下载'}</TooltipContent></Tooltip>;
+  }
+  function feedAction(task: Task) {
+    if (waitingTaskActions.has(task.id)) return waitingTaskAction(task);
+    if (task.status === 'parsing') return cancelAction(task, true);
+    if (task.status === 'ready') return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="task-feed-play" aria-label={task.video?.kind === 'image_album' ? '下载图集' : '下载视频'} disabled={busy} onClick={() => void run(() => download(task))}><Download aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>点击下载</TooltipContent></Tooltip>;
+    if (task.status === 'canceled' || task.status === 'failed') return retryAction(task);
+    const asset = backup.assets.find(value => value.asset_id === task.asset_id);
+    const restore = asset ? backupAssetStatus(backup, asset) : null;
+    if (task.status === 'completed' && asset && !backupDeletion(backup, asset.asset_id) && ['queued','downloading','failed'].includes(restore ?? '')) {
+      const restoring = restore !== 'failed';
+      return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="task-feed-play" aria-label={restoring ? '正在下载' : '重试下载'} disabled={busy || restoring} onClick={event => void playTask(task, event.currentTarget)}>{restoring ? <Spinner aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent>{restoring ? '正在下载' : '下载失败，点击重试下载'}</TooltipContent></Tooltip>;
+    }
+    if (task.status === 'completed' && task.asset_id && !backupDeletion(backup, task.asset_id)) {
+      const state = backupCardStatus(backup, task.asset_id, task);
+      if (state.action || ['清理中','待确认','正在取消'].includes(state.label)) return <BackupCardAction backup={backup} assetId={task.asset_id} />;
+    }
+    if (canPlayTask(task)) return playAction(task, true);
+    if (task.status === 'completed' && task.video?.kind === 'image_album' && !task.file_missing) return albumAction(task, true);
+    return null;
   }
   function cancelProgress(task: Task) {
     const queued = task.status === 'queued';
-    return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="task-feed-progress-cancel" aria-label={task.canceling ? '正在取消…' : '取消下载'} disabled={busy || task.canceling} onClick={event => requestCancel(task, event.currentTarget)}><Progress variant="circular" aria-label={queued ? '等待下载' : task.merging ? '合并进度' : '下载进度'} aria-valuetext={task.canceling ? '正在取消' : queued ? '等待下载' : task.merging ? '正在合并音视频' : downloadPercent(task) == null ? '正在下载，大小未知' : undefined} value={queued || task.merging ? null : downloadPercent(task)}>{task.canceling ? <Spinner aria-hidden="true" /> : queued ? '等待' : task.merging ? '合并' : undefined}</Progress></Button></TooltipTrigger><TooltipContent>{task.canceling ? '正在取消…' : '点击取消下载'}</TooltipContent></Tooltip>;
+    return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="task-feed-progress-cancel" aria-label={task.canceling ? '正在取消…' : '取消下载'} disabled={busy || task.canceling} onClick={event => requestCancel(task, event.currentTarget)}><Progress variant="circular" updateIntervalMs={1000} aria-label={queued ? '等待下载' : task.merging ? '合并进度' : '下载进度'} aria-valuetext={task.canceling ? '正在取消' : queued ? '等待下载' : task.merging ? '正在合并音视频' : downloadPercent(task) == null ? '正在下载，大小未知' : undefined} value={queued || task.merging ? null : downloadPercent(task)}>{task.canceling ? <Spinner aria-hidden="true" /> : queued ? '等待' : task.merging ? '合并' : undefined}</Progress></Button></TooltipTrigger><TooltipContent>{task.canceling ? '正在取消…' : '点击取消下载'}</TooltipContent></Tooltip>;
   }
   function albumAction(task: Task, overlay = false) {
     return <Tooltip><TooltipTrigger asChild><Button size={taskListPage ? 'icon' : 'sm'} variant={taskListPage ? 'ghost' : 'outline'} className={overlay ? 'task-feed-play cursor-pointer' : undefined} aria-label="查看图集" onClick={() => setViewAlbum(task.id)}>{taskListPage ? <Images aria-hidden="true" /> : <Eye aria-hidden="true" />}{!taskListPage && '查看图集'}</Button></TooltipTrigger><TooltipContent>查看图集</TooltipContent></Tooltip>;
   }
-  function taskActions(task: Task, showPlay = true) {
+  function retryTask(task: Task) {
+    if (task.video || (task.telegram_link && task.download_requested)) {
+      setDismissedTaskErrorRevisions(old => new Map(old).set(task.id, task.revision));
+      return runTaskAction(task.id, async () => {
+        const next = await api.retry(task.id);
+        toast.dismiss(task.id);
+        promptedDuplicates.current.delete(duplicatePromptKey(next));
+        setDismissedPreviewIds(old => { const updated = new Set(old); updated.delete(next.id); return updated; });
+        setTasks(old => mergeTasks(old, [next], removedIds.current));
+        setSelected(next.id);
+        setPreviewReset(false);
+      });
+    }
+    setPage('download'); setSelected(null); setInput('');
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+  function retryAction(task: Task) {
+    const label = task.video || (task.telegram_link && task.download_requested) ? '重试下载' : '重新解析';
+    return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="task-feed-play" aria-label={label} disabled={busy} onClick={() => void retryTask(task)}>{task.status === 'canceled' ? <CircleX aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent collisionPadding={8}>{task.status === 'canceled' ? '已取消' : task.error === 'INTERRUPTED' ? '任务已中断' : '下载失败'}，点击{label}</TooltipContent></Tooltip>;
+  }
+  function taskActions(task: Task) {
+    if (waitingTaskActions.has(task.id)) return <div className="task-actions flex justify-end">{waitingTaskAction(task)}</div>;
     return <div className="task-actions flex flex-wrap items-center justify-end gap-2">
       {page === 'download' && task.status === 'ready' && <Button size="sm" data-background-download-task={task.id} disabled={busy} onClick={() => run(() => download(task, true))}><ListVideo data-icon="inline-start" />后台下载</Button>}
       {task.status === 'ready' && <Button variant={page === 'download' ? 'outline' : 'default'} data-download-task={task.id} disabled={busy} onClick={() => run(() => download(task))}><Download data-icon="inline-start" />{page === 'download' ? '立即下载' : task.video?.kind === 'image_album' ? '下载图集' : '下载视频'}</Button>}
       {['parsing','ready','queued','downloading'].includes(task.status) && (taskListPage && task.status === 'downloading'
         ? cancelAction(task)
         : <Button size="sm" variant="outline" disabled={busy || task.canceling} onClick={event => requestCancel(task, event.currentTarget)}>{task.canceling ? '正在取消…' : '取消'}</Button>)}
-      {showPlay && task.status === 'completed' && task.video?.kind === 'image_album' && !task.file_missing && albumAction(task)}
-      {showPlay && canPlayTask(task) && playAction(task)}
+      {task.status === 'completed' && task.video?.kind === 'image_album' && !task.file_missing && albumAction(task)}
+      {canPlayTask(task) && playAction(task)}
 
-      {['failed', 'canceled'].includes(task.status) && <Button size="sm" variant="outline" disabled={busy} onClick={() => task.video || (task.telegram_link && task.download_requested) ? run(async () => { const next = await api.retry(task.id); toast.dismiss(task.id); promptedDuplicates.current.delete(next.id); setDismissedPreviewIds(old => { const updated = new Set(old); updated.delete(next.id); return updated; }); setTasks(old => mergeTasks(old, [next], removedIds.current)); setSelected(next.id); setPreviewReset(false); }) : (setPage('download'), setSelected(null), setInput(''), requestAnimationFrame(() => inputRef.current?.focus()))}><RotateCcw />{task.video || (task.telegram_link && task.download_requested) ? '重试' : '重新解析'}</Button>}
+      {['failed', 'canceled'].includes(task.status) && <Button size="sm" variant="outline" disabled={busy} onClick={() => void retryTask(task)}><RotateCcw />{task.video || (task.telegram_link && task.download_requested) ? '重试' : '重新解析'}</Button>}
       {page === 'download' && taskMenu(task)}
     </div>;
   }
@@ -623,21 +710,21 @@ function App() {
       <h1>{page === 'search' ? '搜索结果' : nav.find(n => n.id === page)?.label}</h1>
       {taskListPage && <div className="flex max-w-full items-center gap-2">{page === 'tasks' && <Tooltip><TooltipTrigger asChild><span className="inline-flex"><Button ref={clearHistoryTrigger} size="icon-sm" variant="ghost" aria-label="清理历史" disabled={busy || historyCount === 0} onClick={() => setClearHistoryPlatform(taskPlatform)}><ListX /></Button></span></TooltipTrigger><TooltipContent>{historyCount ? `清理${taskPlatform === 'all' ? '全部平台' : platformName(taskPlatform)}下载历史` : '当前平台暂无可清理的下载历史'}</TooltipContent></Tooltip>}<InputGroup className="h-7 w-[260px] max-w-full"><InputGroupAddon><Search /></InputGroupAddon><InputGroupInput ref={taskSearchRef} aria-label="搜索作品标题或作者" placeholder="搜索作品标题或作者" value={search} onChange={e => { setSearch(e.target.value); setAuthorQuery(null); }} />{search.length > 0 && <InputGroupAddon align="inline-end"><InputGroupButton size="icon-xs" aria-label="清空搜索" title="清空搜索" onClick={() => { setSearch(''); setAuthorQuery(null); taskSearchRef.current?.focus(); }}><X aria-hidden="true" /></InputGroupButton></InputGroupAddon>}</InputGroup></div>}</header>
     <div key={page} data-slot="page-content" className={cn("min-h-0 flex-1", taskListPage || page === 'settings' ? "overflow-hidden" : "overflow-y-auto", page === 'about' && "mr-1")}><div className={cn("page-body flex w-full flex-col gap-4", taskListPage && "task-page-body", (taskListPage || page === 'settings') && "h-full min-h-0")}>
-    {error && <Alert variant="destructive" className="border-0 bg-transparent p-0"><AlertCircle aria-hidden="true" /><AlertDescription className="text-xs text-inherit">{error}</AlertDescription></Alert>}
     {page === 'download' && <div className="flex flex-col gap-3"><Card size="sm" className="share-card"><CardHeader><CardTitle>作品链接</CardTitle></CardHeader><CardContent><form onSubmit={parse}><FieldGroup className="gap-3"><Field orientation="horizontal"><FieldLabel className="sr-only" htmlFor="video-input">作品分享链接</FieldLabel><InputGroup className="min-h-8 flex-1"><ShareLinkInput value={input} onChange={setInput} inputRef={inputRef} disabled={busy || parsing} /></InputGroup><div className="flex shrink-0 flex-col gap-2"><Button type="button" variant="outline" className="min-w-[100px]" disabled={busy || pasting || parsing} onClick={() => void pasteLink()}>{pasting ? <Spinner aria-hidden="true" data-icon="inline-start" /> : <ClipboardPaste data-icon="inline-start" />}{pasting ? '粘贴中…' : '粘贴链接'}</Button><Button className="min-w-[100px]" variant={current?.video ? 'secondary' : 'default'} disabled={!connected || busy || pasting || parsing}>{parsing ? <Spinner data-icon="inline-start" /> : <Link data-icon="inline-start" />}{parsing ? '正在解析…' : current?.video ? '重新解析' : '解析链接'}</Button></div></Field><Field orientation="horizontal"><FieldLabel id="resolver-label">解析引擎</FieldLabel><Select value={resolver} onValueChange={value => setResolver(value as Resolver)} disabled={busy || parsing}><SelectTrigger size="sm" aria-labelledby="resolver-label" className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="auto">自动，按平台选择</SelectItem><SelectItem value="yt-dlp">yt-dlp，视频</SelectItem><SelectItem value="dtk">DTK，视频与图集</SelectItem><SelectItem value="grammers">Telegram</SelectItem></SelectContent></Select></Field><FieldDescription>支持抖音、TikTok、YouTube、Telegram<span className="float-right">Ctrl / ⌘ + V 粘贴</span></FieldDescription></FieldGroup></form></CardContent></Card>
     {current ? <Card size="sm" className="media-preview"><CardHeader><div className="flex items-center gap-2"><Badge variant="outline">{platformName(current.video?.platform ?? (current.telegram_link ? 'telegram' : undefined))}</Badge>{current.video?.resolver && current.video.platform !== 'telegram' && <Badge variant="secondary">{current.video.resolver === 'dtk' ? 'DTK' : 'yt-dlp'}</Badge>}<Badge variant={current.canceling ? 'warning' : statusVariant[current.status]}>{current.canceling ? '正在取消…' : current.status === 'queued' && !current.video && current.telegram_link ? '等待解析' : labels[current.status]}</Badge>{current.cache_hit && <Badge variant="muted">解析缓存</Badge>}</div></CardHeader><CardContent className="media-preview-content"><>{current.video?.kind === 'image_album' ? <AlbumGallery key={current.id} task={current} /> : <VideoCover task={current} />}</><div className="media-preview-info flex min-w-0 flex-1 flex-col gap-3"><CardTitle className="line-clamp-2" title={current.video?.title ?? ''}>{current.video?.title || (current.status === 'parsing' ? '正在获取作品信息' : current.telegram_link && current.status === 'queued' ? '等待解析 Telegram 链接' : '等待有效视频链接')}</CardTitle><AuthorInfo task={current} /><dl className="grid grid-cols-3 gap-4"><div><dt className="text-xs text-muted-foreground">{current.video?.kind === 'image_album' ? '图片数量' : '时长'}</dt><dd className="mt-2 tabular-nums">{current.video?.kind === 'image_album' ? `${current.video.images?.length ?? 0} 张` : duration(current.video?.duration_ms)}</dd></div><div><dt className="text-xs text-muted-foreground">{current.video?.kind === 'image_album' ? '图片质量' : '清晰度'}</dt><dd className="mt-2 tabular-nums">{current.video?.kind === 'image_album' ? '原图优先，高清次选' : resolution}</dd></div><div><dt className="text-xs text-muted-foreground">文件大小</dt><dd className="mt-2 tabular-nums">{previewSize}</dd></div></dl>{current.status === 'ready' && !!current.video?.formats?.length && <Field className="gap-2"><FieldLabel>下载规格，{current.video.formats.length} 个</FieldLabel><ToggleGroup type="single" variant="outline" data-media-formats="" aria-label="下载视频规格" value={current.video.selected_format_id ?? ''} disabled={busy} onValueChange={value => { if (value) void run(async () => { const task = await api.chooseFormat(current.id, value); setTasks(old => mergeTasks(old, [task], removedIds.current)); }); }} className="grid max-h-[196px] w-full grid-cols-2 gap-2 overflow-y-auto p-1 pr-3 max-[1100px]:grid-cols-1">{current.video.formats.map(format => <ToggleGroupItem key={format.format_id} value={format.format_id} className="h-auto min-w-0 justify-between gap-2 px-3 py-2 text-left data-[state=on]:border-primary data-[state=on]:bg-accent data-[state=on]:text-primary"><span className="flex min-w-0 flex-col gap-0.5"><span className="font-medium">{format.format_id === 'original' ? '原始文件' : format.width && format.height ? `${format.width} × ${format.height}` : '清晰度未知'}</span><span className="text-xs text-muted-foreground">{format.container.toUpperCase()}{format.requires_merge ? '，需 FFmpeg' : ''}，{format.codec === 'h265' ? 'H.265' : format.codec === 'h264' ? 'H.264' : format.codec === 'av1' ? 'AV1' : format.codec || '编码未知'}{format.fps ? `，${format.fps} fps` : ''}{format.tbr ? `，${(format.tbr / 1000).toFixed(2)} Mbps` : ''}</span></span><span className="shrink-0 tabular-nums">{format.filesize != null ? bytes(format.filesize) : format.filesize_approx != null ? '约 ' + bytes(format.filesize_approx) : '大小未知'}</span></ToggleGroupItem>)}</ToggleGroup><FieldDescription>{current.video.platform === 'telegram' ? '下载原始文件，不转码。' : current.video.platform === 'douyin' && current.video.resolver === 'yt-dlp' ? '仅展示已确认含视频和音轨的一体规格；默认最高分辨率，下载时重新获取所选规格。' : '默认最高分辨率；下载时重新获取所选规格。YouTube 分离音视频规格需本机安装 FFmpeg，合并不转码。'}</FieldDescription></Field>}{current.video?.cookie_warning && <Alert className="border-0 bg-transparent p-0 text-muted-foreground"><AlertCircle aria-hidden="true" /><AlertDescription className="text-xs text-inherit">{errorText(current.video.cookie_warning)}</AlertDescription></Alert>}{current.video?.music?.title && <p className="text-sm text-muted-foreground">原声：{current.video.music.title}{current.video.music.author ? `，${current.video.music.author}` : ''}</p>}{current.status === 'downloading' && <DownloadProgress task={current} />}{current.status === 'queued' && <p className="text-sm text-muted-foreground">{!current.video && current.telegram_link ? '等待解析并下载' : '等待下载'}，第 {queued.findIndex(t => t.id === current.id) + 1} 位</p>}{current.error && <Alert variant="destructive" className="border-0 bg-transparent p-0"><AlertCircle aria-hidden="true" /><AlertDescription className="text-xs text-inherit">{errorText(current.error)}</AlertDescription></Alert>}{current.status === 'canceled' && <CardDescription>已取消，重试将重新解析并从头下载。</CardDescription>}{current.path && <p className="truncate text-xs text-muted-foreground" title={displayPath(current.path)}>{displayPath(current.path)}</p>}</div></CardContent><CardFooter className="justify-end py-2">{taskActions(current)}</CardFooter></Card> : emptyState()}
     <footer className="flex items-center gap-2 text-xs text-muted-foreground"><FolderOpen className="size-4 shrink-0" /><span className="min-w-0 truncate" title={displayPath(settings?.download_directory)}>下载目录：{displayPath(settings?.download_directory) || '—'}</span><Button variant="link" onClick={() => setPage('settings')}>修改设置</Button></footer></div>}
     {page === 'tasks' && <TaskStatusFilters value={taskStatus} counts={statusCounts} onChange={value => { setTaskStatus(value); taskListRef.current?.scrollTo(0, 0); }} />}
     {taskListPage && <TaskList tasks={visible} assets={visibleAssets} removingAssetIds={new Set(backup.exitingAssets.map(asset => asset.asset_id))} onAssetExited={backup.finishAssetRemoval} renderAsset={asset => <BackupAssetRow asset={asset} backup={backup} dialogs={backupDialogs} feed={taskView === 'feed'} />} toolbar={backupSettings?.enabled && <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" aria-label="刷新备份" disabled={backup.refreshing} onClick={() => void backup.refresh()}><RefreshCw aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>刷新备份</TooltipContent></Tooltip>} paginationKey={JSON.stringify([page, taskPlatform, taskStatus, search, authorQuery])} platform={taskPlatform} onPlatformChange={setTaskPlatform} view={taskView} onViewChange={value => { try { localStorage.setItem(taskViewStorageKey, value); setTaskView(value); taskListRef.current?.scrollTo(0, 0); } catch (error) { reportActionError(error); } }} listRef={taskListRef} removingIds={removedIds.current} onExited={finishRemoval} empty={emptyState(true)} renderRow={task => <VideoCover task={task} small feed={taskView === 'feed'} renderTask={(cover, coverActions) => taskMenu(task, <TaskRow
-      task={task} feed={taskView === 'feed'} selected={selectedRow === task.id} onSelect={() => setSelectedRow(task.id)}
+      task={task} hidePreviousError={task.revision <= (dismissedTaskErrorRevisions.get(task.id) ?? -1)} waitingForResources={waitingTaskActions.has(task.id)} feed={taskView === 'feed'} selected={selectedRow === task.id} onSelect={() => setSelectedRow(task.id)}
       onPlay={!busy && canPlayTask(task) ? () => { void playTask(task); } : undefined}
       cover={cover} title={<>{task.asset_id && <span className="task-title-backup"><BackupTaskStatus backup={backup} assetId={task.asset_id} /></span>}<Tooltip><TooltipTrigger asChild><span className="task-row-title" tabIndex={0}>{taskTitle(task)}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{taskTitle(task)}</TooltipContent></Tooltip></>}
-      metadata={<div className="task-row-byline"><AuthorInfo task={task} compact showId={false} showAvatar={false} onAuthorClick={authorSearch(task.video) ? () => showAuthorWorks(task) : undefined} /><span className="task-row-platform">{platformName(task.video?.platform ?? (task.telegram_link ? 'telegram' : undefined))}</span>{!(taskView === 'feed' && task.status === 'downloading') && <TaskMetadata task={task} compact />}</div>}
-      coverBadge={task.asset_id && (backup.assets.some(asset => asset.asset_id === task.asset_id) || backupDeletion(backup, task.asset_id)) ? <BackupAssetCoverBadge backup={backup} assetId={task.asset_id} /> : undefined}
-      coverActions={taskView === 'feed' ? canPlayTask(task) ? playAction(task, true) : task.status === 'completed' && task.video?.kind === 'image_album' && !task.file_missing ? albumAction(task, true) : null : null}
-      coverProgress={taskView === 'feed' && task.asset_id && backupDeletion(backup, task.asset_id) ? <BackupDeleteProgress backup={backup} assetId={task.asset_id} cover /> : taskView === 'feed' && (task.status === 'queued' || task.status === 'downloading') ? cancelProgress(task) : null}
-      progress={<>{task.status === 'downloading' && <DownloadProgress task={task} hideIndicator={taskView === 'feed'} />}{task.asset_id && <><BackupDeleteProgress backup={backup} assetId={task.asset_id} /><BackupTaskError backup={backup} assetId={task.asset_id} /></>}</>}
-      queuePosition={queued.findIndex(t => t.id === task.id) + 1} actions={taskActions(task, taskView !== 'feed')}
+      metadata={<div className="task-row-byline"><AuthorInfo task={task} compact showId={false} showAvatar={false} onAuthorClick={authorSearch(task.video) ? () => showAuthorWorks(task) : undefined} /><span className="task-row-platform">{platformName(task.video?.platform ?? (task.telegram_link ? 'telegram' : undefined))}</span>{!(taskView === 'feed' && task.status === 'downloading') && <TaskMetadata task={task} compact hideMissing />}</div>}
+      coverBadge={<UnifiedTaskBadge backup={backup} task={task} waiting={waitingTaskActions.has(task.id)} />}
+      coverActions={taskView === 'feed' ? feedAction(task) : null}
+      coverProgress={taskView === 'feed' && task.asset_id && backupDeletion(backup, task.asset_id) ? <BackupDeleteProgress backup={backup} assetId={task.asset_id} cover /> : taskView === 'feed' && (task.status === 'queued' || task.status === 'downloading') ? cancelProgress(task) : taskView === 'feed' && task.asset_id ? <BackupRestoreProgress backup={backup} assetId={task.asset_id} /> : null}
+      feedback={task.asset_id && <BackupTaskFeedback backup={backup} assetId={task.asset_id} />}
+      progress={<>{task.status === 'downloading' && <DownloadProgress task={task} hideIndicator={taskView === 'feed'} />}{taskView !== 'feed' && task.asset_id && <><BackupDeleteProgress backup={backup} assetId={task.asset_id} /></>}</>}
+      queuePosition={queued.findIndex(t => t.id === task.id) + 1} actions={taskView === 'list' ? taskActions(task) : null}
     />, coverActions)} />} />}
     <BackupDialogs dialogs={backupDialogs} backup={backup} tasks={tasks} runtime={runtimeDependencies} />
     {page === 'settings' && settings && <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[184px_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] gap-6 max-[1100px]:grid-cols-[160px_minmax(0,1fr)]">
@@ -654,14 +741,14 @@ function App() {
     <VideoTranscriptDialog client={videoTranscripts} tasks={tasks} assets={backup.assets} runtime={runtimeDependencies} />
     <VideoPlayer removedIds={removedIds.current} task={playingTask} close={() => setPlayback(null)} returnFocus={playback?.returnFocus ?? null} fallbackFocus={() => taskListRef.current ?? inputRef.current} />
     <Dialog open={!!viewedAlbum} onOpenChange={open => { if (!open) setViewAlbum(null); }}><DialogContent className="album-dialog max-h-[90dvh] overflow-y-auto sm:max-w-[680px]"><DialogHeader><DialogTitle>{viewedAlbum?.video?.title || '图集'}</DialogTitle><DialogDescription className="text-sm">{viewedAlbum?.files.length ?? 0} 张图片，保留原格式</DialogDescription></DialogHeader>{viewedAlbum && <AlbumGallery key={viewedAlbum.id} task={viewedAlbum} expanded />}</DialogContent></Dialog>
-    <AlertDialog open={!!duplicate} onOpenChange={open => { if (!open) setDuplicate(null); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); requestAnimationFrame(() => { const button = document.querySelector<HTMLButtonElement>('[' + (duplicateTrigger.current?.background ? 'data-background-download-task' : 'data-download-task') + '="' + duplicateTrigger.current?.id + '"]'); ((button && !button.disabled ? button : null) ?? inputRef.current ?? document.querySelector<HTMLButtonElement>('[aria-current="page"]'))?.focus(); }); }}><AlertDialogHeader><AlertDialogTitle>该规格已下载过</AlertDialogTitle><AlertDialogDescription>{duplicate?.previous.video?.selected_format_id == null ? '已找到规格未知的历史成功记录，本地文件仍存在。' : '已找到同一下载规格的成功记录，本地文件仍存在。'}重新下载会保存为新文件，不覆盖原作品。<span className="mt-2 block break-all">{displayPath(duplicate?.previous.path)}</span></AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel size="sm">暂不下载</AlertDialogCancel><AlertDialogAction size="sm" disabled={busy} onClick={() => { const pending = duplicate; setDuplicate(null); if (pending) void run(() => download(pending.task, pending.background, true)); }}>重新下载</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    <AlertDialog open={!!duplicate} onOpenChange={open => { if (!open) setDuplicate(null); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); requestAnimationFrame(() => { const button = document.querySelector<HTMLButtonElement>('[' + (duplicateTrigger.current?.background ? 'data-background-download-task' : 'data-download-task') + '="' + duplicateTrigger.current?.id + '"]'); ((button && !button.disabled ? button : null) ?? inputRef.current ?? document.querySelector<HTMLButtonElement>('[aria-current="page"]'))?.focus(); }); }}><AlertDialogHeader><AlertDialogTitle>{duplicate?.previous.status === 'completed' ? '该规格已下载过' : '该规格已有下载任务'}</AlertDialogTitle><AlertDialogDescription>{duplicate?.previous.status !== 'completed' ? '已有同规格的下载任务，再次下载会创建另一条任务。' : duplicate?.previous.video?.selected_format_id == null ? '已找到规格未知的历史成功记录，本地文件仍存在。' : '已找到同一下载规格的成功记录，本地文件仍存在。'}重新下载会保存为新文件，不覆盖原作品。{duplicate?.previous.path && <span className="mt-2 block break-all">{displayPath(duplicate.previous.path)}</span>}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel size="sm">暂不下载</AlertDialogCancel><AlertDialogAction size="sm" disabled={busy} onClick={() => { const pending = duplicate; setDuplicate(null); if (pending) void run(() => download(pending.task, pending.background, true)); }}>重新下载</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     <AlertDialog open={clearHistoryPlatform !== null} onOpenChange={open => { if (!open && !busy) setClearHistoryPlatform(null); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); requestAnimationFrame(() => { (clearHistoryTrigger.current && !clearHistoryTrigger.current.disabled ? clearHistoryTrigger.current : taskListRef.current)?.focus({preventScroll: true}); }); }}><AlertDialogHeader><AlertDialogTitle>清理下载历史？</AlertDialogTitle><AlertDialogDescription>移除{(clearHistoryPlatform ?? taskPlatform) === 'all' ? '全部平台' : platformName(clearHistoryPlatform ?? taskPlatform)}中已完成、失败和已取消的下载记录，不受当前搜索条件影响。进行中、排队任务和未提交的预览会保留，不会删除任何本地文件。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel size="sm" disabled={busy}>返回</AlertDialogCancel><AlertDialogAction size="sm" disabled={busy || clearHistoryPlatform === null} onClick={event => { event.preventDefault(); void run(async () => {
       const ids = await api.clearHistory(clearHistoryPlatform === 'all' ? null : clearHistoryPlatform);
       removeTasks(ids);
       setClearHistoryPlatform(null);
       if (ids.length) toast.success(`已清理 ${ids.length} 条下载历史`); else toast.info('暂无可清理的下载历史');
     }); }}>{busy ? '清理中…' : '清理历史'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
-    <AlertDialog open={!!confirm} onOpenChange={open => { if (!open) setConfirm(null); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); cancelTrigger.current?.focus(); }}><AlertDialogHeader><AlertDialogTitle>取消当前任务？</AlertDialogTitle><AlertDialogDescription>将取消等待，或停止当前解析 / 下载并清理暂存文件。其他任务不受影响，记录会保留。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel size="sm">返回</AlertDialogCancel><AlertDialogAction size="sm" onClick={() => { const pending = confirm; setConfirm(null); if (pending) void run(() => cancelTask(pending)); }}>确认取消</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    <AlertDialog open={!!confirm} onOpenChange={open => { if (!open) setConfirm(null); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); requestAnimationFrame(() => { const trigger = cancelTrigger.current; (trigger?.isConnected && !trigger.matches(':disabled') ? trigger : taskListRef.current ?? inputRef.current)?.focus({preventScroll: true}); }); }}><AlertDialogHeader><AlertDialogTitle>取消当前任务？</AlertDialogTitle><AlertDialogDescription>将取消等待，或停止当前解析 / 下载并清理暂存文件。取消完成后从列表移除，其他任务不受影响。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel size="sm">返回</AlertDialogCancel><AlertDialogAction size="sm" onClick={() => { const pending = confirm; setConfirm(null); if (pending) void run(() => cancelTask(pending)); }}>确认取消</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </SidebarProvider></TooltipProvider>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);

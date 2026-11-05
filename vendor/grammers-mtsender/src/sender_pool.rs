@@ -7,6 +7,7 @@
 // except according to those terms.
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::ops::{ControlFlow, Deref};
 use std::sync::Arc;
@@ -18,7 +19,7 @@ use grammers_session::Session;
 use grammers_session::storages::{ErasedSession, erase};
 use grammers_session::types::DcOption;
 use grammers_session::updates::UpdatesLike;
-use grammers_tl_types::{self as tl, Deserializable, enums};
+use grammers_tl_types::{self as tl, Deserializable, Serializable, Identifiable, enums};
 use tokio::task::AbortHandle;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -31,8 +32,57 @@ use crate::configuration::{ConnectionParams, RetryContext};
 use crate::errors::{InvocationError, ReadError};
 use crate::{Sender, ServerAddr, connect, connect_with_auth};
 
+#[path = "media_recovery.rs"]
+mod media_recovery;
+use media_recovery::Recovery;
+
+fn next_connection_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+fn connection_log(pool: u64, dc: i32, connection: u64, role: &str, event: &str, reason: &str, details: fmt::Arguments<'_>) {
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    // Static reason codes and local counters only. Never log keys, peer IDs,
+    // RPC bodies, proxy addresses or media URLs. The desktop launcher captures stderr.
+    eprintln!("telegram_pool at_ms={at} pool={pool} dc={dc} connection={connection} role={role} event={event} reason={reason} {details}");
+}
+
+fn read_error_kind(error: &ReadError) -> &'static str {
+    match error {
+        ReadError::Io(error) => match error.kind() {
+            std::io::ErrorKind::ConnectionReset => "io_reset",
+            std::io::ErrorKind::ConnectionAborted => "io_aborted",
+            std::io::ErrorKind::UnexpectedEof => "io_eof",
+            std::io::ErrorKind::TimedOut => "io_timeout",
+            std::io::ErrorKind::BrokenPipe => "io_broken_pipe",
+            std::io::ErrorKind::NotConnected => "io_not_connected",
+            _ => "io_other",
+        },
+        ReadError::Transport(transport::Error::BadStatus { .. }) => "transport_status",
+        ReadError::Transport(_) => "transport_frame",
+        ReadError::Deserialize(_) => "mtproto_decode",
+    }
+}
+
+enum ProbeOutcome { Healthy, Failed(&'static str), Canceled }
+enum PoolEvent {
+    Connection { id: u64, dc: i32, media: bool, reason: &'static str, result: Result<(), ReadError> },
+    Probe { id: u64, dc: i32, outcome: ProbeOutcome },
+}
+
 /// How long to wait after warning the user that the updates was dropped.
 const UPDATES_DROPPED_LOG_COOLDOWN: Duration = Duration::from_secs(300);
+
+fn is_media_request(body: &[u8]) -> bool {
+    body.get(..4).is_some_and(|id| {
+        matches!(
+            u32::from_le_bytes(id.try_into().expect("four bytes")),
+            tl::functions::upload::GetFile::CONSTRUCTOR_ID
+                | tl::functions::upload::SaveFilePart::CONSTRUCTOR_ID
+                | tl::functions::upload::SaveBigFilePart::CONSTRUCTOR_ID
+        )
+    })
+}
 
 pub(crate) type Transport = transport::Full;
 
@@ -54,6 +104,7 @@ enum Request {
         dc_id: i32,
     },
     Quit,
+    MediaPool { budget: Arc<tokio::sync::Semaphore> },
 }
 
 struct Rpc {
@@ -62,9 +113,13 @@ struct Rpc {
 }
 
 struct ConnectionInfo {
+    id: u64,
     dc_id: i32,
+    media: bool,
     rpc_tx: mpsc::UnboundedSender<Rpc>,
     abort_handle: AbortHandle,
+    uses: u64,
+    last_reuse_log: tokio::time::Instant,
 }
 
 /// A fat [`SenderPoolHandle`] with additional metadata from its attached [`SenderPoolRunner`].
@@ -118,7 +173,13 @@ pub struct SenderPoolRunner {
     request_rx: mpsc::UnboundedReceiver<Request>,
     updates_tx: mpsc::Sender<UpdatesLike>,
     connections: Vec<ConnectionInfo>,
-    connection_pool: JoinSet<Result<(), ReadError>>,
+    connection_pool: JoinSet<PoolEvent>,
+    pool_id: u64,
+    media_recovery: HashMap<i32, Recovery>,
+    fallback_logs: HashMap<i32, (&'static str, tokio::time::Instant)>,
+    media_options: HashMap<i32, DcOption>,
+    media_budget: Option<Arc<tokio::sync::Semaphore>>,
+    media_cursor: HashMap<i32, usize>,
 }
 
 impl Deref for SenderPoolFatHandle {
@@ -130,6 +191,11 @@ impl Deref for SenderPoolFatHandle {
 }
 
 impl SenderPoolHandle {
+    /// Enable at most two file-only TCP sessions per DC, sharing an account-wide
+    /// connection budget supplied by the application. RPC sessions are unaffected.
+    pub fn enable_media_pool(&self, budget: Arc<tokio::sync::Semaphore>) -> bool {
+        self.0.send(Request::MediaPool { budget }).is_ok()
+    }
     /// Communicate with the running [`SenderPoolRunner`] instance
     /// to invoke the request in the specified datacenter.
     pub async fn invoke_in_dc<R: tl::RemoteCall>(
@@ -277,6 +343,12 @@ impl SenderPool {
                 updates_tx,
                 connections: Vec::new(),
                 connection_pool: JoinSet::new(),
+                media_options: HashMap::new(),
+                pool_id: next_connection_id(),
+                media_recovery: HashMap::new(),
+                fallback_logs: HashMap::new(),
+                media_budget: None,
+                media_cursor: HashMap::new(),
             },
             handle: SenderPoolFatHandle {
                 thin: SenderPoolHandle(request_tx),
@@ -293,43 +365,147 @@ impl SenderPoolRunner {
     ///
     /// Connections will be initiated on-demand whenever the first request to a datacenter is made.
     pub async fn run(mut self) {
-        loop {
+        let shutdown_reason = loop {
             tokio::select! {
                 biased;
                 completion = self.connection_pool.join_next(), if !self.connection_pool.is_empty() => {
-                    if let Err(err) = completion.unwrap()
-                        && let Ok(reason) = err.try_into_panic()
-                    {
-                        panic::resume_unwind(reason);
+                    match completion.unwrap() {
+                        Err(err) => if let Ok(reason) = err.try_into_panic() { panic::resume_unwind(reason); },
+                        Ok(event) => self.connection_event(event),
                     }
-                    self.connections
-                        .retain(|connection| !connection.abort_handle.is_finished());
                 }
                 request = self.request_rx.recv() => {
-                    let flow = if let Some(request) = request {
-                        self.process_request(request).await
-                    } else {
-                        ControlFlow::Break(())
-                    };
+                    let Some(request) = request else { break "handles_dropped"; };
+                    let flow = self.process_request(request).await;
                     match flow {
                         ControlFlow::Continue(_) => continue,
-                        ControlFlow::Break(_) => break,
+                        ControlFlow::Break(_) => break "pool_quit",
                     }
                 }
             }
+        };
+        for connection in self.connections.drain(..) {
+            connection_log(self.pool_id, connection.dc_id, connection.id, if connection.media {"media"} else {"control"}, "retired", shutdown_reason, format_args!("requests={}", connection.uses));
         }
+        // Probe response monitors are owned here too; quitting cannot wait for
+        // a caller's timeout or leave a probe alive beyond its connection pool.
+        self.connection_pool.abort_all();
+        while let Some(result) = self.connection_pool.join_next().await {
+            if let Err(error) = result && error.is_panic() { panic::resume_unwind(error.into_panic()); }
+        }
+    }
 
-        self.connections.clear(); // drop all channels to cause the `run_sender` loops to stop
-        self.connection_pool.join_all().await;
+    fn connection_event(&mut self, event: PoolEvent) {
+        match event {
+            PoolEvent::Connection { id, dc, media, reason, result } => {
+                let Some(index) = self.connections.iter().position(|c| c.id == id) else { return; };
+                let connection = self.connections.remove(index);
+                let rejected_key = matches!(result, Err(ReadError::Transport(transport::Error::BadStatus {status: 404})));
+                let reason = if rejected_key { "transport_404" } else { reason };
+                let error_kind = result.as_ref().err().map(read_error_kind).unwrap_or("none");
+                let os_error = match &result { Err(ReadError::Io(error)) => error.raw_os_error().unwrap_or(0), _ => 0 };
+                let status = match &result { Err(ReadError::Transport(transport::Error::BadStatus { status })) => *status, _ => 0 };
+                connection_log(self.pool_id, dc, id, if media {"media"} else {"control"}, "retired", reason, format_args!("requests={} error_kind={error_kind} os_error={os_error} transport_status={status}", connection.uses));
+                if media && (rejected_key || matches!(reason, "connect_failed" | "connect_timeout") || self.media_recovery.get(&dc).is_some_and(|r| r.probing == Some(id))) {
+                    self.defer_media(dc, reason);
+                }
+            }
+            PoolEvent::Probe { id, dc, outcome } => {
+                if !self.media_recovery.get(&dc).is_some_and(|r| r.probing == Some(id)) { return; }
+                match outcome {
+                    ProbeOutcome::Healthy => {
+                        self.media_recovery.remove(&dc);
+                        self.fallback_logs.remove(&dc);
+                        connection_log(self.pool_id, dc, id, "media", "recovered", "file_rpc_response", format_args!(""));
+                    }
+                    ProbeOutcome::Failed(reason) => self.defer_media(dc, reason),
+                    ProbeOutcome::Canceled => self.defer_media(dc, "probe_caller_dropped"),
+                }
+            }
+        }
+    }
+
+    fn defer_media(&mut self, dc: i32, reason: &'static str) {
+        let recovery = self.media_recovery.entry(dc).or_insert_with(Recovery::new);
+        let attempts = recovery.attempts;
+        let delay = recovery.defer();
+        connection_log(self.pool_id, dc, 0, "media", "degraded", reason, format_args!("attempts={attempts} retry_after_s={}", delay.as_secs()));
+        self.connections.retain(|connection| {
+            if connection.media && connection.dc_id == dc {
+                connection_log(self.pool_id, dc, connection.id, "media", "retired", "dc_degraded", format_args!("requests={}", connection.uses));
+                connection.abort_handle.abort();
+                false
+            } else { true }
+        });
+    }
+
+    fn fallback(&mut self, dc: i32, reason: &'static str) {
+        let now = tokio::time::Instant::now();
+        if self.fallback_logs.get(&dc).is_none_or(|(previous, at)| *previous != reason || now.duration_since(*at) >= Duration::from_secs(30)) {
+            connection_log(self.pool_id, dc, 0, "media", "fallback", reason, format_args!(""));
+            self.fallback_logs.insert(dc, (reason, now));
+        }
+    }
+
+    fn reused(&mut self, index: usize) {
+        let connection = &mut self.connections[index];
+        connection.uses += 1;
+        let now = tokio::time::Instant::now();
+        if connection.uses == 2 || connection.uses > 2 && now.duration_since(connection.last_reuse_log) >= Duration::from_secs(1) {
+            connection.last_reuse_log = now;
+            connection_log(self.pool_id, connection.dc_id, connection.id, if connection.media {"media"} else {"control"}, "reused", "rpc_request", format_args!("requests={}", connection.uses));
+        }
+    }
+
+    fn probe_request(&mut self, index: usize, body: Vec<u8>, mut tx: oneshot::Sender<Result<InvokeResponse, InvocationError>>) {
+        let connection = &self.connections[index];
+        let (proxy, result) = oneshot::channel();
+        let id = connection.id;
+        let dc = connection.dc_id;
+        let _ = connection.rpc_tx.send(Rpc { body, tx: proxy });
+        self.connection_pool.spawn(async move {
+            let response = tokio::select! { biased;
+                _ = tx.closed() => return PoolEvent::Probe { id, dc, outcome: ProbeOutcome::Canceled },
+                response = tokio::time::timeout(Duration::from_secs(25), result) => response,
+            };
+            let (response, failure) = match response {
+                Ok(Ok(response)) => (response, "probe_rpc_failed"),
+                Ok(Err(_)) => (Err(InvocationError::Dropped("media probe connection closed")), "probe_connection_closed"),
+                Err(_) => (Err(InvocationError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "media probe timeout"))), "probe_timeout"),
+            };
+            // A valid RPC rejection (including FLOOD_WAIT) proves the MTProto
+            // route works; the original rejection still reaches the caller.
+            // Authentication/permission failures never count as recovery.
+            let healthy = response.is_ok() || matches!(&response, Err(InvocationError::Rpc(error)) if error.code != 401 && error.code != 403);
+            let auth_rejected = matches!(&response, Err(InvocationError::Rpc(error)) if error.code == 401 || error.code == 403);
+            let outcome = if healthy { ProbeOutcome::Healthy } else { ProbeOutcome::Failed(if auth_rejected { "probe_auth_rejected" } else { failure }) };
+            let _ = tx.send(response);
+            PoolEvent::Probe { id, dc, outcome }
+        });
     }
 
     async fn process_request(&mut self, request: Request) -> ControlFlow<()> {
         match request {
             Request::Invoke { dc_id, body, tx } => {
-                let connection = match self
+                if tx.is_closed() {
+                    return ControlFlow::Continue(());
+                }
+                if is_media_request(&body) {
+                    match self.media_connection(dc_id) {
+                        Ok(Some((index, probe))) => {
+                            self.reused(index);
+                            if probe { self.probe_request(index, body, tx); }
+                            else { let _ = self.connections[index].rpc_tx.send(Rpc {body, tx}); }
+                            return ControlFlow::Continue(());
+                        }
+                        Ok(None) => {},
+                        Err(error) => { let _ = tx.send(Err(error)); return ControlFlow::Continue(()); }
+                    }
+                }
+                let index = match self
                     .connections
                     .iter()
-                    .find(|connection| connection.dc_id == dc_id)
+                    .position(|connection| connection.dc_id == dc_id && !connection.media && !connection.abort_handle.is_finished() && !connection.rpc_tx.is_closed())
                 {
                     Some(connection) => connection,
                     None => match self.create_connection(dc_id).await {
@@ -340,7 +516,8 @@ impl SenderPoolRunner {
                         }
                     },
                 };
-                let _ = connection.rpc_tx.send(Rpc { body, tx });
+                self.reused(index);
+                let _ = self.connections[index].rpc_tx.send(Rpc { body, tx });
                 ControlFlow::Continue(())
             }
             Request::CheckRetry {
@@ -366,8 +543,10 @@ impl SenderPoolRunner {
                 ControlFlow::Continue(())
             }
             Request::Disconnect { dc_id } => {
+                self.media_recovery.remove(&dc_id);
                 self.connections.retain(|connection| {
                     if connection.dc_id == dc_id {
+                        connection_log(self.pool_id, dc_id, connection.id, if connection.media {"media"} else {"control"}, "retired", "explicit_disconnect", format_args!("requests={}", connection.uses));
                         connection.abort_handle.abort();
                         false
                     } else {
@@ -377,33 +556,180 @@ impl SenderPoolRunner {
                 ControlFlow::Continue(())
             }
             Request::Quit => ControlFlow::Break(()),
+            Request::MediaPool { budget } => {
+                if self.media_budget.is_none() { self.media_budget = Some(budget); }
+                ControlFlow::Continue(())
+            }
         }
     }
 
-    async fn create_connection(&mut self, dc_id: i32) -> Result<&ConnectionInfo, InvocationError> {
+    fn media_connection(&mut self, dc_id: i32) -> Result<Option<(usize, bool)>, InvocationError> {
+        if self.media_recovery.get(&dc_id).is_some_and(|r| !r.ready()) {
+            let reason = if self.media_recovery[&dc_id].probing.is_some() { "probe_in_flight" } else { "recovery_cooldown" };
+            self.fallback(dc_id, reason);
+            return Ok(None);
+        }
+        let probing = self.media_recovery.contains_key(&dc_id);
+        let Some(budget) = self.media_budget.clone() else {
+            return Ok(None);
+        };
+        let Some(option) = self.media_options.get(&dc_id).cloned() else {
+            self.fallback(dc_id, "no_media_endpoint");
+            return Ok(None);
+        };
+        let Some(key) = self
+            .session
+            .dc_option(dc_id)?
+            .and_then(|option| option.auth_key)
+        else {
+            self.fallback(dc_id, "no_dc_auth_key");
+            return Ok(None);
+        };
+        let address: std::net::SocketAddr = if !option.ipv6.ip().is_unspecified()
+            && (self.connection_params.use_ipv6 || option.ipv4.ip().is_unspecified())
+        {
+            option.ipv6.into()
+        } else if !option.ipv4.ip().is_unspecified() {
+            option.ipv4.into()
+        } else {
+            self.fallback(dc_id, "no_usable_address");
+            return Ok(None);
+        };
+        let mut slots: Vec<_> = self
+            .connections
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.dc_id == dc_id && c.media && !c.abort_handle.is_finished() && !c.rpc_tx.is_closed())
+            .map(|(i, _)| i)
+            .collect();
+        if slots.len() < if probing { 1 } else { 2 }
+            && let Ok(permit) = budget.clone().try_acquire_owned()
+        {
+            let id = next_connection_id();
+            let pool_id = self.pool_id;
+            if probing {
+                let recovery = self.media_recovery.get_mut(&dc_id).expect("due recovery");
+                recovery.begin(id);
+                connection_log(pool_id, dc_id, id, "media", "probe_started", "cooldown_elapsed", format_args!("attempt={}", recovery.attempts));
+            }
+            connection_log(pool_id, dc_id, id, "media", "creating", if probing {"recovery_probe"} else {"file_demand"}, format_args!(""));
+            #[cfg(feature = "proxy")]
+            let address = if let Some(proxy) = self.connection_params.proxy_url.clone() {
+                ServerAddr::Proxied { address, proxy }
+            } else {
+                ServerAddr::Tcp { address }
+            };
+            #[cfg(not(feature = "proxy"))]
+            let address = ServerAddr::Tcp { address };
+            // Only InitConnection headers are used; replace the placeholder
+            // query with the actual allowlisted file RPC before sending.
+            let mut prefix = tl::functions::InvokeWithLayer {
+                layer: tl::LAYER,
+                query: tl::functions::InitConnection {
+                    api_id: self.api_id,
+                    device_model: self.connection_params.device_model.clone(),
+                    system_version: self.connection_params.system_version.clone(),
+                    app_version: self.connection_params.app_version.clone(),
+                    system_lang_code: self.connection_params.system_lang_code.clone(),
+                    lang_pack: String::new(),
+                    lang_code: self.connection_params.lang_code.clone(),
+                    proxy: None,
+                    params: None,
+                    query: tl::functions::InvokeWithoutUpdates { query: tl::functions::help::GetConfig {} },
+                },
+            }
+            .to_bytes();
+            prefix.truncate(prefix.len() - tl::functions::help::GetConfig {}.to_bytes().len());
+            let updates = self.updates_tx.clone();
+            let (rpc_tx, mut rpc_rx) = mpsc::unbounded_channel::<Rpc>();
+            let abort_handle = self.connection_pool.spawn(async move {
+                let _permit = permit;
+                let (result, reason) = match tokio::time::timeout(
+                    Duration::from_secs(15),
+                    connect_with_auth(transport::Full::new(), address, key),
+                )
+                .await
+                {
+                    Ok(Ok(sender)) => {
+                        connection_log(pool_id, dc_id, id, "media", "created", "tcp_connected", format_args!(""));
+                        run_sender(sender, rpc_rx, updates, false, Some(prefix)).await
+                    }
+                    result => {
+                        let (kind, reason) = match result {
+                            Ok(Err(error)) => (error.kind(), "connect_failed"),
+                            _ => (std::io::ErrorKind::TimedOut, "connect_timeout"),
+                        };
+                        rpc_rx.close();
+                        while let Some(rpc) = rpc_rx.recv().await {
+                            let _ = rpc.tx.send(Err(InvocationError::Io(std::io::Error::new(
+                                kind,
+                                "media connection failed",
+                            ))));
+                        }
+                        (Ok(()), reason)
+                    }
+                };
+                PoolEvent::Connection { id, dc: dc_id, media: true, reason, result }
+            });
+            self.connections.push(ConnectionInfo {
+                id,
+                dc_id,
+                media: true,
+                rpc_tx,
+                abort_handle,
+                uses: 0,
+                last_reuse_log: tokio::time::Instant::now(),
+            });
+            slots.push(self.connections.len() - 1);
+        }
+        if slots.is_empty() {
+            self.fallback(dc_id, "connection_budget_exhausted");
+            return Ok(None);
+        }
+        let cursor = self.media_cursor.entry(dc_id).or_default();
+        let index = slots[*cursor % slots.len()];
+        *cursor = cursor.wrapping_add(1);
+        Ok(Some((index, probing)))
+    }
+
+    async fn create_connection(&mut self, dc_id: i32) -> Result<usize, InvocationError> {
         let mut dc_option = match self.session.dc_option(dc_id)? {
             Some(x) => x,
             None => return Err(InvocationError::InvalidDc),
         };
 
-        let sender = self.connect_sender(&dc_option).await?;
+        let id = next_connection_id();
+        let pool_id = self.pool_id;
+        connection_log(pool_id, dc_id, id, "control", "creating", "rpc_demand", format_args!(""));
+        let sender = match self.connect_sender(&dc_option).await {
+            Ok(sender) => sender,
+            Err(error) => {
+                connection_log(pool_id, dc_id, id, "control", "retired", "connect_failed", format_args!(""));
+                return Err(error);
+            }
+        };
+        connection_log(pool_id, dc_id, id, "control", "created", "initialized", format_args!(""));
 
         dc_option.auth_key = Some(sender.auth_key());
         self.session.set_dc_option(&dc_option).await?;
 
         let (rpc_tx, rpc_rx) = mpsc::unbounded_channel();
-        let abort_handle = self.connection_pool.spawn(run_sender(
-            sender,
-            rpc_rx,
-            self.updates_tx.clone(),
-            dc_option.id == self.session.home_dc_id()?,
-        ));
+        let updates = self.updates_tx.clone();
+        let home = dc_option.id == self.session.home_dc_id()?;
+        let abort_handle = self.connection_pool.spawn(async move {
+            let (result, reason) = run_sender(sender, rpc_rx, updates, home, None).await;
+            PoolEvent::Connection { id, dc: dc_id, media: false, reason, result }
+        });
         self.connections.push(ConnectionInfo {
+            id,
             dc_id,
+            media: false,
             rpc_tx,
             abort_handle,
+            uses: 0,
+            last_reuse_log: tokio::time::Instant::now(),
         });
-        Ok(self.connections.last().unwrap())
+        Ok(self.connections.len() - 1)
     }
 
     async fn connect_sender(
@@ -468,9 +794,19 @@ impl SenderPoolRunner {
     }
 
     async fn update_config(
-        &self,
+        &mut self,
         config: tl::types::Config,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.media_options.clear();
+        for enums::DcOption::Option(option) in &config.dc_options {
+            if !option.media_only || option.tcpo_only || option.cdn { continue; }
+            let dc = self.media_options.entry(option.id).or_insert(DcOption {
+                id: option.id, ipv4: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
+                ipv6: SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0), auth_key: None,
+            });
+            if option.ipv6 { dc.ipv6 = SocketAddrV6::new(option.ip_address.parse()?, option.port.try_into()?, 0, 0); }
+            else { dc.ipv4 = SocketAddrV4::new(option.ip_address.parse()?, option.port.try_into()?); }
+        }
         for option in config
             .dc_options
             .iter()
@@ -524,16 +860,18 @@ async fn run_sender(
     mut rpc_rx: mpsc::UnboundedReceiver<Rpc>,
     updates: mpsc::Sender<UpdatesLike>,
     home_sender: bool,
-) -> Result<(), ReadError> {
+    media_prefix: Option<Vec<u8>>,
+) -> (Result<(), ReadError>, &'static str) {
     let mut dropped: usize = 0;
     let mut last_update_limit_warn = Instant::now();
     let mut updates_closed = false;
+    let mut last_request = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
             step = sender.step() => match step {
                 Ok(all_new_updates) => {
-                    if updates_closed {
+                    if updates_closed || media_prefix.is_some() {
                         continue;
                     }
                     for new_updates in all_new_updates {
@@ -565,13 +903,21 @@ async fn run_sender(
                     if home_sender {
                         let _ = updates.try_send(UpdatesLike::ConnectionClosed);
                     }
-                    break Err(err)
+                    break (Err(err), "transport_error")
                 },
             },
             rpc = rpc_rx.recv() => match rpc {
-                Some(rpc) => sender.enqueue_body(rpc.body, rpc.tx),
-                None => break Ok(()),
+                Some(rpc) => {
+                    if rpc.tx.is_closed() { continue; }
+                    last_request = tokio::time::Instant::now();
+                    if let Some(prefix) = &media_prefix {
+                        let mut body = prefix.clone(); body.extend_from_slice(&rpc.body);
+                        sender.enqueue_media_body(body, rpc.tx);
+                    } else { sender.enqueue_body(rpc.body, rpc.tx); }
+                },
+                None => break (Ok(()), "rpc_queue_closed"),
             },
+            _ = tokio::time::sleep_until(last_request + Duration::from_secs(60)), if media_prefix.is_some() && !sender.has_pending_file_requests() && rpc_rx.is_empty() => break (Ok(()), "idle_60s"),
         }
     }
 }
@@ -607,6 +953,11 @@ impl fmt::Debug for Request {
                 f.debug_struct("Disconnect").field("dc_id", dc_id).finish()
             }
             Self::Quit => write!(f, "Quit"),
+            Self::MediaPool { .. } => write!(f, "MediaPool"),
         }
     }
 }
+
+#[cfg(test)]
+#[path = "media_pool_tests.rs"]
+mod media_pool_tests;

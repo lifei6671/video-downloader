@@ -544,13 +544,17 @@ impl SyncEngine {
     }
     pub async fn execute_upload(&self, operation: &str) -> Result<()> {
         use anyhow::Context;
-        let _writer = self.core.backup_write_lock.lock().await;
+        let _writer = self.core.backup_write_lock.read().await;
         self.check(operation)?;
         let op = scheduler::operations(&self.core)?
             .into_iter()
             .find(|o| o.operation_id == operation)
             .context("BACKUP_INVALID_OPERATION")?;
         let local = op.asset_id.as_deref().context("BACKUP_INVALID_OPERATION")?;
+        // Different assets may transfer together; a retry of the same asset cannot.
+        // Keep global -> asset lock order consistent with destructive file work.
+        let _file = self.core.restore_file_guard(local).await;
+        self.check(operation)?;
         let scope = self.provider.scope();
         let mut payload = op.payload.clone();
         let saved_scope: Scope =
@@ -988,7 +992,8 @@ pub async fn run_with(
 ) {
     tokio::join!(
         discovery_loop(core.clone(), cancel.clone(), resolve.clone()),
-        queue_loop(core.clone(), cancel.clone(), resolve.clone()),
+        queue_loop(core.clone(), cancel.clone(), resolve.clone(), QueueLane::Primary),
+        queue_loop(core.clone(), cancel.clone(), resolve.clone(), QueueLane::Upload),
         maintenance_loop(core, cancel, resolve)
     );
 }
@@ -1037,6 +1042,12 @@ async fn discovery_loop(
             else {
                 return Ok::<_, anyhow::Error>(false);
             };
+            if settings.provider_type == ProviderType::Telegram {
+                let binding = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
+                if binding.session.reconnect.waiting() {
+                    wait_backup_network(&core, &settings.space_id, cancel.clone()).await?;
+                }
+            }
             let replies = core.backup_db(|db| {
                 let mut pending = core.deferred_pulls.pending.lock().unwrap();
                 pending.retain(|space, _| space == &settings.space_id);
@@ -1080,7 +1091,23 @@ async fn discovery_loop(
             }
             // Stopping the worker is control flow, not a persistent space failure.
             Err(error) if error.to_string() == "CANCELED" => return,
-            Err(error) => {
+            Err(mut error) => {
+                if crate::telegram_reconnect::network_error(&error.to_string()) {
+                    if let Some(space) = attempted_space.as_deref().filter(|space|
+                        super::spaces::get(&core).ok().flatten().is_some_and(|settings| settings.space_id == *space && settings.provider_type == ProviderType::Telegram)
+                    ) {
+                        let _ = core.backup_db(|db| {
+                            db.execute("INSERT INTO backup_sync_checkpoints(space_id,last_error) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET last_error=excluded.last_error", params![space,error.to_string()])?;
+                            Ok(())
+                        });
+                        match wait_backup_network(&core, space, cancel.clone()).await {
+                            Ok(()) => { failures = 0; trigger = "reconnected"; continue; }
+                            Err(_) if *cancel.borrow() => return,
+                            Err(error) if error.to_string() == "BACKUP_SPACE_INACTIVE" => { failures = 0; continue; }
+                            Err(recovery_error) => error = recovery_error,
+                        }
+                    }
+                }
                 failures = (failures + 1).min(8);
                 if let Some(space) = &attempted_space {
                     let _=core.backup_db(|db|{db.execute("INSERT INTO backup_sync_checkpoints(space_id,last_error) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET last_error=excluded.last_error",params![space,error.to_string()])?;Ok(())});
@@ -1122,7 +1149,7 @@ async fn discovery_loop(
         }
     }
 }
-const CLAIM_OPERATION_SQL: &str = "UPDATE backup_operations SET state='running',
+const CLAIM_OPERATION_SQL: &str = "UPDATE backup_operations SET state='running',last_error=NULL,next_retry_at=NULL,
     payload_json=CASE WHEN kind='delete' AND attempt=0 THEN json_set(
         json_insert(payload_json,'$.first_claimed_ms',CAST(unixepoch('subsec')*1000 AS INTEGER)),
         CASE WHEN COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)=1 THEN '$.timings.maintenance.queue' ELSE '$.timings.foreground.queue' END,
@@ -1130,10 +1157,100 @@ const CLAIM_OPERATION_SQL: &str = "UPDATE backup_operations SET state='running',
                     'outcome','ok','at',unixepoch(),'attempt',1))
         ELSE payload_json END,attempt=attempt+1 WHERE operation_id=? AND state IN ('pending','retry_wait')
         AND (next_retry_at IS NULL OR next_retry_at<=unixepoch())";
+// Proxy reconfiguration is not a failed attempt. Retain all publication evidence
+// and let the same operation reconcile an uncertain send before continuing.
+// TASK_BUSY here is only local finalization after a confirmed remote delete.
+// Keep the phase and all ownership evidence; no publish/upload is replayed.
+const TASK_BUSY_RETRY_SQL: &str = "UPDATE backup_operations SET state='retry_wait',last_error=NULL,
+    next_retry_at=unixepoch()+1,attempt=MAX(0,attempt-1)
+    WHERE operation_id=? AND state='running' AND kind='delete' AND phase IN ('local_cleanup','finalizing')";
+
+const NETWORK_RETRY_SQL: &str = "UPDATE backup_operations SET state='retry_wait',last_error=NULL,
+    attempt=max(0,attempt-1),next_retry_at=unixepoch()+2
+    WHERE operation_id=? AND state='running'";
+// Cleanup is maintenance, never a prerequisite for unrelated foreground work.
+async fn cleanup_one_upload(
+    engine: &SyncEngine,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<bool> {
+    if *cancel.borrow() {
+        bail!("CANCELED");
+    }
+    engine.check_space()?;
+    let space = &engine.provider.scope().space_id;
+    if engine
+        .core
+        .backup_db(|db| Ok(scheduler::foreground_delete_busy(db, space)? || scheduler::upload_running(db, space)?))?
+    {
+        return Ok(false);
+    }
+    // Cleanup can physically delete owned temporary media. Keep it exclusive
+    // with upload/file work, without waiting behind an active foreground job.
+    // A second lane may claim an upload while we clean: it then waits here,
+    // remaining observable by the preemption check until cleanup is dropped.
+    let Ok(_writer) = engine.core.backup_write_lock.try_write() else {
+        return Ok(false);
+    };
+    let Some(op) = scheduler::uploads_to_clean(&engine.core, space)?
+        .into_iter()
+        .next()
+    else {
+        return Ok(false);
+    };
+    let work = async {
+        for kind in ["video", "cover", "transcript"] {
+            if let Some(state) = op.payload.get(format!("resume_{kind}")).cloned() {
+                engine
+                    .provider
+                    .cancel_upload(serde_json::from_value(state)?, &op.operation_id)
+                    .await?;
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::pin!(work);
+    let result = loop {
+        tokio::select! {
+            _ = cancel.changed() => return Err(anyhow::anyhow!("CANCELED")),
+            result = &mut work => break result,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                engine.check_space()?;
+                let (runnable, deleting, uploading) = engine.core.backup_db(|db| Ok((
+                    scheduler::next_sync_operation(db, space)?.is_some(),
+                    scheduler::foreground_delete_busy(db, space)?,
+                    scheduler::upload_running(db, space)?,
+                )))?;
+                if runnable || deleting || uploading { return Ok(runnable); }
+            }
+        }
+    };
+    match result {
+        Ok(()) => scheduler::finish_upload_cleanup(&engine.core, &op.operation_id)?,
+        Err(error) if *cancel.borrow() || engine.check_space().is_err() => return Err(error),
+        Err(error) if engine.provider.scope().provider_type == ProviderType::Telegram && crate::telegram_reconnect::network_error(&error.to_string()) => {
+            return Err(error);
+        }
+        Err(error) => {
+            scheduler::defer_upload_cleanup(&engine.core, &op, &error.to_string())?;
+            eprintln!("backup cleanup operation={}: {error}", op.operation_id);
+        }
+    }
+    Ok(true)
+}
+
+#[derive(Clone, Copy)]
+enum QueueLane {
+    Primary,
+    Upload,
+}
+
+// One primary lane handles uploads, deletes and cleanup. The second lane only
+// uploads, so cleanup is never executed twice and no per-operation task escapes.
 async fn queue_loop(
     core: Arc<Core>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     resolve: ProviderResolver,
+    lane: QueueLane,
 ) {
     while !*cancel.borrow() {
         let mut queue_space = None;
@@ -1142,6 +1259,15 @@ async fn queue_loop(
             if !super::spaces::enabled(&core)? {return Ok::<_,anyhow::Error>(false);}
             let Some(mut settings)=super::spaces::get(&core)? else {return Ok(false);};
             queue_space = Some(settings.space_id.clone());
+            if settings.provider_type == ProviderType::Telegram {
+                let binding = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
+                if binding.session.reconnect.waiting() {
+                    wait_backup_network(&core, &settings.space_id, cancel.clone()).await?;
+                    settings = super::spaces::get(&core)?.filter(|s| s.enabled).context("BACKUP_SPACE_INACTIVE")?;
+                    queue_space = Some(settings.space_id.clone());
+                }
+                recover_network_operations(&core, &settings.space_id)?;
+            }
             if settings.connection_pending || !settings.enabled {
                 super::spaces::prepare_current(&core).await?;
                 settings=super::spaces::get(&core)?.context("BACKUP_SPACE_NOT_FOUND")?;
@@ -1153,26 +1279,28 @@ async fn queue_loop(
             // Canceled uploads retain their exact private resume state until own-session cleanup succeeds.
             let foreground_busy = || core.backup_db(|db| scheduler::foreground_delete_busy(db, &settings.space_id));
             if !foreground_busy()? {
+                core.register_backup_history(&settings.space_id)?;
                 engine.enqueue()?;
-                for op in scheduler::uploads_to_clean(&core, &settings.space_id)? {
-                    if foreground_busy()? { break; }
-                    for kind in ["video","cover","transcript"] {
-                        if let Some(state)=op.payload.get(format!("resume_{kind}")).cloned() {
-                            scoped(&engine,&mut cancel,engine.provider.cancel_upload(serde_json::from_value(state)?,&op.operation_id)).await?;
-                        }
-                    }
-                    core.backup_db(|db|{db.execute("UPDATE backup_operations SET phase='cancel_cleaned',state=CASE WHEN phase='superseded' THEN 'completed' ELSE state END WHERE operation_id=?",[&op.operation_id])?;Ok(())})?;
-                }
+                scheduler::park_upload_cleanup_dependencies(&core, &settings.space_id)?;
             }
             // Select and claim under one DB lock. A delete can arrive while upload discovery
             // or canceled-upload cleanup is running.
             let claim=core.backup_db(|db|{
-                let Some((operation,foreground_delete))=scheduler::next_sync_operation(db,&settings.space_id)? else {return Ok(None);};
+                let next = match lane {
+                    QueueLane::Primary => scheduler::next_sync_operation(db, &settings.space_id)?,
+                    QueueLane::Upload => scheduler::next_upload_operation(db, &settings.space_id)?,
+                };
+                let Some((operation,foreground_delete))=next else {return Ok(None);};
                 if db.execute(CLAIM_OPERATION_SQL,[&operation])? == 0 {return Ok(None);}
                 if foreground_delete { core.deferred_pulls.mark(&settings.space_id); }
                 Ok(Some((operation,foreground_delete)))
             })?;
-            let Some((operation,foreground_delete))=claim else {return Ok(false);};
+            let Some((operation,foreground_delete))=claim else {
+                return match lane {
+                    QueueLane::Primary => cleanup_one_upload(&engine, &mut cancel).await,
+                    QueueLane::Upload => Ok(false),
+                };
+            };
             let kind:String=core.backup_db(|db|Ok(db.query_row("SELECT kind FROM backup_operations WHERE operation_id=?",[&operation],|r|r.get(0))?))?;
             if kind == "delete" {
                 eprintln!("backup_delete operation={operation} phase=queue_claim at_ms={} foreground={foreground_delete}", chrono::Utc::now().timestamp_millis());
@@ -1189,10 +1317,21 @@ async fn queue_loop(
                 let op=scheduler::operation(&core,&operation)?;
                 let reason=error.to_string();
                 core.backup_db(|db|{
+                    if reason == "TASK_BUSY" && db.execute(TASK_BUSY_RETRY_SQL, [&operation])? != 0 {
+                        return Ok(());
+                    }
+                    if engine.provider.scope().provider_type==ProviderType::Telegram && (reason=="TELEGRAM_NETWORK_CHANGED" || crate::telegram_reconnect::network_error(&reason)) {
+                        db.execute(NETWORK_RETRY_SQL, [&operation])?;
+                        return Ok(());
+                    }
                     let state=if op.attempt>=5 || (engine.provider.scope().provider_type==ProviderType::Telegram && reason=="BACKUP_CHECKSUM_MISMATCH") || matches!(reason.as_str(),"BACKUP_ACCESS_DENIED"|"BACKUP_ASSET_DELETED"|"BACKUP_SOURCE_CHANGED"|"BACKUP_INVALID_OPERATION"|"BACKUP_REUPLOAD_STALE"|"BACKUP_DELETE_UNSUPPORTED"|"BACKUP_MEDIA_IN_USE"|"BACKUP_TOMBSTONE_REQUIRED"|"TELEGRAM_MEDIA_CHANGED"|"TELEGRAM_MEDIA_MISSING"|"TELEGRAM_AUTH_REQUIRED"|"TELEGRAM_ACCOUNT_MISMATCH"|"TELEGRAM_CHANNEL_FORBIDDEN"|"TELEGRAM_INDEX_INVALID"|"TELEGRAM_INDEX_CHANGED"|"TELEGRAM_OPERATION_MISMATCH"|"TELEGRAM_FILE_TOO_LARGE") {"blocked"} else {"retry_wait"};
                     db.execute("UPDATE backup_operations SET state=?2,last_error=?3,next_retry_at=unixepoch()+?4 WHERE operation_id=?1 AND state='running'",params![operation,state,reason,reason.strip_prefix("TELEGRAM_FLOOD_WAIT:").and_then(|v|v.parse::<u32>().ok()).map(i64::from).unwrap_or_else(||(2i64.pow(op.attempt.min(8) as u32)).min(300))])?;
                     Ok(())
                 })?;
+                if engine.provider.scope().provider_type == ProviderType::Telegram && crate::telegram_reconnect::network_error(&reason) {
+                    core.backup_db(|db| { db.execute("UPDATE backup_operations SET last_error='TELEGRAM_RECONNECTING' WHERE operation_id=? AND state='retry_wait'", [&operation])?; Ok(()) })?;
+                    wait_backup_network(&core, &settings.space_id, cancel.clone()).await?;
+                }
             }
             if foreground_delete && !core.backup_db(|db| scheduler::foreground_delete_busy(db, &settings.space_id))? {
                 core.deferred_pulls.finished.notify_one();
@@ -1202,6 +1341,12 @@ async fn queue_loop(
         // A handled failure has its own retry deadline. Drain other runnable work immediately.
         if matches!(result, Ok(true)) {
             continue;
+        }
+        if result.as_ref().is_err_and(|e| crate::telegram_reconnect::network_error(&e.to_string()))
+            && super::spaces::get(&core).ok().flatten().is_some_and(|s| s.provider_type == ProviderType::Telegram) {
+            if let Some(space) = queue_space.as_deref() {
+                let _ = wait_backup_network(&core, space, cancel.clone()).await;
+            }
         }
         let connection_error = result.is_err()
             && super::spaces::get(&core)
@@ -1222,6 +1367,32 @@ async fn queue_loop(
         }
     }
 }
+async fn wait_backup_network(core: &Core, space: &str, cancel: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+    let work = crate::telegram_accounts::recover_network(core, crate::telegram_accounts::Purpose::Backup, cancel);
+    tokio::pin!(work);
+    loop {
+        if !super::spaces::enabled(core)? || super::spaces::current_id(core)?.as_deref() != Some(space) { bail!("BACKUP_SPACE_INACTIVE"); }
+        tokio::select! {
+            result = &mut work => return result,
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+        }
+    }
+}
+
+const RECOVER_NETWORK_OPERATIONS_SQL: &str = "UPDATE backup_operations SET attempt=CASE WHEN state='blocked' THEN 0 ELSE attempt END,state='retry_wait',next_retry_at=NULL,last_error=NULL
+            WHERE space_id=? AND kind IN ('upload','delete') AND state IN ('blocked','retry_wait') AND phase<>'superseded'
+            AND last_error IN ('TELEGRAM_CONNECTION_ERROR','TELEGRAM_TIMEOUT','TELEGRAM_NOT_CONNECTED','TELEGRAM_TRANSFER_TIMEOUT','BACKUP_NETWORK_ERROR','TELEGRAM_RECONNECTING')";
+
+fn recover_network_operations(core: &Core, space: &str) -> Result<()> {
+    core.backup_db(|db| {
+        db.execute(RECOVER_NETWORK_OPERATIONS_SQL, [space])?;
+        db.execute("UPDATE backup_operations SET payload_json=json_remove(payload_json,'$.cleanup_blocked','$.cleanup_attempt','$.cleanup_error'),next_retry_at=NULL
+            WHERE space_id=? AND kind='upload' AND (state='canceled' OR state='blocked' AND last_error='BACKUP_ASSET_DELETED')
+            AND json_extract(payload_json,'$.cleanup_error') IN ('TELEGRAM_CONNECTION_ERROR','TELEGRAM_TIMEOUT','TELEGRAM_NOT_CONNECTED','TELEGRAM_TRANSFER_TIMEOUT','BACKUP_NETWORK_ERROR')", [space])?;
+        Ok(())
+    })
+}
+
 fn settings_cleanup(core: &Core) -> Result<()> {
     super::settings::cleanup_credentials(core, &super::settings::SystemVault)
 }
@@ -1322,6 +1493,11 @@ pub fn request_upload_with(
             // Cleanup can have removed confirmed messages: a resumed request needs fresh send identities.
             db.execute("UPDATE backup_operations SET state=CASE WHEN phase='cancel_cleaned' THEN 'completed' ELSE state END,phase=CASE WHEN phase='cancel_cleaned' THEN phase ELSE 'superseded' END WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state='canceled'",params![space,local])?;
         }
+        // An explicit retry also retries owned cleanup, retaining every send identity and receipt.
+        db.execute("UPDATE backup_operations SET next_retry_at=NULL,
+            payload_json=json_remove(payload_json,'$.cleanup_blocked','$.cleanup_attempt','$.cleanup_error')
+            WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state='canceled' AND phase<>'cancel_cleaned'",
+            params![space,local])?;
         // A changed incarnation cannot resume the previous immutable object path.
         // Keep its private upload state for owned-session cleanup, then capture a fresh operation.
         db.execute("UPDATE backup_operations SET state='canceled',phase='superseded',last_error=NULL WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state IN ('blocked','retry_wait') AND last_error IN ('BACKUP_REUPLOAD_STALE','BACKUP_SOURCE_CHANGED') AND json_extract(payload_json,'$.scope.protocol')=2",params![space,local])?;
@@ -1336,11 +1512,36 @@ pub fn request_upload_with(
 mod claim_timing_tests {
     use super::*;
     #[test]
+    fn reconnect_recovers_only_network_operations_and_preserves_send_evidence() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,space_id TEXT,kind TEXT,state TEXT,phase TEXT,attempt INTEGER,payload_json TEXT,next_retry_at INTEGER,last_error TEXT)").unwrap();
+        let evidence = json!({"video_receipt":{"message_id":123},"resume_video":{"phase":"Sending","random_id":42}}).to_string();
+        for (id, space, kind, state, phase, error) in [
+            ("retry", "active", "upload", "blocked", "publishing", "TELEGRAM_CONNECTION_ERROR"),
+            ("delete", "active", "delete", "retry_wait", "objects", "TELEGRAM_RECONNECTING"),
+            ("canceled", "active", "upload", "canceled", "captured", "TELEGRAM_CONNECTION_ERROR"),
+            ("uncertain", "active", "upload", "blocked", "publishing", "TELEGRAM_SEND_UNCONFIRMED"),
+            ("other", "other", "upload", "blocked", "publishing", "TELEGRAM_CONNECTION_ERROR"),
+            ("stale", "active", "upload", "blocked", "superseded", "TELEGRAM_CONNECTION_ERROR"),
+            ("done", "active", "upload", "completed", "completed", "TELEGRAM_CONNECTION_ERROR"),
+            ("restore", "active", "restore", "blocked", "downloading", "TELEGRAM_CONNECTION_ERROR"),
+        ] {
+            db.execute("INSERT INTO backup_operations VALUES(?1,?2,?3,?4,?5,9,?6,9999999999,?7)", params![id,space,kind,state,phase,evidence,error]).unwrap();
+        }
+        assert_eq!(db.execute(RECOVER_NETWORK_OPERATIONS_SQL, ["active"]).unwrap(), 2);
+        for id in ["retry", "delete"] {
+            let (state, payload, attempt, error): (String,String,i64,Option<String>) = db.query_row("SELECT state,payload_json,attempt,last_error FROM backup_operations WHERE operation_id=?", [id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+            assert_eq!((state,payload,attempt,error), ("retry_wait".into(),evidence.clone(),if id == "retry" {0} else {9},None));
+        }
+        assert_eq!(db.query_row("SELECT count(*) FROM backup_operations WHERE attempt=9", [], |r|r.get::<_,i64>(0)).unwrap(), 7);
+    }
+
+    #[test]
     fn maintenance_retry_preserves_foreground_queue_timing_and_upload_payload() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER,next_retry_at INTEGER)").unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER,next_retry_at INTEGER,last_error TEXT)").unwrap();
         let original = serde_json::json!({"local_cleanup_done":true,"timings":{"foreground":{"queue":{"elapsed_ms":1234}}}});
-        db.execute("INSERT INTO backup_operations VALUES('maintenance','delete','retry_wait',0,?1,unixepoch()-10,NULL)",[original.to_string()]).unwrap();
+        db.execute("INSERT INTO backup_operations VALUES('maintenance','delete','retry_wait',0,?1,unixepoch()-10,NULL,NULL)",[original.to_string()]).unwrap();
         db.execute(CLAIM_OPERATION_SQL, ["maintenance"]).unwrap();
         let (state,attempt,payload):(String,i64,String)=db.query_row("SELECT state,attempt,payload_json FROM backup_operations WHERE operation_id='maintenance'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
         let payload: Value = serde_json::from_str(&payload).unwrap();
@@ -1357,7 +1558,7 @@ mod claim_timing_tests {
                 >= 10000
         );
         db.execute(
-            "INSERT INTO backup_operations VALUES('upload','upload','pending',0,'{}',unixepoch(),NULL)",
+            "INSERT INTO backup_operations VALUES('upload','upload','pending',0,'{}',unixepoch(),NULL,NULL)",
             [],
         )
         .unwrap();
@@ -1370,5 +1571,75 @@ mod claim_timing_tests {
             )
             .unwrap();
         assert_eq!(raw, "{}");
+    }
+
+    #[test]
+    fn task_busy_retry_keeps_delete_phase_evidence_and_cancellation() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,phase TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER,next_retry_at INTEGER,last_error TEXT)").unwrap();
+        let evidence = json!({"scope":{"account_id":"test"},"remote_asset_id":"original-generation","archive_revision":7,"local_cleanup_done":true,"video_receipt":{"message_id":123}}).to_string();
+        db.execute("INSERT INTO backup_operations VALUES('original','delete','running','finalizing',5,?1,unixepoch(),NULL,'TASK_BUSY')", [&evidence]).unwrap();
+        for _ in 0..8 {
+            assert_eq!(db.execute(TASK_BUSY_RETRY_SQL, ["original"]).unwrap(), 1);
+            let (attempt, error, payload, phase): (i64, Option<String>, String, String) = db
+                .query_row(
+                    "SELECT attempt,last_error,payload_json,phase FROM backup_operations",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (attempt, error, payload, phase),
+                (4, None, evidence.clone(), "finalizing".into())
+            );
+            assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["original"]).unwrap(), 0);
+            db.execute(
+                "UPDATE backup_operations SET next_retry_at=unixepoch()-1",
+                [],
+            )
+            .unwrap();
+            assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["original"]).unwrap(), 1);
+        }
+        for state in ["canceled", "blocked", "completed"] {
+            db.execute("UPDATE backup_operations SET state=?", [state])
+                .unwrap();
+            assert_eq!(db.execute(TASK_BUSY_RETRY_SQL, ["original"]).unwrap(), 0);
+            assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["original"]).unwrap(), 0);
+        }
+        for (kind, phase) in [
+            ("upload", "finalizing"),
+            ("delete", "tombstone"),
+            ("delete", "objects"),
+        ] {
+            db.execute(
+                "UPDATE backup_operations SET state='running',kind=?1,phase=?2",
+                params![kind, phase],
+            )
+            .unwrap();
+            assert_eq!(db.execute(TASK_BUSY_RETRY_SQL, ["original"]).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn proxy_retry_preserves_evidence_budget_and_user_cancellation() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER,next_retry_at INTEGER,last_error TEXT)").unwrap();
+        let evidence = json!({"video_receipt":{"message_id":123},"capture":{"operation_id":"same-send"}}).to_string();
+        db.execute("INSERT INTO backup_operations VALUES('same-send','upload','running',5,?1,unixepoch(),NULL,'TELEGRAM_TRANSFER_CANCELED')", [&evidence]).unwrap();
+        for _ in 0..6 {
+            assert_eq!(db.execute(NETWORK_RETRY_SQL, ["same-send"]).unwrap(), 1);
+            let (attempt, error, payload): (i64, Option<String>, String) = db.query_row("SELECT attempt,last_error,payload_json FROM backup_operations", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            assert_eq!(attempt, 4);
+            assert_eq!(error, None);
+            assert_eq!(payload, evidence);
+            assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 0, "respect reconnect delay");
+            db.execute("UPDATE backup_operations SET next_retry_at=unixepoch()-1,last_error='TELEGRAM_TRANSFER_CANCELED'", []).unwrap();
+            assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 1);
+            let (attempt, error, deadline): (i64, Option<String>, Option<i64>) = db.query_row("SELECT attempt,last_error,next_retry_at FROM backup_operations", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            assert_eq!((attempt,error,deadline), (5,None,None));
+        }
+        db.execute("UPDATE backup_operations SET state='canceled'", []).unwrap();
+        assert_eq!(db.execute(NETWORK_RETRY_SQL, ["same-send"]).unwrap(), 0);
+        assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 0);
     }
 }

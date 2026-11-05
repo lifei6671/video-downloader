@@ -21,10 +21,22 @@ class ErrorCode(StrEnum):
     CONTENT_PRIVATE = "CONTENT_PRIVATE"
     RATE_LIMITED = "RATE_LIMITED"
     IDENTITY_POOL_EXHAUSTED = "IDENTITY_POOL_EXHAUSTED"
+    #: The request needs a signed-in identity - Douyin pages an author's posts
+    #: for nobody else - and rotation has none. Not IDENTITY_POOL_EXHAUSTED,
+    #: whose answer is "wait, the pool refills": minting makes guests, so no
+    #: wait mends this, and sending the request to a guest instead is what
+    #: used to come back as UPSTREAM_RISK_CONTROL and cool the guest (#782).
+    IDENTITY_LOGIN_REQUIRED = "IDENTITY_LOGIN_REQUIRED"
     ENDPOINT_CIRCUIT_OPEN = "ENDPOINT_CIRCUIT_OPEN"
     UPSTREAM_RISK_CONTROL = "UPSTREAM_RISK_CONTROL"
     UPSTREAM_CHANGED = "UPSTREAM_CHANGED"
     SIGNING_FAILED = "SIGNING_FAILED"
+    #: Every attempt to reach the platform failed on the network - refused,
+    #: reset, timed out, or the proxy in between said no. Its own code because
+    #: it used to be INTERNAL, whose contract is "a bug, report it", when the
+    #: usual cause is a host that cannot reach the platform at all: a server in
+    #: mainland China calling TikTok with no proxy on the identity (#781).
+    UPSTREAM_UNREACHABLE = "UPSTREAM_UNREACHABLE"
     TASK_NOT_FOUND = "TASK_NOT_FOUND"
     SETUP_ALREADY_DONE = "SETUP_ALREADY_DONE"
     SETUP_TOKEN_INVALID = "SETUP_TOKEN_INVALID"
@@ -35,6 +47,7 @@ class ErrorCode(StrEnum):
     #: permanent property of the install and this is a service that is down, and
     #: the two want opposite things from the caller.
     DOWNLOADER_UNAVAILABLE = "DOWNLOADER_UNAVAILABLE"
+    TRANSCRIBER_UNAVAILABLE = "TRANSCRIBER_UNAVAILABLE"
     #: The work was given up on deliberately - a task cancelled by its caller.
     #: Its own code because it used to be reported as INVALID_PARAM, which told
     #: the caller their perfectly valid request was malformed, and which is in
@@ -62,16 +75,19 @@ HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.CONTENT_PRIVATE: 403,
     ErrorCode.RATE_LIMITED: 429,
     ErrorCode.IDENTITY_POOL_EXHAUSTED: 503,
+    ErrorCode.IDENTITY_LOGIN_REQUIRED: 503,
     ErrorCode.ENDPOINT_CIRCUIT_OPEN: 503,
     ErrorCode.UPSTREAM_RISK_CONTROL: 502,
     ErrorCode.UPSTREAM_CHANGED: 502,
     ErrorCode.SIGNING_FAILED: 502,
+    ErrorCode.UPSTREAM_UNREACHABLE: 502,
     ErrorCode.TASK_NOT_FOUND: 404,
     ErrorCode.SETUP_ALREADY_DONE: 409,
     ErrorCode.SETUP_TOKEN_INVALID: 403,
     ErrorCode.NOT_CONFIGURED: 501,
     ErrorCode.QUEUE_FULL: 503,
     ErrorCode.DOWNLOADER_UNAVAILABLE: 503,
+    ErrorCode.TRANSCRIBER_UNAVAILABLE: 503,
     ErrorCode.CANCELLED: 409,
     ErrorCode.METHOD_NOT_ALLOWED: 405,
     ErrorCode.UNSUPPORTED_MEDIA_TYPE: 415,
@@ -102,6 +118,9 @@ NON_RETRYABLE: frozenset[ErrorCode] = frozenset(
         # never the answer: no amount of waiting installs a browser
         # container or writes an alert channel into the settings.
         ErrorCode.NOT_CONFIGURED,
+        # Only an operator importing a logged-in cookie fixes it; until then
+        # every retry is the same refusal.
+        ErrorCode.IDENTITY_LOGIN_REQUIRED,
     }
 )
 
@@ -152,9 +171,11 @@ NotFound = _err("NotFound", ErrorCode.NOT_FOUND)
 ContentPrivate = _err("ContentPrivate", ErrorCode.CONTENT_PRIVATE)
 RateLimited = _err("RateLimited", ErrorCode.RATE_LIMITED)
 IdentityPoolExhausted = _err("IdentityPoolExhausted", ErrorCode.IDENTITY_POOL_EXHAUSTED)
+IdentityLoginRequired = _err("IdentityLoginRequired", ErrorCode.IDENTITY_LOGIN_REQUIRED)
 EndpointCircuitOpen = _err("EndpointCircuitOpen", ErrorCode.ENDPOINT_CIRCUIT_OPEN)
 UpstreamRiskControl = _err("UpstreamRiskControl", ErrorCode.UPSTREAM_RISK_CONTROL)
 SigningFailed = _err("SigningFailed", ErrorCode.SIGNING_FAILED)
+UpstreamUnreachable = _err("UpstreamUnreachable", ErrorCode.UPSTREAM_UNREACHABLE)
 TaskNotFound = _err("TaskNotFound", ErrorCode.TASK_NOT_FOUND)
 SetupAlreadyDone = _err("SetupAlreadyDone", ErrorCode.SETUP_ALREADY_DONE)
 SetupTokenInvalid = _err("SetupTokenInvalid", ErrorCode.SETUP_TOKEN_INVALID)
@@ -167,6 +188,7 @@ NotConfigured = _err("NotConfigured", ErrorCode.NOT_CONFIGURED)
 #: that will not finish in time to matter.
 QueueFull = _err("QueueFull", ErrorCode.QUEUE_FULL)
 DownloaderDown = _err("DownloaderDown", ErrorCode.DOWNLOADER_UNAVAILABLE)
+TranscriberDown = _err("TranscriberDown", ErrorCode.TRANSCRIBER_UNAVAILABLE)
 #: Given up on deliberately, by whoever asked for it.
 Cancelled = _err("Cancelled", ErrorCode.CANCELLED)
 
@@ -195,6 +217,7 @@ __all__ = [
     "EndpointCircuitOpen",
     "ErrorCode",
     "ForbiddenScope",
+    "IdentityLoginRequired",
     "IdentityPoolExhausted",
     "Internal",
     "InvalidParam",
@@ -207,8 +230,10 @@ __all__ = [
     "SetupTokenInvalid",
     "SigningFailed",
     "TaskNotFound",
+    "TranscriberDown",
     "Unauthenticated",
     "UnsupportedContent",
     "UpstreamChanged",
     "UpstreamRiskControl",
+    "UpstreamUnreachable",
 ]

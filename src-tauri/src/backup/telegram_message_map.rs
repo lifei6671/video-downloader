@@ -148,7 +148,7 @@ fn save(
     let tx = db.unchecked_transaction()?;
     tx.execute("INSERT INTO telegram_message_map(space_id,target_json,pts,high_water) VALUES(?1,?2,?3,?4)
         ON CONFLICT(space_id) DO UPDATE SET target_json=excluded.target_json,pts=excluded.pts,high_water=excluded.high_water",
-        params![space,serde_json::to_string(target)?,pts,high])?;
+        params![space,cache_identity(target)?,pts,high])?;
     if let Some(ids) = changed {
         let mut remove = tx
             .prepare("DELETE FROM telegram_mapped_documents WHERE space_id=?1 AND message_id=?2")?;
@@ -255,6 +255,16 @@ impl GrammersTransport {
     ) -> Result<ChannelSnapshot> {
         refresh(core, target, io, self).await
     }
+
+    pub(in crate::backup) async fn with_mapped_snapshot<T>(
+        &self,
+        core: &Core,
+        target: &Target,
+        io: &Io,
+        project: impl FnOnce(ChannelSnapshot) -> Result<T>,
+    ) -> Result<T> {
+        refresh_with(core, target, io, self, project).await
+    }
 }
 
 trait MessageSource {
@@ -321,6 +331,11 @@ async fn verify_indexes(
 }
 
 // Only the bytes are reusable. Membership, revision and attachment identity come from the live scan.
+fn cache_identity(target: &Target) -> Result<String> {
+    let mut value = serde_json::to_value(target)?;
+    value["reader_format"] = 2.into();
+    Ok(serde_json::to_string(&value)?)
+}
 fn reuse_index_bodies(
     core: &Core,
     target: &Target,
@@ -328,7 +343,7 @@ fn reuse_index_bodies(
     io: &Io,
 ) -> Result<usize> {
     use sha2::{Digest, Sha256};
-    let target_json = serde_json::to_string(target)?;
+    let target_json = cache_identity(target)?;
     let mut reused = 0;
     for index in &mut snapshot.indexes {
         io.check()?;
@@ -372,12 +387,26 @@ async fn refresh(
     io: &Io,
     source: &impl MessageSource,
 ) -> Result<ChannelSnapshot> {
+    refresh_with(core, target, io, source, Ok).await
+}
+
+async fn refresh_with<T>(
+    core: &Core,
+    target: &Target,
+    io: &Io,
+    source: &impl MessageSource,
+    project: impl FnOnce(ChannelSnapshot) -> Result<T>,
+) -> Result<T> {
+    io.check()?;
+    // Read the cursor only after admission. A slower full scan or difference
+    // must not overwrite a newer cache committed by another uploader.
+    let _refresh = io.run(async { Ok(core.telegram_map_refresh.lock().await) }).await?;
     io.check()?;
     let space = &target.scope.space_id;
     let previous: Option<(i32, i64)> = core.backup_db(|db| {
         Ok(db.query_row(
         "SELECT pts,high_water FROM telegram_message_map WHERE space_id=?1 AND target_json=?2",
-        params![space,serde_json::to_string(target)?], |r|Ok((r.get(0)?,r.get(1)?))).optional()?)
+        params![space,cache_identity(target)?], |r|Ok((r.get(0)?,r.get(1)?))).optional()?)
     })?;
     if let Some((old_pts, old_high)) = previous {
         let mut ids = BTreeSet::new();
@@ -433,12 +462,12 @@ async fn refresh(
             };
             let high = old_high.max(fresh.high);
             io.check()?;
-            return core.backup_db(|db| {
+            return project(core.backup_db(|db| {
                 if pts != old_pts {
                     save(db, target, pts, high, Some(&ids), &fresh)?;
                 }
                 load(db, space, high)
-            });
+            })?);
         }
     } else {
         delete_timing::selected_full_scan("missing_mapping", None);
@@ -451,7 +480,7 @@ async fn refresh(
     let fresh = verify_indexes(source, fresh, io).await?;
     io.check()?;
     core.backup_db(|db| save(db, target, pts, fresh.high, None, &fresh))?;
-    Ok(fresh)
+    project(fresh)
 }
 
 #[cfg(test)]

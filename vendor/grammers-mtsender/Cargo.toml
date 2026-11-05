@@ -132,3 +132,10 @@ default-features = false
 [dependencies.percent-encoding]
 version = "2.3"
 optional = true
+
+[dev-dependencies.sha2]
+version = "0.10"
+
+[dev-dependencies.tokio]
+version = "1.53.3"
+features = ["test-util"]

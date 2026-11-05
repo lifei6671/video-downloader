@@ -76,7 +76,7 @@ impl NetStream {
                 let response = resolver
                     .lookup_ip(domain)
                     .await
-                    .map_err(|err| io::Error::new(ErrorKind::Other, err))?;
+                    .map_err(io::Error::other)?;
                 let socks_ip_addr = response.iter().next().ok_or(io::Error::new(
                     ErrorKind::NotFound,
                     format!("proxy host did not return any ip address: {}", domain),

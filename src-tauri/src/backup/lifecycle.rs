@@ -116,14 +116,14 @@ pub async fn delete_task(core: &Arc<Core>, task_id: &str) -> Result<()> {
                 return super::sync_delete::delete(core, &current.space_id, id).await.map(|_| ());
             } else {
                 stop_readers(core, id).await?;
-                let _writer = core.backup_write_lock.lock().await;
+                let _writer = core.backup_write_lock.write().await;
                 let _restore = core.backup_restore_lock.lock().await;
                 remove_local(core, id).await?;
             }
             return core.remove_after_transcription(task_id, false).await;
         }
         stop_readers(core, id).await?;
-        let _writer = core.backup_write_lock.lock().await;
+        let _writer = core.backup_write_lock.write().await;
         let _restore = core.backup_restore_lock.lock().await;
         remove_local(core, id).await?;
         core.remove_after_transcription(task_id, false).await

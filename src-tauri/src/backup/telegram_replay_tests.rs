@@ -30,6 +30,53 @@ struct Memory {
 }
 
 #[tokio::test]
+async fn historical_missing_document_id_is_resolved_without_changing_cursor_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let core = open(root.path());
+    let net = Arc::new(Remote::default());
+    let provider = setup(&core, net.clone(), None);
+    let engine = SyncEngine::new(core.clone(), provider.clone());
+    seed(&core, root.path());
+    engine.execute_upload(&claim(&core, &engine)).await.unwrap();
+    let (revision, body, documents) = {
+        let data = net.data.lock().unwrap();
+        let (id, body) = data.events[0].clone();
+        (i64::from(id), body, data.documents.values().cloned().collect::<Vec<_>>())
+    };
+    let mut raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let expected = raw["change"]["media"]["location"]["document_id"].clone();
+    raw["change"]["media"]["location"].as_object_mut().unwrap().remove("document_id");
+    let historical = serde_json::to_vec(&raw).unwrap();
+    assert!(Event::decode(&provider.target, &historical).is_err());
+    assert!(Event::decode_with_documents(&provider.target, &historical, &[]).is_err());
+    let decoded = Event::decode_with_documents(&provider.target, &historical, &documents).unwrap();
+    assert_eq!(serde_json::to_value(decoded.change.media.as_ref().unwrap()).unwrap()["location"]["document_id"], expected);
+    let projected = replay_decoded(&provider.target, revision, vec![(revision,historical.clone())],None, |bytes|Event::decode_with_documents(&provider.target,bytes,&documents)).unwrap();
+    assert_eq!(projected.cursor.evidence[&revision],format!("{:x}",Sha256::digest(&historical)));
+    let mut changed = documents.clone();
+    for document in &mut changed { document.bytes += 1; }
+    assert!(Event::decode_with_documents(&provider.target, &historical, &changed).is_err());
+    let mut deletion=projected.assets.values().next().unwrap().clone();
+    deletion.deleted=true;deletion.revision=100;
+    let mut recreated=decoded.change;
+    recreated.recreate=true;recreated.base=Some(deletion.clone());
+    recreated.cover=ReferenceChange::Clear;recreated.transcript=ReferenceChange::Clear;
+    if let MediaLocation::TelegramMessage {message_id,..}=&mut recreated.media.as_mut().unwrap().location {*message_id=50;}
+    assert!(validate_incarnation(&recreated,Some(&deletion),Some(100)).is_err());
+    if let MediaLocation::TelegramMessage {message_id,..}=&mut recreated.media.as_mut().unwrap().location {*message_id=101;}
+    validate_incarnation(&recreated,Some(&deletion),Some(100)).unwrap();
+    let mut edit=Event::decode_with_documents(&provider.target,&historical,&documents).unwrap().change;
+    edit.base=Some(projected.assets.values().next().unwrap().clone());
+    edit.media=None;edit.fields.clear();edit.cover=ReferenceChange::Unchanged;edit.transcript=ReferenceChange::Unchanged;
+    let body=Event::encode(&provider.target,&edit).unwrap();
+    let revision=revision+1;
+    let recovered=replay(&provider.target,revision,vec![(revision,body.clone())],None).unwrap();
+    assert_eq!(recovered.assets.values().next().unwrap().media,projected.assets.values().next().unwrap().media);
+    assert!(replay(&provider.target,revision,vec![(revision,body)],Some(&projected.cursor)).is_err(),"a base snapshot never replaces missing observed byte evidence");
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn telegram_message_updates_replay_latest_transcript_and_preserve_history() {
     let root=tempfile::tempdir().unwrap();let core=open(root.path());let net=Arc::new(Remote::default());
     let p=setup(&core,net.clone(),None);let engine=SyncEngine::new(core.clone(),p.clone());
@@ -76,7 +123,9 @@ struct Remote {
     lost: AtomicBool,
     incomplete: AtomicBool,
     video_downloads: AtomicUsize,
+    body_downloads: AtomicUsize,
     expired: AtomicBool,
+    network_changes: AtomicUsize,
     denied_delete: AtomicBool,
     lost_delete: AtomicBool,
     before_publish: AtomicBool,
@@ -277,8 +326,10 @@ impl BackupProvider for Provider {
             }
             let bytes = self.remote.data.lock().unwrap().media[&id].clone();
             let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> =
-                if self.remote.expired.swap(false, Ordering::SeqCst) {
-                    Box::new(Expired { prefix: false })
+                if r.container == "mp4" && self.remote.network_changes.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1)).is_ok() {
+                    Box::new(Expired { prefix: false, error: "TELEGRAM_NETWORK_CHANGED" })
+                } else if self.remote.expired.swap(false, Ordering::SeqCst) {
+                    Box::new(Expired { prefix: false, error: "TELEGRAM_FILE_REFERENCE_EXPIRED" })
                 } else {
                     Box::new(std::io::Cursor::new(bytes.clone()))
                 };
@@ -612,13 +663,13 @@ async fn telegram_t4_owned_cleanup_keeps_published_replaced_foreign_and_next_gen
                     caption: e.caption().unwrap(),
                 },
             );
-            data.media.insert(message, bytes.clone());
+            data.media.insert(message, if message == 10 { vec![42; bytes.len()] } else { bytes.clone() });
         }
     }
     delete_pass(&core, &p, &delete).await.unwrap();
-    let stats: (i64,i64) = core.backup_db(|db| Ok(db.query_row("SELECT json_extract(payload_json,'$.timings.foreground.remote_cleanup.details.unknown_media_verify_bytes'),json_extract(payload_json,'$.timings.foreground.remote_cleanup.details.steps.unknown_media_verify.calls') FROM backup_operations WHERE operation_id=?",[&delete],|r|Ok((r.get(0)?,r.get(1)?)))?)).unwrap();
-    let verified_size = net.data.lock().unwrap().media[&11].len() as i64;
-    assert_eq!(stats,(verified_size,1),"only the unregistered asset in the deleted generation needs a full SHA-256 read");
+    let stats: (i64,i64) = core.backup_db(|db| Ok(db.query_row("SELECT json_extract(payload_json,'$.timings.foreground.remote_cleanup.details.unknown_media_verify_bytes'),COALESCE(json_extract(payload_json,'$.timings.foreground.remote_cleanup.details.steps.unknown_media_verify.calls'),0) FROM backup_operations WHERE operation_id=?",[&delete],|r|Ok((r.get(0)?,r.get(1)?)))?)).unwrap();
+    assert_eq!(stats,(0,0),"unregistered attachments use identity/generation checks without body download");
+    assert_eq!(net.body_downloads.load(Ordering::SeqCst),0,"deletion downloaded an attachment body");
     let remaining: Vec<_> = net.data.lock().unwrap().documents.keys().copied().collect();
     assert_eq!(
         remaining,
@@ -744,6 +795,7 @@ impl Transport for MemoryTransport<'_> {
         d: RemoteDocument,
     ) -> ProviderFuture<'_, Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
         Box::pin(async move {
+            self.0.body_downloads.fetch_add(1, Ordering::SeqCst);
             let bytes = self
                 .0
                 .data
@@ -830,6 +882,7 @@ impl telegram_lifecycle::OwnedMessageRemoval for MemoryTransport<'_> {
 }
 struct Expired {
     prefix: bool,
+    error: &'static str,
 }
 impl tokio::io::AsyncRead for Expired {
     fn poll_read(
@@ -843,7 +896,7 @@ impl tokio::io::AsyncRead for Expired {
             std::task::Poll::Ready(Ok(()))
         } else {
             std::task::Poll::Ready(Err(std::io::Error::other(
-                "TELEGRAM_FILE_REFERENCE_EXPIRED",
+                self.error,
             )))
         }
     }
@@ -1437,6 +1490,42 @@ async fn telegram_t3_provider_reference_expiry_restarts_small_and_video_reads_on
     fresh.shutdown().await;
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn proxy_changes_restore_same_operation_with_full_checksum_and_no_cloud_writes() {
+    let a = tempfile::tempdir().unwrap();
+    let core = open(a.path());
+    let net = Arc::new(Remote::default());
+    let p = setup(&core, net.clone(), None);
+    let engine = SyncEngine::new(core.clone(), p.clone());
+    let (_, original) = seed(&core, a.path());
+    engine.execute_upload(&claim(&core, &engine)).await.unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let fresh = open(b.path());
+    let other = setup(&fresh, net.clone(), Some(p.scope().library_id.clone()));
+    SyncEngine::new(fresh.clone(), other.clone()).pull().await.unwrap();
+    let asset = fresh.backup_assets().unwrap().remove(0);
+    let before = {
+        let data = net.data.lock().unwrap();
+        (data.events.clone(), data.media.clone())
+    };
+    net.network_changes.store(2, Ordering::SeqCst);
+    let path = sync_read::ensure(&fresh, other.as_ref(), &asset.asset_id).await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(super::super::repository::fingerprint(&path).unwrap().0, format!("{:x}", Sha256::digest(&original)));
+    assert_eq!(net.video_downloads.load(Ordering::SeqCst), 3);
+    let operations = super::super::scheduler::operations(&fresh).unwrap();
+    let restores: Vec<_> = operations.iter().filter(|op| op.kind == "restore").collect();
+    assert_eq!(restores.len(), 1);
+    assert_eq!(restores[0].state, "completed");
+    assert!(restores[0].last_error.is_none());
+    {
+        let data = net.data.lock().unwrap();
+        assert_eq!((data.events.clone(),data.media.clone()), before);
+    }
+    fresh.shutdown().await;
+    core.shutdown().await;
+}
 #[tokio::test]
 async fn deletion_only_wakes_the_queue_and_keeps_the_permit_until_claimed() {
     let root = tempfile::tempdir().unwrap();
@@ -1646,7 +1735,7 @@ async fn telegram_t3_existing_background_worker_claims_telegram_queue_and_conver
 }
 
 #[tokio::test]
-async fn corrupt_attachment_on_parked_delete_preserves_its_file_and_allows_successor_to_finish() -> Result<()> {
+async fn changed_attachment_identity_on_parked_delete_preserves_its_file_and_allows_successor_to_finish() -> Result<()> {
     use crate::backup::sync_delete;
     let root = tempfile::tempdir()?;
     let core = open(root.path());
@@ -1678,6 +1767,7 @@ async fn corrupt_attachment_on_parked_delete_preserves_its_file_and_allows_succe
     let mut stray = transport.media(&io).await?.into_iter().find(|doc|
         serde_json::from_str::<Envelope>(&doc.caption).is_ok_and(|e| e.asset_id==assets[0] && e.kind=="video")).unwrap();
     stray.message_id = 2000;
+    stray.bytes += 1;
     {
         let mut data = net.data.lock().unwrap();
         data.media.insert(stray.message_id,vec![42;stray.bytes as usize]);
@@ -1685,7 +1775,7 @@ async fn corrupt_attachment_on_parked_delete_preserves_its_file_and_allows_succe
     }
     let err = telegram_lifecycle::reconcile_deleted_messages(&transport,&provider.target,&revisions,&io,
         &projected,transport.media(&io).await?,vec![]).await.unwrap_err();
-    assert_eq!(err.to_string(),"BACKUP_CHECKSUM_MISMATCH");
+    assert_eq!(err.to_string(),"TELEGRAM_MEDIA_CHANGED");
     assert!(net.delete_batches.lock().unwrap().is_empty());
     assert!(sync_delete::recover_cleanup(&core,provider.scope(),&b,&err)?);
     assert!(core.backup_db(|db| sync_delete::parked_archive(db,space,&b))?.is_none());
@@ -1810,4 +1900,30 @@ async fn deletion_groups_media_and_archived_events_by_physical_message_and_check
     cancel_tx.send_replace(true);
     assert_eq!(telegram_lifecycle::reconcile_snapshot(&transport,&p.target,&asset,&io,&projected,media,vec![]).await.unwrap_err().to_string(),"TELEGRAM_TRANSFER_CANCELED");
     assert!(net.removed_groups.lock().unwrap().is_empty());core.shutdown().await;
+}
+
+#[tokio::test]
+async fn canceling_an_unpublished_send_checks_identity_without_reading_its_body() {
+    use crate::backup::telegram_transfer_journal::{Entry, SendState};
+    let root = tempfile::tempdir().unwrap();
+    let core = open(root.path());
+    let net = Arc::new(Remote::default());
+    let provider = setup(&core, net.clone(), None);
+    let envelope = Envelope {
+        yingqu_media:2, library_id:provider.scope().library_id.clone(), asset_id:id(), device_id:id(), operation_id:id(),
+        kind:"video".into(), bytes:8, sha256:format!("{:x}", Sha256::digest(b"expected")), container:"mp4".into(), generation:None,
+    };
+    let document = RemoteDocument {message_id:10,document_id:10,bytes:8,caption:envelope.caption().unwrap()};
+    {
+        let mut data = net.data.lock().unwrap();
+        data.documents.insert(10,document);
+        data.media.insert(10,b"corrupt!".to_vec());
+    }
+    let entry = Entry {target:provider.target.clone(),envelope,random_id:1,state:SendState::Sending,document:None,last_error:None};
+    let (_stop,rx)=tokio::sync::watch::channel(false);
+    let io=Io::new(rx.clone(),rx,None);
+    telegram_lifecycle::cancel(&MemoryTransport(&net),&provider.target,&entry,&provider.projection(None).unwrap(),&io).await.unwrap();
+    assert!(!net.data.lock().unwrap().documents.contains_key(&10));
+    assert_eq!(net.body_downloads.load(Ordering::SeqCst),0);
+    core.shutdown().await;
 }

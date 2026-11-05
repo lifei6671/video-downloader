@@ -9,6 +9,8 @@ import { TelegramLoginQr } from '@/components/telegram-login-qr';
 import { Spinner } from '@/components/ui/spinner';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
+const networkError = (code: string) => ['TELEGRAM_CONNECTION_ERROR', 'TELEGRAM_TIMEOUT', 'TELEGRAM_NOT_CONNECTED', 'TELEGRAM_TRANSFER_TIMEOUT', 'BACKUP_NETWORK_ERROR'].includes(code);
+
 export function TelegramStorageSettings({ space, name, connected, saving, actions, accountOnly = false, active = true, network, networkSaved }: { network?: Profile; networkSaved?: (value: Settings) => void; active?: boolean; accountOnly?: boolean; space?: BackupSettings; name?: string; connected?: (value: BackupSettings) => Promise<void>; saving?: (value: boolean) => void; actions?: ReactNode }) {
   const purpose = accountOnly ? 'download' : 'backup';
   const [status, setStatus] = useState<TelegramStorageStatus | null>(null);
@@ -34,7 +36,7 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
     void api.telegramStorageStatus(purpose).then(value => {
       if (stopped || !live.current || revision.current !== current) return;
       receiveStatus(value); setNotice(''); setError(''); setPassword(''); setLoginOpen(['qr', 'password'].includes(value.phase));
-    }).catch(error => { if (!stopped && live.current && revision.current === current) setError(errorText(error)); });
+    }).catch(error => { if (!stopped && live.current && revision.current === current) setError(String(error)); });
     return () => { stopped = true; };
   }, [active]);
   useEffect(() => { if (!busy) input.current?.focus(); }, [status?.phase, busy]);
@@ -69,6 +71,7 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
       setChannels([]); setChannel(''); setChannelsLoaded(false); autoChannels.current = '';
     }
     if (value.phase === 'ready') setNotice('');
+    if (value.phase === 'ready' && value.account && value.operation_id && !value.last_error) setError(previous => networkError(previous) ? '' : previous);
   }
   async function refreshStatus(current: number) {
     try {
@@ -89,7 +92,7 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
         if (kind === 'resume' && value.phase === 'signed_out') setNotice('没有可恢复的登录，请扫码登录。');
       }
     } catch (error) {
-      if (live.current && current === revision.current) setError(errorText(error));
+      if (live.current && current === revision.current) setError(String(error));
     } finally {
       if (live.current && current === revision.current) {
         await refreshStatus(current);
@@ -104,7 +107,7 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
     try {
       const value = await api.telegramStorageCancel(status.operation_id, purpose);
       if (live.current && current === revision.current) receiveStatus(value);
-    } catch (error) { if (live.current && current === revision.current) setError(errorText(error)); }
+    } catch (error) { if (live.current && current === revision.current) setError(String(error)); }
     finally {
       if (live.current && current === revision.current) {
         await refreshStatus(current);
@@ -122,7 +125,7 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
         setChannels(values); setChannel(previous => values.some(value => value.id === (space?.telegram?.channel_id ?? previous)) ? space?.telegram?.channel_id ?? previous : ''); setChannelsLoaded(true);
         if (!space) requestAnimationFrame(() => channelInput.current?.focus());
       }
-    } catch (error) { if (live.current && current === revision.current) setError(previous => source === 'automatic' && previous ? previous : errorText(error)); }
+    } catch (error) { if (live.current && current === revision.current) setError(previous => source === 'automatic' && previous ? previous : String(error)); }
     finally {
       if (live.current && current === revision.current) {
         await refreshStatus(current);
@@ -146,11 +149,14 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
       if (space?.telegram && account.id !== space.telegram.account_id) throw 'TELEGRAM_ACCOUNT_MISMATCH';
       const value = await api.saveBackupSettings({ cleanup_deleted_records: false, deleted_record_retention_days: 30, provider_type: 'telegram', profile: 'telegram', endpoint: '', bucket: '', prefix: '', region: 'auto', path_style: true, enabled: true, telegram: space?.telegram ?? { account_id: account.id, channel_id: channel }, display_name: name?.trim() || space?.display_name || channels.find(value => value.id === channel)?.title || '', create_library: create }, false);
       if (live.current && current === revision.current) await connected?.(value);
-    } catch (error) { if (live.current && current === revision.current) setError(errorText(error)); }
+    } catch (error) { if (live.current && current === revision.current) setError(String(error)); }
     finally { await new Promise(resolve => setTimeout(resolve, Math.max(0, 300 - (performance.now() - started)))); saving?.(false); if (live.current && current === revision.current) { await refreshStatus(current); if (live.current) setBusy(null); } }
   }
   const id = status?.operation_id;
   const phase = status?.phase;
+  const visibleError = networkError(error) && status?.last_error ? status.last_error : error || status?.last_error;
+  const reconnecting = visibleError === 'TELEGRAM_RECONNECTING';
+  const errorFeedback = visibleError && visibleError !== space?.last_error && <p role={reconnecting ? 'status' : 'alert'} className={`flex items-center gap-2 text-sm ${reconnecting ? 'text-muted-foreground' : 'text-destructive'}`}>{reconnecting && <Spinner aria-hidden="true" />}{errorText(visibleError)}</p>;
   const channelTitle = space?.telegram_channel_title || channels.find(value => value.id === space?.telegram?.channel_id)?.title;
   function startQr(otherAccount = false) {
     loginOtherAccount.current = otherAccount;
@@ -178,9 +184,8 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
           {!space && <Button type="button" variant="outline" disabled={!!busy} onClick={() => id && void run('logout', () => api.telegramStorageLogout(id, purpose))}>{accountOnly ? '退出账号' : '退出存储账号'}</Button>}</div>
         {!accountOnly && channelsLoaded && channels.length === 0 && <p role="status" className="text-xs text-muted-foreground">未找到可访问的私有频道。</p>}
       </> : status?.configured && phase !== 'ready' && <div className="flex flex-wrap gap-2">
-        {phase === 'signed_out' ? <>
+        {phase === 'disconnected' ? <Button type="button" variant="outline" disabled={!!busy} onClick={() => void run('resume', () => api.telegramStorageResume(purpose))}>重试连接</Button> : phase === 'signed_out' ? <>
           <Button type="button" disabled={!!busy} onClick={() => startQr()}>扫码登录</Button>
-          <Button type="button" variant="outline" disabled={!!busy} onClick={() => void run('resume', () => api.telegramStorageResume(purpose))}>恢复登录</Button>
           <Button type="button" variant="outline" disabled={!!busy} onClick={() => startQr(true)}>切换其他账号</Button>
         </> : ['qr', 'password'].includes(phase ?? '') && <Button type="button" variant="outline" onClick={() => setLoginOpen(true)}>继续登录</Button>}
       </div>}
@@ -202,7 +207,7 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
           {phase === 'password' && !busy && <form id="telegram-storage-password-form" onSubmit={event => { event.preventDefault(); if (id) void run('password', () => api.telegramStoragePassword(id, password, purpose)); }}>
             <Field><FieldLabel htmlFor="telegram-storage-password">两步验证密码</FieldLabel><Input ref={input} autoFocus id="telegram-storage-password" type="password" autoComplete="off" required disabled={!!busy} value={password} onChange={event => setPassword(event.target.value)} /></Field>
           </form>}
-          {(error || status?.last_error) && <p role="alert" className="text-sm text-destructive">{error || errorText(status?.last_error)}</p>}
+          {errorFeedback}
           <DialogFooter>
             {phase === 'password' && <Button type="submit" form="telegram-storage-password-form" disabled={!!busy || !password}>验证并登录</Button>}
             {phase === 'signed_out' && !busy && <Button type="button" onClick={() => startQr(loginOtherAccount.current)}>重新扫码</Button>}
@@ -211,7 +216,7 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
         </DialogContent>
       </Dialog>
     </>}
-    {!loginOpen && (error || status?.last_error) && <p role="alert" className="text-sm text-destructive">{error || errorText(status?.last_error)}</p>}
+    {!loginOpen && errorFeedback}
     {notice && <p role="status" className="text-xs text-muted-foreground">{notice}</p>}
   </>;
   return <section className={accountOnly ? "space-y-4" : "max-w-xl space-y-4"} aria-label={accountOnly ? "Telegram 账号" : "Telegram 存储账号"} aria-busy={!!busy}>

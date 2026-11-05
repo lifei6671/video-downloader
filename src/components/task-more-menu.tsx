@@ -1,5 +1,5 @@
 import { useRef, type ReactNode } from 'react';
-import { Copy, Download, FileText, FolderOpen, ListX, MoreHorizontal, Trash2, X } from 'lucide-react';
+import { Copy, Download, FileText, FolderOpen, ListX, MoreHorizontal, Play, Trash2, X } from 'lucide-react';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import type { Task } from '@/api';
 import { Button } from '@/components/ui/button';
@@ -13,15 +13,17 @@ export type CoverMenuActions = {
   copy: () => void;
 };
 
-export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, deleteFile, deleteBackup, release, cancel, transcript, backupActions, coverActions, children, onOpenChange }: {
+export function TaskMoreMenu({ task, busy, play, reveal, copy, copyPath, remove, deleteFile, deleteBackup, release, cancel, waitingCancel, transcript, backupActions, coverActions, children, onOpenChange }: {
   task: Task;
   children?: ReactNode;
   onOpenChange?: (open: boolean) => void;
   transcript?: { label: string; open: (returnFocus: HTMLElement | null) => void };
   backupActions?: ReactNode;
   cancel?: (returnFocus: HTMLElement | null) => void;
+  waitingCancel?: () => void;
   coverActions?: CoverMenuActions;
   busy: boolean;
+  play?: () => void;
   reveal: () => void;
   copy: () => void;
   copyPath: () => void;
@@ -42,6 +44,7 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
   const removable = ['completed', 'failed', 'canceled'].includes(task.status);
   const available = hasFile || hasLink || removable || !!cancel || !!coverActions;
   const items = <>
+      {play && <Item disabled={busy} onSelect={play}><Play />播放视频</Item>}
       {hasFile && <Item disabled={busy} onSelect={reveal}><FolderOpen />打开文件夹</Item>}
       {transcript && <Item disabled={busy} onSelect={() => transcript.open(context ? row.current : trigger.current)}><FileText />{transcript.label}</Item>}
       {backupActions}
@@ -52,6 +55,7 @@ export function TaskMoreMenu({ task, busy, reveal, copy, copyPath, remove, delet
         <Item disabled={busy || coverActions.saving || coverActions.copying || !coverActions.available} onSelect={coverActions.save}><Download />{coverActions.saving ? '保存中…' : '保存封面'}</Item>
         <Item disabled={busy || coverActions.saving || coverActions.copying || !coverActions.available} onSelect={coverActions.copy}><Copy />{coverActions.copying ? '复制中…' : '复制封面'}</Item>
       </>}
+      {waitingCancel && <Item onSelect={waitingCancel}><X />取消等待</Item>}
       {cancel && <Item disabled={busy || task.canceling} onSelect={() => cancel(context ? row.current : trigger.current)}><X />{task.canceling ? '正在取消…' : '取消下载'}</Item>}
       {removable && (hasFile || hasLink || transcript || coverActions) && <Separator />}
       {removable && <Item disabled={busy} onSelect={remove}><ListX />从列表移除</Item>}

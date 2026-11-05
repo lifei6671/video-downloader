@@ -7,6 +7,47 @@ use std::{
 };
 
 struct TestJournal(Mutex<Connection>);
+#[tokio::test]
+async fn proxy_stop_is_durable_but_explicit_cancellation_takes_priority() {
+    let (cancel, rx) = watch::channel(false);
+    let (connection, stopped) = watch::channel(false);
+    let (network, epoch) = watch::channel(());
+    let io = Io::new(rx, stopped, None).with_network_stop(epoch);
+    let pending = io.run(std::future::pending::<Result<()>>());
+    tokio::pin!(pending);
+    assert!(tokio::time::timeout(Duration::from_millis(10), &mut pending).await.is_err());
+    network.send_replace(());
+    connection.send_replace(true);
+    assert_eq!(pending.await.unwrap_err().to_string(), "TELEGRAM_NETWORK_CHANGED");
+    assert_eq!(io.check().unwrap_err().to_string(), "TELEGRAM_NETWORK_CHANGED");
+    cancel.send_replace(true);
+    assert_eq!(io.check().unwrap_err().to_string(), "TELEGRAM_TRANSFER_CANCELED");
+}
+
+#[tokio::test]
+async fn proxy_change_after_publication_reconciles_without_uploading_or_sending_twice() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let net = Mock::new();
+    let source = source(root.path(), "video", b"original bytes");
+    let (_cancel, _stop, first_io) = io();
+    let (network, epoch) = watch::channel(());
+    *net.network_on_send.lock().unwrap() = Some(network);
+    let first_io = first_io.with_network_stop(epoch);
+    let error = upload(&net, &journal, &target(), source.clone(), &first_io).await.unwrap_err();
+    assert_eq!(error.to_string(), "TELEGRAM_NETWORK_CHANGED");
+    let interrupted = journal.entry(&source);
+    assert_eq!(interrupted.state, SendState::Sending);
+    std::fs::remove_file(&source.path).unwrap();
+    let (_cancel, _stop, retry_io) = io();
+    let receipt = upload(&net, &journal, &target(), source.clone(), &retry_io).await.unwrap();
+    let confirmed = journal.entry(&source);
+    assert_eq!(confirmed.state, SendState::Confirmed);
+    assert_eq!(confirmed.random_id, interrupted.random_id);
+    assert_eq!(receipt.reference.bytes, source.bytes);
+    assert_eq!(net.uploads.load(Ordering::SeqCst), 1);
+    assert_eq!(net.sends.load(Ordering::SeqCst), 1);
+}
 impl TestJournal {
     fn open(path: &Path) -> Self {
         let db = Connection::open(path).unwrap();
@@ -56,6 +97,7 @@ struct Mock {
     expired: AtomicBool,
     deny: AtomicBool,
     cancel_on_send: Mutex<Option<watch::Sender<bool>>>,
+    network_on_send: Mutex<Option<watch::Sender<()>>>,
     source_edit: Mutex<Option<PathBuf>>,
     reject_once: Mutex<Option<String>>,
     random_ids: Mutex<Vec<i64>>,
@@ -132,6 +174,9 @@ impl Transport for Mock {
             );
             if let Some(cancel) = self.cancel_on_send.lock().unwrap().as_ref() {
                 cancel.send_replace(true);
+            }
+            if let Some(network) = self.network_on_send.lock().unwrap().as_ref() {
+                network.send_replace(());
             }
             if self.lost_response.load(Ordering::SeqCst) {
                 bail!("TELEGRAM_CONNECTION_ERROR");
@@ -572,6 +617,27 @@ async fn telegram_transfer_changed_source_and_size_limit_never_publish_a_message
         b"changed during upload"
     );
 }
+
+#[tokio::test]
+async fn missing_parts_after_upload_return_to_prepared_without_confirming_or_blind_resend() {
+    let root=tempfile::tempdir().unwrap();
+    let journal=TestJournal::open(&root.path().join("journal.sqlite"));
+    let net=Mock::new();
+    let (_cancel,_stop,io)=io();
+    let target=target();
+    let source=source(root.path(),"video",b"unchanged original bytes");
+    *net.reject_once.lock().unwrap()=Some("TELEGRAM_UPLOAD_PART_MISSING".into());
+    assert_eq!(upload(&net,&journal,&target,source.clone(),&io).await.unwrap_err().to_string(),"TELEGRAM_UPLOAD_PART_MISSING");
+    assert_eq!(journal.entry(&source).state,SendState::Prepared);
+    assert!(journal.entry(&source).document.is_none());
+    assert!(net.documents.lock().unwrap().is_empty());
+    upload(&net,&journal,&target,source.clone(),&io).await.unwrap();
+    assert_eq!(net.uploads.load(Ordering::SeqCst),2);
+    assert_eq!(journal.entry(&source).state,SendState::Confirmed);
+    let ids=net.random_ids.lock().unwrap();
+    assert_eq!(ids.len(),2);assert_eq!(ids[0],ids[1]);
+    assert_eq!(net.documents.lock().unwrap().len(),1);
+}
 #[tokio::test]
 async fn telegram_transfer_cancel_after_send_keeps_uncertain_evidence_and_reconciles() {
     let root = tempfile::tempdir().unwrap();
@@ -747,7 +813,43 @@ async fn telegram_transfer_idle_timeout_and_abort_drop_the_request() {
 }
 
 #[tokio::test]
-async fn telegram_upload_reports_the_first_byte_before_the_transfer_finishes() {
+async fn upload_io_observes_binding_and_login_stops_in_source_fingerprints() {
+    for binding_changed in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let source = source(root.path(), "video", b"original bytes");
+        let (_cancel, _stop, io) = io();
+        let (login, login_stop) = watch::channel(false);
+        let (binding, binding_stop) = watch::channel(());
+        let io = io.with_session_stops(login_stop, binding_stop);
+        if binding_changed { binding.send_replace(()); } else { login.send_replace(true); }
+        assert_eq!(source_unchanged(&source, &io).await.unwrap_err().to_string(), "TELEGRAM_TRANSFER_CANCELED");
+        assert_eq!(io.run(async { Ok(()) }).await.unwrap_err().to_string(), "TELEGRAM_TRANSFER_CANCELED");
+    }
+}
+
+#[tokio::test]
+async fn proxy_change_stops_the_source_fingerprint_worker_before_scanning() {
+    let root = tempfile::tempdir().unwrap();
+    let source = source(root.path(), "video", b"original bytes");
+    let (_cancel, _stop, mut io) = io();
+    let (network, epoch) = watch::channel(());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    io.control = Some(Arc::new(TransferControl {
+        check: Box::new(move || {
+            if observed.fetch_add(1, Ordering::SeqCst) == 0 { network.send_replace(()); }
+            Ok(())
+        }),
+        checkpoint: Box::new(|_| Ok(())),
+        progress: Arc::new(AtomicU64::new(0)),
+    }));
+    let io = io.with_network_stop(epoch);
+    assert_eq!(source_unchanged(&source, &io).await.unwrap_err().to_string(), "TELEGRAM_NETWORK_CHANGED");
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "one worker check, then the final Io classification; no file scan checks");
+}
+
+#[tokio::test]
+async fn telegram_upload_disk_reads_do_not_advance_server_confirmed_progress() {
     let root = tempfile::tempdir().unwrap();
     let journal = TestJournal::open(&root.path().join("journal.sqlite"));
     let net = Mock::new();
@@ -770,7 +872,7 @@ async fn telegram_upload_reports_the_first_byte_before_the_transfer_finishes() {
         result = &mut uploading => panic!("transfer finished before first-byte observation: {result:?}"),
         _ = tokio::time::sleep(Duration::from_secs(3)) => panic!("upload never started"),
     }
-    assert_eq!(progress.load(Ordering::Relaxed), 1);
+    assert_eq!(progress.load(Ordering::Relaxed), 0);
     assert_eq!(net.sends.load(Ordering::SeqCst), 0);
     release.notify_one();
     let receipt = uploading.await.unwrap();

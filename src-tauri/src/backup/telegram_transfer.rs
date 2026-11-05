@@ -160,7 +160,7 @@ impl RemoteDocument {
         if self.message_id <= 0
             || self.document_id == 0
             || self.bytes != envelope.bytes
-            || self.caption != envelope.caption()?
+            || serde_json::from_str::<Envelope>(&self.caption).ok().as_ref() != Some(envelope)
         {
             bail!("TELEGRAM_MEDIA_CHANGED");
         }
@@ -187,6 +187,21 @@ pub(super) trait Transport: Send + Sync {
         bytes: u64,
         name: String,
     ) -> ProviderFuture<'a, Self::Uploaded>;
+    fn upload_with_progress<'a>(
+        &'a self,
+        reader: &'a mut (dyn AsyncRead + Unpin + Send),
+        bytes: u64,
+        name: String,
+        progress: Option<&'a AtomicU64>,
+        activity: Option<&'a Io>,
+    ) -> ProviderFuture<'a, Self::Uploaded> {
+        Box::pin(async move {
+            let uploaded = self.upload(reader, bytes, name).await?;
+            if let Some(progress) = progress { progress.store(bytes, Ordering::Relaxed); }
+            if let Some(io) = activity { io.touch(); }
+            Ok(uploaded)
+        })
+    }
     fn send<'a>(
         &'a self,
         uploaded: Self::Uploaded,
@@ -209,6 +224,9 @@ pub(super) trait Transport: Send + Sync {
     fn inspect_reference<'a>(&'a self,target:&'a Target,reference:&'a MediaRef)->ProviderFuture<'a,RemoteDocument> {
         Box::pin(async move {self.inspect_document(target.message_id(reference)?,reference.document_id().context("BACKUP_MEDIA_PROVIDER_MISMATCH")?).await})
     }
+    fn inspect_read_reference<'a>(&'a self,target:&'a Target,reference:&'a MediaRef)->ProviderFuture<'a,RemoteDocument> {
+        self.inspect_reference(target, reference)
+    }
     fn find<'a>(
         &'a self,
         envelope: &'a Envelope,
@@ -223,6 +241,9 @@ pub(super) trait Transport: Send + Sync {
 pub(super) struct Io {
     cancel: watch::Receiver<bool>,
     stop: watch::Receiver<bool>,
+    session_stop: Option<watch::Receiver<bool>>,
+    binding_stop: Option<watch::Receiver<()>>,
+    network_stop: Option<watch::Receiver<()>>,
     control: Option<Arc<TransferControl>>,
     abort: watch::Sender<bool>,
     activity: Mutex<Instant>,
@@ -242,6 +263,9 @@ impl Io {
         Self {
             cancel,
             stop,
+            session_stop: None,
+            binding_stop: None,
+            network_stop: None,
             control,
             abort: watch::channel(false).0,
             activity: Mutex::new(Instant::now()),
@@ -251,16 +275,35 @@ impl Io {
     pub(super) fn abort_handle(&self) -> watch::Sender<bool> {
         self.abort.clone()
     }
+    pub(super) fn with_session_stops(
+        mut self,
+        session: watch::Receiver<bool>,
+        binding: watch::Receiver<()>,
+    ) -> Self {
+        self.session_stop = Some(session);
+        self.binding_stop = Some(binding);
+        self
+    }
+    pub(super) fn with_network_stop(mut self, stop: watch::Receiver<()>) -> Self {
+        self.network_stop = Some(stop);
+        self
+    }
     pub(super) fn check(&self) -> Result<()> {
         if *self.cancel.borrow()
-            || *self.stop.borrow()
             || *self.abort.borrow()
-            || self.stop.has_changed().is_err()
+            || lease_stopped(self.session_stop.as_ref(), self.binding_stop.as_ref())
         {
             bail!("TELEGRAM_TRANSFER_CANCELED");
         }
         if let Some(control) = &self.control {
             (control.check)()?;
+        }
+        // Keep the cause on the leased generation, even after proxy persistence finishes.
+        if self.network_stop.as_ref().is_some_and(|stop| stop.has_changed().unwrap_or(false)) {
+            bail!("TELEGRAM_NETWORK_CHANGED");
+        }
+        if *self.stop.borrow() || self.stop.has_changed().is_err() {
+            bail!("TELEGRAM_TRANSFER_CANCELED");
         }
         Ok(())
     }
@@ -281,7 +324,7 @@ impl Io {
         loop {
             tokio::select! {biased;
                 _=cancel.wait_for(|v|*v)=>bail!("TELEGRAM_TRANSFER_CANCELED"),
-                _=stop.wait_for(|v|*v)=>bail!("TELEGRAM_TRANSFER_CANCELED"),
+                _=stop.wait_for(|v|*v)=>{self.check()?;bail!("TELEGRAM_TRANSFER_CANCELED");},
                 _=abort.wait_for(|v|*v)=>bail!("TELEGRAM_TRANSFER_CANCELED"),
                 _=check.tick()=>{self.check()?;if self.activity.lock().expect("telegram transfer activity lock poisoned").elapsed()>=self.idle {bail!("TELEGRAM_TRANSFER_TIMEOUT");}},
                 result=&mut work=>{self.check()?;return result;}
@@ -289,12 +332,18 @@ impl Io {
         }
     }
 }
+fn lease_stopped(
+    session: Option<&watch::Receiver<bool>>,
+    binding: Option<&watch::Receiver<()>>,
+) -> bool {
+    session.is_some_and(|stop| *stop.borrow() || stop.has_changed().is_err())
+        || binding.is_some_and(|stop| stop.has_changed().unwrap_or(true))
+}
 struct SourceReader<'a> {
     file: tokio::fs::File,
     io: &'a Io,
     hash: Sha256,
     bytes: u64,
-    progress: Option<&'a AtomicU64>,
 }
 impl AsyncRead for SourceReader<'_> {
     fn poll_read(
@@ -311,7 +360,6 @@ impl AsyncRead for SourceReader<'_> {
             let bytes = &buffer.filled()[before..];
             self.bytes += bytes.len() as u64;
             self.hash.update(bytes);
-            if let Some(progress) = self.progress { progress.store(self.bytes, Ordering::Relaxed); }
             self.io.touch();
         }
         result
@@ -358,6 +406,9 @@ async fn source_unchanged(source: &MediaSource, io: &Io) -> Result<()> {
     let stop = io.stop.clone();
     let abort = io.abort.subscribe();
     let control = io.control.clone();
+    let session = io.session_stop.clone();
+    let binding = io.binding_stop.clone();
+    let network = io.network_stop.clone();
     let result = tokio::task::spawn_blocking(move || {
         super::restore::regular(&path)?.context("FILE_MISSING")?;
         let (hash, signature) = super::repository::fingerprint_with_cancel(&path, || {
@@ -365,6 +416,8 @@ async fn source_unchanged(source: &MediaSource, io: &Io) -> Result<()> {
                 || *stop.borrow()
                 || *abort.borrow()
                 || stop.has_changed().is_err()
+                || lease_stopped(session.as_ref(), binding.as_ref())
+                || network.as_ref().is_some_and(|stop| stop.has_changed().unwrap_or(false))
                 || control.as_ref().is_some_and(|c| (c.check)().is_err())
         })?;
         if hash != expected || signature["size"].as_u64() != Some(bytes) {
@@ -545,12 +598,13 @@ pub(super) async fn upload_with_timing(
                 io,
                 hash: Sha256::new(),
                 bytes: 0,
-                progress: source.control.as_ref().map(|control| control.progress.as_ref()),
             };
-            let uploaded = timing.run("upload", io.run(transport.upload(
+            let uploaded = timing.run("upload", io.run(transport.upload_with_progress(
                     &mut reader,
                     source.bytes,
                     format!("yingqu-{}.{}", source.kind, source.container),
+                    source.control.as_ref().map(|control| control.progress.as_ref()),
+                    Some(io),
                 ))).await?;
             if reader.bytes != source.bytes
                 || format!("{:x}", reader.hash.finalize()) != source.sha256
@@ -575,6 +629,7 @@ pub(super) async fn upload_with_timing(
                         "TELEGRAM_CHANNEL_FORBIDDEN"
                             | "TELEGRAM_AUTH_REQUIRED"
                             | "TELEGRAM_FILE_TOO_LARGE"
+                            | "TELEGRAM_UPLOAD_PART_MISSING"
                     ) || code
                         .strip_prefix("TELEGRAM_FLOOD_WAIT:")
                         .is_some_and(|v| v.parse::<u32>().is_ok())
@@ -649,7 +704,7 @@ pub(super) async fn restore(
         let mut staged = tempfile::NamedTempFile::new_in(parent).context("IO_ERROR")?;
         for attempt in 0..2 {
             io.check()?;
-            let document = io.run(transport.inspect_reference(target,reference)).await?;
+            let document = io.run(transport.inspect_read_reference(target,reference)).await?;
             let envelope: Envelope =
                 serde_json::from_str(&document.caption).context("TELEGRAM_MEDIA_CHANGED")?;
             if envelope.yingqu_media != 2

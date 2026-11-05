@@ -32,9 +32,9 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.14.1'
+ENGINE_VERSION = '0.14.2'
 PROTOCOL_VERSION = 3
-YTDLP_VERSION = '2026.08.19'
+YTDLP_VERSION = '2026.10.26'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0')
 

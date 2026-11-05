@@ -11,7 +11,7 @@ mod message_map;
 mod bundle;
 use super::{
     provider::{ProviderFuture, VideoAttributes},
-    telegram_session::rpc_error,
+    telegram_session::{rpc_error, retry_read},
     telegram_transfer::{Envelope, Io, RemoteDocument, Target, Transport},
 };
 use anyhow::{bail, Context, Result};
@@ -21,12 +21,8 @@ use grammers_client::{
     session::types::PeerRef,
     tl, Client, InvocationError,
 };
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context as TaskContext, Poll},
-};
-use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
+use std::future::Future;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 fn document_attributes(name: String, video: Option<&VideoAttributes>) -> (String, Vec<tl::enums::DocumentAttribute>) {
     let mime = mime_guess::from_path(&name).first_or_octet_stream().to_string();
@@ -52,14 +48,10 @@ fn uploaded_media(uploaded: Uploaded, video: Option<&VideoAttributes>, thumb: Op
         mime_type,attributes,stickers:None,video_cover:None,video_timestamp:None,ttl_seconds:None,
     }.into())
 }
-struct OriginalDocument<'a>(&'a tl::types::Document);
 pub(super) struct PreparedUpload { file: Uploaded, thumbnail: Option<tl::enums::InputFile> }
-impl grammers_client::media::Downloadable for OriginalDocument<'_> {
-    fn to_raw_input_location(&self) -> Option<tl::enums::InputFileLocation> {
-        Some(tl::types::InputDocumentFileLocation {id:self.0.id,access_hash:self.0.access_hash,file_reference:self.0.file_reference.clone(),thumb_size:String::new()}.into())
-    }
-    fn size(&self) -> Option<usize> {usize::try_from(self.0.size).ok()}
-    fn dc_id(&self) -> Option<i32> {Some(self.0.dc_id)}
+#[cfg(test)]
+impl PreparedUpload {
+    pub(super) fn without_thumbnail(file: Uploaded) -> Self { Self { file, thumbnail: None } }
 }
 fn message_documents(message:&grammers_client::message::Message) -> Result<Vec<(RemoteDocument,tl::types::Document)>> {
     if let Some(documents)=bundle::documents(message)? {return Ok(documents);}
@@ -71,9 +63,29 @@ fn message_documents(message:&grammers_client::message::Message) -> Result<Vec<(
 }
 fn select_document(message:&grammers_client::message::Message, document_id:Option<i64>, envelope:Option<&Envelope>) -> Result<(RemoteDocument,tl::types::Document)> {
     let mut documents=message_documents(message)?;
-    documents.retain(|(d,_)|document_id.is_none_or(|id|id==d.document_id) && envelope.is_none_or(|e|e.caption().ok().as_deref()==Some(d.caption.as_str())));
+    documents.retain(|(d,_)|document_id.is_none_or(|id|id==d.document_id) && envelope.is_none_or(|e|serde_json::from_str::<Envelope>(&d.caption).ok().as_ref()==Some(e)));
     if documents.len()!=1 && !(document_id.is_some() && envelope.is_none() && !documents.is_empty()) {bail!("TELEGRAM_MEDIA_MISSING");}
     documents.pop().context("TELEGRAM_MEDIA_MISSING")
+}
+
+fn check_standalone_read(evidence: &RemoteDocument, document_id: i64) -> Result<()> {
+    let envelope: Envelope = serde_json::from_str(&evidence.caption).context("TELEGRAM_INDEX_INVALID")?;
+    if envelope.yingqu_media != 2 || !matches!(envelope.kind.as_str(), "video" | "cover" | "transcript" | "event" | "library") {
+        bail!("TELEGRAM_INDEX_INVALID");
+    }
+    if evidence.document_id != document_id { bail!("TELEGRAM_MEDIA_CHANGED"); }
+    evidence.check(&envelope)
+}
+
+// Old independent attachments remain readable. Keep mutation/receipt selection on select_document.
+fn select_read_document(message: &grammers_client::message::Message, document_id: i64) -> Result<(RemoteDocument, tl::types::Document)> {
+    if matches!(&message.raw, tl::enums::Message::Message(raw) if raw.rich_message.is_none()) {
+        let (evidence, Media::Document(document)) = document(message)? else { bail!("TELEGRAM_MEDIA_CHANGED"); };
+        check_standalone_read(&evidence, document_id)?;
+        let Some(tl::enums::Document::Document(raw)) = document.raw.document else { bail!("TELEGRAM_MEDIA_MISSING"); };
+        return Ok((evidence, raw));
+    }
+    select_document(message, Some(document_id), None)
 }
 
 // Shared by clones in one request; each fresh connection gets an empty cache.
@@ -206,6 +218,7 @@ pub(super) struct GrammersTransport {
     new_delete_operation: Option<String>,
     bundle_heading: Option<String>,
     video_thumbnail: Option<Vec<u8>>,
+    transfer_budget: std::sync::Arc<crate::telegram_transfer_engine::Budget>,
 }
 #[derive(Clone)]
 pub(super) struct IndexDocument {
@@ -244,13 +257,13 @@ async fn cached_channel(
     let id = PeerId::channel(id).context("TELEGRAM_CHANNEL_FORBIDDEN")?;
     let Some(peer) = session.peer_ref(id).await? else { return Ok(None) };
     let _by_id = super::delete_timing::setup_span("channel_by_id");
-    let reply = io.run(async {
+    let reply = io.run(retry_read(|| async {
         match client.invoke(&tl::functions::channels::GetChannels { id: vec![peer.into()] }).await {
             Ok(reply) => Ok(Some(reply)),
             Err(InvocationError::Rpc(e)) if matches!(e.name.as_str(), "CHANNEL_INVALID" | "PEER_ID_INVALID" | "ACCESS_HASH_INVALID") => Ok(None),
             Err(e) => Err(rpc_error(e)),
         }
-    }).await?;
+    })).await?;
     let Some(reply) = reply else { return Ok(None) };
     let chats = match reply {
         tl::enums::messages::Chats::Chats(result) => result.chats,
@@ -301,11 +314,10 @@ impl GrammersTransport {
             return Ok(None);
         };
         let mut reader = std::io::Cursor::new(body.as_slice());
-        let uploaded = self
-            .client
-            .upload_stream(&mut reader, body.len(), "video-thumb.jpg".into())
-            .await
-            .map_err(io_error)?;
+        let uploaded = crate::telegram_transfer_engine::upload(
+            &self.client, &self.transfer_budget, &mut reader, body.len() as u64,
+            self.max_bytes, "video-thumb.jpg".into(), &|_| {},
+        ).await?;
         Ok(Some(uploaded.raw))
     }
 
@@ -316,6 +328,14 @@ impl GrammersTransport {
     }
     pub(super) fn for_message(&self,message:Option<i32>)->Self {let mut value=self.clone();value.preferred_message=message;value}
     pub(super) fn channel_title(&self) -> &str { &self.channel_title }
+    #[cfg(test)]
+    pub(super) fn test_client(&self) -> Client { self.client.clone() }
+    #[cfg(test)]
+    pub(super) async fn test_document(&self, expected: &RemoteDocument) -> Result<tl::types::Document> {
+        let (actual, raw) = select_document(&self.message(expected.message_id).await?, Some(expected.document_id), None)?;
+        anyhow::ensure!(actual == *expected, "TELEGRAM_MEDIA_CHANGED");
+        Ok(raw)
+    }
     #[cfg(test)]
     pub(super) async fn streaming_video_flag(&self, id: i32) -> Result<bool> {
         let message = self.message(id).await?;
@@ -341,6 +361,24 @@ impl GrammersTransport {
             let tl::enums::Message::Message(raw)=&message.raw else {continue;};
             let (count,part,blocks)=match &raw.rich_message {Some(tl::enums::RichMessage::Message(r))=>(r.documents.len(),r.part,r.blocks.len()),_ =>(0,false,0)};
             rows.push(serde_json::json!({"text_is_json":serde_json::from_str::<serde_json::Value>(message.text()).is_ok(),"text_chars":message.text().chars().count(),"rich_documents":count,"rich_part":part,"rich_blocks":blocks,"legacy_media":raw.media.is_some()}));
+        }
+        Ok(serde_json::json!(rows))
+    }
+    #[cfg(test)]
+    pub(super) async fn audit_existing_formats(&self, io: &Io) -> Result<serde_json::Value> {
+        let mut history = self.client.iter_messages(self.peer);
+        let mut rows = vec![];
+        while let Some(message) = io.run(async { history.next().await.map_err(rpc_error) }).await? {
+            anyhow::ensure!(rows.len() < 10000, "AUDIT_MESSAGE_LIMIT");
+            let message = io.run(self.complete_message(message)).await?;
+            let tl::enums::Message::Message(raw) = &message.raw else { continue; };
+            let anchors = match &raw.rich_message {
+                Some(tl::enums::RichMessage::Message(r)) => r.blocks.iter().filter_map(|b| match b { tl::enums::PageBlock::Anchor(a) => Some(a.name.clone()), _ => None }).collect::<Vec<_>>(),
+                _ => vec![],
+            };
+            let current = bundle::documents(&message);
+            rows.push(serde_json::json!({"message_id":message.id(),"caption":message.text(),"anchors":anchors,"has_regular_media":raw.media.is_some(),"current_rich_documents":current.as_ref().ok().and_then(|v|v.as_ref()).map(Vec::len),"current_error":current.err().map(|e|e.to_string())}));
+            io.touch();
         }
         Ok(serde_json::json!(rows))
     }
@@ -400,7 +438,7 @@ impl GrammersTransport {
         let Ok(raw) = serde_json::from_str::<serde_json::Value>(message.text()) else {
             return Ok(());
         };
-        if raw["yingqu_media"] != 2 || raw["kind"] != "library" {
+        if raw["yingqu_media"] != 2 {
             return Ok(());
         }
         let envelope: Envelope =
@@ -411,9 +449,13 @@ impl GrammersTransport {
         let Some(tl::enums::Document::Document(original)) = attachment.raw.document else {
             bail!("TELEGRAM_MEDIA_MISSING");
         };
-        if evidence.bytes != envelope.bytes
-            || (envelope.container != "json" || evidence.bytes > 16 * 1024 * 1024)
-        {
+        if evidence.bytes != envelope.bytes { bail!("TELEGRAM_MEDIA_CHANGED"); }
+        if !matches!(envelope.kind.as_str(), "library" | "event") {
+            if !matches!(envelope.kind.as_str(), "video" | "cover" | "transcript") { bail!("TELEGRAM_INDEX_INVALID"); }
+            snapshot.media.push(evidence);
+            return Ok(());
+        }
+        if envelope.container != "json" || evidence.bytes > 16 * 1024 * 1024 {
             bail!("TELEGRAM_INDEX_INVALID");
         }
         snapshot.indexes.push(IndexDocument {
@@ -428,25 +470,32 @@ impl GrammersTransport {
         io.check()?;
         let reader = match &index.source {
             IndexSource::Verified(body) => return Ok(body.as_ref().clone()),
-            IndexSource::Scanned(document) => self.original_reader(document),
+            IndexSource::Scanned(document) => self.original_reader(document, index.document.clone())?,
         };
         read_index_body(self, &self.index_bodies, index.document.clone(), io, Some(reader)).await
     }
 
-    fn original_reader(&self, document: &tl::types::Document) -> Box<dyn AsyncRead + Unpin + Send> {
-        Box::new(DownloadReader {
-            iter: Some(self.client.iter_download(&OriginalDocument(document))),
-            next: None,
-            buffer: vec![],
-            offset: 0,
-        })
+    fn original_reader(&self, document: &tl::types::Document, expected: RemoteDocument) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+        let transport = self.clone();
+        let refresh: crate::telegram_transfer_engine::Refresh = std::sync::Arc::new(move || {
+            let transport = transport.clone();
+            let expected = expected.clone();
+            Box::pin(async move {
+                let (actual, raw) = select_read_document(&transport.message(expected.message_id).await?, expected.document_id)?;
+                anyhow::ensure!(actual == expected, "TELEGRAM_MEDIA_CHANGED");
+                Ok(raw)
+            })
+        });
+        Ok(Box::new(crate::telegram_transfer_engine::Reader::new(crate::telegram_transfer_engine::download(
+            self.client.clone(), document.clone(), refresh, self.transfer_budget.clone(),
+        )?)))
     }
     pub(super) async fn media_reader(
         &self,
         target: &Target,
         reference: &super::provider::MediaRef,
     ) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
-        let doc = self.inspect_reference(target,reference).await?;
+        let doc = self.inspect_read_reference(target,reference).await?;
         let envelope: Envelope =
             serde_json::from_str(&doc.caption).context("TELEGRAM_MEDIA_CHANGED")?;
         doc.check(&envelope)?;
@@ -484,14 +533,16 @@ impl GrammersTransport {
             Some(channel) => channel,
             None => {
                 let _scan = super::delete_timing::setup_span("channel_dialogs");
-                let mut dialogs = client.iter_dialogs();
-                loop {
-                    let dialog = io.run(async { dialogs.next().await.map_err(rpc_error) }).await?
-                        .context("TELEGRAM_CHANNEL_FORBIDDEN")?;
-                    if let Peer::Channel(channel) = dialog.peer() {
-                        if channel.raw.id == id { break channel.clone(); }
+                retry_read(|| async {
+                    let mut dialogs = client.iter_dialogs();
+                    loop {
+                        let dialog = io.run(async { dialogs.next().await.map_err(rpc_error) }).await?
+                            .context("TELEGRAM_CHANNEL_FORBIDDEN")?;
+                        if let Peer::Channel(channel) = dialog.peer() {
+                            if channel.raw.id == id { break Ok(channel.clone()); }
+                        }
                     }
-                }
+                }).await?
             }
         };
         let has_public_alias = channel.raw.usernames.as_ref().is_some_and(|names| {
@@ -514,8 +565,10 @@ impl GrammersTransport {
         let channel_title = channel.title().to_owned();
         drop(lookup);
         check_read_access(request_kind, async {
-            let mut history = client.iter_messages(peer).limit(1);
-            io.run(async { history.next().await.map_err(rpc_error) }).await?;
+            io.run(retry_read(|| async {
+                let mut history = client.iter_messages(peer).limit(1);
+                history.next().await.map_err(rpc_error)
+            })).await?;
             Ok(())
         }).await?;
         let max_bytes = upload_limit.await?;
@@ -531,20 +584,16 @@ impl GrammersTransport {
             new_delete_operation: None,
             bundle_heading: None,
             video_thumbnail: None,
+            transfer_budget: crate::telegram_transfer_engine::Budget::account(&target.account_id),
         })
     }
     async fn message(&self, id: i32) -> Result<grammers_client::message::Message> {
-        let message = self
-            .client
-            .get_messages_by_id(self.peer, &[id])
-            .await
-            .map_err(rpc_error)?
-            .into_iter()
-            .next()
-            .flatten()
-            .context("TELEGRAM_MEDIA_MISSING")?;
-        check_presence(&message.raw)?;
-        self.complete_message(message).await
+        retry_read(|| async {
+            let message = self.client.get_messages_by_id(self.peer, &[id]).await.map_err(rpc_error)?
+                .into_iter().next().flatten().context("TELEGRAM_MEDIA_MISSING")?;
+            check_presence(&message.raw)?;
+            self.complete_message(message).await
+        }).await
     }
     async fn complete_message(&self,message:grammers_client::message::Message)->Result<grammers_client::message::Message> {
         let tl::enums::Message::Message(original)=&message.raw else {return Ok(message);};
@@ -569,9 +618,9 @@ fn check_presence(message: &tl::enums::Message) -> Result<()> {
     Ok(())
 }
 pub(super) async fn fetch_upload_limit(client: &Client, premium: bool, io: &Io) -> Result<u64> {
-    let config = io.run(async {
+    let config = io.run(retry_read(|| async {
         client.invoke(&tl::functions::help::GetAppConfig { hash: 0 }).await.map_err(rpc_error)
-    }).await?;
+    })).await?;
     let tl::enums::help::AppConfig::Config(config) = config else {
         bail!("TELEGRAM_LIMIT_UNAVAILABLE");
     };
@@ -686,19 +735,28 @@ impl Transport for GrammersTransport {
     }
     fn upload<'a>(
         &'a self,
-        mut reader: &'a mut (dyn AsyncRead + Unpin + Send),
+        reader: &'a mut (dyn AsyncRead + Unpin + Send),
         bytes: u64,
         name: String,
     ) -> ProviderFuture<'a, PreparedUpload> {
+        self.upload_with_progress(reader, bytes, name, None, None)
+    }
+    fn upload_with_progress<'a>(
+        &'a self,
+        reader: &'a mut (dyn AsyncRead + Unpin + Send),
+        bytes: u64,
+        name: String,
+        progress: Option<&'a std::sync::atomic::AtomicU64>,
+        activity: Option<&'a Io>,
+    ) -> ProviderFuture<'a, PreparedUpload> {
         Box::pin(async move {
-            let file = self.client
-                .upload_stream(
-                    &mut reader,
-                    usize::try_from(bytes).context("TELEGRAM_FILE_TOO_LARGE")?,
-                    name,
-                )
-                .await
-                .map_err(io_error)?;
+            let confirmed = |bytes| {
+                if let Some(progress) = progress { progress.store(bytes, std::sync::atomic::Ordering::Relaxed); }
+                if let Some(io) = activity { io.touch(); }
+            };
+            let file = crate::telegram_transfer_engine::upload(
+                &self.client, &self.transfer_budget, reader, bytes, self.max_bytes, name, &confirmed,
+            ).await?;
             let thumbnail = self.upload_video_thumbnail().await?;
             Ok(PreparedUpload { file, thumbnail })
         })
@@ -770,6 +828,12 @@ impl Transport for GrammersTransport {
     fn inspect_document(&self, id:i32, document_id:i64) -> ProviderFuture<'_,RemoteDocument> {
         Box::pin(async move {Ok(select_document(&self.message(id).await?,Some(document_id),None)?.0)})
     }
+    fn inspect_read_reference<'a>(&'a self, target: &'a Target, reference: &'a super::provider::MediaRef) -> ProviderFuture<'a, RemoteDocument> {
+        Box::pin(async move {
+            let message = self.message(target.message_id(reference)?).await?;
+            Ok(select_read_document(&message, reference.document_id().context("BACKUP_MEDIA_PROVIDER_MISMATCH")?)?.0)
+        })
+    }
     fn inspect_envelope<'a>(&'a self,id:i32,envelope:&'a Envelope) -> ProviderFuture<'a,RemoteDocument> {
         Box::pin(async move {Ok(select_document(&self.message(id).await?,None,Some(envelope))?.0)})
     }
@@ -810,11 +874,11 @@ impl Transport for GrammersTransport {
     ) -> ProviderFuture<'_, Box<dyn AsyncRead + Unpin + Send>> {
         Box::pin(async move {
             // Always fetch the original message anew: file_reference is an expiring session detail.
-            let (actual, document) = select_document(&self.message(expected.message_id).await?,Some(expected.document_id),None)?;
+            let (actual, document) = select_read_document(&self.message(expected.message_id).await?, expected.document_id)?;
             if actual != expected {
                 bail!("TELEGRAM_MEDIA_CHANGED");
             }
-            Ok(self.original_reader(&document))
+            self.original_reader(&document, expected)
         })
     }
 }
@@ -830,89 +894,6 @@ fn sent_id(updates: tl::enums::Updates, random_id: i64) -> Option<i32> {
         _ => None,
     })
 }
-fn io_error(error: std::io::Error) -> anyhow::Error {
-    let code = error.to_string();
-    if let Some(inner) = error.into_inner() {
-        if let Ok(error) = inner.downcast::<InvocationError>() {
-            return rpc_error(*error);
-        }
-    }
-    // The reader's own validation/cancellation error is already a fixed application code.
-    if matches!(
-        code.as_str(),
-        "CANCELED"
-            | "TELEGRAM_TRANSFER_CANCELED"
-            | "BACKUP_SOURCE_CHANGED"
-            | "BACKUP_SPACE_INACTIVE"
-    ) {
-        return anyhow::anyhow!(code);
-    }
-    anyhow::anyhow!("TELEGRAM_TRANSFER_IO")
-}
-type NextChunk = Pin<
-    Box<
-        dyn Future<
-                Output = (
-                    grammers_client::client::DownloadIter,
-                    std::result::Result<Option<Vec<u8>>, InvocationError>,
-                ),
-            > + Send,
-    >,
->;
-struct DownloadReader {
-    iter: Option<grammers_client::client::DownloadIter>,
-    next: Option<NextChunk>,
-    buffer: Vec<u8>,
-    offset: usize,
-}
-impl AsyncRead for DownloadReader {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        output: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if output.remaining() == 0 {
-            return Poll::Ready(Ok(()));
-        }
-        loop {
-            if self.offset < self.buffer.len() {
-                let count = output.remaining().min(self.buffer.len() - self.offset);
-                output.put_slice(&self.buffer[self.offset..self.offset + count]);
-                self.offset += count;
-                return Poll::Ready(Ok(()));
-            }
-            if self.next.is_none() {
-                let Some(mut iter) = self.iter.take() else {
-                    return Poll::Ready(Ok(()));
-                };
-                self.next = Some(Box::pin(async move {
-                    let chunk = iter.next().await;
-                    (iter, chunk)
-                }));
-            }
-            let Poll::Ready((iter, result)) = self
-                .next
-                .as_mut()
-                .expect("download future set above")
-                .as_mut()
-                .poll(cx)
-            else {
-                return Poll::Pending;
-            };
-            self.next = None;
-            match result {
-                Ok(Some(chunk)) => {
-                    self.iter = Some(iter);
-                    self.buffer = chunk;
-                    self.offset = 0;
-                }
-                Ok(None) => return Poll::Ready(Ok(())),
-                Err(error) => return Poll::Ready(Err(std::io::Error::other(rpc_error(error)))),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

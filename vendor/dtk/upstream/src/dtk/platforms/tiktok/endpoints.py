@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from dtk.core.types import LoginNeed
 from dtk.platforms.base import EndpointSpec, EndpointTable
 from dtk.platforms.tiktok.params import (
     author_bookmarks_params,
@@ -21,6 +22,7 @@ from dtk.platforms.tiktok.params import (
     author_followers_params,
     author_following_params,
     author_likes_params,
+    author_mixes_params,
     author_posts_params,
     author_profile_params,
     author_reposts_params,
@@ -29,7 +31,17 @@ from dtk.platforms.tiktok.params import (
     comment_replies_params,
     comments_params,
     content_detail_params,
+    hashtag_detail_params,
+    hashtag_posts_params,
+    live_room_by_id_params,
+    live_room_params,
+    live_status_params,
     mix_posts_params,
+    music_detail_params,
+    music_posts_params,
+    related_posts_params,
+    search_authors_params,
+    search_posts_params,
     session_check_params,
 )
 
@@ -98,6 +110,26 @@ class TikTokAPIEndpoints:
     # Post detail
     POST_DETAIL: Final = f"{TIKTOK_DOMAIN}/api/item/detail/"
 
+    # A hashtag, and the posts under it
+    CHALLENGE_DETAIL: Final = f"{TIKTOK_DOMAIN}/api/challenge/detail/"
+    CHALLENGE_ITEM_LIST: Final = f"{TIKTOK_DOMAIN}/api/challenge/item_list/"
+
+    # A live room by its owner's handle, from the web app's own API host
+    LIVE_USER_ROOM: Final = f"{TIKTOK_DOMAIN}/api-live/user/room/"
+    # A live room by the broadcast's own id. The webcast host's, not the web
+    # app's: www.tiktok.com answers this path with a 302 (2026-10-26).
+    LIVE_ROOM_INFO: Final = f"{WEBCAST_DOMAIN}/webcast/room/info/"
+    # Whether each of many broadcasts is on air: one boolean apiece.
+    LIVE_CHECK_ALIVE: Final = f"{WEBCAST_DOMAIN}/webcast/room/check_alive/"
+
+    # Keyword search: posts, and accounts
+    SEARCH_ITEM: Final = f"{TIKTOK_DOMAIN}/api/search/item/full/"
+    SEARCH_USER: Final = f"{TIKTOK_DOMAIN}/api/search/user/full/"
+
+    # A sound, and the posts that use it
+    MUSIC_DETAIL: Final = f"{TIKTOK_DOMAIN}/api/music/detail/"
+    MUSIC_ITEM_LIST: Final = f"{TIKTOK_DOMAIN}/api/music/item_list/"
+
     # Comments on a post
     POST_COMMENT: Final = f"{TIKTOK_DOMAIN}/api/comment/list/"
 
@@ -122,6 +154,17 @@ MIX_POSTS: Final = "tiktok.mix_posts"
 AUTHOR_FOLLOWERS: Final = "tiktok.author_followers"
 AUTHOR_FOLLOWING: Final = "tiktok.author_following"
 SESSION_CHECK: Final = "tiktok.session_check"
+RELATED_POSTS: Final = "tiktok.related_posts"
+MUSIC_DETAIL: Final = "tiktok.music_detail"
+MUSIC_POSTS: Final = "tiktok.music_posts"
+HASHTAG_DETAIL: Final = "tiktok.hashtag_detail"
+HASHTAG_POSTS: Final = "tiktok.hashtag_posts"
+SEARCH_POSTS: Final = "tiktok.search_posts"
+SEARCH_AUTHORS: Final = "tiktok.search_authors"
+AUTHOR_MIXES: Final = "tiktok.author_mixes"
+LIVE_ROOM: Final = "tiktok.live_room"
+LIVE_ROOM_BY_ID: Final = "tiktok.live_room_by_id"
+LIVE_STATUS: Final = "tiktok.live_status"
 
 #: Cookies and User-Agent come from the identity; only the platform-specific
 #: referer belongs here.
@@ -210,6 +253,12 @@ ENDPOINTS: Final = EndpointTable.of(
         # of a parser of its own. Weaker than the assumption that put cover: null
         # into #753, but still an assumption: what would settle it is one
         # response from an account that has saved something.
+        #
+        # Session-bound although it names an account: only that account's own
+        # session is answered, so the list is as private as Douyin's. Served
+        # unpinned, an answer drawn from the owner's identity would be cached
+        # under the sec_uid for whoever asked next.
+        session_bound=True,
         summary="Posts an author has saved, across every folder",
     ),
     EndpointSpec(
@@ -296,6 +345,132 @@ ENDPOINTS: Final = EndpointTable.of(
         summary="Accounts an author follows",
     ),
     EndpointSpec(
+        name=RELATED_POSTS,
+        path=TikTokAPIEndpoints.GUESS_YOU_LIKE,
+        required=("item_id",),
+        build=related_posts_params,
+        risk_weight=1.2,
+        # Like Douyin's, it answers an id that names no post (13 posts on
+        # 2026-10-20), so an answer is not evidence the post exists.
+        summary="Posts the site recommends beside one post",
+    ),
+    EndpointSpec(
+        name=MUSIC_DETAIL,
+        path=TikTokAPIEndpoints.MUSIC_DETAIL,
+        required=("music_id",),
+        build=music_detail_params,
+        risk_weight=1.0,
+        # A sound that does not exist is `statusCode: 10203` and no
+        # `musicInfo` (measured 2026-10-20): a business error, which is what
+        # the classifier already makes of a non-zero statusCode.
+        summary="One sound: its title, publisher and how many posts use it",
+    ),
+    EndpointSpec(
+        name=MUSIC_POSTS,
+        path=TikTokAPIEndpoints.MUSIC_ITEM_LIST,
+        required=("music_id",),
+        build=music_posts_params,
+        risk_weight=1.5,
+        # The itemList/hasMore/cursor envelope every item_list path here
+        # answers, so parse_author_posts reads it. Pages for a guest: 30, then
+        # 30 more and a next cursor (2026-10-20).
+        summary="Posts that use one sound, paged by cursor",
+    ),
+    EndpointSpec(
+        name=HASHTAG_DETAIL,
+        path=TikTokAPIEndpoints.CHALLENGE_DETAIL,
+        # By id or by name; the builder takes either, as author_profile does.
+        required=(),
+        build=hashtag_detail_params,
+        risk_weight=1.0,
+        # A name nobody uses is `statusCode: 10205` (measured 2026-10-20).
+        summary="One hashtag: its name, cover and counts",
+    ),
+    EndpointSpec(
+        name=HASHTAG_POSTS,
+        path=TikTokAPIEndpoints.CHALLENGE_ITEM_LIST,
+        required=("challenge_id",),
+        build=hashtag_posts_params,
+        risk_weight=1.5,
+        # The item_list envelope again. Pages for a guest: 30 and a next
+        # cursor, then 30 more (2026-10-20). An id nobody has is HTTP 400 with
+        # `statusCode: 10201`, a business answer.
+        summary="Posts under one hashtag, paged by cursor",
+    ),
+    EndpointSpec(
+        name=SEARCH_POSTS,
+        path=TikTokAPIEndpoints.SEARCH_ITEM,
+        required=("keyword",),
+        build=search_posts_params,
+        risk_weight=1.8,
+        # Measured 2026-10-20 with a guest: "dance" answered one post and
+        # has_more 0, "cat" eight, and every second page - for those and for a
+        # query that had said has_more 1 - came back with no list at all. So a
+        # guest was a thin first page and no paging. Measured again 2026-11-02:
+        # no page at all, `status_code: 2483` "Please login your account
+        # first" for every keyword tried, while `search_authors` still answered
+        # a guest in full. A login, then; the scheduler now says so before
+        # spending a request on a guest.
+        login=LoginNeed.REQUIRED,
+        paging_login=LoginNeed.REQUIRED,
+        summary="Posts matching a keyword",
+    ),
+    EndpointSpec(
+        name=SEARCH_AUTHORS,
+        path=TikTokAPIEndpoints.SEARCH_USER,
+        required=("keyword",),
+        build=search_authors_params,
+        risk_weight=1.8,
+        # A guest gets ten accounts and has_more 1; the next page is empty
+        # with has_more 0 (2026-10-20), the same wall as the post search.
+        paging_login=LoginNeed.REQUIRED,
+        summary="Accounts matching a keyword",
+    ),
+    EndpointSpec(
+        name=AUTHOR_MIXES,
+        path=TikTokAPIEndpoints.USER_PLAY_LIST,
+        required=("sec_uid",),
+        build=author_mixes_params,
+        risk_weight=1.5,
+        # Answers a guest: nine playlists and hasMore false for an author with
+        # nine, and an empty envelope with no playList key for one with none
+        # (2026-10-20).
+        summary="The playlists an author has made",
+    ),
+    EndpointSpec(
+        name=LIVE_ROOM,
+        path=TikTokAPIEndpoints.LIVE_USER_ROOM,
+        required=("unique_id",),
+        build=live_room_params,
+        risk_weight=1.2,
+        # A guest is told the room, its viewers and its pull URLs while it is
+        # live, and the room marked ended when it is not; a handle nobody has
+        # is `statusCode: 19881007`, "user_not_found" (2026-10-20).
+        summary="One live room, by its owner's @handle",
+    ),
+    EndpointSpec(
+        name=LIVE_ROOM_BY_ID,
+        path=TikTokAPIEndpoints.LIVE_ROOM_INFO,
+        required=("room_id",),
+        build=live_room_by_id_params,
+        risk_weight=1.2,
+        # Answers a guest with the room, its viewers and its pull URLs; a
+        # room_id nobody has is `status_code: 10011`, "Request params error"
+        # (2026-10-26).
+        summary="One live room, by the broadcast's own id",
+    ),
+    EndpointSpec(
+        name=LIVE_STATUS,
+        path=TikTokAPIEndpoints.LIVE_CHECK_ALIVE,
+        required=("room_ids",),
+        build=live_status_params,
+        risk_weight=1.0,
+        # Answers a guest with `{alive, room_id_str}` for every id asked, in
+        # the order asked; an id nobody has is `alive: false`, not an error
+        # (2026-10-26).
+        summary="Whether each of many broadcasts is on air",
+    ),
+    EndpointSpec(
         name=COMMENTS,
         path=TikTokAPIEndpoints.POST_COMMENT,
         required=("aweme_id",),
@@ -320,6 +495,7 @@ __all__ = [
     "AUTHOR_FOLLOWERS",
     "AUTHOR_FOLLOWING",
     "AUTHOR_LIKES",
+    "AUTHOR_MIXES",
     "AUTHOR_POSTS",
     "AUTHOR_PROFILE",
     "AUTHOR_REPOSTS",
@@ -330,6 +506,16 @@ __all__ = [
     "CONTENT_DETAIL",
     "DEFAULT_HEADERS",
     "ENDPOINTS",
+    "HASHTAG_DETAIL",
+    "HASHTAG_POSTS",
+    "LIVE_ROOM",
+    "LIVE_ROOM_BY_ID",
+    "LIVE_STATUS",
     "MIX_POSTS",
+    "MUSIC_DETAIL",
+    "MUSIC_POSTS",
+    "RELATED_POSTS",
+    "SEARCH_AUTHORS",
+    "SEARCH_POSTS",
     "TikTokAPIEndpoints",
 ]

@@ -15,6 +15,8 @@ struct Attachment {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Bundle {
+    #[serde(skip)]
+    legacy: bool,
     yingqu_bundle: u32,
     heading: String,
     attachments: Vec<Attachment>,
@@ -33,7 +35,7 @@ pub(super) fn display_heading(title: Option<&str>, filename: Option<&str>) -> Op
 }
 impl Bundle {
     fn validate(&self) -> Result<()> {
-        if self.yingqu_bundle != 1
+        if !(self.yingqu_bundle == 1 || self.legacy && self.yingqu_bundle == 2)
             || self.attachments.is_empty()
             || self.attachments.len() > 256
             || self.heading.chars().count() > 300
@@ -45,6 +47,7 @@ impl Bundle {
         let mut sequences = BTreeSet::new();
         let mut owners = BTreeMap::new();
         let mut documents = BTreeMap::new();
+        let mut legacy_event = false;
         for a in &self.attachments {
             let e = &a.envelope;
             let content = (&e.sha256, e.bytes, &e.container);
@@ -65,8 +68,10 @@ impl Bundle {
                     .is_some_and(|old| old != &e.device_id)
                 || e.kind != "event" && a.event_sequence.is_some()
                 || e.kind == "event"
-                    && (a.event_sequence.is_none_or(|s| s == 0)
-                        || !sequences.insert(a.event_sequence))
+                    && match a.event_sequence {
+                        Some(s) => s == 0 || !sequences.insert(s),
+                        None => !self.legacy || std::mem::replace(&mut legacy_event, true),
+                    }
                 || e.bytes == 0
                 || e.sha256.len() != 64
                 || !e.sha256.bytes().all(|b| b.is_ascii_hexdigit())
@@ -114,13 +119,19 @@ const ANCHOR_PREFIX: &str = "yingqu_asset_v1_";
 fn manifest(rich: &tl::types::RichMessage) -> Result<Option<Bundle>> {
     let mut parts = BTreeMap::new();
     let mut total = None;
+    let mut legacy = None;
+    let mut single = None;
     for block in &rich.blocks {
         let tl::enums::PageBlock::Anchor(anchor) = block else {
             continue;
         };
-        let Some(encoded) = anchor.name.strip_prefix(ANCHOR_PREFIX) else {
+        let (encoded, old) = if let Some(encoded) = anchor.name.strip_prefix(ANCHOR_PREFIX) { (encoded, false) }
+            else if let Some(encoded) = anchor.name.strip_prefix("yingqu_bundle_v1_") { (encoded, true) }
+            else {
             continue;
         };
+        if legacy.is_some_and(|previous| previous != old) { bail!("TELEGRAM_INDEX_INVALID"); }
+        legacy = Some(old);
         if encoded.len() > 4096 {
             bail!("TELEGRAM_INDEX_INVALID");
         }
@@ -146,21 +157,25 @@ fn manifest(rich: &tl::types::RichMessage) -> Result<Option<Bundle>> {
             total = Some(count);
             continue;
         }
-        bail!("TELEGRAM_INDEX_INVALID");
+        if !old || single.replace(encoded).is_some() { bail!("TELEGRAM_INDEX_INVALID"); }
     }
-    if let Some(total) = total {
+    let encoded = if let Some(total) = total {
+        if single.is_some() { bail!("TELEGRAM_INDEX_INVALID"); }
         if parts.len() != total {
             bail!("TELEGRAM_INDEX_INVALID");
         }
-        let encoded = (0..total)
+        Some((0..total)
             .map(|i| parts.get(&i).copied().context("TELEGRAM_INDEX_INVALID"))
-            .collect::<Result<String>>()?;
-        let bundle: Bundle = serde_json::from_slice(
+            .collect::<Result<String>>()?)
+    } else { single.map(str::to_owned) };
+    if let Some(encoded) = encoded {
+        let mut bundle: Bundle = serde_json::from_slice(
             &URL_SAFE_NO_PAD
                 .decode(encoded)
                 .context("TELEGRAM_INDEX_INVALID")?,
         )
         .context("TELEGRAM_INDEX_INVALID")?;
+        bundle.legacy = legacy.unwrap_or(false);
         bundle.validate()?;
         return Ok(Some(bundle));
     }
@@ -245,10 +260,11 @@ pub(super) fn event_revision(
         .iter()
         .find(|a| &a.envelope == envelope)
         .context("TELEGRAM_INDEX_INVALID")?;
-    Ok(revision(
-        message.id(),
-        a.event_sequence.context("TELEGRAM_INDEX_INVALID")?,
-    ))
+    match a.event_sequence {
+        Some(sequence) => Ok(revision(message.id(), sequence)),
+        None if loaded.bundle.legacy => Ok(i64::from(message.id())),
+        _ => bail!("TELEGRAM_INDEX_INVALID"),
+    }
 }
 fn revision(message: i32, sequence: u32) -> i64 {
     (i64::from(message) << 32) | i64::from(sequence)
@@ -369,7 +385,8 @@ fn rich_input(loaded: &Loaded) -> Result<tl::enums::InputRichMessage> {
     .into())
 }
 fn owned_message_matches(loaded: &Loaded, expected: &[RemoteDocument]) -> bool {
-    !expected.is_empty()
+    !loaded.bundle.legacy
+        && !expected.is_empty()
         && loaded.bundle.attachments.len() == expected.len()
         && loaded.bundle.attachments.iter().all(|attachment| {
             expected.iter().any(|document| {
@@ -459,6 +476,7 @@ impl GrammersTransport {
         Ok(found)
     }
     async fn edit_bundle(&self, id: i32, loaded: &Loaded) -> Result<()> {
+        if loaded.bundle.legacy { bail!("BACKUP_LEGACY_READ_ONLY"); }
         self.client
             .invoke(&tl::functions::messages::EditMessage {
                 no_webpage: true,
@@ -497,21 +515,26 @@ impl GrammersTransport {
             (Some(existing), _) => Some(existing),
             (None, Some(id)) => {
                 let message = io.run(self.message(id)).await?;
-                let loaded = read(&message)?.context("TELEGRAM_INDEX_INVALID")?;
-                let first = &loaded.bundle.attachments[0].envelope;
-                if first.library_id != envelope.library_id || first.asset_id != envelope.asset_id {
-                    bail!("BACKUP_SCOPE_MISMATCH");
+                if let Some(loaded) = read(&message)? {
+                    let first = &loaded.bundle.attachments[0].envelope;
+                    if first.library_id != envelope.library_id || first.asset_id != envelope.asset_id { bail!("BACKUP_SCOPE_MISMATCH"); }
+                    Some((id, loaded))
+                } else {
+                    let first: Envelope = serde_json::from_str(message.text()).context("TELEGRAM_INDEX_INVALID")?;
+                    if first.library_id != envelope.library_id || first.asset_id != envelope.asset_id || first.kind != "video" { bail!("BACKUP_SCOPE_MISMATCH"); }
+                    None
                 }
-                Some((id, loaded))
             }
             (None, None) => None,
         };
+        let existing = existing.filter(|(_, loaded)| !loaded.bundle.legacy);
         let (id, mut loaded) = match existing {
             Some((id, loaded)) => (Some(id), loaded),
             None => (
                 None,
                 Loaded {
                     bundle: Bundle {
+                        legacy: false,
                         yingqu_bundle: 1,
                         heading: self.bundle_heading.clone().unwrap_or_else(|| "映取备份".into()),
                         attachments: vec![],
@@ -619,6 +642,7 @@ impl GrammersTransport {
         let Some(mut loaded) = read(message)? else {
             return Ok(false);
         };
+        if loaded.bundle.legacy { bail!("BACKUP_LEGACY_READ_ONLY"); }
         let Some(a) = loaded.bundle.attachments.iter().find(|a| {
             a.document_id == expected.document_id
                 && a.envelope.caption().ok().as_deref() == Some(expected.caption.as_str())
@@ -772,6 +796,7 @@ mod tests {
             .collect();
         Loaded {
             bundle: Bundle {
+                legacy: false,
                 yingqu_bundle: 1,
                 heading: "原始文件".into(),
                 attachments,
@@ -857,6 +882,27 @@ mod tests {
             .blocks
             .iter()
             .any(|b| matches!(b,tl::enums::PageBlock::Document(d) if d.document_id==102)));
+    }
+    #[test]
+    fn legacy_single_and_chunked_manifests_keep_unsequenced_event_identity() {
+        for chunked in [false, true] {
+            let mut f = fixture();
+            f.bundle.attachments.iter_mut().find(|a| a.envelope.kind == "event").unwrap().event_sequence = None;
+            let mut raw = received(&fixture());
+            raw.blocks.retain(|b| !matches!(b, tl::enums::PageBlock::Anchor(_)));
+            let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&f.bundle).unwrap());
+            let anchors = if chunked { encoded.as_bytes().chunks(700).map(|s|std::str::from_utf8(s).unwrap().to_owned()).collect::<Vec<_>>() } else { vec![encoded] };
+            for (i,part) in anchors.iter().enumerate() {
+                raw.blocks.push(tl::types::PageBlockAnchor { name:if chunked {format!("yingqu_bundle_v1_part_{i}_{}_{}",anchors.len(),part)} else {format!("yingqu_bundle_v1_{part}")} }.into());
+            }
+            let bundle = manifest(&raw).unwrap().unwrap();
+            assert!(bundle.legacy);
+            assert!(bundle.attachments.iter().find(|a|a.envelope.kind=="event").unwrap().event_sequence.is_none());
+            let loaded=load(bundle, &raw, false).unwrap();
+            assert_eq!(loaded.documents.len(), 4);
+            let expected=loaded.bundle.attachments.iter().map(|a|RemoteDocument{message_id:1,document_id:a.document_id,bytes:a.envelope.bytes,caption:a.envelope.caption().unwrap()}).collect::<Vec<_>>();
+            assert!(!owned_message_matches(&loaded,&expected));
+        }
     }
     #[test]
     fn repeated_transcripts_chunk_manifest_and_preserve_all_versions() {

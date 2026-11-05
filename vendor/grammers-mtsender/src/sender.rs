@@ -130,8 +130,25 @@ pub struct Sender<T: Transport, M: Mtp> {
 
 struct Request {
     body: Vec<u8>,
+    media: bool,
     state: RequestState,
     result: oneshot::Sender<Result<Vec<u8>, InvocationError>>,
+}
+
+impl Request {
+    fn is_file_transfer(&self) -> bool {
+        if self.media { return true; }
+        let id = u32::from_le_bytes(self.body[..4].try_into().expect("request constructor"));
+        matches!(id,
+            tl::functions::upload::GetFile::CONSTRUCTOR_ID
+            | tl::functions::upload::SaveFilePart::CONSTRUCTOR_ID
+            | tl::functions::upload::SaveBigFilePart::CONSTRUCTOR_ID)
+    }
+}
+
+fn discard_abandoned_file_requests(requests: &mut Vec<Request>) {
+    // Control/publication requests and keepalives retain their existing semantics.
+    requests.retain(|request| !request.is_file_transfer() || !request.result.is_closed());
 }
 
 #[derive(Clone, Debug)]
@@ -212,10 +229,18 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
         self.requests.push(Request {
             body,
+            media: false,
             state: RequestState::NotSerialized,
             result: tx,
         });
     }
+
+    pub(crate) fn enqueue_media_body(&mut self, body: Vec<u8>, tx: oneshot::Sender<Result<Vec<u8>, InvocationError>>) {
+        self.enqueue_body(body, tx);
+        self.requests.last_mut().expect("enqueued media request").media = true;
+    }
+
+    pub(crate) fn has_pending_file_requests(&self) -> bool { self.requests.iter().any(|request| request.is_file_transfer() && !request.result.is_closed()) }
 
     async fn step_until_receive(
         &mut self,
@@ -240,6 +265,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     /// If an error is returned, the connection should be treated
     /// as dead and the sender instance recreated.
     pub async fn step(&mut self) -> Result<Vec<UpdatesLike>, ReadError> {
+        discard_abandoned_file_requests(&mut self.requests);
+        let has_file_requests = self.requests.iter().any(Request::is_file_transfer);
         self.try_fill_write();
         let write_len = self.write_buffer.len() - self.write_head;
         trace!(
@@ -251,6 +278,10 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         let sleep = sleep_until(self.next_ping);
 
         let res = tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(100)), if has_file_requests => {
+                discard_abandoned_file_requests(&mut self.requests);
+                Ok(Vec::new())
+            }
             n = reader.read(&mut self.read_buffer[self.read_tail..]) => {
                 n.map_err(ReadError::Io).and_then(|n| self.on_net_read(n))
             }
@@ -703,4 +734,33 @@ pub async fn connect_with_auth<T: Transport>(
     auth_key: [u8; 256],
 ) -> Result<Sender<T, mtp::Encrypted>, io::Error> {
     Sender::connect(transport, mtp::Encrypted::build().finish(auth_key), addr).await
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn abandoned_file_parts_are_removed_but_control_and_keepalive_remain() {
+        let (file_tx, file_rx) = oneshot::channel();
+        let (live_tx, _live_rx) = oneshot::channel();
+        let (control_tx, control_rx) = oneshot::channel();
+        let (ping_tx, ping_rx) = oneshot::channel();
+        let file = tl::functions::upload::SaveFilePart { file_id: 1, file_part: 0, bytes: vec![1; 1024] }.to_bytes();
+        let mut requests = vec![
+            Request { media: false, body: file.clone(), state: RequestState::NotSerialized, result: file_tx },
+            Request { media: false, body: file, state: RequestState::NotSerialized, result: live_tx },
+            Request { media: false, body: tl::functions::help::GetConfig {}.to_bytes(), state: RequestState::NotSerialized, result: control_tx },
+            Request { media: false, body: tl::functions::PingDelayDisconnect { ping_id: 1, disconnect_delay: 60 }.to_bytes(), state: RequestState::NotSerialized, result: ping_tx },
+        ];
+        drop(file_rx);
+        drop(control_rx);
+        drop(ping_rx);
+        discard_abandoned_file_requests(&mut requests);
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].is_file_transfer());
+        assert!(!requests[0].result.is_closed());
+        assert!(!requests[1].is_file_transfer());
+        assert!(!requests[2].is_file_transfer());
+    }
 }

@@ -21,7 +21,21 @@ pub(crate) struct WireRecord {
     pub operation_id: String,
 }
 
+fn legacy_object_kind<'a>(prefix: &str, key: &'a str, asset: &str) -> Option<&'a str> {
+    let parts: Vec<_> = key.strip_prefix(prefix)?.split('/').collect();
+    let (kind, _) = parts.last()?.split_once('.')?;
+    let root = if kind == "transcript" { "transcripts" } else { "media" };
+    let hash = |s: &str| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit());
+    if !matches!(kind, "video" | "cover" | "transcript") || parts.get(1)? != &asset || parts.first()? != &root { return None; }
+    match parts.as_slice() {
+        [_, _, source, _] if kind == "video" && hash(source) => Some(kind),
+        [_, _, source, content, _] if kind != "video" && hash(source) && hash(content) => Some(kind),
+        [_, _, source, device, operation, _] if hash(source) && uuid::Uuid::parse_str(device).is_ok() && uuid::Uuid::parse_str(operation).is_ok() => Some(kind),
+        _ => None,
+    }
+}
 fn object_generation(prefix: &str, key: &str, asset: &str) -> Result<Option<u64>> {
+    if legacy_object_kind(prefix, key, asset).is_some() { return Ok(None); }
     let name = key
         .strip_prefix(&format!("{prefix}media/{asset}/"))
         .filter(|s| !s.contains('/'))
@@ -59,6 +73,14 @@ fn validate_object(reference: &ObjectRef, prefix: &str, asset: &str, kind: &str)
     }
     if kind != "video" && reference.bytes > 16 * 1024 * 1024 {
         bail!("BACKUP_METADATA_TOO_LARGE");
+    }
+    if legacy_object_kind(prefix, &reference.key, asset) == Some(kind) {
+        let parts: Vec<_> = reference.key.strip_prefix(prefix).context("BACKUP_INVALID_KEY")?.split('/').collect();
+        let named_hash = if kind == "video" { Some(parts[2]) } else if parts.len() == 5 { Some(parts[3]) } else { None };
+        if named_hash.is_some_and(|hash| hash != reference.sha256) || parts.last().copied() != Some(format!("{kind}.{}",reference.container).as_str()) {
+            bail!("BACKUP_INVALID_KEY");
+        }
+        return Ok(());
     }
     let generation = object_generation(prefix, &reference.key, asset)?
         .map(|r| format!("r{r}-"))
@@ -109,6 +131,58 @@ fn validate_source(value: &serde_json::Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    #[test]
+    fn historical_keys_are_readable_only_with_their_original_identity() {
+        let asset = "00000000-0000-4000-8000-000000000001";
+        let device = "00000000-0000-4000-8000-000000000002";
+        let operation = "00000000-0000-4000-8000-000000000003";
+        let hash = "a".repeat(64);
+        let source = "b".repeat(64);
+        for (kind, container, key) in [
+            ("video", "mp4", format!("p/media/{asset}/{hash}/video.mp4")),
+            ("cover", "png", format!("p/media/{asset}/{source}/{hash}/cover.png")),
+            ("transcript", "json", format!("p/transcripts/{asset}/{source}/{hash}/transcript.json")),
+            ("video", "mp4", format!("p/media/{asset}/{hash}/{device}/{operation}/video.mp4")),
+            ("cover", "png", format!("p/media/{asset}/{source}/{device}/{operation}/cover.png")),
+            ("transcript", "json", format!("p/transcripts/{asset}/{source}/{device}/{operation}/transcript.json")),
+        ] {
+            let reference = ObjectRef { key, bytes: 100, sha256: hash.clone(), container: container.into() };
+            validate_object(&reference, "p/", asset, kind).unwrap();
+            assert_eq!(object_generation("p/", &reference.key, asset).unwrap(), None);
+            assert!(validate_object(&reference, "other/", asset, kind).is_err());
+            assert!(validate_object(&reference, "p/", device, kind).is_err());
+            let mut changed = reference.clone(); changed.container = "webm".into();
+            assert!(validate_object(&changed, "p/", asset, kind).is_err());
+            if kind == "video" || reference.key.split('/').count() == 6 {
+                changed = reference.clone(); changed.sha256 = source.clone();
+                assert!(validate_object(&changed, "p/", asset, kind).is_err());
+            }
+            changed = reference.clone(); changed.key = changed.key.replace(asset, "../escape");
+            assert!(validate_object(&changed, "p/", asset, kind).is_err());
+        }
+    }
+    #[test]
+    fn pre_deletion_index_descriptor_remains_protocol_two() {
+        let old = br#"{"schema_version":2,"library_id":"00000000-0000-4000-8000-000000000001","mode":"multi_writer","created_at":"2026-10-30"}"#;
+        let library: crate::backup::library::LibraryMetadata = serde_json::from_slice(old).unwrap();
+        library.validate().unwrap();
+        assert!(!library.deletion_indexes);
+    }
+    #[test]
+    fn only_known_historical_paths_allow_an_unattributed_writer() {
+        let asset="00000000-0000-4000-8000-000000000001";
+        let hash="a".repeat(64);
+        let mut value=serde_json::json!({"schema_version":2,"library_id":asset,"asset_id":asset,"record_revision":1,"state":"active","deleted_at":null,"fields":{"source":{"platform":"youtube","video_id":"fixture","canonical_url":null},"original_filename":"fixture.mp4"},"media":{"key":format!("p/media/{asset}/{hash}/video.mp4"),"bytes":24,"sha256":hash,"container":"mp4"},"cover":null,"transcript":null,"conflicts":[],"device_id":"","operation_id":asset});
+        let record=validate_wire(&serde_json::to_vec(&value).unwrap(),asset,asset,"p/").unwrap();
+        assert!(record.device_id.is_empty());
+        value["media"]["key"]=format!("p/media/{asset}/video-{}.mp4",record.media.unwrap().sha256).into();
+        assert!(validate_wire(&serde_json::to_vec(&value).unwrap(),asset,asset,"p/").is_err());
+    }
 }
 
 impl WireRecord {
@@ -211,7 +285,8 @@ pub(crate) fn validate_wire(
             .context("BACKUP_INVALID_SOURCE")?;
         validate_source(source)?;
     }
-    uuid::Uuid::parse_str(&record.device_id).context("BACKUP_INVALID_RECORD")?;
+    let legacy_unattributed = record.device_id.is_empty() && record.media.as_ref().is_some_and(|r|legacy_object_kind(prefix,&r.key,asset).is_some());
+    if !legacy_unattributed { uuid::Uuid::parse_str(&record.device_id).context("BACKUP_INVALID_RECORD")?; }
     if record.conflicts.len() > 1024 {
         bail!("BACKUP_INVALID_RECORD");
     }
@@ -351,7 +426,7 @@ impl<S: ObjectStore> S3Provider<S> {
         let kind = locator
             .rsplit('/')
             .next()
-            .and_then(|s| s.split('-').next())
+            .and_then(|s| s.split(['-', '.']).next())
             .context("BACKUP_INVALID_KEY")?;
         validate_object(&reference, &self.space.prefix, asset, kind)?;
         Ok(reference)
@@ -391,6 +466,12 @@ impl<S: ObjectStore> S3Provider<S> {
             .strip_prefix(&self.space.prefix)
             .context("BACKUP_SCOPE_MISMATCH")?;
         let mut segments = relative.split('/');
+        if let Some(asset) = relative.split('/').nth(1) {
+            if legacy_object_kind(&self.space.prefix, key, asset).is_some() {
+                uuid::Uuid::parse_str(asset).context("BACKUP_INVALID_KEY")?;
+                return Ok(asset);
+            }
+        }
         if segments.next() != Some("media")
             || relative.contains('\\')
             || relative
@@ -897,6 +978,9 @@ impl<S: ObjectStore> BackupProvider for S3Provider<S> {
                 bail!("BACKUP_DELETE_UNSUPPORTED");
             }
             let asset = self.media_asset(&object.key)?;
+            if legacy_object_kind(&self.space.prefix, &object.key, asset).is_some() {
+                bail!("BACKUP_LEGACY_READ_ONLY");
+            }
             if !self.read(asset).await?.is_some_and(|r| r.snapshot.deleted) {
                 bail!("BACKUP_TOMBSTONE_REQUIRED");
             }
@@ -932,6 +1016,9 @@ impl<S: ObjectStore> BackupProvider for S3Provider<S> {
                 .context("BACKUP_TOMBSTONE_REQUIRED")?;
             let revision = deletion.snapshot.revision;
             let old_generation = |key: &str| -> Result<bool> {
+                if legacy_object_kind(&self.space.prefix, key, &asset).is_some() {
+                    bail!("BACKUP_LEGACY_READ_ONLY");
+                }
                 Ok(self
                     .object_generation(key, &asset)?
                     .is_none_or(|generation| generation < revision))

@@ -9,8 +9,11 @@ export function sameDownloadVariant(old: Video, video: Video) {
 }
 
 export function previousDownload(tasks: Task[], task: Task) {
-  return task.video && tasks.find(old => old.id !== task.id && old.status === 'completed'
-    && !old.file_missing && !!old.path && old.video && sameDownloadVariant(old.video, task.video!));
+  return task.video && tasks.find(old => old.id !== task.id
+    && (old.status === 'queued' || old.status === 'downloading'
+      || old.status === 'parsing' && old.download_requested
+      || old.status === 'completed' && !old.file_missing && !!old.path)
+    && old.video && sameDownloadVariant(old.video, task.video!));
 }
 
 export function duplicatePromptKey(task: Task) {

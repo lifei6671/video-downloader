@@ -17,7 +17,7 @@ async page => {
   };
   const results=[];
   const checkDownloadHeight=async stage=>check(Math.abs((await row('visual-1').boundingBox()).height-(await row('visual-3').boundingBox()).height)<1,stage+' card height differs from completed card');
-  for(const [width,height,columns] of [[1440,900,4],[1280,800,4],[1024,680,3]]) {
+  for(const [width,height,columns] of [[1440,900,4],[1280,800,3],[1024,680,3]]) {
     await page.setViewportSize({width,height});await load('visual-list');
     const original=await ids();
     check(await list().getAttribute('data-view')==='list','default is not list');
@@ -58,7 +58,7 @@ async page => {
     const completedBox=await completed.boundingBox();
     const play=row('visual-3').getByRole('button',{name:'播放视频',exact:true});
     const playBox=await play.boundingBox();
-    check(Math.abs(completedBox.x-coverBox.x-8)<1 && Math.abs(completedBox.y-coverBox.y-8)<1,'completed badge is not at cover top left');
+    check(Math.abs(completedBox.x-coverBox.x-8)<1 && Math.abs(completedBox.y-coverBox.y-12)<1,'completed badge is not aligned with the corner action');
     check(Math.abs(coverBox.x+coverBox.width-playBox.x-playBox.width-8)<1 && Math.abs(playBox.y-coverBox.y-8)<1,'play button is not at cover top right');
     check(await row('visual-3').getByText('已完成',{exact:true}).count()===1 && await play.count()===1,'duplicate completed badge or play action');
     check(await play.evaluate(node=>!node.closest('[data-media-cover]')),'play button is nested inside cover trigger');
@@ -113,7 +113,7 @@ async page => {
     check(await row('visual-5').getByText('文件不存在',{exact:true}).isVisible(),'missing-file feedback lost');
     const tween=await page.evaluate(async()=>{
       const samples=[];const started=performance.now();window.backgroundTest.progress({bytes:104857600});
-      while(performance.now()-started<350){await new Promise(requestAnimationFrame);const node=document.querySelector('[data-task-id="visual-1"] [data-variant="circular"]');const angle=node.querySelector('[data-slot="progress-indicator"]').style.background.match(/([\d.]+)deg/);samples.push(angle?Number(angle[1])/3.6:null)}
+      while(performance.now()-started<350){await new Promise(requestAnimationFrame);const node=document.querySelector('[data-task-id="visual-1"] [data-slot="progress-indicator"]');samples.push(Number(getComputedStyle(node).getPropertyValue('--progress-percentage')))}
       return samples;
     });
     await page.waitForFunction(()=>document.querySelector('[data-task-id="visual-1"]').textContent.includes('100.0 MB'));
@@ -121,11 +121,11 @@ async page => {
     check(await ring.textContent()==='62%' && await ring.getAttribute('aria-valuenow')==='62','circle failed to update');
     check(tween.some(value=>value>49&&value<62) && tween.every(value=>value>=49&&value<=62),'progress did not interpolate within actual targets');
     const retarget=await page.evaluate(async()=>{
-      const initial=document.querySelector('[data-task-id="visual-1"] [data-slot="progress-indicator"]').style.background.match(/([\d.]+)deg/);
-      const start=Number(initial[1])/3.6;const samples=[];window.backgroundTest.progress({bytes:134217728});
+      const initial=document.querySelector('[data-task-id="visual-1"] [data-slot="progress-indicator"]');
+      const start=Number(getComputedStyle(initial).getPropertyValue('--progress-percentage'));const samples=[];window.backgroundTest.progress({bytes:134217728});
       for(let index=0;index<3;index++)await new Promise(requestAnimationFrame);
       window.backgroundTest.progress({bytes:150994944});const started=performance.now();
-      while(performance.now()-started<350){await new Promise(requestAnimationFrame);const angle=document.querySelector('[data-task-id="visual-1"] [data-slot="progress-indicator"]').style.background.match(/([\d.]+)deg/);samples.push(Number(angle[1])/3.6)}
+      while(performance.now()-started<350){await new Promise(requestAnimationFrame);const node=document.querySelector('[data-task-id="visual-1"] [data-slot="progress-indicator"]');samples.push(Number(getComputedStyle(node).getPropertyValue('--progress-percentage')))}
       return {start,samples};
     });
     await page.waitForFunction(()=>document.querySelector('[data-task-id="visual-1"] [data-variant="circular"]')?.textContent==='90%');
@@ -143,7 +143,7 @@ async page => {
     check((await row('visual-1').innerText()).includes('约 200.0 MB'),'estimated total lost marker');
     await page.evaluate(()=>window.backgroundTest.progress({total_bytes:null,total_bytes_estimate:null}));
     await page.waitForFunction(()=>document.querySelector('[data-task-id="visual-1"] [data-variant="circular"]')?.textContent==='—');
-    check(await ring.getAttribute('aria-valuenow')===null && (await row('visual-1').innerText()).includes('正在下载'),'unknown total displayed a fake percentage');
+    check(await ring.getAttribute('aria-valuenow')===null && (await row('visual-1').innerText()).includes('下载中'),'unknown total displayed a fake percentage');
     await page.evaluate(()=>window.backgroundTest.progress({merging:true}));
     const merging=row('visual-1').getByRole('progressbar',{name:'合并进度',exact:true});
     await merging.waitFor();
@@ -177,7 +177,7 @@ async page => {
     await page.locator('.task-browser > [role="tabpanel"]').evaluate(node=>node.scrollTop=0);
     await page.evaluate(()=>document.fonts.ready);
     await page.mouse.move(20,20);
-    await page.screenshot({path:'.local/feed-portrait/feed-'+width+'.png',animations:'disabled'});
+    await page.screenshot({path:'.local/card-layout-unification/feed-'+width+'.png',animations:'disabled'});
     check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'page horizontal overflow');
     await page.evaluate(()=>window.backgroundTest.complete('visual-1'));
     await row('visual-1').getByRole('group',{name:'下载信息',exact:true}).waitFor();
@@ -211,7 +211,8 @@ async page => {
   await page.getByRole('heading',{name:'搜索结果',exact:true}).waitFor();
   check(await list().getAttribute('data-view')==='feed','author results lost view');
   const ready=row('second');await ready.getByRole('button',{name:'下载视频',exact:true}).waitFor();
-  check(await ready.locator('.task-row-controls').evaluate(node=>{const inner=node.getBoundingClientRect(),outer=node.closest('[data-task-id]').getBoundingClientRect();return inner.left>=outer.left && inner.right<=outer.right && inner.bottom<=outer.bottom}),'author-ready actions overflow card');
+  check(await ready.locator('.task-row-footer').count()===0,'author-ready retained footer');
+  check(await ready.getByRole('button',{name:'下载视频',exact:true}).evaluate(node=>{const inner=node.getBoundingClientRect(),cover=node.closest('[data-task-id]').querySelector('.task-row-cover').getBoundingClientRect();return Math.abs(inner.right-cover.right+8)<1 && Math.abs(inner.top-cover.top-8)<1}),'author-ready download is not in the corner');
   results.push('author results and ready actions retain behavior');
   await page.reload();await page.getByRole('button',{name:'下载任务',exact:true}).click();
   check(await list().getAttribute('data-view')==='feed','new application session did not restore saved feed preference');

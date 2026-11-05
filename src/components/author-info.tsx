@@ -23,8 +23,12 @@ export function AuthorInfo({ task, compact = false, showId = true, showAvatar = 
   if (!task.video) return null;
   const telegram = task.video.platform === 'telegram';
   const authorId = profile?.id?.trim() || (telegram ? task.video.video_id.split('_')[0] : undefined);
-  const id = showId ? authorId : undefined;
-  const name = profile?.nickname?.trim() || (!showId && authorId) || profile?.handle || task.video.author || (telegram ? 'Telegram 频道' : '作者未知');
+  const id = showId && !telegram ? authorId : undefined;
+  const legacyName = task.video.author?.trim();
+  const channelName = legacyName && legacyName !== authorId ? legacyName : profile?.handle?.trim() || 'Telegram 频道';
+  const name = profile?.nickname?.trim() || (telegram
+    ? channelName
+    : (!showId && authorId) || profile?.handle || task.video.author || '作者未知');
   return <div data-author-info="" role="group" aria-label={telegram ? '频道信息' : '作者信息'} className="flex min-w-0 items-center gap-2">
     {showAvatar && <Avatar size={compact ? 'sm' : 'default'}>
       <AvatarImage src={source} alt={`${name}的头像`} />

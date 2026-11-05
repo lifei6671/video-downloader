@@ -11,6 +11,29 @@ enum Step {
     Read(Vec<i32>, Result<ChannelSnapshot>),
 }
 struct Channel(Mutex<VecDeque<Step>>);
+struct HeldChannel {
+    inner: Channel,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
+impl HeldChannel {
+    async fn wait(&self, io: &Io) -> Result<()> {
+        self.started.notify_one();
+        io.run(async { self.release.acquire().await?.forget(); Ok(()) }).await
+    }
+}
+impl MessageSource for HeldChannel {
+    async fn full(&self, io: &Io) -> Result<(i32, ChannelSnapshot)> {
+        self.wait(io).await?;
+        self.inner.full(io).await
+    }
+    async fn changes(&self, pts: i32, io: &Io) -> Result<DifferencePage> {
+        self.wait(io).await?;
+        self.inner.changes(pts, io).await
+    }
+    async fn read_body(&self, index: &IndexDocument, io: &Io) -> Result<Vec<u8>> { self.inner.read_body(index, io).await }
+    async fn by_id(&self, ids: &BTreeSet<i32>, io: &Io) -> Result<ChannelSnapshot> { self.inner.by_id(ids, io).await }
+}
 impl Channel {
     fn take(&self) -> Step {
         self.0
@@ -96,6 +119,120 @@ fn image(library: i32, videos: &[i32]) -> ChannelSnapshot {
         }],
         media: videos.iter().map(|id| doc(*id, "video")).collect(),
     }
+}
+
+#[tokio::test]
+async fn concurrent_full_and_incremental_refreshes_admit_before_reading_the_cursor() {
+    for incremental in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let core = open(root.path());
+        let target = setup_target(&core);
+        let (_stop, rx) = tokio::sync::watch::channel(false);
+        let io = Io::new(rx.clone(), rx, None);
+        if incremental {
+            let seed = Channel(Mutex::new(VecDeque::from([Step::Full(12, image(1, &[2]))])));
+            refresh(&core, &target, &io, &seed).await.unwrap();
+        }
+        let older = HeldChannel {
+            inner: Channel(Mutex::new(if incremental {
+                VecDeque::from([Step::Changes(12, Some((15, vec![1, 3]))), Step::Read(vec![1, 3], Ok(image(3, &[])))])
+            } else { VecDeque::from([Step::Full(15, image(3, &[2]))]) })),
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        };
+        let newer = Channel(Mutex::new(VecDeque::from([
+            Step::Changes(15, Some((20, vec![2, 3, 4, 5]))),
+            Step::Read(vec![2, 3, 4, 5], Ok(image(4, &[5]))),
+        ])));
+        let mut first = Box::pin(refresh(&core, &target, &io, &older));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::select! { _ = older.started.notified() => {}, _ = &mut first => panic!("old scan ended early") }
+        }).await.unwrap();
+        let mut second = Box::pin(refresh(&core, &target, &io, &newer));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut second).await.is_err());
+        assert_eq!(newer.0.lock().unwrap().len(), 2, "waiting refresh read a stale cursor or started network work");
+        older.release.add_permits(1);
+        let (first, second) = tokio::join!(first, second);
+        first.unwrap();
+        assert_eq!(second.unwrap().media.iter().map(|d| d.message_id).collect::<Vec<_>>(), vec![5]);
+        core.backup_db(|db| {
+            let cursor: (i32, i64) = db.query_row("SELECT pts,high_water FROM telegram_message_map WHERE space_id=?", [&target.scope.space_id], |r| Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(cursor, (20, 4));
+            assert_eq!(load(db, &target.scope.space_id, cursor.1)?.media.iter().map(|d| d.message_id).collect::<Vec<_>>(), vec![5]);
+            Ok(())
+        }).unwrap();
+        core.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn canceling_a_waiting_map_refresh_does_not_cancel_the_active_scan() {
+    let root = tempfile::tempdir().unwrap();
+    let core = open(root.path());
+    let target = setup_target(&core);
+    let (_login, login) = tokio::sync::watch::channel(false);
+    let (stop, cancel) = tokio::sync::watch::channel(false);
+    let first_io = Io::new(login.clone(), login.clone(), None);
+    let second_io = Io::new(cancel, login, None);
+    let older = HeldChannel { inner: Channel(Mutex::new(VecDeque::from([Step::Full(15, image(3, &[2]))]))), started: tokio::sync::Notify::new(), release: tokio::sync::Semaphore::new(0) };
+    let newer = Channel(Mutex::new(VecDeque::new()));
+    let mut first = Box::pin(refresh(&core, &target, &first_io, &older));
+    tokio::select! { _ = older.started.notified() => {}, _ = &mut first => panic!("scan ended early") }
+    let mut second = Box::pin(refresh(&core, &target, &second_io, &newer));
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut second).await.is_err());
+    stop.send_replace(true);
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(1), &mut second).await.unwrap().err().unwrap().to_string(), "TELEGRAM_TRANSFER_CANCELED");
+    older.release.add_permits(1);
+    assert_eq!(first.await.unwrap().high, 3);
+    assert!(core.telegram_map_refresh.try_lock().is_ok());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_projection_observation_finishes_before_the_next_refresh() {
+    use crate::backup::{telegram_provider::TelegramProvider, telegram_replay::Cursor};
+    let root = tempfile::tempdir().unwrap();
+    let core = open(root.path());
+    let target = setup_target(&core);
+    let (_login, login) = tokio::sync::watch::channel(false);
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let first_core = core.clone();
+    let first_target = target.clone();
+    let first_login = login.clone();
+    let first = tokio::spawn(async move {
+        let io = Io::new(first_login.clone(), first_login, None);
+        let channel = Channel(Mutex::new(VecDeque::from([Step::Full(12, image(1, &[]))])));
+        let observe_core = first_core.clone();
+        let observe_space = first_target.scope.space_id.clone();
+        refresh_with(&first_core, &first_target, &io, &channel, move |_| {
+            let _ = started.send(());
+            // Model CPU projection on another runtime worker. Bound the gate so
+            // even a failing assertion cannot leave a blocked test thread.
+            held.recv_timeout(std::time::Duration::from_secs(3))?;
+            TelegramProvider::observe(&observe_core, &observe_space,
+                &Cursor {high_water:1,evidence:std::collections::BTreeMap::from([(1,"old".into())])})
+        }).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), entered).await.unwrap().unwrap();
+    let io = Io::new(login.clone(), login, None);
+    let channel = Channel(Mutex::new(VecDeque::from([
+        Step::Changes(12, Some((15, vec![1, 2]))), Step::Read(vec![1, 2], Ok(image(2, &[]))),
+    ])));
+    let mut second = Box::pin(refresh_with(&core, &target, &io, &channel, |_| {
+        TelegramProvider::observe(&core, &target.scope.space_id,
+            &Cursor {high_water:2,evidence:std::collections::BTreeMap::from([(1,"old".into()),(2,"new".into())])})
+    }));
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut second).await.is_err());
+    assert_eq!(channel.0.lock().unwrap().len(), 2, "new observation overtook a slow old projection");
+    release.send(()).unwrap();
+    first.await.unwrap().unwrap();
+    second.await.unwrap();
+    let saved: String = core.backup_db(|db| Ok(db.query_row("SELECT cursor_json FROM telegram_observed_prefix WHERE space_id=?", [&target.scope.space_id], |r| r.get(0))?)).unwrap();
+    let saved: Cursor = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved.high_water, 2);
+    assert_eq!(saved.evidence.len(), 2);
+    core.shutdown().await;
 }
 #[tokio::test]
 async fn mapped_delete_restart_only_reads_changed_ids_and_rebuilds_on_lost_position() {

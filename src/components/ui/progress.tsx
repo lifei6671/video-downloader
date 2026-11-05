@@ -6,38 +6,18 @@ function Progress({
   className,
   value,
   variant = "linear",
+  updateIntervalMs,
   children,
   ...props
-}: React.ComponentProps<typeof ProgressPrimitive.Root> & { variant?: "linear" | "circular" }) {
+}: React.ComponentProps<typeof ProgressPrimitive.Root> & { variant?: "linear" | "circular"; updateIntervalMs?: number }) {
   const circular = variant === "circular"
-  const [animatedValue, setAnimatedValue] = React.useState(value ?? 0)
-  const currentValue = React.useRef(value ?? 0)
   const previousValue = React.useRef(value)
+  const reset = value == null || previousValue.current == null || value < previousValue.current
   React.useEffect(() => {
-    if (!circular) return
-    const previous = previousValue.current
     previousValue.current = value
-    const target = value ?? 0
-    const media = matchMedia("(prefers-reduced-motion: reduce)")
-    if (value == null || previous == null || target < previous || target <= currentValue.current || media.matches) {
-      currentValue.current = target
-      setAnimatedValue(target)
-      return
-    }
-    const start = currentValue.current
-    const startedAt = performance.now()
-    let frame = 0
-    const tick = (now: number) => {
-      const elapsed = media.matches ? 1 : Math.max(0, Math.min(1, (now - startedAt) / 250))
-      const next = start + (target - start) * (1 - (1 - elapsed) ** 3)
-      currentValue.current = next
-      setAnimatedValue(next)
-      if (elapsed < 1) frame = requestAnimationFrame(tick)
-    }
-    frame = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(frame)
-  }, [circular, value])
-  const visualValue = value == null ? 0 : previousValue.current == null || value < previousValue.current ? value : Math.max(0, Math.min(value, animatedValue))
+  }, [value])
+  const percent = Math.max(0, Math.min(100, value ?? 0))
+  const duration = reset ? 0 : updateIntervalMs ?? (circular ? 250 : 0)
   return (
     <ProgressPrimitive.Root
       value={value}
@@ -52,9 +32,14 @@ function Progress({
       <ProgressPrimitive.Indicator
         data-slot="progress-indicator"
         className={circular ? "progress-circular-indicator" : "size-full flex-1 bg-primary transition-all"}
-        style={circular ? { background: `conic-gradient(var(--progress-value) ${Math.min(100, visualValue) * 3.6}deg, var(--progress-track) 0deg)` } : { transform: `translateX(-${100 - (value || 0)}%)` }}
+        style={{
+          ...(circular ? { "--progress-percentage": percent } : { transform: `translateX(-${100 - percent}%)` }),
+          transitionProperty: circular ? "--progress-percentage" : "transform",
+          transitionDuration: `${duration}ms`,
+          transitionTimingFunction: "linear",
+        } as React.CSSProperties}
       />
-      {circular && <span className="progress-circular-label" aria-hidden="true">{children ?? (value == null ? "—" : `${Math.round(visualValue)}%`)}</span>}
+      {circular && <span className="progress-circular-label" aria-hidden="true">{children ?? (value == null ? "—" : `${Math.round(percent)}%`)}</span>}
     </ProgressPrimitive.Root>
   )
 }

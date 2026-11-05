@@ -188,34 +188,54 @@ pub fn snapshot(settings: &Settings) -> Result<Value> {
     Ok(Value::Object(profiles))
 }
 
+pub(crate) fn parse_proxy(platform: &str, proxy: &str) -> Result<(url::Url, u16)> {
+    let parsed = url::Url::parse(proxy).context("CONFIG_INVALID")?;
+    let authority = proxy.split_once("://").context("CONFIG_INVALID")?.1.split('/').next().unwrap();
+    let port: u16 = authority.rsplit_once(':').context("CONFIG_INVALID")?.1.parse().context("CONFIG_INVALID")?;
+    if proxy.len() > 2000
+        || !matches!(parsed.scheme(), "http" | "socks5")
+        || platform == "telegram" && parsed.scheme() != "socks5"
+        || parsed.host_str().is_none()
+        || port == 0
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/" && !parsed.path().is_empty()
+    {
+        bail!("CONFIG_INVALID");
+    }
+    Ok((parsed, port))
+}
+
+pub(crate) fn validate_profile_update(settings: &Settings, update: &ProfileUpdate) -> Result<()> {
+    let profile = settings.profiles.iter().find(|p| p.platform == update.platform).context("CONFIG_INVALID")?;
+    if let Some(value) = update.http_chunk_size {
+        if update.platform != "youtube" || value.is_some_and(|n| !valid_chunk_size(n)) {
+            bail!("CONFIG_INVALID");
+        }
+    }
+    if update.user_agent.is_empty() || update.user_agent.len() > 2048 || update.user_agent.contains(['\r', '\n']) {
+        bail!("CONFIG_INVALID");
+    }
+    let cookie = update.cookie.as_deref().map(str::trim).unwrap_or(&profile.cookie);
+    if cookie.len() > 60_000 || cookie.contains(['\r', '\n']) { bail!("CONFIG_INVALID"); }
+    if let Some(proxy) = update.proxy.as_deref().filter(|proxy| !proxy.is_empty()) {
+        parse_proxy(&update.platform, proxy)?;
+    }
+    Ok(())
+}
+
 pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpdate) -> Result<()> {
+    validate_profile_update(settings, &update)?;
     let profile = settings
         .profiles
         .iter_mut()
         .find(|p| p.platform == update.platform)
         .context("CONFIG_INVALID")?;
-    let http_chunk_size = match update.http_chunk_size {
-        Some(value) => {
-            if update.platform != "youtube" || value.is_some_and(|n| !valid_chunk_size(n)) {
-                bail!("CONFIG_INVALID");
-            }
-            value
-        }
-        None => profile.http_chunk_size,
-    };
-    if update.user_agent.is_empty()
-        || update.user_agent.len() > 2048
-        || update.user_agent.contains(['\r', '\n'])
-    {
-        bail!("CONFIG_INVALID");
-    }
+    let http_chunk_size = update.http_chunk_size.unwrap_or(profile.http_chunk_size);
     let cookie = update
         .cookie
         .map(|cookie| cookie.trim().to_owned())
         .unwrap_or_else(|| profile.cookie.clone());
-    if cookie.len() > 60_000 || cookie.contains(['\r', '\n']) {
-        bail!("CONFIG_INVALID");
-    }
     let mut reference = profile.credential_ref.clone();
     let mut new_credential = None;
     let mut public_proxy = profile.proxy.clone();
@@ -224,31 +244,7 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
         if proxy.is_empty() {
             public_proxy = None;
         } else {
-            let mut parsed = url::Url::parse(&proxy).context("CONFIG_INVALID")?;
-            let authority = proxy
-                .split_once("://")
-                .context("CONFIG_INVALID")?
-                .1
-                .split('/')
-                .next()
-                .unwrap();
-            let port: u16 = authority
-                .rsplit_once(':')
-                .context("CONFIG_INVALID")?
-                .1
-                .parse()
-                .context("CONFIG_INVALID")?;
-            if proxy.len() > 2000
-                || !matches!(parsed.scheme(), "http" | "socks5")
-                || update.platform == "telegram" && parsed.scheme() != "socks5"
-                || parsed.host_str().is_none()
-                || port == 0
-                || parsed.query().is_some()
-                || parsed.fragment().is_some()
-                || parsed.path() != "/" && !parsed.path().is_empty()
-            {
-                bail!("CONFIG_INVALID");
-            }
+            let (mut parsed, port) = parse_proxy(&update.platform, &proxy)?;
             if !parsed.username().is_empty() || parsed.password().is_some() {
                 let id = Uuid::new_v4().to_string();
                 entry(&id)?
