@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { ExternalLink, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, errorText, type Task, type BackupAsset } from '@/api';
@@ -8,9 +8,9 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { readPlaybackPosition, writePlaybackPosition } from '@/lib/playback-position';
 
-type PlaybackSubject = {id: string; path: string | null; completed_at: number | null; video: {title?: string} | null; asset?: boolean};
+type PlaybackSubject = {id: string; path: string | null; completed_at: number | null; video: {title?: string; width?: number | null; height?: number | null} | null; asset?: boolean};
 
-function PlaybackSession({ task, open, close, removedIds }: { task: PlaybackSubject; open: boolean; close: () => void; removedIds: ReadonlySet<string> }) {
+function PlaybackSession({ task, open, close, removedIds, onAspectRatio }: { task: PlaybackSubject; open: boolean; close: () => void; removedIds: ReadonlySet<string>; onAspectRatio: (ratio: number) => void }) {
   const video = useRef<HTMLVideoElement>(null);
   const session = useRef({ active: true, fallback: false, externalPending: false });
   const sourceRequest = useRef<Promise<string> | null>(null);
@@ -115,6 +115,7 @@ function PlaybackSession({ task, open, close, removedIds }: { task: PlaybackSubj
           if (!session.current.active || session.current.fallback) return;
           const element = event.currentTarget;
           if (!element.videoWidth || !element.videoHeight) { void openExternal(); return; }
+          onAspectRatio(element.videoWidth / element.videoHeight);
           const position = readPlaybackPosition(task);
           if (position > 0 && Number.isFinite(element.duration) && position < element.duration) element.currentTime = position;
           progress.current.metadataReady = true;
@@ -130,16 +131,21 @@ function PlaybackSession({ task, open, close, removedIds }: { task: PlaybackSubj
 export function VideoPlayer({ task, asset, close, returnFocus, fallbackFocus, removedIds }: { task: Task | null; asset?: BackupAsset | null; close: () => void; returnFocus: HTMLElement | null; fallbackFocus: () => HTMLElement | null; removedIds: ReadonlySet<string> }) {
   const focus = useRef<HTMLElement | null>(null);
   const lastTask = useRef<PlaybackSubject | null>(null);
-  const subject: PlaybackSubject | null = task ?? (asset ? { id: asset.asset_id, path: asset.path, completed_at: null, video: { title: asset.metadata.title }, asset: true } : null);
+  const [measured, setMeasured] = useState<{ id: string; ratio: number } | null>(null);
+  const subject: PlaybackSubject | null = task ?? (asset ? { id: asset.asset_id, path: asset.path, completed_at: null, video: asset.metadata, asset: true } : null);
   if (subject) { focus.current = returnFocus; lastTask.current = subject; }
+  const current = lastTask.current;
+  const initialRatio = current?.video?.width && current.video.height ? current.video.width / current.video.height : 16 / 9;
+  const ratio = measured?.id === current?.id ? measured?.ratio : initialRatio;
+  const playerStyle = { '--video-player-ratio': ratio && Number.isFinite(ratio) && ratio > 0 ? ratio : 16 / 9 } as CSSProperties;
   return <Dialog open={!!subject} onOpenChange={open => { if (!open) close(); }}>
-    <DialogContent className="video-player-dialog" onCloseAutoFocus={event => {
+    <DialogContent className="video-player-dialog" style={playerStyle} onCloseAutoFocus={event => {
       event.preventDefault();
       const target = focus.current;
       (target?.isConnected && !target.closest('[inert]') ? target : fallbackFocus())?.focus({ preventScroll: true });
     }}>
       <DialogHeader className="pr-8"><DialogTitle className="line-clamp-2">{lastTask.current?.video?.title?.trim() || '视频播放'}</DialogTitle><DialogDescription className="sr-only">本地视频播放器</DialogDescription></DialogHeader>
-      {lastTask.current && <PlaybackSession key={lastTask.current.id} task={lastTask.current} open={!!subject} close={close} removedIds={removedIds} />}
+      {current && <PlaybackSession key={current.id} task={current} open={!!subject} close={close} removedIds={removedIds} onAspectRatio={ratio => setMeasured({ id: current.id, ratio })} />}
     </DialogContent>
   </Dialog>;
 }

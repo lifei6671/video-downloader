@@ -23,7 +23,7 @@ function BackupConnectionNotice({ code }: { code: string }) {
   return <p role={reconnecting ? 'status' : 'alert'} className={`flex items-center gap-2 ${reconnecting ? 'text-muted-foreground' : 'text-destructive'}`}>{reconnecting && <Spinner aria-hidden="true" />}{errorText(code)}</p>;
 }
 
-export function BackupSettingsForm({ saved }: { saved: (value: BackupSettings | null) => void }) {
+export function BackupSettingsForm({ saved, active = true }: { saved: (value: BackupSettings | null) => void; active?: boolean }) {
   const formRef = useRef<HTMLFormElement>(null);
   const [form, setForm] = useState<BackupUpdate>(draft());
   const [spaces, setSpaces] = useState<BackupSettings[]>([]), [selected, setSelected] = useState('new');
@@ -145,7 +145,7 @@ export function BackupSettingsForm({ saved }: { saved: (value: BackupSettings | 
   const currentSpace = spaces.find(space => space.space_id === current);
   // Keep Telegram connection feedback current using local status only.
   useEffect(() => {
-    if (!loaded || busy || !enabled || !(currentSpace?.connection_pending || currentSpace?.cleanup_deleted_records || currentSpace?.provider_type === 'telegram')) return;
+    if (!active || !loaded || busy || !enabled || !(currentSpace?.connection_pending || currentSpace?.cleanup_deleted_records || currentSpace?.provider_type === 'telegram')) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
@@ -158,9 +158,9 @@ export function BackupSettingsForm({ saved }: { saved: (value: BackupSettings | 
         if (live) { setActionError(errorText(error)); timer = setTimeout(() => void refresh(), 5000); }
       }
     }
-    timer = setTimeout(() => void refresh(), currentSpace.connection_pending || currentSpace.last_error === 'TELEGRAM_RECONNECTING' ? 1000 : 5000);
+    void refresh();
     return () => { live = false; clearTimeout(timer); };
-  }, [loaded, busy, enabled, current, currentSpace?.connection_pending, currentSpace?.cleanup_deleted_records, currentSpace?.provider_type, currentSpace?.last_error, saved]);
+  }, [active, loaded, busy, enabled, current, currentSpace?.connection_pending, currentSpace?.cleanup_deleted_records, currentSpace?.provider_type, currentSpace?.last_error, saved]);
   async function run(kind: 'save' | 'test') {
     if (busy || !loaded || !validate()) return;
     const started = performance.now();
@@ -292,7 +292,7 @@ export function BackupSettingsForm({ saved }: { saved: (value: BackupSettings | 
       })}
       <TabsTrigger value="new" disabled={disabled} className={`${settingsTabsTriggerClassName} gap-1.5`}><Plus aria-hidden="true" />新建空间</TabsTrigger>
     </TabsList>
-    <TabsContent value={selected}>{selectedSpace?.last_error && !(enabled && selected === current && currentSpace?.connection_pending) && <div className="text-sm"><BackupConnectionNotice code={selectedSpace.last_error} /></div>}<div className="max-w-xl space-y-4 mb-5">{selected === 'new' && <Field><FieldLabel htmlFor="backup-space-name">空间名称</FieldLabel><Input id="backup-space-name" maxLength={64} disabled={disabled} value={form.display_name ?? ''} placeholder="例如：个人备份" onChange={event => setForm({ ...form, display_name: event.target.value })} /></Field>}{providerField}</div>{form.profile === 'telegram' ? <div className="max-w-xl space-y-5"><TelegramStorageSettings key={selected} space={selectedSpace?.provider_type === 'telegram' ? selectedSpace : undefined} name={form.display_name} saving={value => setBusy(value ? 'telegram' : null)} connected={async value => {
+    <TabsContent value={selected}>{selectedSpace?.last_error && !(enabled && selected === current && currentSpace?.connection_pending) && <div className="text-sm"><BackupConnectionNotice code={selectedSpace.last_error} /></div>}<div className="max-w-xl space-y-4 mb-5">{selected === 'new' && <Field><FieldLabel htmlFor="backup-space-name">空间名称</FieldLabel><Input id="backup-space-name" maxLength={64} disabled={disabled} value={form.display_name ?? ''} placeholder="例如：个人备份" onChange={event => setForm({ ...form, display_name: event.target.value })} /></Field>}{providerField}</div>{form.profile === 'telegram' ? <div className="max-w-xl space-y-5"><TelegramStorageSettings active={active} key={selected} space={selectedSpace?.provider_type === 'telegram' ? selectedSpace : undefined} name={form.display_name} saving={value => setBusy(value ? 'telegram' : null)} connected={async value => {
         const [all, active] = await Promise.all([api.backupSpaces(), api.backupSettings()]);
         drafts.current.delete(selected); drafts.current.delete(value.space_id); setSpaces(all); setCurrent(active?.space_id ?? null); setSelected(value.space_id);
         restore({ form: update(value), key: '', secret: '', savedTarget: target(value), credentialsChanged: false }); saved(active); toast.success('备份配置已保存');
@@ -307,7 +307,7 @@ export function BackupSettingsForm({ saved }: { saved: (value: BackupSettings | 
     </FieldGroup>
     <div className="flex flex-wrap gap-2">{selectedSpace && selected !== current && <Tooltip><TooltipTrigger asChild><span className="inline-flex"><Button type="button" className="backup-save-button backup-feedback-button" variant="outline" disabled={disabled || !!switchReason} aria-label="设为默认" aria-busy={busy === 'switch'} onClick={() => void switchSpace()}><span aria-hidden="true" className="backup-save-label" data-visible={busy !== 'switch'}>设为默认</span><span aria-hidden="true" className="backup-save-progress" data-visible={busy === 'switch'}><Spinner />设置中…</span></Button></span></TooltipTrigger><TooltipContent>{switchReason || '设为默认备份渠道'}</TooltipContent></Tooltip>}<Button type="submit" className="backup-save-button" disabled={disabled} aria-busy={busy === 'save'} aria-label={busy === 'save' ? '保存中…' : saveLabel}><span aria-hidden="true" className="backup-save-label" data-visible={busy !== 'save'}>{saveLabel}</span><span aria-hidden="true" className="backup-save-progress" data-visible={busy === 'save'}><Spinner aria-hidden="true" />保存中…</span></Button><Button type="button" variant="outline" className="min-w-28" disabled={disabled || !key || !secret} aria-busy={busy === 'test'} onClick={() => void run('test')}>{busy === 'test' && <Spinner aria-hidden="true" />}{busy === 'test' ? '测试中…' : '测试连接'}</Button>{selectedSpace && <Button type="button" className="backup-save-button backup-feedback-button" variant="destructive" disabled={disabled} aria-label="删除配置" aria-busy={busy === 'delete'} onClick={() => void deleteSpace()}><span aria-hidden="true" className="backup-save-label" data-visible={busy !== 'delete'}><Trash2 />删除配置</span><span aria-hidden="true" className="backup-save-progress" data-visible={busy === 'delete'}><Spinner />删除中…</span></Button>}</div>
   </form>}</TabsContent>
-  <AlertDialog open={confirmDelete} onOpenChange={open => { if (!busy) setConfirmDelete(open); }}><AlertDialogContent className="backup-settings-dialog"><AlertDialogHeader><AlertDialogTitle>删除备份配置？</AlertDialogTitle><AlertDialogDescription>此配置仍被视频或同步任务使用。删除后，关联视频将无法通过此配置同步。本机视频、远端文件和未同步文案会保留。</AlertDialogDescription></AlertDialogHeader>{actionError && <p role="alert" className="text-xs text-destructive">{actionError}</p>}<AlertDialogFooter><AlertDialogCancel disabled={disabled}>取消</AlertDialogCancel><AlertDialogAction disabled={disabled} onClick={event => { event.preventDefault(); void deleteSpace(true); }}>{busy === 'delete' && <Spinner aria-hidden="true" />}确认删除</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+  <AlertDialog open={active && confirmDelete} onOpenChange={open => { if (!busy) setConfirmDelete(open); }}><AlertDialogContent className="backup-settings-dialog"><AlertDialogHeader><AlertDialogTitle>删除备份配置？</AlertDialogTitle><AlertDialogDescription>此配置仍被视频或同步任务使用。删除后，关联视频将无法通过此配置同步。本机视频、远端文件和未同步文案会保留。</AlertDialogDescription></AlertDialogHeader>{actionError && <p role="alert" className="text-xs text-destructive">{actionError}</p>}<AlertDialogFooter><AlertDialogCancel disabled={disabled}>取消</AlertDialogCancel><AlertDialogAction disabled={disabled} onClick={event => { event.preventDefault(); void deleteSpace(true); }}>{busy === 'delete' && <Spinner aria-hidden="true" />}确认删除</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </Tabs></div></div></div>;
 }
 

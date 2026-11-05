@@ -84,7 +84,7 @@ export function RuntimeDependencies({ runtime }: { runtime: ReturnType<typeof us
       </Card>;
   };
   return <div className="flex min-w-0 flex-col gap-4" aria-busy={busy}>
-    {error && <Alert variant={error === 'CANCELED' ? 'default' : 'destructive'} role="alert"><AlertCircle aria-hidden="true" /><AlertDescription>{errorText(error)}</AlertDescription></Alert>}
+    {error && <Alert variant={error === 'CANCELED' ? 'default' : 'destructive'} role="alert"><AlertCircle aria-hidden="true" /><AlertDescription>{error === 'CANCELED' ? '依赖操作已取消' : errorText(error)}</AlertDescription></Alert>}
     {notice && <Alert role="status"><Check aria-hidden="true" /><AlertDescription>{notice}</AlertDescription></Alert>}
     {error === 'DEPENDENCY_BUSY' && <Button variant="outline" disabled={canceling} onClick={() => void cancel()}><Square aria-hidden="true" />取消正在进行的依赖操作</Button>}
     {status?.tools.filter(tool => tool.id !== 'fun-asr-nano').map(renderTool)}

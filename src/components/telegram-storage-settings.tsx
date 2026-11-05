@@ -154,7 +154,11 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
   }
   const id = status?.operation_id;
   const phase = status?.phase;
-  const visibleError = networkError(error) && status?.last_error ? status.last_error : error || status?.last_error;
+  // A ready account can be shared by background file/backup requests. Their
+  // failures belong to those tasks, not the currently open settings form.
+  const sharedError = status?.last_error;
+  const statusError = phase !== 'ready' || sharedError && (networkError(sharedError) || ['TELEGRAM_RECONNECTING', 'TELEGRAM_AUTH_REQUIRED', 'TELEGRAM_RELOGIN_REQUIRED'].includes(sharedError)) ? sharedError : null;
+  const visibleError = networkError(error) && statusError ? statusError : error || statusError;
   const reconnecting = visibleError === 'TELEGRAM_RECONNECTING';
   const errorFeedback = visibleError && visibleError !== space?.last_error && <p role={reconnecting ? 'status' : 'alert'} className={`flex items-center gap-2 text-sm ${reconnecting ? 'text-muted-foreground' : 'text-destructive'}`}>{reconnecting && <Spinner aria-hidden="true" />}{errorText(visibleError)}</p>;
   const channelTitle = space?.telegram_channel_title || channels.find(value => value.id === space?.telegram?.channel_id)?.title;

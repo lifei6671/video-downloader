@@ -1920,7 +1920,7 @@ impl Core {
     }
 
     pub fn set_max_downloads(self: &Arc<Self>, value: u8) -> Result<Settings> {
-        if !(1..=3).contains(&value) {
+        if !(1..=5).contains(&value) {
             bail!("CONFIG_INVALID");
         }
         let mut inner = self.inner.lock().unwrap();
@@ -4240,7 +4240,8 @@ mod tests {
     async fn fifo_completion_failure_and_queued_cancellation_release_slots() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        assert_eq!(app.settings().max_downloads, 2);
+        assert_eq!(app.settings().max_downloads, 3);
+        app.set_max_downloads(2).unwrap();
         let a = enqueue(&app, "8001").await;
         let b = enqueue(&app, "7002").await;
         started(root.path(), "8001").await;
@@ -4305,6 +4306,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn five_download_slots_dispatch_and_reduce_without_interrupting() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        assert_eq!(app.settings().max_downloads, 3);
+        app.set_max_downloads(5).unwrap();
+        let mut tasks = Vec::new();
+        for id in ["8151", "8152", "8153", "8154", "8155", "8156"] {
+            tasks.push(enqueue(&app, id).await);
+        }
+        for id in ["8151", "8152", "8153", "8154", "8155"] {
+            started(root.path(), id).await;
+        }
+        assert!(!root.path().join("started-8156").exists());
+        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 5);
+        app.set_max_downloads(4).unwrap();
+        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 5);
+        app.cancel(&tasks[0].id).await.unwrap();
+        assert_eq!(app.list().iter().find(|task| task.id == tasks[5].id).unwrap().status, Status::Queued);
+        app.cancel(&tasks[1].id).await.unwrap();
+        started(root.path(), "8156").await;
+        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 4);
+        app.set_max_downloads(5).unwrap();
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(app.settings().max_downloads, 5);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn changing_limit_preserves_running_tasks_and_persists_without_resetting_directory() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
@@ -4321,7 +4352,7 @@ mod tests {
             1
         );
         assert!(app.set_max_downloads(0).is_err());
-        assert!(app.set_max_downloads(4).is_err());
+        assert!(app.set_max_downloads(6).is_err());
         assert_eq!(app.settings().max_downloads, 1);
         app.set_max_downloads(3).unwrap();
         for id in ["8101", "8102", "8103"] {

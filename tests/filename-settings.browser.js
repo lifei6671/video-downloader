@@ -8,7 +8,7 @@ async page => {
   const path=async text=>page.waitForFunction(expected=>document.querySelector('[aria-labelledby="filename-preview-label"]')?.textContent===expected,text);
   const stored=()=>page.evaluate(()=>window.filenameSettingsTest.snapshot().filename_template);
   const open=async()=>{await page.getByRole('button',{name:'系统设置',exact:true}).click();await path('youtube/creator-sample-video.mp4')};
-  const fresh=async()=>{await page.goto(base+'/tests/fixtures/filename-settings.html');await page.evaluate(()=>sessionStorage.clear());await page.reload();await open()};
+  const fresh=async()=>{await page.goto(base+'/tests/fixtures/filename-settings.html?directory=/Users/test/Videos');await page.evaluate(()=>sessionStorage.clear());await page.reload();await open()};
   const saved=async()=>{await page.locator('[data-sonner-toast][data-type="success"]').last().waitFor();await page.waitForFunction(()=>document.querySelector('#filename-template')&&!Array.from(document.querySelectorAll('button')).some(b=>b.textContent==='保存中…'))};
   const cases=[];
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {

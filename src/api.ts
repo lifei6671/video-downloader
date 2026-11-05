@@ -219,7 +219,7 @@ const errors: Record<string, string> = {
   DEPENDENCY_CHECKSUM_MISMATCH: '下载文件校验不一致，未安装，请重新下载',
   DEPENDENCY_INVALID_ARCHIVE: '下载的压缩包无效，未安装，请重新下载',
   DEPENDENCY_VALIDATION_FAILED: '依赖无法正常执行或版本不符，未确认安装成功',
-  CANCELED: '依赖操作已取消',
+  CANCELED: '操作已取消',
   OPEN_LINK_FAILED: '无法打开系统浏览器，请稍后重试',
   UPDATE_TIMEOUT: '检查更新超时，请检查网络后重试',
   UPDATE_NETWORK_ERROR: '无法连接 GitHub，请检查网络或系统代理后重试',

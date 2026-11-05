@@ -451,6 +451,13 @@ impl TelegramSession {
             && matches!(control.view.last_error.as_deref(), Some("TELEGRAM_AUTH_REQUIRED" | "TELEGRAM_RELOGIN_REQUIRED"));
         if !*cancel.borrow() && !auth_lost { control.view.last_error = Some(message); }
     }
+    fn record_transfer_error(&self, cancel: &watch::Receiver<bool>, message: String) {
+        // Request errors are returned to the owning task. Only a connection
+        // failure is shared with account settings; auth loss has its own path.
+        if crate::telegram_reconnect::network_error(&message) {
+            self.record_error(cancel, message);
+        }
+    }
     fn set_view(
         &self,
         cancel: &watch::Receiver<bool>,
@@ -952,9 +959,7 @@ impl TelegramSession {
             if !registration.preserve_sender || reset_after_transport_error(&error.to_string()) {
                 connection.close().await;
             }
-            if !matches!(error.to_string().as_str(), "TELEGRAM_TRANSFER_CANCELED" | "TELEGRAM_NETWORK_CHANGED") {
-                self.record_error(&stop, error.to_string());
-            }
+            self.record_transfer_error(&stop, error.to_string());
         }
         if result.is_ok() { self.clear_network_error(id); }
         registration.completed = true;
@@ -1051,9 +1056,7 @@ impl TelegramSession {
                 self.authorization_failed(id).await;
             }
             journal.failure(&target.account_id, &message)?;
-            if !matches!(message.as_str(), "TELEGRAM_TRANSFER_CANCELED" | "TELEGRAM_NETWORK_CHANGED") {
-                self.record_error(&login_stop, message);
-            }
+            self.record_transfer_error(&login_stop, message);
         }
         if result.is_ok() { self.clear_network_error(id); }
         result
@@ -1634,14 +1637,17 @@ mod tests {
     async fn backup_business_errors_preserve_authorization_and_do_not_revive_signed_out_state() {
         let session = TelegramSession::default(); let cancel = session.start_operation().unwrap();
         session.set_view(&cancel, Phase::Ready, Some(Account{id:"123".into(),name:"test".into()}), None);
-        for code in ["TELEGRAM_MEDIA_MISSING", "TELEGRAM_CHANNEL_FORBIDDEN", "TELEGRAM_FILE_TOO_LARGE", "TELEGRAM_INDEX_INVALID"] {
-            session.record_error(&cancel, code.into());
+        for code in ["CANCELED", "TELEGRAM_TRANSFER_CANCELED", "TELEGRAM_NETWORK_CHANGED", "TELEGRAM_MEDIA_MISSING", "TELEGRAM_CHANNEL_FORBIDDEN", "TELEGRAM_FILE_TOO_LARGE", "TELEGRAM_INDEX_INVALID"] {
+            session.record_transfer_error(&cancel, code.into());
             assert!(matches!(session.status().phase, Phase::Ready));
             assert_eq!(session.status().account.unwrap().id, "123");
-            assert_eq!(session.status().last_error.as_deref(), Some(code));
+            assert!(session.status().last_error.is_none());
         }
+        session.record_transfer_error(&cancel, "TELEGRAM_CONNECTION_ERROR".into());
+        session.record_transfer_error(&cancel, "CANCELED".into());
+        assert_eq!(session.status().last_error.as_deref(), Some("TELEGRAM_CONNECTION_ERROR"));
         session.set_view(&cancel, Phase::SignedOut, None, Some("TELEGRAM_AUTH_REQUIRED".into()));
-        session.record_error(&cancel, "TELEGRAM_MEDIA_MISSING".into());
+        session.record_transfer_error(&cancel, "TELEGRAM_CONNECTION_ERROR".into());
         assert_eq!(session.status().last_error.as_deref(), Some("TELEGRAM_AUTH_REQUIRED"));
         assert!(matches!(session.status().phase, Phase::SignedOut));
         assert!(session.status().account.is_none());

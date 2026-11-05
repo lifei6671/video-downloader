@@ -79,7 +79,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         .iter()
         .any(|name| name == "max_downloads");
     if !has_limit {
-        db.execute_batch("ALTER TABLE app_settings ADD COLUMN max_downloads INTEGER NOT NULL DEFAULT 2 CHECK(max_downloads BETWEEN 1 AND 3);")
+        db.execute_batch("ALTER TABLE app_settings ADD COLUMN max_downloads INTEGER NOT NULL DEFAULT 3 CHECK(max_downloads BETWEEN 1 AND 5);")
             .context("DATABASE_ERROR")?;
     }
     let has_template = db.prepare("PRAGMA table_info(app_settings)")?
@@ -88,6 +88,27 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
     if !has_template {
         db.execute_batch("ALTER TABLE app_settings ADD COLUMN filename_template TEXT NOT NULL DEFAULT '{platform}/{user_name}-{content}'")
             .context("DATABASE_ERROR")?;
+    }
+    // Older installations have a DEFAULT 2 column with a 1..=3 CHECK.
+    // SQLite requires rebuilding the table to widen that constraint; retain
+    // the user's directory, naming rule and chosen limit in one transaction.
+    let limit_default: String = db.query_row(
+        "SELECT dflt_value FROM pragma_table_info('app_settings') WHERE name='max_downloads'",
+        [], |row| row.get(0),
+    ).context("DATABASE_ERROR")?;
+    if limit_default == "2" {
+        let transaction = db.unchecked_transaction().context("DATABASE_ERROR")?;
+        transaction.execute_batch(
+            "CREATE TABLE app_settings_expanded (
+               id INTEGER PRIMARY KEY CHECK(id=1), directory TEXT NOT NULL,
+               max_downloads INTEGER NOT NULL DEFAULT 3 CHECK(max_downloads BETWEEN 1 AND 5),
+               filename_template TEXT NOT NULL DEFAULT '{platform}/{user_name}-{content}');
+             INSERT INTO app_settings_expanded(id,directory,max_downloads,filename_template)
+               SELECT id,directory,max_downloads,filename_template FROM app_settings;
+             DROP TABLE app_settings;
+             ALTER TABLE app_settings_expanded RENAME TO app_settings;",
+        ).context("DATABASE_ERROR")?;
+        transaction.commit().context("DATABASE_ERROR")?;
     }
     let filename_template = match db.query_row("SELECT filename_template FROM app_settings WHERE id=1", [], |r| r.get::<_, String>(0)) {
         Ok(value) => { crate::naming::validate(&value).context("DATABASE_ERROR")?; value },
@@ -99,8 +120,8 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         [],
         |r| r.get::<_, u8>(0),
     ) {
-        Ok(value @ 1..=3) => value,
-        Err(rusqlite::Error::QueryReturnedNoRows) => 2,
+        Ok(value @ 1..=5) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => 3,
         _ => bail!("DATABASE_ERROR"),
     };
     let directory = db.query_row("SELECT directory FROM app_settings WHERE id=1", [], |r| {
@@ -622,7 +643,7 @@ mod tests {
             .contains("session=fixture"));
     }
     #[test]
-    fn existing_settings_migrate_with_default_two_and_preserve_directory() {
+    fn existing_settings_migrate_with_default_three_and_preserve_directory() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE app_settings(id INTEGER PRIMARY KEY, directory TEXT NOT NULL);
@@ -631,9 +652,44 @@ mod tests {
         .unwrap();
         let restored = load(&db, PathBuf::from("default")).unwrap();
         assert_eq!(restored.download_directory, PathBuf::from("old-downloads"));
-        assert_eq!(restored.max_downloads, 2);
+        assert_eq!(restored.max_downloads, 3);
         assert_eq!(restored.filename_template, crate::naming::DEFAULT_TEMPLATE);
-        assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 2);
+        assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 3);
+    }
+    #[test]
+    fn download_limit_migration_preserves_values_and_allows_five() {
+        for previous in 1..=3 {
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch(
+                "CREATE TABLE app_settings(id INTEGER PRIMARY KEY CHECK(id=1), directory TEXT NOT NULL,
+                   max_downloads INTEGER NOT NULL DEFAULT 2 CHECK(max_downloads BETWEEN 1 AND 3),
+                   filename_template TEXT NOT NULL DEFAULT '{platform}/{user_name}-{content}');",
+            ).unwrap();
+            db.execute("INSERT INTO app_settings VALUES(1,'saved-directory',?1,'custom/{link_id}')", [previous]).unwrap();
+            let restored = load(&db, PathBuf::from("unused")).unwrap();
+            assert_eq!(restored.max_downloads, previous);
+            assert_eq!(restored.download_directory, PathBuf::from("saved-directory"));
+            assert_eq!(restored.filename_template, "custom/{link_id}");
+            for value in [4, 5] {
+                db.execute("UPDATE app_settings SET max_downloads=?1", [value]).unwrap();
+                assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, value);
+            }
+            for invalid in [0, 6] {
+                assert!(db.execute("UPDATE app_settings SET max_downloads=?1", [invalid]).is_err());
+            }
+            db.execute("DELETE FROM app_settings", []).unwrap();
+            db.execute("INSERT INTO app_settings(id,directory) VALUES(1,'new-directory')", []).unwrap();
+            assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 3);
+        }
+    }
+    #[test]
+    fn fresh_download_limit_defaults_to_three_before_and_after_directory_save() {
+        let db = Connection::open_in_memory().unwrap();
+        assert_eq!(load(&db, PathBuf::from("default")).unwrap().max_downloads, 3);
+        db.execute("INSERT INTO app_settings(id,directory) VALUES(1,'saved-directory')", []).unwrap();
+        assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 3);
+        db.execute("UPDATE app_settings SET max_downloads=5", []).unwrap();
+        assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 5);
     }
     #[test]
     fn telegram_proxy_is_persisted_separately_and_excluded_from_engine_snapshot() {
