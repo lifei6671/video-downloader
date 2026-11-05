@@ -24,6 +24,7 @@ pub(crate) fn init_prepared(
     tx.execute_batch(include_str!("schema.sql"))?;
     tx.execute_batch(include_str!("sync-schema.sql"))?;
     tx.execute_batch(include_str!("telegram-schema.sql"))?;
+    tx.execute_batch(include_str!("operation-display.sql"))?;
     super::schema_migration::finish(&tx, &prepared)?;
     super::spaces::select_initial_default(&tx)?;
     tx.execute(

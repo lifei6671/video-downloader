@@ -209,6 +209,7 @@ pub(super) trait Transport: Send + Sync {
         random_id: i64,
         video: Option<super::provider::VideoAttributes>,
         io: &'a Io,
+        before_publish: &'a mut (dyn FnMut() -> Result<()> + Send),
     ) -> ProviderFuture<'a, Option<i32>>;
     fn inspect(&self, message: i32) -> ProviderFuture<'_, RemoteDocument>;
     fn inspect_document(&self, message:i32, document_id:i64) -> ProviderFuture<'_,RemoteDocument> {
@@ -616,9 +617,14 @@ pub(super) async fn upload_with_timing(
             }
             source_unchanged(&source, io).await?;
             io.check()?;
-            entry.state = SendState::Sending;
-            journal.save(&entry)?;
-            match timing.run("send", io.run(transport.send(uploaded, entry.envelope.caption()?, entry.random_id, video, io))).await
+            let caption = entry.envelope.caption()?;
+            let random_id = entry.random_id;
+            let mut before_publish = || {
+                io.check()?;
+                entry.state = SendState::Sending;
+                journal.save(&entry)
+            };
+            match timing.run("send", io.run(transport.send(uploaded, caption, random_id, video, io, &mut before_publish))).await
             {
                 Ok(message) => sent_message = message,
                 Err(error) => {

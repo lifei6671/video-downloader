@@ -78,20 +78,35 @@ pub fn operations(core: &Core) -> Result<Vec<Operation>> {
 }
 
 /// UI state only. Keep captured media and recovery evidence in the worker payload.
-pub fn operations_for_display(core: &Core) -> Result<Vec<Operation>> {
-    core.backup_db(|db| {
+pub fn operations_for_display(core: &Core, space: Option<&str>) -> Result<Vec<Operation>> {
+    core.backup_display_db(|db| {
         let mut query = db.prepare("SELECT operation_id,space_id,asset_id,kind,state,phase,
-            json_extract(payload_json,'$.completed_bytes','$.transfer_started','$.local_cleanup_done',
-                '$.archive_next','$.cleanup_dependency','$.cleanup_error','$.cleanup_blocked'),attempt,last_error
-            FROM backup_operations ORDER BY created_at DESC,rowid DESC")?;
-        let rows = query.query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get::<_,String>(6)?,row.get(7)?,row.get(8)?)))?;
+            summary_json,attempt,last_error,progress_bytes,progress_started
+            FROM backup_operation_display WHERE (?1 IS NULL OR space_id=?1)
+            ORDER BY created_at DESC,sequence DESC")?;
+        let rows = query.query_map([space], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get::<_,String>(6)?,row.get(7)?,row.get(8)?,row.get::<_,Option<i64>>(9)?,row.get::<_,Option<bool>>(10)?)))?;
         rows.map(|row| {
-            let (operation_id,space_id,asset_id,kind,state,phase,projection,attempt,last_error) = row?;
-            let values: [Value; 7] = serde_json::from_str(&projection)?;
+            let (operation_id,space_id,asset_id,kind,state,phase,projection,attempt,last_error,bytes,started) = row?;
+            let mut values: [Value; 7] = serde_json::from_str(&projection)?;
+            if let Some(bytes) = bytes { values[0] = bytes.into(); }
+            if let Some(started) = started { values[1] = started.into(); }
             let payload = ["completed_bytes","transfer_started","local_cleanup_done","archive_next","cleanup_dependency","cleanup_error","cleanup_blocked"]
                 .into_iter().zip(values).filter(|(_,value)| !value.is_null()).map(|(key,value)| (key.to_owned(),value)).collect();
             Ok(Operation { operation_id,space_id,asset_id,kind,state,phase,payload:Value::Object(payload),attempt,last_error })
         }).collect()
+    })
+}
+
+pub(super) fn active_restore(core: &Core, space: &str, asset: &str) -> Result<Option<Operation>> {
+    Ok(select_operations(core, "WHERE space_id=?1 AND asset_id=?2 AND kind='restore' AND state NOT IN ('completed','canceled') ORDER BY created_at DESC,rowid DESC LIMIT 1", [space, asset])?.pop())
+}
+
+pub(super) fn transfer_progress(core: &Core, id: &str, bytes: Option<u64>, started: bool) -> Result<()> {
+    core.backup_db(|db| {
+        db.execute("UPDATE backup_operation_display SET progress_bytes=COALESCE(?2,progress_bytes),progress_started=CASE WHEN ?3 THEN 1 ELSE progress_started END
+            WHERE operation_id=?1 AND ((?2 IS NOT NULL AND progress_bytes IS NOT ?2) OR (?3 AND progress_started IS NOT 1))",
+            rusqlite::params![id,bytes.map(i64::try_from).transpose()?,started])?;
+        Ok(())
     })
 }
 
@@ -233,6 +248,82 @@ mod display_tests {
     use serde_json::json;
 
     #[test]
+    fn large_history_projection_benchmark_and_cancel_does_not_wait_for_reader() {
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::open(&root.path().join("app.sqlite"),root.path().join("downloads"),"unused".into(),vec![], |_| {}).unwrap();
+        let payload = json!({"capture":{"cover":"x".repeat(128*1024)},"completed_bytes":0}).to_string();
+        core.backup_db(|db| { db.execute("INSERT INTO backup_spaces VALUES('space','library','','','','',0)", [])?; Ok(()) }).unwrap();
+        let mut previous = 0;
+        for count in [500, 2000, 5000] {
+            core.backup_db(|db| {
+                let tx = db.unchecked_transaction()?;
+                for i in previous..count {
+                    tx.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES(?1,'space','upload','completed','completed',?2)",rusqlite::params![i.to_string(),payload])?;
+                }
+                tx.commit()?; Ok(())
+            }).unwrap();
+            let start = std::time::Instant::now();
+            core.backup_db(|db| {
+                let mut q = db.prepare("SELECT json_extract(payload_json,'$.completed_bytes','$.transfer_started','$.local_cleanup_done','$.archive_next','$.cleanup_dependency','$.cleanup_error','$.cleanup_blocked') FROM backup_operations")?;
+                let values = q.query_map([], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                assert_eq!(values.len(),count); Ok(())
+            }).unwrap();
+            let old = start.elapsed();
+            let start = std::time::Instant::now();
+            assert_eq!(operations_for_display(&core,Some("space")).unwrap().len(),count);
+            eprintln!("operation_history count={count} payload_bytes=131072 old_locked_json_ms={:.3} projection_ms={:.3}",old.as_secs_f64()*1000.0,start.elapsed().as_secs_f64()*1000.0);
+            previous = count;
+        }
+        core.backup_db(|db| { db.execute("UPDATE backup_operations SET state='running' WHERE operation_id='0'", [])?; Ok(()) }).unwrap();
+        transfer_progress(&core,"0",Some(100),true).unwrap();
+        let changed = core.backup_db(|db| Ok(db.total_changes())).unwrap();
+        transfer_progress(&core,"0",Some(100),true).unwrap();
+        assert_eq!(changed,core.backup_db(|db| Ok(db.total_changes())).unwrap());
+        assert_eq!(operation(&core,"0").unwrap().payload.to_string(),payload);
+        let (locked_tx,locked_rx) = std::sync::mpsc::channel();
+        let (release_tx,release_rx) = std::sync::mpsc::channel();
+        let reader = core.clone();
+        let worker = std::thread::spawn(move || reader.backup_display_db(|db| {
+            db.query_row("SELECT count(*) FROM backup_operation_display",[],|r|r.get::<_,i64>(0))?;
+            locked_tx.send(()).unwrap(); release_rx.recv().unwrap(); Ok(())
+        }).unwrap());
+        locked_rx.recv().unwrap();
+        let (done_tx,done_rx) = std::sync::mpsc::channel();
+        let cancel_core = core.clone();
+        let cancel = std::thread::spawn(move || { done_tx.send(super::cancel(&cancel_core,"0")).unwrap(); });
+        let result = done_rx.recv_timeout(std::time::Duration::from_millis(500));
+        release_tx.send(()).unwrap();
+        worker.join().unwrap(); cancel.join().unwrap();
+        result.expect("cancel waited for the display reader").unwrap();
+    }
+
+    #[test]
+    fn version_seven_backfill_and_projection_updates_are_atomic_and_scoped() {
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::open(&root.path().join("app.sqlite"),root.path().join("downloads"),"unused".into(),vec![], |_| {}).unwrap();
+        core.backup_db(|db| {
+            db.execute_batch("DROP TRIGGER backup_display_insert; DROP TRIGGER backup_display_state; DROP TRIGGER backup_display_payload; DROP TRIGGER backup_display_delete; DROP TABLE backup_operation_display;
+                UPDATE backup_schema SET version=7;
+                INSERT INTO backup_spaces VALUES('a','a','','','','',0),('b','b','','','','',0);
+                INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES('a','a','upload','blocked','captured','{\"capture\":\"keep\",\"completed_bytes\":12}'),('b','b','delete','completed','completed','{}');")?;
+            super::super::repository::init(db)?;
+            assert_eq!(db.query_row("SELECT version FROM backup_schema",[],|r|r.get::<_,i64>(0))?,8);
+            Ok(())
+        }).unwrap();
+        let a = operations_for_display(&core,Some("a")).unwrap();
+        assert_eq!(a.len(),1); assert_eq!(a[0].payload["completed_bytes"],12);
+        assert_eq!(operation(&core,"a").unwrap().payload["capture"],"keep");
+        core.backup_db(|db| {
+            db.execute("UPDATE backup_operations SET state='canceled',payload_json=json_set(payload_json,'$.cleanup_error','NETWORK') WHERE operation_id='a'",[])?;
+            Ok(())
+        }).unwrap();
+        let a = operations_for_display(&core,Some("a")).unwrap();
+        assert_eq!(a[0].state,"canceled"); assert_eq!(a[0].payload["cleanup_error"],"NETWORK");
+        core.backup_db(|db| { db.execute("DELETE FROM backup_operations WHERE operation_id='a'",[])?; Ok(()) }).unwrap();
+        assert!(operations_for_display(&core,Some("a")).unwrap().is_empty());
+    }
+
+    #[test]
     fn display_projection_keeps_ui_state_and_leaves_recovery_payload_intact() {
         let root = tempfile::tempdir().unwrap();
         let core = Core::open(&root.path().join("app.sqlite"),root.path().join("downloads"),"unused".into(),vec![], |_| {}).unwrap();
@@ -247,7 +338,7 @@ mod display_tests {
                       ('new','space','delete','completed','completed','{}',0,NULL,1)", [payload.to_string()])?;
             Ok(())
         }).unwrap();
-        let display = operations_for_display(&core).unwrap();
+        let display = operations_for_display(&core, Some("space")).unwrap();
         assert_eq!(display.iter().map(|op| op.operation_id.as_str()).collect::<Vec<_>>(),vec!["new","old"]);
         assert_eq!(display[0].payload,json!({}));
         assert_eq!(display[1].payload,state);

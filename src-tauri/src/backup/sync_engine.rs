@@ -784,6 +784,9 @@ impl SyncEngine {
         let check_core = core.clone();
         let check_scope = scope.clone();
         let check_id = id.clone();
+        let confirmed_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let checkpoint_bytes = confirmed_bytes.clone();
+        let is_video = kind == "video";
         let field = format!("resume_{kind}");
         let persisted = payload
             .get(&field)
@@ -794,6 +797,11 @@ impl SyncEngine {
             check: Box::new(move || check_operation(&check_core, &check_scope, &check_id)),
             checkpoint: Box::new(move |state| {
                 check_operation(&core, &scope, &id)?;
+                if is_video {
+                    let confirmed = serde_json::from_str::<Value>(&state.value).ok()
+                        .and_then(|value| value["completed_bytes"].as_u64()).unwrap_or(0);
+                    checkpoint_bytes.store(confirmed, std::sync::atomic::Ordering::Relaxed);
+                }
                 core.backup_db(|db| {
                     let raw: String = db.query_row(
                         "SELECT payload_json FROM backup_operations WHERE operation_id=?",
@@ -829,23 +837,22 @@ impl SyncEngine {
             persisted,
         );
         tokio::pin!(upload);
-        let mut timer = tokio::time::interval(std::time::Duration::from_millis(200));
+        // The queue independently checks cancellation every 100 ms. UI polling is
+        // once per second; changed progress needs only a small durable row update.
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut previous = None;
         loop {
             tokio::select! {
                 result=&mut upload=>return result,
                 _=timer.tick()=>{
                     self.check(operation)?;
-                    self.core.backup_db(|db|{
-                        let raw:String=db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id=?",[operation],|r|r.get(0))?;
-                        let mut value:Value=serde_json::from_str(&raw)?;
-                        let transferred = progress.load(std::sync::atomic::Ordering::Relaxed);
-                        if transferred > 0 { value["transfer_started"] = json!(true); }
-                        if kind=="video" {
-                            let confirmed=value["resume_video"]["value"].as_str().and_then(|raw|serde_json::from_str::<Value>(raw).ok()).and_then(|v|v["completed_bytes"].as_u64()).unwrap_or(0);
-                            value["completed_bytes"]=json!((confirmed+transferred).min(bytes));
-                        }
-                        db.execute("UPDATE backup_operations SET payload_json=?2 WHERE operation_id=?1",params![operation,value.to_string()])?;Ok(())
-                    })?;
+                    let transferred = progress.load(std::sync::atomic::Ordering::Relaxed);
+                    let confirmed = confirmed_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                    let current = (is_video.then_some(confirmed.saturating_add(transferred).min(bytes)), transferred > 0 || confirmed > 0);
+                    if previous != Some(current) {
+                        scheduler::transfer_progress(&self.core, operation, current.0, current.1)?;
+                        previous = Some(current);
+                    }
                 }
             }
         }

@@ -229,12 +229,7 @@ pub async fn ensure(
         return Ok(path);
     }
     let scope = provider.scope();
-    let existing = scheduler::operations(core)?.into_iter().find(|o| {
-        o.space_id == scope.space_id
-            && o.asset_id.as_deref() == Some(local)
-            && o.kind == "restore"
-            && !matches!(o.state.as_str(), "completed" | "canceled")
-    });
+    let existing = scheduler::active_restore(core, &scope.space_id, local)?;
     let (operation, mut payload) = existing
         .map(|o| (o.operation_id, o.payload))
         .unwrap_or_else(|| (uuid::Uuid::new_v4().to_string(), json!({"scope":scope})));

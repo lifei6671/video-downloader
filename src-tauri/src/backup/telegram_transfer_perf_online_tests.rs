@@ -108,8 +108,9 @@ impl Transport for Measured<'_> {
         random: i64,
         video: Option<VideoAttributes>,
         io: &'a Io,
+        before_publish: &'a mut (dyn FnMut() -> Result<()> + Send),
     ) -> ProviderFuture<'a, Option<i32>> {
-        self.inner.send(uploaded, caption, random, video, io)
+        self.inner.send(uploaded, caption, random, video, io, before_publish)
     }
     fn inspect(&self, id: i32) -> ProviderFuture<'_, RemoteDocument> {
         self.inner.inspect(id)

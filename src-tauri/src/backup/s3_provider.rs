@@ -1326,9 +1326,13 @@ impl<S: ObjectStore> S3Provider<S> {
                     }
                     state.completed_bytes = parts.iter().map(|p| p.bytes).sum();
                     checkpoint(&state)?;
-                    let etag = self
-                        .store
-                        .write(Write::UploadFilePart {
+                    let mut attempt = 0;
+                    let etag = loop {
+                        check()?;
+                        if let Some(progress) = &progress {
+                            progress.store(0, Ordering::Relaxed);
+                        }
+                        let result = self.store.write(Write::UploadFilePart {
                             key: key.clone(),
                             upload_id: upload_id.clone(),
                             part: number as u32,
@@ -1337,7 +1341,22 @@ impl<S: ObjectStore> S3Provider<S> {
                             bytes,
                             progress: progress.clone(),
                         })
-                        .await?;
+                        .await;
+                        match result {
+                            Ok(etag) => break etag,
+                            Err(error) if attempt < 2 && matches!(error.to_string().as_str(),
+                                "BACKUP_NETWORK_ERROR" | "BACKUP_SERVICE_UNAVAILABLE" | "BACKUP_RATE_LIMITED") => {
+                                // Same part number and byte range replace the uncertain part.
+                                // Never retry Create/Complete or conditional writes this way.
+                                attempt += 1;
+                                for _ in 0..(10 * attempt) {
+                                    check()?;
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                }
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    };
                     parts.retain(|p| p.number != number as u32);
                     parts.push(super::store::Part {
                         number: number as u32,

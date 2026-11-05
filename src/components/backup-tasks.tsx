@@ -72,7 +72,7 @@ export function useBackupTasks() {
   const reload = useCallback(async () => {
     if (!settings) return;
     const sequence = ++reloadSequence.current;
-    const [list, ops, active] = await Promise.all([api.backupAssets(settings.space_id), api.backupOperations(),
+    const [list, ops, active] = await Promise.all([api.backupAssets(settings.space_id), api.backupOperations(settings.space_id),
       settings.connection_pending || !settings.enabled ? api.backupSettings() : Promise.resolve(settings)]);
     if (live.current && currentSpace.current === settings.space_id && sequence === reloadSequence.current) {
       if (active?.space_id === settings.space_id && (active.enabled !== settings.enabled || active.connection_pending !== settings.connection_pending)) setSettings(active);

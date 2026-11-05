@@ -115,6 +115,9 @@ struct State {
     break_stream: Option<usize>,
     corrupt_stream: bool,
     fail_after: Option<&'static str>,
+    fail_after_code: Option<&'static str>,
+    fail_part_once: Option<u32>,
+    fail_part_remaining: Option<(u32, u8)>,
     fail_delete: bool,
     fail_record: bool,
     stop_after_tombstone: Option<(std::sync::Weak<Core>, String, bool)>,
@@ -391,6 +394,16 @@ impl ObjectStore for Memory {
                     ..
                 } => {
                     s.part_writes.push((upload_id.clone(), part));
+                    if let Some((number, remaining)) = &mut s.fail_part_remaining {
+                        if *number == part && *remaining > 0 {
+                            *remaining -= 1;
+                            bail!("BACKUP_SERVICE_UNAVAILABLE");
+                        }
+                    }
+                    if s.fail_part_once == Some(part) {
+                        s.fail_part_once = None;
+                        bail!("BACKUP_SERVICE_UNAVAILABLE");
+                    }
                     let mut f = std::fs::File::open(path)?;
                     f.seek(std::io::SeekFrom::Start(offset))?;
                     let mut b = Vec::new();
@@ -442,7 +455,7 @@ impl ObjectStore for Memory {
             };
             if s.fail_after == Some(kind) {
                 s.fail_after = None;
-                bail!("BACKUP_NETWORK_ERROR");
+                bail!(s.fail_after_code.take().unwrap_or("BACKUP_NETWORK_ERROR"));
             }
             Ok(etag)
         })

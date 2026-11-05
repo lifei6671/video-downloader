@@ -129,6 +129,7 @@ pub struct Sender<T: Transport, M: Mtp> {
 }
 
 struct Request {
+    queued_at: Instant,
     body: Vec<u8>,
     media: bool,
     state: RequestState,
@@ -136,6 +137,9 @@ struct Request {
 }
 
 impl Request {
+    fn response_deadline(&self) -> Option<Instant> {
+        (!self.result.is_closed()).then(|| self.queued_at + Duration::from_secs(if self.is_file_transfer() { 24 } else { 55 }))
+    }
     fn is_file_transfer(&self) -> bool {
         if self.media { return true; }
         let id = u32::from_le_bytes(self.body[..4].try_into().expect("request constructor"));
@@ -228,6 +232,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         );
 
         self.requests.push(Request {
+            queued_at: Instant::now(),
             body,
             media: false,
             state: RequestState::NotSerialized,
@@ -276,8 +281,18 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
         let (mut reader, mut writer) = self.stream.split();
         let sleep = sleep_until(self.next_ping);
+        // A live TCP socket is not proof that Telegram is answering RPCs.
+        // File callers time out after 25s; retire this exact sender first so
+        // their retry cannot reuse it. Canceled callers never condemn a pool.
+        let response_deadline = self.requests.iter().filter_map(Request::response_deadline)
+            .min();
 
         let res = tokio::select! {
+            _ = sleep_until(response_deadline.unwrap_or(self.next_ping)), if response_deadline.is_some() => {
+                if self.requests.iter().filter_map(Request::response_deadline).any(|deadline| deadline <= Instant::now()) {
+                    Err(ReadError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "RPC response timeout")))
+                } else { Ok(Vec::new()) }
+            }
             _ = tokio::time::sleep(Duration::from_millis(100)), if has_file_requests => {
                 discard_abandoned_file_requests(&mut self.requests);
                 Ok(Vec::new())
@@ -748,10 +763,10 @@ mod cancellation_tests {
         let (ping_tx, ping_rx) = oneshot::channel();
         let file = tl::functions::upload::SaveFilePart { file_id: 1, file_part: 0, bytes: vec![1; 1024] }.to_bytes();
         let mut requests = vec![
-            Request { media: false, body: file.clone(), state: RequestState::NotSerialized, result: file_tx },
-            Request { media: false, body: file, state: RequestState::NotSerialized, result: live_tx },
-            Request { media: false, body: tl::functions::help::GetConfig {}.to_bytes(), state: RequestState::NotSerialized, result: control_tx },
-            Request { media: false, body: tl::functions::PingDelayDisconnect { ping_id: 1, disconnect_delay: 60 }.to_bytes(), state: RequestState::NotSerialized, result: ping_tx },
+            Request { queued_at: Instant::now(), media: false, body: file.clone(), state: RequestState::NotSerialized, result: file_tx },
+            Request { queued_at: Instant::now(), media: false, body: file, state: RequestState::NotSerialized, result: live_tx },
+            Request { queued_at: Instant::now(), media: false, body: tl::functions::help::GetConfig {}.to_bytes(), state: RequestState::NotSerialized, result: control_tx },
+            Request { queued_at: Instant::now(), media: false, body: tl::functions::PingDelayDisconnect { ping_id: 1, disconnect_delay: 60 }.to_bytes(), state: RequestState::NotSerialized, result: ping_tx },
         ];
         drop(file_rx);
         drop(control_rx);

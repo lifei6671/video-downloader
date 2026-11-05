@@ -768,10 +768,11 @@ impl Transport for GrammersTransport {
         random_id: i64,
         video: Option<VideoAttributes>,
         io: &'a Io,
+        before_publish: &'a mut (dyn FnMut() -> Result<()> + Send),
     ) -> ProviderFuture<'a, Option<i32>> {
         Box::pin(async move {
             let envelope:Envelope=serde_json::from_str(&caption).context("BACKUP_INVALID_MEDIA")?;
-            if envelope.kind!="library" {return self.send_bundle(uploaded,envelope,random_id,video,io).await;}
+            if envelope.kind!="library" {return self.send_bundle(uploaded,envelope,random_id,video,io,before_publish).await;}
             let uploaded = uploaded.file;
             let name = match &uploaded.raw {
                 tl::enums::InputFile::File(f) => f.name.clone(),
@@ -792,6 +793,7 @@ impl Transport for GrammersTransport {
                 video_timestamp: None,
                 ttl_seconds: None,
             };
+            before_publish()?;
             let updates = self
                 .client
                 .invoke(&tl::functions::messages::SendMedia {

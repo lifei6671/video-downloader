@@ -444,7 +444,7 @@ impl SenderPoolRunner {
                 let os_error = match &result { Err(ReadError::Io(error)) => error.raw_os_error().unwrap_or(0), _ => 0 };
                 let status = match &result { Err(ReadError::Transport(transport::Error::BadStatus { status })) => *status, _ => 0 };
                 connection_log(self.pool_id, dc, id, if media {"media"} else {"control"}, "retired", reason, format_args!("requests={} error_kind={error_kind} os_error={os_error} transport_status={status}", connection.uses));
-                if media && (rejected_key || matches!(reason, "connect_failed" | "connect_timeout") || self.media_recovery.get(&dc).is_some_and(|r| r.probing == Some(id))) {
+                if media && (rejected_key || matches!(reason, "connect_failed" | "connect_timeout" | "response_timeout") || self.media_recovery.get(&dc).is_some_and(|r| r.probing == Some(id))) {
                     self.defer_media(dc, reason);
                 }
             }
@@ -991,7 +991,8 @@ async fn run_sender(
                     if home_sender {
                         let _ = updates.try_send(UpdatesLike::ConnectionClosed);
                     }
-                    break (Err(err), "transport_error")
+                    let reason = if matches!(&err, ReadError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut) { "response_timeout" } else { "transport_error" };
+                    break (Err(err), reason)
                 },
             },
             rpc = rpc_rx.recv() => match rpc {

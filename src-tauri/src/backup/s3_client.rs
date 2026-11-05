@@ -419,6 +419,8 @@ impl ObjectStore for S3Store {
                         .content_length(i64::try_from(bytes)?)
                         .metadata("sha256", sha256)
                         .body(body)
+                        .customize()
+                        .config_override(upload_config(bytes))
                         .send()
                         .await
                         .map_err(error)?
@@ -498,6 +500,8 @@ impl ObjectStore for S3Store {
                         .part_number(i32::try_from(part)?)
                         .content_length(i64::try_from(bytes)?)
                         .body(body)
+                        .customize()
+                        .config_override(upload_config(bytes))
                         .send()
                         .await
                         .map_err(error)?
@@ -581,6 +585,21 @@ mod tests {
     }
 }
 
+fn upload_config(bytes: u64) -> aws_sdk_s3::config::Builder {
+    // Read timeout starts before the request body is sent. Budget for 64 KiB/s
+    // plus connection/response overhead; SDK stalled-stream protection still
+    // terminates a body that stops making progress, independently of its size.
+    let budget = Duration::from_secs(bytes.div_ceil(64 * 1024).saturating_add(60));
+    aws_sdk_s3::config::Builder::new()
+        .timeout_config(aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(budget)
+            .operation_timeout(budget)
+            .build())
+        .stalled_stream_protection(aws_sdk_s3::config::StalledStreamProtectionConfig::enabled()
+            .grace_period(Duration::from_secs(20)).build())
+}
+
 fn observed_body(body: ByteStream, progress: Option<Arc<AtomicU64>>) -> ByteStream {
     let Some(progress) = progress else {
         return body;
@@ -609,6 +628,73 @@ mod progress_tests {
         let bytes = body.collect().await.unwrap().into_bytes();
         assert_eq!(bytes.as_ref(), vec![7u8; 1234]);
         assert_eq!(progress.load(Ordering::Relaxed), 1234);
+    }
+}
+
+#[cfg(test)]
+mod upload_timeout_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn fixture() -> (S3Store, tokio::net::TcpListener, tempfile::TempDir, std::path::PathBuf) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest()).region(Region::new("us-east-1"))
+            .endpoint_url(format!("http://{}", listener.local_addr().unwrap())).force_path_style(true)
+            .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(1))
+            .timeout_config(aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                .read_timeout(Duration::from_secs(30)).operation_timeout(Duration::from_secs(180)).build())
+            .build();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("upload.mp4");
+        std::fs::File::create(&path).unwrap().set_len(128 * 1024 * 1024).unwrap();
+        (S3Store { client: aws_sdk_s3::Client::from_conf(config), bucket: "test".into() }, listener, root, path)
+    }
+
+    #[tokio::test]
+    async fn progressing_upload_can_receive_its_response_after_thirty_seconds() {
+        let (store, listener, _root, path) = fixture().await;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); }
+            let headers = String::from_utf8(headers).unwrap();
+            let len: usize = headers.lines().find_map(|s| s.to_ascii_lowercase().strip_prefix("content-length:").map(|s| s.trim().parse().unwrap())).unwrap();
+            let mut remaining = len;
+            let mut buffer = vec![0; 256 * 1024];
+            while remaining > 0 {
+                let n = remaining.min(buffer.len());
+                socket.read_exact(&mut buffer[..n]).await.unwrap();
+                remaining -= n;
+                tokio::time::sleep(Duration::from_millis(65)).await;
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nETag: \"ok\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        });
+        let start = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(60), store.write(Write::UploadFilePart {
+            key: "video.mp4".into(), upload_id: "upload".into(), part: 1, path,
+            offset: 0, bytes: 128 * 1024 * 1024, progress: None,
+        })).await.unwrap().unwrap();
+        assert_eq!(result, "\"ok\"");
+        assert!(start.elapsed() > Duration::from_secs(30));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_upload_times_out_without_waiting_for_size_budget() {
+        let (store, listener, _root, path) = fixture().await;
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let result = tokio::time::timeout(Duration::from_secs(45), store.write(Write::PutFile {
+            key: "video.mp4".into(), path, bytes: 128 * 1024 * 1024, sha256: "a".repeat(64), progress: None,
+        })).await;
+        server.abort();
+        assert_eq!(result.unwrap().unwrap_err().to_string(), "BACKUP_NETWORK_ERROR");
     }
 }
 

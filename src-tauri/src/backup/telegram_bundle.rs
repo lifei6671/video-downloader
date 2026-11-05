@@ -476,7 +476,12 @@ impl GrammersTransport {
         Ok(found)
     }
     async fn edit_bundle(&self, id: i32, loaded: &Loaded) -> Result<()> {
+        self.edit_bundle_before_publish(id, loaded, &mut || Ok(())).await
+    }
+    async fn edit_bundle_before_publish(&self, id: i32, loaded: &Loaded, before_publish: &mut (dyn FnMut() -> Result<()> + Send)) -> Result<()> {
         if loaded.bundle.legacy { bail!("BACKUP_LEGACY_READ_ONLY"); }
+        let rich_message = Some(rich_input(loaded)?);
+        before_publish()?;
         self.client
             .invoke(&tl::functions::messages::EditMessage {
                 no_webpage: true,
@@ -490,7 +495,7 @@ impl GrammersTransport {
                 schedule_date: None,
                 schedule_repeat_period: None,
                 quick_reply_shortcut_id: None,
-                rich_message: Some(rich_input(loaded)?),
+                rich_message,
             })
             .await
             .map_err(rpc_error)?;
@@ -503,9 +508,10 @@ impl GrammersTransport {
         random_id: i64,
         video: Option<VideoAttributes>,
         io: &Io,
+        before_publish: &mut (dyn FnMut() -> Result<()> + Send),
     ) -> Result<Option<i32>> {
-        let existing = if envelope.kind == "event"
-            && self.new_delete_operation.as_deref() == Some(&envelope.operation_id)
+        let existing = if self.preferred_message.is_some() || (envelope.kind == "event"
+            && self.new_delete_operation.as_deref() == Some(&envelope.operation_id))
         {
             None
         } else {
@@ -604,9 +610,11 @@ impl GrammersTransport {
             loaded.documents.push(document);
         }
         if let Some(id) = id {
-            self.edit_bundle(id, &loaded).await?;
+            self.edit_bundle_before_publish(id, &loaded, before_publish).await?;
             Ok(Some(id))
         } else {
+            let rich_message = Some(rich_input(&loaded)?);
+            before_publish()?;
             let updates = self
                 .client
                 .invoke(&tl::functions::messages::SendMessage {
@@ -631,7 +639,7 @@ impl GrammersTransport {
                     effect: None,
                     allow_paid_stars: None,
                     suggested_post: None,
-                    rich_message: Some(rich_input(&loaded)?),
+                    rich_message,
                 })
                 .await
                 .map_err(rpc_error)?;

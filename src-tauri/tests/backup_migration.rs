@@ -16,14 +16,14 @@ fn v6_deletion_hides_are_scoped_atomically_without_losing_explicit_hides() {
         INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES('delete','space','deleted','delete','completed','completed','{\"local_cleanup_done\":true}');
         DROP TABLE asset_deletion_hidden_history;
         UPDATE backup_schema SET version=6;
-        CREATE TRIGGER reject_v7 BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=7 BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+        CREATE TRIGGER reject_v8 BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=8 BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
     assert!(repository::init(&db).is_err());
     assert_eq!(version(&db), 6);
     assert_eq!(db.query_row("SELECT count(*) FROM asset_hidden_history", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
     assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='asset_deletion_hidden_history'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    db.execute("DROP TRIGGER reject_v7", []).unwrap();
+    db.execute("DROP TRIGGER reject_v8", []).unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 7);
+    assert_eq!(version(&db), 8);
     assert_eq!(db.query_row("SELECT asset_id FROM asset_hidden_history", [], |r| r.get::<_, String>(0)).unwrap(), "hidden");
     assert_eq!(db.query_row("SELECT space_id,asset_id FROM asset_deletion_hidden_history", [], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?))).unwrap(), ("space".into(),"deleted".into()));
     // Explicitly hiding a remaining membership after migration must survive
@@ -112,7 +112,7 @@ fn v5_migration_preserves_wal_snapshot_receipts_and_blocks_automatic_work() {
     seed(&db);
     db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES('active','space','probe','running','unknown','{\"nonce\":456}')", []).unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 7);
+    assert_eq!(version(&db), 8);
     assert_eq!(columns(&db, "backup_spaces"), 7);
     assert_eq!(columns(&db, "asset_remote_objects"), 4);
     assert_eq!(columns(&db, "backup_provider_config"), 7);
@@ -245,7 +245,7 @@ fn failed_migration_rolls_back_every_table_and_keeps_a_complete_backup() {
     let root = tempfile::tempdir().unwrap();
     let db = Connection::open(root.path().join("user.sqlite")).unwrap();
     seed(&db);
-    db.execute_batch("CREATE TRIGGER reject_upgrade BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=7 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
+    db.execute_batch("CREATE TRIGGER reject_upgrade BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=8 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
     assert!(repository::init(&db)
         .unwrap_err()
         .to_string()
@@ -287,7 +287,7 @@ fn current_v1_upgrades_once_without_pausing_current_format_work() {
         .unwrap();
     let device = repository::device_id(&db).unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 7);
+    assert_eq!(version(&db), 8);
     assert_eq!(repository::device_id(&db).unwrap(), device);
     assert_eq!(
         db.query_row("SELECT enabled FROM backup_sync_preference", [], |r| r
@@ -372,7 +372,7 @@ fn incompatible_protocol_layout_and_pending_remote_upgrade_are_not_relabelled() 
 fn fresh_schema_and_unknown_version_have_explicit_boundaries() {
     let db = Connection::open_in_memory().unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 7);
+    assert_eq!(version(&db), 8);
     let device = repository::device_id(&db).unwrap();
     db.execute("UPDATE backup_schema SET version=99", [])
         .unwrap();
@@ -403,7 +403,7 @@ fn migrate_authorized_database_copy() {
     let db = Connection::open(path).unwrap();
     db.pragma_update(None, "foreign_keys", true).unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 7);
+    assert_eq!(version(&db), 8);
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),

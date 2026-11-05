@@ -173,7 +173,7 @@ async fn real_r2_current_upload_readback_fresh_database() -> Result<()> {
             fresh.backup_db(|db| {
                 let columns=|table:&str| -> Result<usize> {Ok(db.prepare(&format!("PRAGMA table_info({table})"))?.query_map([],|_|Ok(()))?.collect::<rusqlite::Result<Vec<_>>>()?.len())};
                 anyhow::ensure!(columns("backup_spaces")?==7 && columns("asset_remote_objects")?==4,"SCHEMA_NOT_CURRENT");
-                anyhow::ensure!(db.query_row("SELECT version FROM backup_schema WHERE id=1",[],|r|r.get::<_,i64>(0))?==7);
+                anyhow::ensure!(db.query_row("SELECT version FROM backup_schema WHERE id=1",[],|r|r.get::<_,i64>(0))?==8);
                 Ok(())
             })?;
             let restored=sync_read::ensure(&fresh,reader.as_ref(),&local.asset_id).await?;
@@ -182,7 +182,7 @@ async fn real_r2_current_upload_readback_fresh_database() -> Result<()> {
             anyhow::ensure!(streams==1 && sync_read::ensure(&fresh,reader.as_ref(),&local.asset_id).await?==restored && audit.lock().unwrap().video_streams==streams,"LOCAL_RESTORE_NOT_REUSED");
             anyhow::ensure!(audit.lock().unwrap().calls.get("WRITE").copied().unwrap_or(0)==0,"REBUILD_WROTE_REMOTE_OBJECTS");
             let (video_writes, uploaded_parts) = {let audit=source_audit.lock().unwrap();(audit.video_writes,audit.uploaded_parts.clone())};
-            Ok::<_,anyhow::Error>(json!({"result":"PASSED","video_bytes":bytes,"video_sha256":hash,"cover_bytes":cover.len(),"cover_sha256":tag(&cover),"three_current_shallow_keys":true,"title_author_profile_transcript_restored":true,"fresh_database_created":true,"fresh_device_identity":true,"schema_version":6,"space_columns":7,"remote_state_columns":4,"metadata_reads_video_streams":0,"on_demand_video_streams":streams,"local_video_reused":true,"rebuild_remote_writes":0,"source_video_upload_calls":video_writes,"uploaded_parts":uploaded_parts}))
+            Ok::<_,anyhow::Error>(json!({"result":"PASSED","video_bytes":bytes,"video_sha256":hash,"cover_bytes":cover.len(),"cover_sha256":tag(&cover),"three_current_shallow_keys":true,"title_author_profile_transcript_restored":true,"fresh_database_created":true,"fresh_device_identity":true,"schema_version":8,"space_columns":7,"remote_state_columns":4,"metadata_reads_video_streams":0,"on_demand_video_streams":streams,"local_video_reused":true,"rebuild_remote_writes":0,"source_video_upload_calls":video_writes,"uploaded_parts":uploaded_parts}))
         }.await;
         fresh.shutdown().await;
         rebuilt

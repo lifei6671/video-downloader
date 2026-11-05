@@ -8,6 +8,21 @@ use std::{
 
 struct TestJournal(Mutex<Connection>);
 #[tokio::test]
+async fn preparation_failure_keeps_prepared_and_retry_publishes_once() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let net = Mock::new();
+    let source = source(root.path(), "video", b"original bytes");
+    let (_cancel, _stop, io) = io();
+    net.prepare_failure.store(true, Ordering::SeqCst);
+    assert_eq!(upload(&net, &journal, &target(), source.clone(), &io).await.unwrap_err().to_string(), "TELEGRAM_CONNECTION_ERROR");
+    assert_eq!(journal.entry(&source).state, SendState::Prepared);
+    assert_eq!(net.sends.load(Ordering::SeqCst), 0);
+    upload(&net, &journal, &target(), source.clone(), &io).await.unwrap();
+    assert_eq!(journal.entry(&source).state, SendState::Confirmed);
+    assert_eq!(net.sends.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
 async fn proxy_stop_is_durable_but_explicit_cancellation_takes_priority() {
     let (cancel, rx) = watch::channel(false);
     let (connection, stopped) = watch::channel(false);
@@ -87,6 +102,7 @@ impl Journal for TestJournal {
 struct Mock {
     documents: Mutex<HashMap<i32, (RemoteDocument, Vec<u8>)>>,
     uploads: AtomicUsize,
+    prepare_failure: AtomicBool,
     upload_gate: Mutex<Option<(tokio::sync::oneshot::Sender<()>, Arc<tokio::sync::Notify>)>>,
     sends: AtomicUsize,
     inspects: AtomicUsize,
@@ -152,8 +168,11 @@ impl Transport for Mock {
         random_id: i64,
         video: Option<crate::backup::provider::VideoAttributes>,
         _io: &'a Io,
+        before_publish: &'a mut (dyn FnMut() -> Result<()> + Send),
     ) -> ProviderFuture<'a, Option<i32>> {
         Box::pin(async move {
+            if self.prepare_failure.swap(false, Ordering::SeqCst) { bail!("TELEGRAM_CONNECTION_ERROR"); }
+            before_publish()?;
             let id = self.sends.fetch_add(1, Ordering::SeqCst) as i32 + 1;
             self.random_ids.lock().unwrap().push(random_id);
             self.video_attributes.lock().unwrap().push(video);

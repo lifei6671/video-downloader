@@ -1772,6 +1772,8 @@ async fn flat_multipart_retry_restarts_and_cancel_cleans_its_session() {
         "cancel reported success but left an unknown CreateMultipart session"
     );
     f.store.0.lock().unwrap().fail_after = Some("part");
+    // A non-retryable part failure still leaves durable cleanup evidence.
+    f.store.0.lock().unwrap().fail_after_code = Some("BACKUP_REQUEST_REJECTED");
     assert!(a
         .upload_media(
             source(
@@ -1789,6 +1791,7 @@ async fn flat_multipart_retry_restarts_and_cancel_cleans_its_session() {
     assert!(a.cancel_upload(interrupted.clone(), &bop).await.is_err());
     a.cancel_upload(interrupted.clone(), &aop).await.unwrap();
     assert!(f.store.0.lock().unwrap().uploads.is_empty());
+    f.store.0.lock().unwrap().fail_part_once = Some(3);
     let receipt = a
         .upload_media(
             source(
@@ -1814,13 +1817,61 @@ async fn flat_multipart_retry_restarts_and_cancel_cleans_its_session() {
             .iter()
             .map(|(_, part)| *part)
             .collect::<Vec<_>>(),
-        vec![1, 1, 2, 3, 4, 5, 6, 7],
+        vec![1, 1, 2, 3, 3, 4, 5, 6, 7],
         "an interrupted upload must resend part 1"
     );
     assert_ne!(
         store.part_writes[0].0, store.part_writes[1].0,
         "retry reused the previous multipart session"
     );
+    assert!(store.part_writes[1..].iter().all(|(id, _)| id == &store.part_writes[1].0));
+}
+
+#[tokio::test]
+async fn multipart_retry_is_bounded_and_cancel_interrupts_backoff() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for cancel in [false, true] {
+        let (f, provider, _) = sync_fixture().await;
+        let path = f.root.path().join("retry.mp4");
+        std::fs::File::create(&path).unwrap().set_len(100*1024*1024).unwrap();
+        f.store.0.lock().unwrap().fail_part_remaining = Some((2, 10));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let check = stopped.clone();
+        let evidence: Arc<Mutex<Option<ResumeState>>> = Default::default();
+        let checkpoint = evidence.clone();
+        let operation = uuid::Uuid::new_v4().to_string();
+        let source = MediaSource {
+            video: None, base_revision: None, recreate_revision: None,
+            asset_id: f.id.clone(), kind: "video".into(), path, bytes: 100*1024*1024,
+            sha256: "a".repeat(64), container: "mp4".into(), operation_id: operation.clone(),
+            device_id: f.core.backup_db(repository::device_id).unwrap(),
+            control: Some(Arc::new(TransferControl {
+                check: Box::new(move || { if check.load(Ordering::Relaxed) { bail!("CANCELED"); } Ok(()) }),
+                checkpoint: Box::new(move |state| { *checkpoint.lock().unwrap() = Some(state); Ok(()) }),
+                progress: Default::default(),
+            })),
+        };
+        let watcher = if cancel {
+            let store = f.store.clone();
+            Some(tokio::spawn(async move {
+                while store.0.lock().unwrap().part_writes.len() < 2 { tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                stopped.store(true, Ordering::Relaxed);
+            }))
+        } else { None };
+        let error = provider.upload_media(source, None).await.unwrap_err();
+        if let Some(watcher) = watcher { watcher.await.unwrap(); }
+        assert_eq!(error.to_string(), if cancel { "CANCELED" } else { "BACKUP_SERVICE_UNAVAILABLE" });
+        {
+            let state = f.store.0.lock().unwrap();
+            assert_eq!(state.part_writes.iter().map(|(_,part)| *part).collect::<Vec<_>>(), if cancel { vec![1,2] } else { vec![1,2,2,2] });
+            assert_eq!(state.uploads.len(),1);
+            assert!(state.part_writes.iter().all(|(id,_)| id == &state.part_writes[0].0));
+        }
+        let resume = evidence.lock().unwrap().clone().unwrap();
+        provider.cancel_upload(resume,&operation).await.unwrap();
+        assert!(f.store.0.lock().unwrap().uploads.is_empty());
+    }
 }
 
 fn local_text(core: &Core, id: &str, text: &str) {
@@ -2212,7 +2263,7 @@ async fn p3_space_names_are_local_persistent_and_do_not_change_library_or_queue(
         db.query_row("SELECT version FROM backup_schema WHERE id=1", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
     let after = scheduler::operations(&f.core)
         .unwrap()
@@ -3559,7 +3610,7 @@ fn current_sqlite_schema_is_idempotent_and_rejects_unknown_versions() {
         db.query_row("SELECT version FROM backup_schema", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
     db.execute("UPDATE backup_schema SET version=99", [])
         .unwrap();

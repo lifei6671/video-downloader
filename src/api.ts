@@ -72,7 +72,7 @@ export const api = {
   deleteActivity: () => invoke<DeleteActivity | null>('get_backup_delete_activity'),
   onDeleteActivity: (update: (value: DeleteActivity | null) => void) =>
     listen<DeleteActivity | null>('backup_delete_activity', event => update(event.payload)),
-  backupOperations: () => invoke<BackupOperation[]>('list_backup_operations'),
+  backupOperations: (spaceId: string) => invoke<BackupOperation[]>('list_backup_operations', { spaceId }),
   retryBackup: (operationId: string) => invoke<void>('retry_backup_operation', { operationId }),
   startAssetBackup: (spaceId: string, assetId: string) => invoke<void>('start_asset_backup', { spaceId, assetId }),
   cancelBackup: (operationId: string) => invoke<void>('cancel_backup_operation', { operationId }),

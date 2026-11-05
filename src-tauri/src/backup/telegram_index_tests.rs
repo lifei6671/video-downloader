@@ -38,6 +38,7 @@ impl Transport for Downloads {
         _: i64,
         _: Option<VideoAttributes>,
         _: &'a Io,
+        _before_publish: &'a mut (dyn FnMut() -> Result<()> + Send),
     ) -> super::super::provider::ProviderFuture<'a, Option<i32>> {
         unreachable!("index reads must not send")
     }

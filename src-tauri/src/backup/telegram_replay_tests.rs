@@ -758,7 +758,7 @@ impl Transport for MemoryTransport<'_> {
     ) -> ProviderFuture<'a, ()> {
         Box::pin(async { unreachable!() })
     }
-    fn send<'a>(&'a self, _: (), _: String, _: i64, _: Option<crate::backup::provider::VideoAttributes>, _: &'a Io) -> ProviderFuture<'a, Option<i32>> {
+    fn send<'a>(&'a self, _: (), _: String, _: i64, _: Option<crate::backup::provider::VideoAttributes>, _: &'a Io, _: &'a mut (dyn FnMut() -> Result<()> + Send)) -> ProviderFuture<'a, Option<i32>> {
         Box::pin(async { unreachable!() })
     }
     fn inspect(&self, id: i32) -> ProviderFuture<'_, RemoteDocument> {

@@ -139,9 +139,9 @@ fn get_backup_delete_activity(core: State<AppCore>) -> Option<yingqu_core::deskt
     core.current_delete_activity()
 }
 #[tauri::command]
-async fn list_backup_operations(core: State<'_, AppCore>) -> Result<Vec<yingqu_core::backup::scheduler::Operation>,String> {
+async fn list_backup_operations(core: State<'_, AppCore>, space_id: Option<String>) -> Result<Vec<yingqu_core::backup::scheduler::Operation>,String> {
     let core = core.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || yingqu_core::backup::scheduler::operations_for_display(&core))
+    tauri::async_runtime::spawn_blocking(move || yingqu_core::backup::scheduler::operations_for_display(&core, space_id.as_deref()))
         .await.map_err(|e| e.to_string())?.map_err(error)
 }
 #[tauri::command]

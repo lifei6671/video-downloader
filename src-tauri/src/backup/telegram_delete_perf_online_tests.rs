@@ -269,7 +269,12 @@ fn contention_fixture(core: &Arc<Core>, cfg: &Config, provider: &dyn BackupProvi
 async fn observe_operation(core: &Core, id: &str, until: impl Fn(&scheduler::Operation) -> bool) -> Result<scheduler::Operation> {
     tokio::time::timeout(Duration::from_secs(1200), async {
         loop {
-            let row = scheduler::operation(core, id)?;
+            let mut row = scheduler::operation(core, id)?;
+            if let Some(progress) = scheduler::operations_for_display(core, Some(&row.space_id))?.into_iter().find(|op| op.operation_id == id) {
+                for field in ["completed_bytes", "transfer_started"] {
+                    if let Some(value) = progress.payload.get(field) { row.payload[field] = value.clone(); }
+                }
+            }
             if until(&row) { return Ok(row); }
             if matches!(row.state.as_str(), "blocked" | "completed" | "canceled") {
                 bail!("fixture operation ended early: {} {} {:?}", row.state, row.phase, row.last_error);

@@ -1075,8 +1075,14 @@ impl TelegramSession {
             *authorization.lock().unwrap() = view.operation_id;
             let connection = self.metadata_connection()?;
             let client = connection.client();
-            let user = tokio::time::timeout(REQUEST_TIMEOUT, Box::pin(client.get_me())).await
-                .map_err(|_| anyhow::anyhow!("TELEGRAM_TIMEOUT"))?.map_err(rpc_error)?;
+            let probe = tokio::time::timeout(REQUEST_TIMEOUT, Box::pin(client.get_me())).await
+                .map_err(|_| anyhow::anyhow!("TELEGRAM_TIMEOUT")).and_then(|r| r.map_err(rpc_error));
+            if probe.as_ref().is_err_and(|e| matches!(e.to_string().as_str(), "TELEGRAM_TIMEOUT" | "TELEGRAM_CONNECTION_ERROR")) {
+                // This lease owns a generation, not whichever pool is current now.
+                // Keep account keys and send evidence; resume replaces only the pool.
+                connection.connection.close().await;
+            }
+            let user = probe?;
             account(&connection.connection.session, &user)?;
             Ok(())
         })).await;

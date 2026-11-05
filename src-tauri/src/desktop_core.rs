@@ -229,6 +229,7 @@ struct Inner {
     transcription_unsaved: HashMap<String, transcription::Snapshot>,
 }
 pub struct Core {
+    backup_display_db: Mutex<Connection>,
     task_actions: Mutex<HashMap<String, task_actions::PendingAction>>,
     delete_activity: Mutex<Option<DeleteActivity>>,
     pub telegram_accounts: crate::telegram_accounts::TelegramAccounts,
@@ -658,6 +659,7 @@ impl Core {
             program,
             args,
             runtime_directory: db_path.parent().context("IO_ERROR")?.join("runtime"),
+            backup_display_db: Mutex::new(Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?),
             #[cfg(test)]
             telegram_source: Mutex::new(None),
             #[cfg(test)]
@@ -786,6 +788,10 @@ impl Core {
 
     pub(crate) fn backup_db<T>(&self, action: impl FnOnce(&Connection)->Result<T>) -> Result<T> {
         action(&self.inner.lock().unwrap().db)
+    }
+
+    pub(crate) fn backup_display_db<T>(&self, action: impl FnOnce(&Connection)->Result<T>) -> Result<T> {
+        action(&self.backup_display_db.lock().unwrap())
     }
 
     pub fn asset_transcript(&self, id: &str) -> Result<Option<crate::backup::model::AssetTranscript>> {
