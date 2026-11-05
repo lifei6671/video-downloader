@@ -77,10 +77,13 @@ async fn request_packet(stream: &mut TcpStream) -> (Vec<u8>, i64, i64, Vec<u8>) 
 // A synthetic encrypted rpc_result response. Reuse grammers AES and full
 // transport framing; x=8 is the documented server-to-client MTProto2 direction.
 async fn answer(stream: &mut TcpStream, auth_id: &[u8], session: i64, request: i64) {
+    answer_body(stream, auth_id, session, request, &true.to_bytes(), 0).await;
+}
+async fn answer_body(stream: &mut TcpStream, auth_id: &[u8], session: i64, request: i64, result: &[u8], sequence: u32) {
     use grammers_mtproto::transport::Transport as _;
     let auth = [7; 256];
-    let body = [0xf35c6d01_u32.to_le_bytes().as_slice(), &request.to_le_bytes(), &true.to_bytes()].concat();
-    let message = ((std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64) << 32) | 1;
+    let body = [0xf35c6d01_u32.to_le_bytes().as_slice(), &request.to_le_bytes(), result].concat();
+    let message = ((std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64) << 32) | (sequence as i64 * 4 + 1);
     let mut plain = [0_i64.to_le_bytes().as_slice(), &session.to_le_bytes(), &message.to_le_bytes(), &1_i32.to_le_bytes(), &(body.len() as i32).to_le_bytes(), &body].concat();
     let padding = (16 - (plain.len() + 12) % 16) % 16 + 12;
     plain.resize(plain.len() + padding, 23);
@@ -95,7 +98,12 @@ async fn answer(stream: &mut TcpStream, auth_id: &[u8], session: i64, request: i
     packet.extend(auth_id.iter().copied());
     packet.extend(msg.iter().copied());
     packet.extend(plain);
-    transport::Full::new().pack(&mut packet);
+    let mut framing=transport::Full::new();
+    for _ in 0..sequence {
+        let mut empty=grammers_crypto::DequeBuffer::with_capacity(0,8);
+        framing.pack(&mut empty);
+    }
+    framing.pack(&mut packet);
     stream.write_all(packet.as_ref()).await.unwrap();
 }
 
@@ -109,6 +117,104 @@ fn normal_control(pool: &mut SenderPool) -> mpsc::UnboundedReceiver<Rpc> {
         rpc_tx, abort_handle, uses: 0, last_reuse_log: tokio::time::Instant::now(),
     });
     rpc_rx
+}
+
+#[tokio::test]
+async fn stalled_control_initialization_does_not_block_other_dc_and_cancels_when_callers_leave() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut pool = pool(listener.local_addr().unwrap());
+    let home = pool.runner.session.home_dc_id().unwrap();
+    let blocked = home + 1;
+    let mut option = pool.runner.session.dc_option(home).unwrap().unwrap();
+    option.id = blocked;
+    pool.runner.session.set_dc_option(&option).await.unwrap();
+    let mut healthy = normal_control(&mut pool);
+    let runner = tokio::spawn(pool.runner.run());
+    let (first, result) = oneshot::channel();
+    pool.handle.0.send(Request::Invoke { dc_id: blocked, body: part(), tx: first }).unwrap();
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await.unwrap().unwrap();
+    let _ = packet(&mut socket).await; // InitConnection is sent but never answered.
+    let (second, second_result) = oneshot::channel();
+    pool.handle.0.send(Request::Invoke { dc_id: blocked, body: part(), tx: second }).unwrap();
+    let (control, response) = oneshot::channel();
+    pool.handle.0.send(Request::Invoke { dc_id: home, body: vec![1;4], tx: control }).unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(1),healthy.recv()).await.unwrap().unwrap();
+    request.tx.send(Ok(vec![42])).unwrap();
+    assert_eq!(response.await.unwrap().unwrap(),vec![42]);
+    drop(result);
+    // One remaining waiter keeps the shared connection attempt alive.
+    assert!(tokio::time::timeout(Duration::from_millis(150),socket.read_u8()).await.is_err());
+    drop(second_result);
+    assert!(tokio::time::timeout(Duration::from_secs(1),socket.read_u8()).await.unwrap().is_err());
+    pool.handle.quit();
+    tokio::time::timeout(Duration::from_secs(1),runner).await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn control_connection_deadline_fails_all_waiters_and_releases_future() {
+    struct Guard(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Guard { fn drop(&mut self) {self.0.store(true,std::sync::atomic::Ordering::SeqCst);} }
+    let dropped=Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag=dropped.clone();
+    let (tx,rx)=mpsc::unbounded_channel();
+    let (first,a)=oneshot::channel();
+    let (second,b)=oneshot::channel();
+    tx.send(Rpc{body:part(),tx:first}).unwrap();
+    tx.send(Rpc{body:part(),tx:second}).unwrap();
+    let connection=tokio::spawn(connect_pending(1,2,rx,async move {
+        let _guard=Guard(flag);
+        std::future::pending().await
+    }));
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(16)).await;
+    assert!(matches!(a.await.unwrap(),Err(InvocationError::Io(e)) if e.kind()==std::io::ErrorKind::TimedOut));
+    assert!(matches!(b.await.unwrap(),Err(InvocationError::Io(e)) if e.kind()==std::io::ErrorKind::TimedOut));
+    assert!(matches!(connection.await.unwrap(),PoolEvent::Connection{reason:"connect_failed",..}));
+    assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(tx.is_closed());
+}
+
+#[tokio::test]
+async fn shared_control_connection_failure_preserves_rpc_and_session_errors_for_every_waiter() {
+    for error in [
+        InvocationError::Rpc(tl::types::RpcError { error_code:420, error_message:"FLOOD_WAIT_12".into() }.into()),
+        InvocationError::Session(Box::new(std::io::Error::other("fixture storage error"))),
+    ] {
+        let (tx, rx)=mpsc::unbounded_channel();
+        let (first,a)=oneshot::channel();let (second,b)=oneshot::channel();
+        let pending=vec![Rpc{body:part(),tx:first}];
+        tx.send(Rpc{body:part(),tx:second}).unwrap();
+        let session=matches!(error,InvocationError::Session(_));
+        fail_connecting(pending,rx,error);
+        for response in [a,b] {
+            match response.await.unwrap().unwrap_err() {
+                InvocationError::Session(error) => {
+                    assert!(session);
+                    assert_eq!(error.source().unwrap().to_string(),"fixture storage error");
+                },
+                InvocationError::Rpc(error) => {
+                    assert!(!session);assert_eq!(error.code,420);assert_eq!(error.name,"FLOOD_WAIT");assert_eq!(error.value,Some(12));
+                },
+                error => panic!("unexpected classification: {error:?}"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn quitting_pool_drops_uninitialized_control_socket() {
+    let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pool=pool(listener.local_addr().unwrap());
+    let dc=pool.runner.session.home_dc_id().unwrap();
+    let runner=tokio::spawn(pool.runner.run());
+    let (tx,rx)=oneshot::channel();
+    pool.handle.0.send(Request::Invoke{dc_id:dc,body:part(),tx}).unwrap();
+    let (mut socket,_)=listener.accept().await.unwrap();
+    let _=packet(&mut socket).await;
+    pool.handle.quit();
+    tokio::time::timeout(Duration::from_secs(1),runner).await.unwrap().unwrap();
+    assert!(rx.await.is_err());
+    assert!(tokio::time::timeout(Duration::from_secs(1),socket.read_u8()).await.unwrap().is_err());
 }
 
 #[tokio::test]
@@ -199,7 +305,7 @@ async fn probe_rpc_errors_are_preserved_and_auth_failures_never_restore_media() 
         let response = rx.await.unwrap();
         assert!(matches!(response, Err(InvocationError::Rpc(ref error)) if error.code == code));
         let event = pool.runner.connection_pool.join_next().await.unwrap().unwrap();
-        pool.runner.connection_event(event);
+        pool.runner.connection_event(event).await;
         assert_eq!(pool.runner.media_recovery.contains_key(&dc), matches!(code, 401 | 403));
         pool.handle.quit(); pool.runner.run().await;
     }
@@ -219,7 +325,7 @@ async fn an_unanswered_probe_has_a_deadline_and_reenters_cooldown() {
     let _message = messages.recv().await.unwrap();
     assert!(matches!(rx.await.unwrap(), Err(InvocationError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut));
     let event = pool.runner.connection_pool.join_next().await.unwrap().unwrap();
-    pool.runner.connection_event(event);
+    pool.runner.connection_event(event).await;
     assert!(!pool.runner.media_recovery[&dc].ready());
     assert_eq!(pool.runner.media_recovery[&dc].next_probe.saturating_duration_since(tokio::time::Instant::now()), Duration::from_secs(30));
     pool.handle.quit(); pool.runner.run().await;
@@ -395,4 +501,98 @@ async fn media_404_returns_to_the_normal_dc_recovery_path() {
     retry.abort();
     runner.abort();
     let _ = runner.await;
+}
+
+#[tokio::test]
+async fn initialized_control_connection_dispatches_waiters_and_reuses_the_socket() {
+    let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pool=pool(listener.local_addr().unwrap());
+    let dc=pool.runner.session.home_dc_id().unwrap();
+    let session=pool.runner.session.clone();
+    let runner=tokio::spawn(pool.runner.run());
+    let server=tokio::spawn(async move {
+        let (mut socket,_)=listener.accept().await.unwrap();
+        let (auth,session,request,_) = request_packet(&mut socket).await;
+        let config: tl::enums::Config = tl::types::Config {
+        default_p2p_contacts: Default::default(),
+        preload_featured_stickers: Default::default(),
+        revoke_pm_inbox: Default::default(),
+        blocked_mode: Default::default(),
+        force_try_ipv6: Default::default(),
+        date: Default::default(),
+        expires: Default::default(),
+        test_mode: Default::default(),
+        this_dc: dc,
+        dc_options: Default::default(),
+        dc_txt_domain_name: Default::default(),
+        chat_size_max: Default::default(),
+        megagroup_size_max: Default::default(),
+        forwarded_count_max: Default::default(),
+        online_update_period_ms: Default::default(),
+        offline_blur_timeout_ms: Default::default(),
+        offline_idle_timeout_ms: Default::default(),
+        online_cloud_timeout_ms: Default::default(),
+        notify_cloud_delay_ms: Default::default(),
+        notify_default_delay_ms: Default::default(),
+        push_chat_period_ms: Default::default(),
+        push_chat_limit: Default::default(),
+        edit_time_limit: Default::default(),
+        revoke_time_limit: Default::default(),
+        revoke_pm_time_limit: Default::default(),
+        rating_e_decay: Default::default(),
+        stickers_recent_limit: Default::default(),
+        channels_read_media_period: Default::default(),
+        tmp_sessions: Default::default(),
+        call_receive_timeout_ms: Default::default(),
+        call_ring_timeout_ms: Default::default(),
+        call_connect_timeout_ms: Default::default(),
+        call_packet_timeout_ms: Default::default(),
+        me_url_prefix: Default::default(),
+        autoupdate_url_prefix: Default::default(),
+        gif_search_username: Default::default(),
+        venue_search_username: Default::default(),
+        img_search_username: Default::default(),
+        static_maps_provider: Default::default(),
+        caption_length_max: Default::default(),
+        message_length_max: Default::default(),
+        webfile_dc_id: Default::default(),
+        suggested_lang_code: Default::default(),
+        lang_pack_version: Default::default(),
+        base_lang_pack_version: Default::default(),
+        reactions_default: Default::default(),
+        autologin_token: Default::default(),
+        }.into();
+        answer_body(&mut socket,&auth,session,request,&config.to_bytes(),0).await;
+        let mut sequence=1;
+        let mut count=0;
+        while count<3 {
+            let (auth,session,id,body)=request_packet(&mut socket).await;
+            let messages=if body[..4]==0x73f1f8dc_u32.to_le_bytes() {
+                let n=i32::from_le_bytes(body[4..8].try_into().unwrap());
+                let mut at=8;let mut messages=Vec::new();
+                for _ in 0..n {
+                    let id=i64::from_le_bytes(body[at..at+8].try_into().unwrap());
+                    let bytes=i32::from_le_bytes(body[at+12..at+16].try_into().unwrap()) as usize;
+                    messages.push((id,body[at+16..at+16+bytes].to_vec()));at+=16+bytes;
+                }
+                messages
+            } else {vec![(id,body)]};
+            for (id,body) in messages {
+                if body==part() {
+                    answer_body(&mut socket,&auth,session,id,&true.to_bytes(),sequence).await;
+                    sequence+=1;count+=1;
+                }
+            }
+        }
+        let mut byte=[0];let _=socket.read(&mut byte).await;
+    });
+    let request=|| {
+        let (tx,rx)=oneshot::channel();
+        pool.handle.0.send(Request::Invoke{dc_id:dc,body:part(),tx}).unwrap();rx
+    };
+    let a=request();let b=request();
+    for response in [a,b] {assert_eq!(tokio::time::timeout(Duration::from_secs(3),response).await.unwrap().unwrap().unwrap(),true.to_bytes());}
+    assert_eq!(session.dc_option(dc).unwrap().unwrap().auth_key,Some([7;256]));
+    assert_eq!(tokio::time::timeout(Duration::from_secs(3),request()).await.unwrap().unwrap().unwrap(),true.to_bytes());
+    pool.handle.quit();runner.await.unwrap();server.await.unwrap();
 }

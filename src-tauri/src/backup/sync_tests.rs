@@ -10,6 +10,8 @@ mod history_registration_tests;
 mod cleanup_isolation_tests;
 #[path = "parallel_upload_tests.rs"]
 mod parallel_upload_tests;
+#[path = "review_regression_tests.rs"]
+mod review_regression_tests;
 use super::*;
 use crate::backup::{conflicts, sync_read};
 use crate::backup::spaces;
@@ -2210,7 +2212,7 @@ async fn p3_space_names_are_local_persistent_and_do_not_change_library_or_queue(
         db.query_row("SELECT version FROM backup_schema WHERE id=1", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        6
+        7
     );
     let after = scheduler::operations(&f.core)
         .unwrap()
@@ -3557,7 +3559,7 @@ fn current_sqlite_schema_is_idempotent_and_rejects_unknown_versions() {
         db.query_row("SELECT version FROM backup_schema", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        6
+        7
     );
     db.execute("UPDATE backup_schema SET version=99", [])
         .unwrap();

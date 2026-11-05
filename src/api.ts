@@ -124,10 +124,14 @@ export const api = {
   play: (taskId: string) => invoke<void>('play_download', { taskId }),
   playbackSource: async (taskId: string) => convertFileSrc(await invoke<string>('prepare_video_playback', { taskId })),
   save: (update: { http_chunk_size?: number | null; platform: string; user_agent: string; cookie: string | null; proxy: string | null }) => invoke<Settings>('save_profile', { update }),
-  subscribe: async (callback: (task: Task) => void, removed: (id: string) => void) => {
+  subscribe: async (callback: (task: Task) => void, removed: (id: string, spaceId?: string) => void) => {
     const stopUpdates = await listen<Task>('task_updated', event => callback(event.payload));
     try {
-      const stopRemovals = await listen<string>('task_removed', event => removed(event.payload));
+      const stopRemovals = await listen<string | { id: string; space_id: string }>('task_removed', event => {
+        const payload = event.payload;
+        if (typeof payload === 'string') removed(payload);
+        else removed(payload.id, payload.space_id);
+      });
       return () => { stopUpdates(); stopRemovals(); };
     } catch (error) { stopUpdates(); throw error; }
   },

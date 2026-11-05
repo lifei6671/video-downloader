@@ -194,6 +194,7 @@ pub enum TaskEvent {
     BackupAssetDeleted(String),
     Updated(Box<Task>),
     Removed(String),
+    RemovedFromSpace { id: String, space_id: String },
     Transcription(Box<transcription::Snapshot>),
 }
 
@@ -319,6 +320,14 @@ fn persist(db: &Connection, task: &Task) -> Result<()> {
         params![task.id, serde_json::to_string(&stored)?],
     )
     .context("DATABASE_ERROR")?;
+    Ok(())
+}
+fn persist_new_attempt(db: &Connection, task: &Task) -> Result<()> {
+    let tx = db.unchecked_transaction().context("DATABASE_ERROR")?;
+    tx.execute("DELETE FROM commit_intents WHERE task_id=?", [&task.id])
+        .context("DATABASE_ERROR")?;
+    persist(&tx, task)?;
+    tx.commit().context("DATABASE_ERROR")?;
     Ok(())
 }
 fn publish(inner: &mut Inner, mut task: Task, emit: &dyn Fn(TaskEvent)) -> Result<()> {
@@ -818,10 +827,10 @@ impl Core {
                 let current = recovery_core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download);
                 if !Arc::ptr_eq(&recovery_binding.session, &current.session) || recovery_core.inner.lock().unwrap().telegram_recovery_epoch != recovery_epoch { break; }
                 if *recovery_stop.borrow() { break; }
-                let candidates: Vec<_> = recovery_core.list().into_iter().filter(|task|
+                let candidates: Vec<_> = recovery_core.inner.lock().unwrap().tasks.iter().filter(|task|
                     task.status == Status::Failed && task.telegram_link.is_some()
                     && task.error.as_deref().is_some_and(crate::telegram_reconnect::network_error)
-                ).collect();
+                ).cloned().collect();
                 for task in candidates {
                     if *recovery_stop.borrow() { break; }
                     let format = task.video.as_ref().and_then(|v| v["selected_format_id"].as_str()).map(str::to_owned);
@@ -1405,7 +1414,7 @@ impl Core {
 
     fn remove_history_records(&self, inner: &mut Inner, ids: Vec<String>) -> Result<Vec<String>> {
         if ids.is_empty() { return Ok(ids); }
-        self.remove_history_records_with(inner, ids, |_| Ok(()))
+        self.remove_history_records_with(inner, ids, None, |_| Ok(()))
     }
 
     pub(crate) fn finish_asset_deletion(&self, asset: &str, operation: &str) -> Result<()> {
@@ -1417,9 +1426,10 @@ impl Core {
             bail!("TASK_BUSY");
         }
         let ids = tasks.into_iter().map(|task| task.id.clone()).collect();
-        self.remove_history_records_with(&mut inner, ids, |tx| {
-            let space: String = tx.query_row("SELECT space_id FROM backup_operations WHERE operation_id=?1 AND asset_id=?2 AND kind='delete'",params![operation,asset],|row|row.get(0))?;
-            tx.execute("INSERT OR IGNORE INTO asset_hidden_history(asset_id) VALUES(?)",[asset])?;
+        let space: String = inner.db.query_row("SELECT space_id FROM backup_operations WHERE operation_id=?1 AND asset_id=?2 AND kind='delete'",params![operation,asset],|row|row.get(0))?;
+        self.remove_history_records_with(&mut inner, ids, Some(&space), |tx| {
+            tx.execute("DELETE FROM asset_hidden_history WHERE asset_id=?",[asset])?;
+            tx.execute("INSERT OR IGNORE INTO asset_deletion_hidden_history(space_id,asset_id) VALUES(?1,?2)",params![space,asset])?;
             tx.execute("UPDATE asset_remote_objects SET remote_state='deleted' WHERE space_id=?1 AND asset_id=?2",params![space,asset])?;
             tx.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.local_cleanup_done',json('true'),'$.local_cleanup_ms',CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE operation_id=?",[operation])?;
             Ok(())
@@ -1429,7 +1439,7 @@ impl Core {
         Ok(())
     }
 
-    fn remove_history_records_with(&self, inner: &mut Inner, ids: Vec<String>, update: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>) -> Result<Vec<String>> {
+    fn remove_history_records_with(&self, inner: &mut Inner, ids: Vec<String>, space: Option<&str>, update: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>) -> Result<Vec<String>> {
         let removing: HashSet<_> = ids.iter().map(String::as_str).collect();
         let retained: HashSet<_> = inner
             .tasks
@@ -1484,7 +1494,10 @@ impl Core {
             .transcription_unsaved
             .retain(|id, _| !removing.contains(id.as_str()));
         for id in &ids {
-            (self.emit)(TaskEvent::Removed(id.clone()));
+            (self.emit)(match space {
+                Some(space) => TaskEvent::RemovedFromSpace { id: id.clone(), space_id: space.to_owned() },
+                None => TaskEvent::Removed(id.clone()),
+            });
         }
         Ok(ids)
     }
@@ -1690,11 +1703,7 @@ impl Core {
                 Err(_) => bail!("DATABASE_ERROR"),
             }
             // Old commit evidence must never complete a new attempt on restart.
-            let tx = inner.db.transaction().context("DATABASE_ERROR")?;
-            tx.execute("DELETE FROM commit_intents WHERE task_id=?", [&task.id])
-                .context("DATABASE_ERROR")?;
-            persist(&tx, &task)?;
-            tx.commit().context("DATABASE_ERROR")?;
+            persist_new_attempt(&inner.db, &task)?;
             *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
             (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
         } else {
@@ -2032,7 +2041,9 @@ impl Core {
             );
         }
         task.revision += 1;
-        publish(inner, task, &*self.emit)?;
+        persist_new_attempt(&inner.db, &task)?;
+        *inner.tasks.iter_mut().find(|stored| stored.id == task.id).context("TASK_NOT_FOUND")? = task.clone();
+        (self.emit)(TaskEvent::Updated(Box::new(task)));
         Ok(())
     }
 
@@ -4103,6 +4114,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_clears_unmoved_commit_intent_before_downloading_again() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = enqueue(&app, "8609").await;
+        started(root.path(), "8609").await;
+        app.shutdown().await;
+        drop(app);
+        let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
+        let source = root.path().join(format!("yingqu-{}-old-staging", task.id));
+        std::fs::create_dir(&source).unwrap();
+        let staged_file = source.join("video.mp4");
+        std::fs::write(&staged_file, b"old bytes").unwrap();
+        db.execute("INSERT INTO task_staging(task_id,path) VALUES(?1,?2)", params![task.id,source.to_string_lossy()]).unwrap();
+        db.execute("INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,9)",params![task.id,staged_file.to_string_lossy(),root.path().join("not-moved.mp4").to_string_lossy()]).unwrap();
+        drop(db);
+        let app = core(root.path());
+        assert!(!source.exists());
+        assert_eq!(app.list()[0].error.as_deref(),Some("INTERRUPTED"));
+        app.start_backup_service();
+        assert_eq!(app.inner.lock().unwrap().db.query_row("SELECT count(*) FROM commit_intents WHERE task_id=?",[&task.id],|r|r.get::<_,i64>(0)).unwrap(),0);
+        release(root.path(), "8609");
+        let done=wait(&app,&task.id,Status::Completed).await;
+        assert!(done.path.unwrap().is_file());
+        assert_eq!(app.list().len(),1);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn startup_restores_interrupted_downloads_in_original_fifo_order() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
@@ -5158,6 +5197,31 @@ mod tests {
         core.inner.lock().unwrap().tasks.push(task);
         assert_eq!(core.finish_asset_deletion("busy-asset", "unstarted-operation").unwrap_err().to_string(), "TASK_BUSY");
         assert_eq!(core.list().len(), 1);
+    }
+
+    #[test]
+    fn asset_deletion_event_keeps_operation_space_after_switching_spaces() {
+        let root = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let core = Core::open(&root.path().join("scoped-delete.sqlite"), root.path().join("downloads"), "unused".into(), vec![], move |event| captured.lock().unwrap().push(event)).unwrap();
+        let task: Task = serde_json::from_value(json!({"id":"task","asset_id":"asset","revision":1,"status":"completed","video":null,"bytes":0,"total_bytes":null,"speed_bps":null,"error":null,"path":null,"created_at":1,"completed_at":2,"canceling":false})).unwrap();
+        {
+            let mut inner = core.inner.lock().unwrap();
+            persist(&inner.db, &task).unwrap();
+            inner.db.execute_batch("
+                INSERT INTO backup_spaces VALUES('A','a','','','','',0),('B','b','','','','',1);
+                INSERT INTO backup_current_space VALUES(1,'B');
+                INSERT INTO media_assets VALUES('asset','task','{}','video.mp4',NULL,24,'active');
+                INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES('delete','A','asset','delete','running','finalizing','{}');
+            ").unwrap();
+            inner.tasks.push(task);
+        }
+        core.finish_asset_deletion("asset", "delete").unwrap();
+        let captured = events.lock().unwrap();
+        assert!(captured.iter().any(|event| matches!(event, TaskEvent::RemovedFromSpace { id, space_id } if id == "task" && space_id == "A")));
+        assert!(!captured.iter().any(|event| matches!(event, TaskEvent::Removed(_))));
+        assert!(core.list().is_empty());
     }
 
     #[tokio::test]

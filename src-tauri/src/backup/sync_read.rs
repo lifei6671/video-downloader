@@ -125,31 +125,54 @@ pub async fn transcript(
     core.backup_db(|db|{db.execute("INSERT INTO asset_transcripts(asset_id,content_sha256,text,model_revision,model_name,pipeline_revision,completed_at,source_json) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL) ON CONFLICT(asset_id) DO UPDATE SET content_sha256=excluded.content_sha256,text=excluded.text,model_revision=excluded.model_revision,model_name=excluded.model_name,pipeline_revision=excluded.pipeline_revision,completed_at=excluded.completed_at,source_json=NULL WHERE NOT EXISTS(SELECT 1 FROM backup_space_assets m WHERE m.local_asset_id=?1 AND (json_extract(m.pending_json,'$.transcript') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(m.pending_json,'$.choices') c WHERE json_extract(c.value,'$.adopt')=1 AND json_extract(c.value,'$.conflict.field')='transcript')))",params![local,value.content_sha256,value.text,value.model_revision,value.model_name,value.pipeline_revision,i64::try_from(value.completed_at)?])?;Ok(())})?;
     core.asset_transcript(local)
 }
+// Covers are shared by all memberships of a local asset. A lazy read from one
+// space must not replace a choice or local edit waiting to publish in another.
+struct CoverState {
+    body: Option<Vec<u8>>,
+    dirty: bool,
+    revisions: Vec<(String, i64)>,
+}
+fn local_cover(db: &rusqlite::Connection, local: &str) -> Result<CoverState> {
+    let body = db.query_row("SELECT body FROM asset_covers WHERE asset_id=?", [local], |r| r.get(0)).optional()?;
+    let dirty = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM backup_space_assets m WHERE m.local_asset_id=?1 AND (json_extract(m.pending_json,'$.cover') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(m.pending_json,'$.choices') c WHERE json_extract(c.value,'$.adopt')=1 AND json_extract(c.value,'$.conflict.field')='cover')))",
+        [local], |r| r.get(0),
+    )?;
+    let revisions = db.prepare("SELECT space_id,local_revision FROM backup_space_assets WHERE local_asset_id=? ORDER BY space_id")?
+        .query_map([local], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    Ok(CoverState { body, dirty, revisions })
+}
+
 pub async fn cover(core: &Core, provider: &dyn BackupProvider, local: &str) -> Result<Vec<u8>> {
+    let previous = core.backup_db(|db| local_cover(db, local))?;
+    if previous.dirty {
+        return previous.body.context("COVER_UNAVAILABLE");
+    }
     let deleted:bool=core.backup_db(|db|Ok(db.query_row("SELECT remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![provider.scope().space_id,local],|r|r.get(0))?))?;
     if deleted {
         return cached_cover(core, &provider.scope().space_id, local)?.context("COVER_UNAVAILABLE");
     }
     let record = cached(core, &provider.scope().space_id, local)?;
     let reference = record.cover.context("COVER_UNAVAILABLE")?;
-    let cached: Option<Vec<u8>> = core.backup_db(|db| {
-        Ok(db
-            .query_row(
-                "SELECT body FROM asset_covers WHERE asset_id=?",
-                [local],
-                |r| r.get(0),
-            )
-            .optional()?)
-    })?;
-    if let Some(body) = cached.filter(|b| format!("{:x}", Sha256::digest(b)) == reference.sha256) {
-        return Ok(body);
+    if let Some(body) = previous.body.as_ref().filter(|b| format!("{:x}", Sha256::digest(b)) == reference.sha256) {
+        return Ok(body.clone());
     }
     let body = small(core, provider, &reference).await?;
     if crate::files::image_extension(&body).is_none() {
         bail!("INVALID_MEDIA_CONTENT");
     }
-    core.backup_db(|db|{db.execute("INSERT INTO asset_covers VALUES(?1,?2) ON CONFLICT(asset_id) DO UPDATE SET body=excluded.body",params![local,body])?;Ok(())})?;
-    Ok(body)
+    core.backup_db(|db| {
+        let tx = db.unchecked_transaction()?;
+        let current = local_cover(&tx, local)?;
+        // Also catch an edit that has already been uploaded while this read was
+        // in flight, so clearing pending flags cannot resurrect the old bytes.
+        if current.dirty || current.revisions != previous.revisions || current.body != previous.body {
+            return current.body.context("COVER_UNAVAILABLE");
+        }
+        tx.execute("INSERT INTO asset_covers VALUES(?1,?2) ON CONFLICT(asset_id) DO UPDATE SET body=excluded.body", params![local,body])?;
+        tx.commit()?;
+        Ok(body)
+    })
 }
 
 fn active(core: &Core, scope: &Scope, operation: &str) -> Result<()> {
@@ -469,7 +492,8 @@ pub fn list(core: &Core, space: &str) -> Result<Vec<super::reconcile::Entry>> {
         }
         let remote_state:Option<String>=core.backup_db(|db|Ok(db.query_row("SELECT remote_state FROM asset_remote_objects WHERE space_id=?1 AND asset_id=?2",params![space,asset.asset_id],|r|r.get(0)).optional()?))?;
         let deleting = remote_state.as_deref() == Some("pending_delete");
-        if hidden && !deleting {
+        let deletion_hidden: bool = core.backup_db(|db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM asset_deletion_hidden_history WHERE space_id=?1 AND asset_id=?2)", params![space,asset.asset_id],|r|r.get(0))?))?;
+        if (hidden || deletion_hidden) && !deleting {
             continue;
         }
         if deleted && asset.path.is_none() && !pending && conflicts == 0 && !deleting {
@@ -548,16 +572,11 @@ pub fn cached_transcript(core: &Core, space: &str, local: &str) -> Result<Option
     Ok(None)
 }
 pub fn cached_cover(core: &Core, space: &str, local: &str) -> Result<Option<Vec<u8>>> {
-    let body: Option<Vec<u8>> = core.backup_db(|db| {
-        Ok(db
-            .query_row(
-                "SELECT body FROM asset_covers WHERE asset_id=?",
-                [local],
-                |r| r.get(0),
-            )
-            .optional()?)
-    })?;
-    let Some(body) = body else {
+    let state = core.backup_db(|db| local_cover(db, local))?;
+    if state.dirty {
+        return Ok(state.body);
+    }
+    let Some(body) = state.body else {
         return Ok(None);
     };
     let raw: Option<String> = core.backup_db(|db| {

@@ -279,6 +279,10 @@ async fn downloaded_cover_survives_metadata_fill_and_restart_without_frame_extra
     drop(application);
     let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
     db.execute("UPDATE download_tasks SET snapshot=json_set(snapshot,'$.video.width',NULL,'$.video.height',NULL,'$.video.duration_ms',NULL) WHERE id=?",[&task.id]).unwrap();
+    let asset = done.asset_id.as_ref().unwrap();
+    db.execute("UPDATE media_assets SET metadata_json=json_set(metadata_json,'$.width',NULL,'$.height',NULL,'$.duration_ms',NULL,'$.title','用户修改的标题') WHERE asset_id=?",[asset]).unwrap();
+    db.execute("INSERT INTO backup_spaces VALUES('repair-space','repair-library','https://example.test','bucket','test/',NULL,0)",[]).unwrap();
+    db.execute("INSERT INTO backup_space_assets(space_id,remote_asset_id,local_asset_id,pending_json) VALUES('repair-space',?1,?1,'{}')",[asset]).unwrap();
     drop(db);
     let reopened = app(root.path(), &fixture);
     reopened.start_backup_service();
@@ -307,6 +311,19 @@ async fn downloaded_cover_survives_metadata_fill_and_restart_without_frame_extra
         )
     });
     assert_eq!(reopened.cover(&task.id).unwrap(), original);
+    reopened.backup_db(|db| {
+        let raw: String = db.query_row("SELECT metadata_json FROM media_assets WHERE asset_id=?",[asset],|r|r.get(0))?;
+        let metadata: serde_json::Value = serde_json::from_str(&raw)?;
+        assert_eq!(metadata["title"],"用户修改的标题");
+        assert_eq!(metadata["width"],1920);
+        assert_eq!(metadata["height"],1080);
+        assert!(metadata["duration_ms"].as_u64().unwrap()>0);
+        let raw: String=db.query_row("SELECT pending_json FROM backup_space_assets WHERE local_asset_id=?",[asset],|r|r.get(0))?;
+        let pending: crate::backup::sync_engine::PendingChanges=serde_json::from_str(&raw)?;
+        for field in ["width","height","duration_ms"] {assert_eq!(pending.fields[field].value,metadata[field]);}
+        assert_eq!(pending.fields.len(),3);
+        Ok(())
+    }).unwrap();
     assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
     reopened.shutdown().await;
 }

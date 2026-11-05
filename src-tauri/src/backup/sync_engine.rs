@@ -546,10 +546,7 @@ impl SyncEngine {
         use anyhow::Context;
         let _writer = self.core.backup_write_lock.read().await;
         self.check(operation)?;
-        let op = scheduler::operations(&self.core)?
-            .into_iter()
-            .find(|o| o.operation_id == operation)
-            .context("BACKUP_INVALID_OPERATION")?;
+        let op = scheduler::operation(&self.core, operation)?;
         let local = op.asset_id.as_deref().context("BACKUP_INVALID_OPERATION")?;
         // Different assets may transfer together; a retry of the same asset cannot.
         // Keep global -> asset lock order consistent with destructive file work.
@@ -1501,7 +1498,9 @@ pub fn request_upload_with(
         // A changed incarnation cannot resume the previous immutable object path.
         // Keep its private upload state for owned-session cleanup, then capture a fresh operation.
         db.execute("UPDATE backup_operations SET state='canceled',phase='superseded',last_error=NULL WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state IN ('blocked','retry_wait') AND last_error IN ('BACKUP_REUPLOAD_STALE','BACKUP_SOURCE_CHANGED') AND json_extract(payload_json,'$.scope.protocol')=2",params![space,local])?;
-        db.execute("UPDATE backup_operations SET state='pending',last_error=NULL,next_retry_at=NULL,attempt=0 WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state IN ('canceled','blocked','retry_wait') AND phase<>'superseded' AND json_extract(payload_json,'$.scope.protocol')=2",params![space,local])?;tx.commit()?;Ok(())
+        db.execute("UPDATE backup_operations SET state='pending',last_error=NULL,next_retry_at=NULL,attempt=0 WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state IN ('canceled','blocked','retry_wait') AND phase<>'superseded' AND json_extract(payload_json,'$.scope.protocol')=2",params![space,local])?;
+        db.execute("DELETE FROM asset_deletion_hidden_history WHERE space_id=?1 AND asset_id=?2",params![space,local])?;
+        tx.commit()?;Ok(())
     })?;
     engine.enqueue()?;
     core.wake_backup();

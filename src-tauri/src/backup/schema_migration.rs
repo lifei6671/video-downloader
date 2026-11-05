@@ -3,7 +3,7 @@ use anyhow::{bail, ensure, Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use std::{fs::OpenOptions, path::Path};
 
-const VERSION: i64 = 6;
+const VERSION: i64 = 7;
 const SPACES: &[&str] = &[
     "space_id",
     "library_id",
@@ -30,7 +30,7 @@ pub(crate) struct Prepared {
 
 impl Prepared {
     pub(crate) fn is_upgrade(&self) -> bool {
-        matches!(self.version, Some(1 | 5))
+        matches!(self.version, Some(1 | 5 | 6))
     }
 }
 
@@ -72,7 +72,7 @@ pub(crate) fn prepare(db: &Connection) -> Result<Prepared> {
     let old = version(db)?;
     match old {
         None => return Ok(Prepared { version: old }),
-        Some(1 | VERSION) => {
+        Some(1 | 6 | VERSION) => {
             // v1 was reused by the current-format rewrite. Do not mistake an older
             // unrelated v1 layout for that format merely because its number matches.
             columns(db, "backup_spaces", SPACES)?;
@@ -224,7 +224,12 @@ pub(crate) fn finish(db: &Connection, prepared: &Prepared) -> Result<()> {
         db.execute("INSERT INTO backup_sync_preference VALUES(1,0) ON CONFLICT(id) DO UPDATE SET enabled=0", [])?;
         db.execute("UPDATE backup_operations SET state='blocked',last_error='BACKUP_MIGRATION_REVIEW_REQUIRED' WHERE state IN ('pending','running','retry_wait')", [])?;
     }
-    if matches!(prepared.version, Some(1 | 5)) {
+    if matches!(prepared.version, Some(1 | 5 | 6)) {
+        // Completed local deletion is durable evidence for the old global hide.
+        // Preserve explicit hides without that evidence; never infer deletion
+        // merely from a missing file or a remote tombstone.
+        db.execute("INSERT OR IGNORE INTO asset_deletion_hidden_history(space_id,asset_id) SELECT o.space_id,o.asset_id FROM backup_operations o JOIN asset_hidden_history h ON h.asset_id=o.asset_id WHERE o.kind='delete' AND json_extract(o.payload_json,'$.local_cleanup_done')=1", [])?;
+        db.execute("DELETE FROM asset_hidden_history WHERE asset_id IN (SELECT asset_id FROM asset_deletion_hidden_history)", [])?;
         db.execute("UPDATE backup_schema SET version=? WHERE id=1", [VERSION])?;
     }
     Ok(())

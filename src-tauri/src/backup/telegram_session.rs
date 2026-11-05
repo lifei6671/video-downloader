@@ -2375,7 +2375,12 @@ mod tests {
                 assert_eq!(target[..3], [5, 1, 0]); // SOCKS CONNECT is sent before any MTProto request.
             };
             tokio::time::timeout(Duration::from_secs(3), async {
-                tokio::select! { _ = observed => {}, _ = connection.client.get_me() => panic!("request bypassed local proxy") }
+                let request = connection.client.get_me();
+                tokio::pin!(request);
+                tokio::select! { biased; _ = observed => {}, _ = &mut request => panic!("request bypassed local proxy") }
+                // Both callers share one pool. Wait for the rejected proxy
+                // attempt to finish before requiring a new socket next round.
+                assert!(request.await.is_err());
             }).await.unwrap();
         }
         let old_runner = login.runner.lock().unwrap().as_ref().unwrap().abort_handle();

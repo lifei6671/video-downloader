@@ -102,6 +102,7 @@ struct State {
     hold_upload: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     hold_probe: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     hold_list: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    hold_stream: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     objects: BTreeMap<String, (Vec<u8>, Option<String>)>,
     uploads: BTreeMap<String, Upload>,
     writes: usize,
@@ -208,7 +209,12 @@ impl ObjectStore for Memory {
     ) -> StoreFuture<'_, ObjectStream> {
         let key = key.to_owned();
         let store = self.clone();
+        let gate = store.0.lock().unwrap().hold_stream.take();
         Box::pin(async move {
+            if let Some((started, release)) = gate {
+                started.notify_one();
+                release.notified().await;
+            }
             let mut s = store.0.lock().unwrap();
             if is_video_key(&key) {
                 s.video_gets += 1;

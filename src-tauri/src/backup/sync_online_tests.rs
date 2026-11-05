@@ -173,7 +173,7 @@ async fn real_r2_current_upload_readback_fresh_database() -> Result<()> {
             fresh.backup_db(|db| {
                 let columns=|table:&str| -> Result<usize> {Ok(db.prepare(&format!("PRAGMA table_info({table})"))?.query_map([],|_|Ok(()))?.collect::<rusqlite::Result<Vec<_>>>()?.len())};
                 anyhow::ensure!(columns("backup_spaces")?==7 && columns("asset_remote_objects")?==4,"SCHEMA_NOT_CURRENT");
-                anyhow::ensure!(db.query_row("SELECT version FROM backup_schema WHERE id=1",[],|r|r.get::<_,i64>(0))?==6);
+                anyhow::ensure!(db.query_row("SELECT version FROM backup_schema WHERE id=1",[],|r|r.get::<_,i64>(0))?==7);
                 Ok(())
             })?;
             let restored=sync_read::ensure(&fresh,reader.as_ref(),&local.asset_id).await?;

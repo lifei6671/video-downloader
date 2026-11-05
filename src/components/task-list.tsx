@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { Task, BackupAsset } from '@/api';
 import { LayoutGrid, List } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,20 @@ import { TaskRemovalRow } from '@/components/task-removal-row';
 import { Spinner } from '@/components/ui/spinner';
 
 export type TaskView = 'list' | 'feed';
+
+// Preserve the bounded, paginated list when navigating away. Hidden pages do
+// not reconcile every progress/poll update; returning uses the latest children.
+const TaskPageContents = memo(function TaskPageContents({ children }: { active: boolean; children: ReactNode }) {
+  return children;
+}, (_, next) => !next.active);
+
+export function RetainedTaskPage({ active, children }: { active: boolean; children: ReactNode }) {
+  const [visited, setVisited] = useState(active);
+  useEffect(() => { if (active) setVisited(true); }, [active]);
+  return active || visited ? <div hidden={!active} className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+    <TaskPageContents active={active}>{children}</TaskPageContents>
+  </div> : null;
+}
 
 export function TaskList({ tasks, paginationKey, platform, onPlatformChange, view, onViewChange, listRef, removingIds, onExited, renderRow, assets = [], renderAsset, removingAssetIds, onAssetExited, toolbar, empty }: {
   tasks: Task[];

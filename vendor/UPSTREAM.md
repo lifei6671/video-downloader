@@ -10,6 +10,8 @@ grammers 使用 MIT OR Apache-2.0。新增解析依赖（含 Tokio 必要升级�
 
 `grammers-mtsender` 0.11.0 的 crates.io 源码保留于 `vendor/grammers-mtsender`，由 Cargo `[patch.crates-io]` 使用。`src/net/tcp.rs` 将 SOCKS5 用户名和密码做 UTF-8 percent-decode，manifest 的 `proxy` feature 增加已有 `percent-encoding` 依赖。`src/sender.rs` 在有文件 RPC 时每 100 ms 清理调用方已放弃的 GetFile/SaveFilePart/SaveBigFilePart 请求，`sender_pool.rs` 跳过已关闭的排队调用；保留控制、发布和 keepalive 请求。已写入 TCP 的数据不能撤回，此补丁停止保留/重发取消请求，不宣称终止服务端已开始的执行。原始 header、LICENSE 均保留；回归测试覆盖代理特殊字符和文件取消不误删控制/保活。升级时重验并在上游提供同等能力后移除补丁。
 
+普通 DC 建连也由池的 JoinSet 独立管理；同一 DC 的等待请求共享建连，完整 TCP/代理、授权协商及 InitConnection 有 15 秒上限。最后一个等待者取消后释放尚未初始化的连接，关闭池回收所有建连任务；不同 DC 的请求继续分发。建连失败向全部等待者保留 RPC 限流、IO、认证和 Session 错误分类。`media_pool_tests.rs` 使用合成 key 与回环 TCP 验证成功初始化、并发等待、复用、慢 DC 隔离、超时和取消；不改 MTProto 编码或认证算法。升级上游时复验这些边界，有等价能力后移除补丁。
+
 媒体 TCP 补丁通过 `enable_media_pool` 显式启用，默认 SDK 路由保持原样；按 DC 缓存 media_only 端点，仅文件 RPC 进入两槽媒体连接，独立 MTProto 状态复用同 DC 授权 key，全账号共享连接许可并有空闲回收。下载租借已有主池，取消不关闭其它任务；媒体 404 及建连失败先退回普通 DC 路径，10 秒后按真实文件请求做单连接探测，每轮至多 3 次，失败按 30/60/300 秒冷却；收到有效 RPC 响应才恢复双槽，401/403 不算恢复，其他 RPC 拒绝仍原样返回调用方，不表示文件传输成功。`media_recovery.rs` 为本地独立实现，监控器与连接均由原 JoinSet 回收；SDK 不主动登录或生成后台文件请求。池/连接生命周期日志写入 stderr，只含本地编号、DC、静态原因和计数；断开记录另含静态错误类别、系统错误码及传输状态码，区分 reset、EOF、超时、帧错误和 MTProto 解码错误，不输出错误原文，复用及回退限频，不记录密钥、用户/频道、代理或 RPC 内容。没有复制 tdl 的 AGPL 源码，按公开协议独立实现，复用现有 Tokio/grammers 加密和传输。新增 dev-only sha2 和 Tokio test-util 仅供合成 key 的回环测试，未增加运行依赖；升级时重验媒体身份、白名单、会话 ID、授权恢复和生命周期并在上游提供等价能力后移除补丁。
 
 分片引擎复用既有 [futures-rs](https://github.com/rust-lang/futures-rs) 的有界 `FuturesUnordered` 调度与既有 [md5](https://github.com/stainless-steel/md5) 的流式摘要，将锁定的 `futures-util` 0.3.34 / `md5` 0.8.1 提升为直接依赖，没有引入新的传递包或替换 SDK 版本。文件协议依据 [Telegram 官方文档](https://core.telegram.org/api/files)独立实现；tdl 只用于机制参考，没有复制其 AGPL 实现。许可证随同一清单分发。

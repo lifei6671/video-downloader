@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS backup_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
-INSERT OR IGNORE INTO backup_schema VALUES(1,6);
+INSERT OR IGNORE INTO backup_schema VALUES(1,7);
 CREATE TABLE IF NOT EXISTS backup_device(id INTEGER PRIMARY KEY CHECK(id=1),device_id TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS backup_spaces(
  space_id TEXT PRIMARY KEY,library_id TEXT NOT NULL,endpoint TEXT NOT NULL,bucket TEXT NOT NULL,prefix TEXT NOT NULL,
@@ -33,3 +33,5 @@ CREATE TABLE IF NOT EXISTS backup_credential_cleanup(reference TEXT PRIMARY KEY)
 
 
 CREATE TABLE IF NOT EXISTS asset_hidden_history(asset_id TEXT PRIMARY KEY REFERENCES media_assets(asset_id));
+CREATE TABLE IF NOT EXISTS asset_deletion_hidden_history(
+ space_id TEXT NOT NULL REFERENCES backup_spaces(space_id),asset_id TEXT NOT NULL REFERENCES media_assets(asset_id),PRIMARY KEY(space_id,asset_id));

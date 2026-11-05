@@ -68,6 +68,16 @@ enum ProbeOutcome { Healthy, Failed(&'static str), Canceled }
 enum PoolEvent {
     Connection { id: u64, dc: i32, media: bool, reason: &'static str, result: Result<(), ReadError> },
     Probe { id: u64, dc: i32, outcome: ProbeOutcome },
+    Connected(Box<Connected>),
+}
+
+struct Connected {
+    id: u64,
+    dc: i32,
+    sender: Sender<Transport, mtp::Encrypted>,
+    config: tl::types::Config,
+    pending: Vec<Rpc>,
+    rpc_rx: mpsc::UnboundedReceiver<Rpc>,
 }
 
 /// How long to wait after warning the user that the updates was dropped.
@@ -169,7 +179,7 @@ pub struct SenderPool {
 pub struct SenderPoolRunner {
     session: Arc<ErasedSession>,
     api_id: i32,
-    connection_params: ConnectionParams,
+    connection_params: Arc<ConnectionParams>,
     request_rx: mpsc::UnboundedReceiver<Request>,
     updates_tx: mpsc::Sender<UpdatesLike>,
     connections: Vec<ConnectionInfo>,
@@ -338,7 +348,7 @@ impl SenderPool {
             runner: SenderPoolRunner {
                 session: Arc::clone(&session),
                 api_id,
-                connection_params,
+                connection_params: Arc::new(connection_params),
                 request_rx,
                 updates_tx,
                 connections: Vec::new(),
@@ -371,7 +381,7 @@ impl SenderPoolRunner {
                 completion = self.connection_pool.join_next(), if !self.connection_pool.is_empty() => {
                     match completion.unwrap() {
                         Err(err) => if let Ok(reason) = err.try_into_panic() { panic::resume_unwind(reason); },
-                        Ok(event) => self.connection_event(event),
+                        Ok(event) => self.connection_event(event).await,
                     }
                 }
                 request = self.request_rx.recv() => {
@@ -395,8 +405,36 @@ impl SenderPoolRunner {
         }
     }
 
-    fn connection_event(&mut self, event: PoolEvent) {
+    async fn connection_event(&mut self, event: PoolEvent) {
         match event {
+            PoolEvent::Connected(connected) => {
+                let Connected { id, dc, mut sender, config, pending, rpc_rx } = *connected;
+                let Some(index) = self.connections.iter().position(|c| c.id == id) else { return; };
+                let setup = async {
+                    self.update_config(config).await?;
+                    let mut option = self.session.dc_option(dc)?.ok_or(InvocationError::InvalidDc)?;
+                    option.auth_key = Some(sender.auth_key());
+                    self.session.set_dc_option(&option).await?;
+                    Ok::<_, InvocationError>(dc == self.session.home_dc_id()?)
+                }.await;
+                let home = match setup {
+                    Ok(home) => home,
+                    Err(error) => {
+                        fail_connecting(pending, rpc_rx, error);
+                        self.connections.remove(index);
+                        return;
+                    }
+                };
+                connection_log(self.pool_id, dc, id, "control", "created", "initialized", format_args!(""));
+                for rpc in pending {
+                    if !rpc.tx.is_closed() { sender.enqueue_body(rpc.body, rpc.tx); }
+                }
+                let updates = self.updates_tx.clone();
+                self.connections[index].abort_handle = self.connection_pool.spawn(async move {
+                    let (result, reason) = run_sender(sender, rpc_rx, updates, home, None).await;
+                    PoolEvent::Connection { id, dc, media: false, reason, result }
+                });
+            }
             PoolEvent::Connection { id, dc, media, reason, result } => {
                 let Some(index) = self.connections.iter().position(|c| c.id == id) else { return; };
                 let connection = self.connections.remove(index);
@@ -508,7 +546,7 @@ impl SenderPoolRunner {
                     .position(|connection| connection.dc_id == dc_id && !connection.media && !connection.abort_handle.is_finished() && !connection.rpc_tx.is_closed())
                 {
                     Some(connection) => connection,
-                    None => match self.create_connection(dc_id).await {
+                    None => match self.create_connection(dc_id) {
                         Ok(x) => x,
                         Err(e) => {
                             let _ = tx.send(Err(e));
@@ -692,53 +730,32 @@ impl SenderPoolRunner {
         Ok(Some((index, probing)))
     }
 
-    async fn create_connection(&mut self, dc_id: i32) -> Result<usize, InvocationError> {
-        let mut dc_option = match self.session.dc_option(dc_id)? {
-            Some(x) => x,
-            None => return Err(InvocationError::InvalidDc),
-        };
-
+    fn create_connection(&mut self, dc_id: i32) -> Result<usize, InvocationError> {
+        let dc_option = self.session.dc_option(dc_id)?.ok_or(InvocationError::InvalidDc)?;
         let id = next_connection_id();
-        let pool_id = self.pool_id;
-        connection_log(pool_id, dc_id, id, "control", "creating", "rpc_demand", format_args!(""));
-        let sender = match self.connect_sender(&dc_option).await {
-            Ok(sender) => sender,
-            Err(error) => {
-                connection_log(pool_id, dc_id, id, "control", "retired", "connect_failed", format_args!(""));
-                return Err(error);
-            }
-        };
-        connection_log(pool_id, dc_id, id, "control", "created", "initialized", format_args!(""));
-
-        dc_option.auth_key = Some(sender.auth_key());
-        self.session.set_dc_option(&dc_option).await?;
-
+        connection_log(self.pool_id, dc_id, id, "control", "creating", "rpc_demand", format_args!(""));
+        let params = self.connection_params.clone();
+        let api_id = self.api_id;
         let (rpc_tx, rpc_rx) = mpsc::unbounded_channel();
-        let updates = self.updates_tx.clone();
-        let home = dc_option.id == self.session.home_dc_id()?;
-        let abort_handle = self.connection_pool.spawn(async move {
-            let (result, reason) = run_sender(sender, rpc_rx, updates, home, None).await;
-            PoolEvent::Connection { id, dc: dc_id, media: false, reason, result }
-        });
+        let abort_handle = self.connection_pool.spawn(connect_pending(
+            id, dc_id, rpc_rx,
+            async move { Self::connect_sender(api_id, &params, &dc_option).await },
+        ));
         self.connections.push(ConnectionInfo {
-            id,
-            dc_id,
-            media: false,
-            rpc_tx,
-            abort_handle,
-            uses: 0,
+            id, dc_id, media: false, rpc_tx, abort_handle, uses: 0,
             last_reuse_log: tokio::time::Instant::now(),
         });
         Ok(self.connections.len() - 1)
     }
 
     async fn connect_sender(
-        &mut self,
+        api_id: i32,
+        connection_params: &ConnectionParams,
         dc_option: &DcOption,
-    ) -> Result<Sender<transport::Full, mtp::Encrypted>, InvocationError> {
+    ) -> Result<(Sender<transport::Full, mtp::Encrypted>, tl::types::Config), InvocationError> {
         let transport = transport::Full::new;
 
-        let address = if self.connection_params.use_ipv6 {
+        let address = if connection_params.use_ipv6 {
             dc_option.ipv6.into()
         } else {
             dc_option.ipv4.into()
@@ -746,7 +763,7 @@ impl SenderPoolRunner {
 
         #[cfg(feature = "proxy")]
         let addr = || {
-            if let Some(proxy) = self.connection_params.proxy_url.clone() {
+            if let Some(proxy) = connection_params.proxy_url.clone() {
                 ServerAddr::Proxied { address, proxy }
             } else {
                 ServerAddr::Tcp { address }
@@ -758,13 +775,13 @@ impl SenderPoolRunner {
         let init_connection = tl::functions::InvokeWithLayer {
             layer: tl::LAYER,
             query: tl::functions::InitConnection {
-                api_id: self.api_id,
-                device_model: self.connection_params.device_model.clone(),
-                system_version: self.connection_params.system_version.clone(),
-                app_version: self.connection_params.app_version.clone(),
-                system_lang_code: self.connection_params.system_lang_code.clone(),
+                api_id,
+                device_model: connection_params.device_model.clone(),
+                system_version: connection_params.system_version.clone(),
+                app_version: connection_params.app_version.clone(),
+                system_lang_code: connection_params.system_lang_code.clone(),
                 lang_pack: "".into(),
-                lang_code: self.connection_params.lang_code.clone(),
+                lang_code: connection_params.lang_code.clone(),
                 proxy: None,
                 params: None,
                 query: tl::functions::help::GetConfig {},
@@ -788,9 +805,7 @@ impl SenderPoolRunner {
             Err(e) => return Err(e),
         };
 
-        self.update_config(remote_config).await?;
-
-        Ok(sender)
+        Ok((sender, remote_config))
     }
 
     async fn update_config(
@@ -852,6 +867,79 @@ impl SenderPoolRunner {
             self.session.set_dc_option(&dc_option).await?;
         }
         Ok(())
+    }
+}
+
+// One connecting task owns the waiters for one DC. The pool remains free to
+// dispatch to other DCs, and dropping the last caller releases the socket.
+async fn connect_pending(
+    id: u64,
+    dc: i32,
+    mut rpc_rx: mpsc::UnboundedReceiver<Rpc>,
+    connect: impl std::future::Future<Output = Result<(Sender<Transport, mtp::Encrypted>, tl::types::Config), InvocationError>>,
+) -> PoolEvent {
+    let mut pending = Vec::new();
+    let connect = tokio::time::timeout(Duration::from_secs(15), connect);
+    tokio::pin!(connect);
+    let mut cancellations = tokio::time::interval(Duration::from_millis(100));
+    // create_connection queues the first request before the spawned task runs.
+    if let Some(rpc) = rpc_rx.recv().await { pending.push(rpc); }
+    loop {
+        pending.retain(|rpc| !rpc.tx.is_closed());
+        if pending.is_empty() && rpc_rx.is_empty() {
+            return PoolEvent::Connection { id, dc, media: false, reason: "connect_canceled", result: Ok(()) };
+        }
+        tokio::select! {
+            biased;
+            _ = cancellations.tick() => {},
+            rpc = rpc_rx.recv() => match rpc {
+                Some(rpc) => pending.push(rpc),
+                None => return PoolEvent::Connection { id, dc, media: false, reason: "rpc_queue_closed", result: Ok(()) },
+            },
+            result = &mut connect => {
+                let error = match result {
+                    Ok(Ok((sender, config))) => return PoolEvent::Connected(Box::new(Connected { id, dc, sender, config, pending, rpc_rx })),
+                    Ok(Err(error)) => error,
+                    Err(_) => InvocationError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "datacenter connection timeout")),
+                };
+                fail_connecting(pending, rpc_rx, error);
+                return PoolEvent::Connection { id, dc, media: false, reason: "connect_failed", result: Ok(()) };
+            }
+        }
+    }
+}
+
+fn fail_connecting(mut pending: Vec<Rpc>, mut rpc_rx: mpsc::UnboundedReceiver<Rpc>, error: InvocationError) {
+    rpc_rx.close();
+    while let Ok(rpc) = rpc_rx.try_recv() { pending.push(rpc); }
+    let error = Arc::new(error);
+    for rpc in pending {
+        if !rpc.tx.is_closed() {
+            let failure = match error.as_ref() {
+                InvocationError::Session(_) => InvocationError::Session(Box::new(ConnectionSessionError(error.clone()))),
+                InvocationError::Rpc(e) => InvocationError::Rpc(e.clone()),
+                InvocationError::Io(e) => InvocationError::Io(e.raw_os_error().map(std::io::Error::from_raw_os_error).unwrap_or_else(|| std::io::Error::new(e.kind(), e.to_string()))),
+                InvocationError::Deserialize(e) => InvocationError::Deserialize(e.clone()),
+                InvocationError::Transport(e) => InvocationError::Transport(e.clone()),
+                InvocationError::Dropped(reason) => InvocationError::Dropped(reason),
+                InvocationError::InvalidDc => InvocationError::InvalidDc,
+                InvocationError::Authentication(e) => InvocationError::Authentication(e.clone()),
+            };
+            let _ = rpc.tx.send(Err(failure));
+        }
+    }
+}
+
+// Session errors are type-erased and cannot be cloned; retain the shared cause
+// without turning persistence failures into retryable network errors.
+#[derive(Debug)]
+struct ConnectionSessionError(Arc<InvocationError>);
+impl fmt::Display for ConnectionSessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { self.0.fmt(f) }
+}
+impl std::error::Error for ConnectionSessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self.0.as_ref() { InvocationError::Session(error) => Some(error.as_ref()), _ => None }
     }
 }
 

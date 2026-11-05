@@ -139,8 +139,10 @@ fn get_backup_delete_activity(core: State<AppCore>) -> Option<yingqu_core::deskt
     core.current_delete_activity()
 }
 #[tauri::command]
-fn list_backup_operations(core: State<AppCore>) -> Result<Vec<yingqu_core::backup::scheduler::Operation>,String> {
-    yingqu_core::backup::scheduler::operations(&core).map_err(error)
+async fn list_backup_operations(core: State<'_, AppCore>) -> Result<Vec<yingqu_core::backup::scheduler::Operation>,String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || yingqu_core::backup::scheduler::operations_for_display(&core))
+        .await.map_err(|e| e.to_string())?.map_err(error)
 }
 #[tauri::command]
 fn retry_backup_operation(core: State<AppCore>, operation_id:String) -> Result<(),String> {
@@ -721,6 +723,9 @@ fn main() {
                     }
                     TaskEvent::Removed(id) => {
                         let _ = handle.emit("task_removed", id);
+                    }
+                    TaskEvent::RemovedFromSpace { id, space_id } => {
+                        let _ = handle.emit("task_removed", serde_json::json!({ "id": id, "space_id": space_id }));
                     }
                     TaskEvent::Transcription(snapshot) => {
                         let _ = handle.emit("transcription_updated", snapshot);

@@ -77,6 +77,24 @@ pub fn operations(core: &Core) -> Result<Vec<Operation>> {
     select_operations(core, "ORDER BY created_at DESC,rowid DESC", [])
 }
 
+/// UI state only. Keep captured media and recovery evidence in the worker payload.
+pub fn operations_for_display(core: &Core) -> Result<Vec<Operation>> {
+    core.backup_db(|db| {
+        let mut query = db.prepare("SELECT operation_id,space_id,asset_id,kind,state,phase,
+            json_extract(payload_json,'$.completed_bytes','$.transfer_started','$.local_cleanup_done',
+                '$.archive_next','$.cleanup_dependency','$.cleanup_error','$.cleanup_blocked'),attempt,last_error
+            FROM backup_operations ORDER BY created_at DESC,rowid DESC")?;
+        let rows = query.query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get::<_,String>(6)?,row.get(7)?,row.get(8)?)))?;
+        rows.map(|row| {
+            let (operation_id,space_id,asset_id,kind,state,phase,projection,attempt,last_error) = row?;
+            let values: [Value; 7] = serde_json::from_str(&projection)?;
+            let payload = ["completed_bytes","transfer_started","local_cleanup_done","archive_next","cleanup_dependency","cleanup_error","cleanup_blocked"]
+                .into_iter().zip(values).filter(|(_,value)| !value.is_null()).map(|(key,value)| (key.to_owned(),value)).collect();
+            Ok(Operation { operation_id,space_id,asset_id,kind,state,phase,payload:Value::Object(payload),attempt,last_error })
+        }).collect()
+    })
+}
+
 pub(super) fn operation(core: &Core, id: &str) -> Result<Operation> {
     select_operations(core, "WHERE operation_id=?1", [id])?
         .pop()
@@ -207,4 +225,35 @@ pub fn cancel(core: &Core, id: &str) -> Result<()> {
         if changed!=1 {bail!("BACKUP_INVALID_OPERATION");}
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn display_projection_keeps_ui_state_and_leaves_recovery_payload_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::open(&root.path().join("app.sqlite"),root.path().join("downloads"),"unused".into(),vec![], |_| {}).unwrap();
+        let state = json!({"completed_bytes":0,"transfer_started":false,"local_cleanup_done":true,
+            "archive_next":"peer","cleanup_dependency":"previous","cleanup_error":"TELEGRAM_SEND_UNCONFIRMED","cleanup_blocked":false});
+        let mut payload = state.clone();
+        payload["captured"] = json!({"cover":vec![255_u8;256*1024],"text":"worker recovery data"});
+        core.backup_db(|db| {
+            db.execute("INSERT INTO backup_spaces VALUES('space','library','','','','',0)", [])?;
+            db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json,attempt,last_error,created_at)
+                VALUES('old','space','upload','blocked','captured',?1,3,'BACKUP_NETWORK_ERROR',1),
+                      ('new','space','delete','completed','completed','{}',0,NULL,1)", [payload.to_string()])?;
+            Ok(())
+        }).unwrap();
+        let display = operations_for_display(&core).unwrap();
+        assert_eq!(display.iter().map(|op| op.operation_id.as_str()).collect::<Vec<_>>(),vec!["new","old"]);
+        assert_eq!(display[0].payload,json!({}));
+        assert_eq!(display[1].payload,state);
+        assert_eq!(display[1].attempt,3);
+        assert_eq!(display[1].last_error.as_deref(),Some("BACKUP_NETWORK_ERROR"));
+        assert!(serde_json::to_vec(&display).unwrap().len()<1024);
+        assert_eq!(operation(&core,"old").unwrap().payload,payload);
+    }
 }

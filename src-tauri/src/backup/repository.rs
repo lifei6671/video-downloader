@@ -161,6 +161,23 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
     metadata.insert("completed_at".into(), task.completed_at.into());
     db.execute("INSERT INTO media_assets(asset_id,task_id,metadata_json,original_filename,content_bytes,asset_state) VALUES(?1,?2,?3,?4,?5,'active') ON CONFLICT(asset_id) DO UPDATE SET task_id=excluded.task_id",
         params![asset_id,task.id,Value::Object(metadata).to_string(),filename,i64::try_from(file.len())?])?;
+    if !is_new && video["platform"] == "telegram" {
+        let raw: String = db.query_row("SELECT metadata_json FROM media_assets WHERE asset_id=?", [&asset_id], |r| r.get(0))?;
+        let mut metadata: Value = serde_json::from_str(&raw)?;
+        let mut patch = super::provider::FieldPatch::new();
+        for field in ["width", "height", "duration_ms"] {
+            if metadata[field].as_u64().is_none_or(|value| value == 0)
+                && video[field].as_u64().is_some_and(|value| value > 0)
+            {
+                metadata[field] = video[field].clone();
+                patch.insert(field.into(), video[field].clone());
+            }
+        }
+        if !patch.is_empty() {
+            db.execute("UPDATE media_assets SET metadata_json=?2 WHERE asset_id=?1", params![asset_id, metadata.to_string()])?;
+            super::sync_engine::mark_local(db, &asset_id, patch, false)?;
+        }
+    }
     let source = serde_json::to_string(&crate::desktop_core::transcription::Source::read(path)?)?;
     db.execute("INSERT OR IGNORE INTO asset_local_files(asset_id,path,bytes,source_json,local_state) VALUES(?1,?2,?3,?4,'present')",
         params![asset_id,path.to_string_lossy(),i64::try_from(file.len())?,source])?;
