@@ -14,9 +14,9 @@ const rows=['douyin','tiktok','youtube','telegram','legacy','missing','broken','
  bytes:100,total_bytes:100,speed_bps:null,error:null,path:null,created_at:10-index,completed_at:20,canceling:false,file_missing:false,queue_order:null,cover_path:id==='legacy'?'C:\\fixture.cover.png':null,cover_error:null,files:[],cache_hit:false,cached_at:null,cover_cached:!['legacy','missing','album'].includes(id)
 }));
 api.tasks=async()=>structuredClone(rows);
-api.settings=async()=>({download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'fixture',proxy:null,cookie_configured:false})),tdl:{enabled:false,path:null}});
+api.settings=async()=>({download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'fixture',proxy:null,cookie_configured:false}))});
 api.subscribe=async()=>()=>{};
-api.tdlLoginStatus=async()=>null;
+api.telegramStorageStatus=async()=>({configured:false,operation_id:null,phase:'signed_out',account:null,last_error:null,qr:null,qr_expires_at:null});
 api.cover=async id=>{if(id==='broken')throw 'FILE_MISSING';return id==='legacy'?jpeg:id==='youtube'?webp:image};
 api.image=async id=>{if(id==='broken-album')throw 'FILE_MISSING';return image};
 api.saveCover=async id=>{state.calls.push(id);if(state.pending)await new Promise(resolve=>state.release=resolve);if(state.error)throw 'IO_ERROR';return state.result};

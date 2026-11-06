@@ -3,6 +3,10 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "cn"
 import { Tabs as TabsPrimitive } from "radix-ui"
 
+// Shared settings navigation: account platforms and backup spaces use one layout.
+const settingsTabsListClassName = "w-full shrink-0 justify-start border-b px-0"
+const settingsTabsTriggerClassName = "min-w-24 flex-none px-4"
+
 function Tabs({
   className,
   orientation = "horizontal",
@@ -84,4 +88,4 @@ function TabsContent({
   )
 }
 
-export { Tabs, TabsList, TabsTrigger, TabsContent, tabsListVariants }
+export { Tabs, TabsList, TabsTrigger, TabsContent, tabsListVariants, settingsTabsListClassName, settingsTabsTriggerClassName }

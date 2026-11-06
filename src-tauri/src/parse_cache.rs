@@ -41,8 +41,8 @@ pub fn init(db: &Connection) -> Result<bool> {
 }
 
 fn revision(resolver: &str) -> String {
-    if resolver == "tdl" {
-        return crate::tdl_bridge::PROTOCOL_REVISION.into();
+    if resolver == "grammers" {
+        return crate::telegram_download::PROTOCOL_REVISION.into();
     }
     let dtk: Value = serde_json::from_str(include_str!("../../vendor/dtk/manifest.json"))
         .expect("bundled manifest");
@@ -159,64 +159,13 @@ pub fn find(db: &Connection, input: &str, resolver: &str) -> Result<Option<Previ
     }
 }
 
-// A validated public message alias also identifies its channel. Reuse existing
-// cache rows across messages; conflicting or obsolete rows are not authority.
-pub fn tdl_channel(db: &Connection, input: &str) -> Result<Option<u64>> {
-    let link = crate::tdl_bridge::message_link(input)?;
-    let Some(peer) = crate::tdl_bridge::public_peer(&link) else {
-        return Ok(link.channel);
-    };
-    let mut query = db
-        .prepare(
-            "SELECT a.url,a.video_id,c.metadata FROM parse_cache_aliases a JOIN parse_cache c
-         ON a.platform=c.platform AND a.video_id=c.video_id
-         WHERE a.platform='telegram' AND c.resolver='tdl' AND c.revision=?",
-        )
-        .context("DATABASE_ERROR")?;
-    let rows = query
-        .query_map([revision("tdl")], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })
-        .context("DATABASE_ERROR")?;
-    let mut channel = None;
-    for row in rows {
-        let (url, id, metadata) = row.context("DATABASE_ERROR")?;
-        let Ok(alias) = crate::tdl_bridge::message_link(&url) else {
-            continue;
-        };
-        if crate::tdl_bridge::public_peer(&alias).as_ref() != Some(&peer) {
-            continue;
-        }
-        let video: Value = serde_json::from_str(&metadata).context("DATABASE_ERROR")?;
-        let Some(canonical) = video["canonical_url"].as_str() else {
-            continue;
-        };
-        if !crate::tdl_bridge::validate_identity(&id, canonical) {
-            continue;
-        }
-        let identity = crate::tdl_bridge::message_link(canonical)?;
-        if identity.message != alias.message {
-            continue;
-        }
-        if channel.is_some() && channel != identity.channel {
-            return Ok(None);
-        }
-        channel = identity.channel;
-    }
-    Ok(channel)
-}
-
-// Re-resolve a known public alias in tdl when starting a download, so the live
+// Re-resolve a known public alias through the SDK when starting a download, so the live
 // service can bind that username to its freshly verified numeric channel ID.
-pub fn tdl_source(db: &Connection, video: &Value) -> Result<String> {
+pub fn telegram_source(db: &Connection, video: &Value) -> Result<String> {
     let canonical = video["canonical_url"]
         .as_str()
         .context("INVALID_ENGINE_RESULT")?;
-    let expected = crate::tdl_bridge::message_link(canonical)?;
+    let expected = crate::telegram_download::message_link(canonical)?;
     let mut statement = db.prepare(
         "SELECT url FROM parse_cache_aliases WHERE platform='telegram' AND video_id=? ORDER BY url"
     ).context("DATABASE_ERROR")?;
@@ -230,10 +179,10 @@ pub fn tdl_source(db: &Connection, video: &Value) -> Result<String> {
         .context("DATABASE_ERROR")?;
     for alias in aliases {
         let alias = alias.context("DATABASE_ERROR")?;
-        if let Ok(link) = crate::tdl_bridge::message_link(&alias) {
+        if let Ok(link) = crate::telegram_download::message_link(&alias) {
             if link.channel.is_none() && link.message == expected.message {
                 // Preserve the database key for precise invalidation (including
-                // telegram.me). The bridge normalizes its own CLI argument.
+                // telegram.me). The SDK normalizes its own username lookup.
                 return Ok(alias);
             }
         }
@@ -243,9 +192,9 @@ pub fn tdl_source(db: &Connection, video: &Value) -> Result<String> {
 
 pub fn remember(db: &Connection, input: &str, video: &Value) -> Result<()> {
     if video["platform"] == "telegram" {
-        let link = crate::tdl_bridge::message_link(input)?;
-        if let Some(peer) = crate::tdl_bridge::public_peer(&link) {
-            let canonical = crate::tdl_bridge::message_link(
+        let link = crate::telegram_download::message_link(input)?;
+        if let Some(peer) = crate::telegram_download::public_peer(&link) {
+            let canonical = crate::telegram_download::message_link(
                 video["canonical_url"]
                     .as_str()
                     .context("INVALID_ENGINE_RESULT")?,
@@ -262,10 +211,10 @@ pub fn remember(db: &Connection, input: &str, video: &Value) -> Result<()> {
                 .context("DATABASE_ERROR")?;
             drop(query);
             for (url, id) in aliases {
-                let Ok(old) = crate::tdl_bridge::message_link(&url) else {
+                let Ok(old) = crate::telegram_download::message_link(&url) else {
                     continue;
                 };
-                if crate::tdl_bridge::public_peer(&old).as_ref() == Some(&peer)
+                if crate::telegram_download::public_peer(&old).as_ref() == Some(&peer)
                     && canonical
                         .channel
                         .is_some_and(|channel| !id.starts_with(&format!("{channel}_")))
@@ -295,9 +244,9 @@ pub fn remember(db: &Connection, input: &str, video: &Value) -> Result<()> {
     Ok(())
 }
 
-pub fn forget_tdl_channel(db: &Connection, input: &str, video: &Value) -> Result<()> {
-    let peer = crate::tdl_bridge::public_peer(&crate::tdl_bridge::message_link(input)?);
-    let channel = crate::tdl_bridge::message_link(
+pub fn forget_telegram_channel(db: &Connection, input: &str, video: &Value) -> Result<()> {
+    let peer = crate::telegram_download::public_peer(&crate::telegram_download::message_link(input)?);
+    let channel = crate::telegram_download::message_link(
         video["canonical_url"]
             .as_str()
             .context("INVALID_ENGINE_RESULT")?,
@@ -313,11 +262,11 @@ pub fn forget_tdl_channel(db: &Connection, input: &str, video: &Value) -> Result
         .context("DATABASE_ERROR")?;
     drop(query);
     for (url, id) in aliases {
-        let Ok(link) = crate::tdl_bridge::message_link(&url) else {
+        let Ok(link) = crate::telegram_download::message_link(&url) else {
             continue;
         };
         if peer.is_some()
-            && crate::tdl_bridge::public_peer(&link) == peer
+            && crate::telegram_download::public_peer(&link) == peer
             && channel.is_some_and(|channel| id.starts_with(&format!("{channel}_")))
         {
             db.execute("DELETE FROM parse_cache_aliases WHERE url=?", [url])
@@ -327,10 +276,10 @@ pub fn forget_tdl_channel(db: &Connection, input: &str, video: &Value) -> Result
     Ok(())
 }
 
-// A fresh tdl HEAD can prove cached original-file metadata obsolete. Let retry resolve it again.
-pub fn invalidate_tdl(db: &mut Connection, video: &Value) -> Result<()> {
+// A fresh Telegram message can prove cached original-file metadata obsolete. Let retry resolve it again.
+pub fn invalidate_telegram(db: &mut Connection, video: &Value) -> Result<()> {
     let cache_key = key(video)?;
-    if video["platform"] != "telegram" || video["resolver"] != "tdl" {
+    if video["platform"] != "telegram" || video["resolver"] != "grammers" {
         bail!("INVALID_ENGINE_RESULT");
     }
     let tx = db.transaction().context("DATABASE_ERROR")?;
@@ -456,6 +405,25 @@ pub fn image(db: &Connection, video: &Value, index: usize) -> Result<Vec<u8>> {
     Ok(body)
 }
 
+pub(crate) fn update_telegram_metadata(db: &Connection, video: &Value) -> Result<()> {
+    anyhow::ensure!(video["platform"] == "telegram", "INVALID_ENGINE_RESULT");
+    let cache_key = key(video)?;
+    let cached: Option<String> = db.query_row(
+        "SELECT metadata FROM parse_cache WHERE cache_key=?1 AND revision=?2",
+        params![cache_key, revision("grammers")], |row| row.get(0),
+    ).optional().context("DATABASE_ERROR")?;
+    let Some(cached) = cached else { return Ok(()); };
+    let mut cached: Value = serde_json::from_str(&cached).context("DATABASE_ERROR")?;
+    if video["telegram_document_id"].as_i64().is_none()
+        || ["telegram_document_id", "filesize", "mime_type", "original_filename"]
+            .iter().any(|field| cached[*field] != video[*field]) {
+        return Ok(());
+    }
+    crate::telegram_download::fill_missing_attributes(&mut cached, video);
+    db.execute("UPDATE parse_cache SET metadata=?2 WHERE cache_key=?1", params![cache_key, serde_json::to_string(&cached)?]).context("DATABASE_ERROR")?;
+    Ok(())
+}
+
 // Add a downloaded cover without replacing newer parsed metadata or restoring an
 // invalidated cache entry. A cache write failure never changes download success.
 pub fn save_cover(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {
@@ -560,46 +528,28 @@ mod tests {
     }
 
     #[test]
-    fn telegram_channel_mapping_reuses_valid_aliases_across_messages_and_restart() {
+    fn telegram_public_source_alias_survives_restart_and_can_be_invalidated() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("cache.sqlite");
         let mut db = Connection::open(&path).unwrap();
         init(&db).unwrap();
-        let video = json!({"platform":"telegram","video_id":"100_9","resolver":"tdl","kind":"video",
+        let video = json!({"platform":"telegram","video_id":"100_9","resolver":"grammers","kind":"video",
             "canonical_url":"https://t.me/c/100/9","selected_format_id":"original",
             "formats":[{"format_id":"original","container":"mp4","filesize":4096}]});
         save(&mut db, &video, vec![], None, 1).unwrap();
         remember(&db, "分享文案 https://telegram.me/Public_Channel/9", &video).unwrap();
-        assert!(find(&db, "https://t.me/public_channel/10", "tdl")
+        assert!(find(&db, "https://t.me/public_channel/10", "grammers")
             .unwrap()
             .is_none());
-        assert_eq!(
-            tdl_channel(&db, "https://t.me/public_channel/10").unwrap(),
-            Some(100)
-        );
-        assert_eq!(
-            tdl_channel(&db, "https://t.me/new_channel/10").unwrap(),
-            None
-        );
         drop(db);
         let db = Connection::open(&path).unwrap();
-        assert_eq!(
-            tdl_channel(&db, "https://telegram.me/PUBLIC_CHANNEL/11").unwrap(),
-            Some(100)
-        );
-        forget_tdl_channel(&db, "https://t.me/public_channel/9", &video).unwrap();
-        assert_eq!(
-            tdl_channel(&db, "https://t.me/public_channel/10").unwrap(),
-            None
-        );
-        assert!(get(&db, "telegram", "100_9", "tdl").unwrap().is_some());
+        assert_eq!(telegram_source(&db, &video).unwrap(), "https://telegram.me/Public_Channel/9");
+        forget_telegram_channel(&db, "https://t.me/public_channel/9", &video).unwrap();
+        assert_eq!(telegram_source(&db, &video).unwrap(), "https://t.me/c/100/9");
+        assert!(get(&db, "telegram", "100_9", "grammers").unwrap().is_some());
         remember(&db, "https://t.me/public_channel/9", &video).unwrap();
-        db.execute("UPDATE parse_cache SET revision='obsolete'", [])
-            .unwrap();
-        assert_eq!(
-            tdl_channel(&db, "https://t.me/public_channel/10").unwrap(),
-            None
-        );
+        db.execute("UPDATE parse_cache SET revision='obsolete'", []).unwrap();
+        assert!(get(&db,"telegram","100_9","grammers").unwrap().is_none());
     }
 
     #[test]
@@ -609,24 +559,22 @@ mod tests {
         init(&db).unwrap();
         for channel in [100, 101] {
             let message = if channel == 100 { 9 } else { 10 };
-            let video = json!({"platform":"telegram","video_id":format!("{channel}_{message}"),"resolver":"tdl","kind":"video",
+            let video = json!({"platform":"telegram","video_id":format!("{channel}_{message}"),"resolver":"grammers","kind":"video",
                 "canonical_url":format!("https://t.me/c/{channel}/{message}"),"selected_format_id":"original",
                 "formats":[{"format_id":"original","container":"mp4","filesize":4096}]});
             save(&mut db, &video, vec![], None, channel).unwrap();
             remember(&db, &format!("https://t.me/channel/{message}"), &video).unwrap();
         }
-        assert_eq!(
-            tdl_channel(&db, "https://t.me/channel/11").unwrap(),
-            Some(101)
-        );
-        assert!(get(&db, "telegram", "100_9", "tdl").unwrap().is_some());
+        assert!(get(&db, "telegram", "100_9", "grammers").unwrap().is_some());
+        assert!(find(&db,"https://t.me/channel/9","grammers").unwrap().is_none());
+        assert_eq!(find(&db,"https://t.me/channel/10","grammers").unwrap().unwrap().video["video_id"],"101_10");
     }
 
     #[test]
     fn downloaded_cover_updates_existing_cache_without_overwriting_metadata_or_reviving_entries() {
         let mut db = Connection::open_in_memory().unwrap();
         init(&db).unwrap();
-        let video = json!({"platform":"telegram","video_id":"100_9","resolver":"tdl","kind":"video",
+        let video = json!({"platform":"telegram","video_id":"100_9","resolver":"grammers","kind":"video",
             "canonical_url":"https://t.me/c/100/9","title":"current","selected_format_id":"original",
             "formats":[{"format_id":"original","container":"mp4","filesize":4096}]});
         let body = b"\x89PNG\r\n\x1a\nfixture";
@@ -635,7 +583,7 @@ mod tests {
         let mut stale = video.clone();
         stale["title"] = "old".into();
         assert!(save_cover(&db, &stale, body).unwrap());
-        let hit = find(&db, "https://t.me/c/100/9", "tdl").unwrap().unwrap();
+        let hit = find(&db, "https://t.me/c/100/9", "grammers").unwrap().unwrap();
         assert_eq!(hit.video["title"], "current");
         assert_eq!(hit.saved_at, 100);
         assert!(hit.has_cover);

@@ -1,0 +1,950 @@
+//! R2 transport using the official S3 SDK; errors never include request credentials.
+use super::{
+    model::Space,
+    store::{
+        Condition, Object, ObjectInfo, ObjectStore, ObjectStream, Page, Part, StoreFuture, Write,UploadSession,
+    },
+};
+use anyhow::{anyhow, bail, Context, Result};
+use aws_sdk_s3::{
+    config::{
+        BehaviorVersion, Credentials, Region, RequestChecksumCalculation,
+        ResponseChecksumValidation,
+    },
+    error::{ProvideErrorMetadata, SdkError},
+    primitives::{ByteStream, SdkBody},
+    types::{CompletedMultipartUpload, CompletedPart},
+};
+use http_body_util::BodyExt;
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::io::AsyncReadExt;
+
+const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+
+pub struct S3Store {
+    client: aws_sdk_s3::Client,
+    bucket: String,
+}
+
+pub fn validate_target(endpoint: &str, bucket: &str, prefix: &str) -> Result<()> {
+    let url = url::Url::parse(endpoint).context("BACKUP_INVALID_ENDPOINT")?;
+    let host = url.host_str().context("BACKUP_INVALID_ENDPOINT")?;
+    let account = host
+        .strip_suffix(".r2.cloudflarestorage.com")
+        .context("BACKUP_INVALID_ENDPOINT")?;
+    if url.scheme() != "https"
+        || account.len() != 32
+        || !account.bytes().all(|b| b.is_ascii_hexdigit())
+        || url.port().is_some_and(|p| p != 443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        bail!("BACKUP_INVALID_ENDPOINT");
+    }
+    if bucket.contains('.') {bail!("BACKUP_INVALID_BUCKET");}
+    validate_namespace(bucket,prefix)
+}
+
+pub fn validate_s3_target(endpoint:&str,bucket:&str,prefix:&str)->Result<()> {
+    let url=url::Url::parse(endpoint).context("BACKUP_INVALID_ENDPOINT")?;
+    if url.scheme()!="https"||url.host_str().is_none()||!url.username().is_empty()||url.password().is_some()
+        ||url.query().is_some()||url.fragment().is_some()||url.path()!="/" {
+        bail!("BACKUP_INVALID_ENDPOINT");
+    }
+    validate_namespace(bucket,prefix)
+}
+
+fn validate_namespace(bucket:&str,prefix:&str)->Result<()> {
+    if bucket.len() < 3
+        || bucket.len() > 63
+        || !bucket
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b,b'-'|b'.'))
+        || !bucket.as_bytes()[0].is_ascii_alphanumeric()
+        || !bucket.as_bytes()[bucket.len()-1].is_ascii_alphanumeric()
+        || bucket.contains("..")
+        || bucket.parse::<std::net::Ipv4Addr>().is_ok()
+    {
+        bail!("BACKUP_INVALID_BUCKET");
+    }
+    let inner = prefix.strip_suffix('/').context("BACKUP_INVALID_PREFIX")?;
+    if inner.is_empty()
+        || inner.len() > 512
+        || inner
+            .split('/')
+            .any(|p| p.is_empty() || p == "." || p == "..")
+        || inner
+            .bytes()
+            .any(|b| !b.is_ascii_alphanumeric() && !matches!(b, b'/' | b'-' | b'_'))
+    {
+        bail!("BACKUP_INVALID_PREFIX");
+    }
+    Ok(())
+}
+
+impl S3Store {
+    pub fn new(space: &Space, access_key: &str, secret: &str) -> Result<Self> {
+        validate_target(&space.endpoint, &space.bucket, &space.prefix)?;
+        Self::configured(space,access_key,secret,"auto",true)
+    }
+
+    pub fn configured(space:&Space,access_key:&str,secret:&str,region:&str,path_style:bool)->Result<Self> {
+        validate_s3_target(&space.endpoint,&space.bucket,&space.prefix)?;
+        if region.is_empty()||region.len()>128||!region.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-') {bail!("BACKUP_INVALID_REGION");}
+        if access_key.is_empty() || secret.is_empty() {
+            bail!("BACKUP_CREDENTIALS_MISSING");
+        }
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new(region.to_owned()))
+            .endpoint_url(&space.endpoint)
+            .force_path_style(path_style)
+            .credentials_provider(Credentials::new(
+                access_key,
+                secret,
+                None,
+                None,
+                "yingqu-r2",
+            ))
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(1))
+            .timeout_config(
+                aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                    .connect_timeout(Duration::from_secs(15))
+                    .read_timeout(Duration::from_secs(30))
+                    .operation_timeout(Duration::from_secs(180))
+                    .build(),
+            )
+            .build();
+        Ok(Self {
+            client: aws_sdk_s3::Client::from_conf(config),
+            bucket: space.bucket.clone(),
+        })
+    }
+}
+
+fn content_type(key: &str) -> &'static str {
+    match key
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "json" => "application/json",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mkv" => "video/matroska",
+        "webm" => "video/webm",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+
+fn error<E: ProvideErrorMetadata>(error: SdkError<E>) -> anyhow::Error {
+    let code = error.as_service_error().and_then(|e| e.code());
+    let status = error.raw_response().map(|r| r.status().as_u16());
+    anyhow!(match (code, status) {
+        (Some("InvalidAccessKeyId"), _) => "BACKUP_INVALID_ACCESS_KEY",
+        (Some("SignatureDoesNotMatch"), _) => "BACKUP_SIGNATURE_MISMATCH",
+        (Some("NoSuchKey"), _) => "BACKUP_OBJECT_NOT_FOUND",
+        (Some("NoSuchBucket"), _) => "BACKUP_BUCKET_NOT_FOUND",
+        (Some("NoSuchUpload"), _) => "BACKUP_UPLOAD_EXPIRED",
+        (Some("RequestTimeout"), _) => "BACKUP_NETWORK_ERROR",
+        (_, Some(412)) => "BACKUP_PRECONDITION_FAILED",
+        (_, Some(409)) => "BACKUP_CONCURRENT_UPDATE",
+        (_, Some(403)) => "BACKUP_ACCESS_DENIED",
+        (_, Some(429)) | (Some("SlowDown"), _) => "BACKUP_RATE_LIMITED",
+        (_, Some(500..=599)) => "BACKUP_SERVICE_UNAVAILABLE",
+        (_, Some(404)) => "BACKUP_OBJECT_NOT_FOUND",
+        (_, Some(_)) => "BACKUP_REQUEST_REJECTED",
+        _ => "BACKUP_NETWORK_ERROR",
+    })
+}
+
+impl ObjectStore for S3Store {
+    fn multipart_sessions(&self, prefix: &str) -> StoreFuture<'_, Vec<UploadSession>> {
+        let key = prefix.to_owned();
+        Box::pin(async move {
+            let mut ids = Vec::new();
+            let mut marker = None;
+            let mut upload_marker = None;
+            loop {
+                let page = self
+                    .client
+                    .list_multipart_uploads()
+                    .bucket(&self.bucket)
+                    .prefix(&key)
+                    .set_key_marker(marker.clone())
+                    .set_upload_id_marker(upload_marker.clone())
+                    .send()
+                    .await
+                    .map_err(error)?;
+                for item in page
+                    .uploads()
+                    .iter()
+                {
+                    let object_key=item.key().context("BACKUP_INVALID_UPLOAD")?;
+                    if !object_key.starts_with(&key) {bail!("BACKUP_INVALID_UPLOAD");}
+                    ids.push(UploadSession {key:object_key.into(),upload_id:item.upload_id().context("BACKUP_INVALID_UPLOAD")?.into()});
+                }
+                if page.is_truncated() != Some(true) {
+                    break;
+                }
+                let next = page.next_key_marker().map(str::to_owned);
+                let next_upload = page.next_upload_id_marker().map(str::to_owned);
+                if next.is_none() || (next == marker && next_upload == upload_marker) {
+                    bail!("BACKUP_INVALID_PAGE");
+                }
+                marker = next;
+                upload_marker = next_upload;
+            }
+            Ok(ids)
+        })
+    }
+    fn uploads(&self,key:&str)->StoreFuture<'_,Vec<String>> {
+        let key=key.to_owned();Box::pin(async move {Ok(self.multipart_sessions(&key).await?.into_iter().filter(|s|s.key==key).map(|s|s.upload_id).collect())})
+    }
+
+    fn get(&self, key: &str) -> StoreFuture<'_, Option<Object>> {
+        let key = key.to_owned();
+        Box::pin(async move {
+            let result = self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(error);
+            let result = match result {
+                Ok(v) => v,
+                Err(e) if e.to_string() == "BACKUP_OBJECT_NOT_FOUND" => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            if result
+                .content_length()
+                .is_some_and(|v| v < 0 || v as u64 > MAX_METADATA_BYTES)
+            {
+                bail!("BACKUP_METADATA_TOO_LARGE");
+            }
+            let etag = result.e_tag().context("BACKUP_ETAG_MISSING")?.to_owned();
+            let mut body = Vec::new();
+            tokio::time::timeout(Duration::from_secs(30), result.body.into_async_read().take(MAX_METADATA_BYTES + 1).read_to_end(&mut body)).await.context("BACKUP_TIMEOUT")?.context("BACKUP_NETWORK_ERROR")?;
+            if body.len() as u64 > MAX_METADATA_BYTES {
+                bail!("BACKUP_METADATA_TOO_LARGE");
+            }
+            Ok(Some(Object { body, etag }))
+        })
+    }
+    fn head(&self, key: &str) -> StoreFuture<'_, Option<ObjectInfo>> {
+        let key = key.to_owned();
+        Box::pin(async move {
+            let result = self
+                .client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(error);
+            let v = match result {
+                Ok(v) => v,
+                Err(e) if e.to_string() == "BACKUP_OBJECT_NOT_FOUND" => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            Ok(Some(ObjectInfo {
+                key,
+                etag: v.e_tag().context("BACKUP_ETAG_MISSING")?.into(),
+                bytes: u64::try_from(v.content_length().context("BACKUP_INVALID_SIZE")?)?,
+                sha256: v.metadata().and_then(|m| m.get("sha256")).cloned(),
+            }))
+        })
+    }
+    fn list(&self, prefix: &str, token: Option<String>) -> StoreFuture<'_, Page> {
+        let prefix = prefix.to_owned();
+        Box::pin(async move {
+            let page = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix)
+                .set_continuation_token(token)
+                .send()
+                .await
+                .map_err(error)?;
+            let mut objects = Vec::new();
+            for v in page.contents() {
+                objects.push(ObjectInfo {
+                    key: v.key().context("BACKUP_INVALID_KEY")?.into(),
+                    etag: v.e_tag().context("BACKUP_ETAG_MISSING")?.into(),
+                    bytes: u64::try_from(v.size().context("BACKUP_INVALID_SIZE")?)?,
+                    sha256: None,
+                });
+            }
+            let next = page.next_continuation_token().map(str::to_owned);
+            if page.is_truncated() == Some(true) && next.is_none() {
+                bail!("BACKUP_INVALID_PAGE");
+            }
+            Ok(Page { objects, next })
+        })
+    }
+    fn stream(
+        &self,
+        key: &str,
+        offset: u64,
+        etag: Option<String>,
+    ) -> StoreFuture<'_, ObjectStream> {
+        let key = key.to_owned();
+        Box::pin(async move {
+            let mut request = self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .set_if_match(etag);
+            if offset > 0 {
+                request = request.range(format!("bytes={offset}-"));
+            }
+            let v = request.send().await.map_err(error)?;
+            let info = ObjectInfo {
+                key,
+                etag: v.e_tag().context("BACKUP_ETAG_MISSING")?.into(),
+                bytes: u64::try_from(v.content_length().context("BACKUP_INVALID_SIZE")?)?,
+                sha256: v.metadata().and_then(|m| m.get("sha256")).cloned(),
+            };
+            let content_range = v.content_range().map(str::to_owned);
+            Ok(ObjectStream {
+                info,
+                content_range,
+                reader: Box::new(v.body.into_async_read()),
+            })
+        })
+    }
+    fn parts(&self, key: &str, upload_id: &str) -> StoreFuture<'_, Vec<Part>> {
+        let (key, upload_id) = (key.to_owned(), upload_id.to_owned());
+        Box::pin(async move {
+            let mut marker = None;
+            let mut parts = Vec::new();
+            loop {
+                let page = self
+                    .client
+                    .list_parts()
+                    .bucket(&self.bucket)
+                    .key(&key)
+                    .upload_id(&upload_id)
+                    .set_part_number_marker(marker.clone())
+                    .send()
+                    .await
+                    .map_err(error)?;
+                for p in page.parts() {
+                    parts.push(Part {
+                        number: u32::try_from(p.part_number().context("BACKUP_INVALID_PART")?)?,
+                        etag: p.e_tag().context("BACKUP_ETAG_MISSING")?.into(),
+                        bytes: u64::try_from(p.size().context("BACKUP_INVALID_SIZE")?)?,
+                    });
+                }
+                if page.is_truncated() != Some(true) {
+                    break;
+                }
+                let next = page
+                    .next_part_number_marker()
+                    .context("BACKUP_INVALID_PAGE")?
+                    .to_owned();
+                if marker.as_deref() == Some(&next) {
+                    bail!("BACKUP_INVALID_PAGE");
+                }
+                marker = Some(next);
+            }
+            Ok(parts)
+        })
+    }
+    fn write(&self, operation: Write) -> StoreFuture<'_, String> {
+        Box::pin(async move {
+            match operation {
+                Write::Put {
+                    key,
+                    body,
+                    condition,
+                } => {
+                    let mut request = self
+                        .client
+                        .put_object()
+                        .content_type(content_type(&key))
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .body(ByteStream::from(body));
+                    request = match condition {
+                        Condition::Absent => request.if_none_match("*"),
+                        Condition::Match(e) => request.if_match(e),
+                    };
+                    Ok(request
+                        .send()
+                        .await
+                        .map_err(error)?
+                        .e_tag()
+                        .context("BACKUP_ETAG_MISSING")?
+                        .into())
+                }
+                Write::PutFile {
+                    key,
+                    path,
+                    bytes,
+                    sha256,
+                    progress,
+                } => {
+                    let body = ByteStream::from_path(path)
+                        .await
+                        .context("BACKUP_SOURCE_UNAVAILABLE")?;
+                    let (body, finished) = upload_body(body, bytes, progress);
+                    Ok(upload_response(finished, self
+                        .client
+                        .put_object()
+                        .content_type(content_type(&key))
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .if_none_match("*")
+                        .content_length(i64::try_from(bytes)?)
+                        .metadata("sha256", sha256)
+                        .body(body)
+                        .customize()
+                        .config_override(upload_config(bytes))
+                        .send()).await?
+                        .e_tag()
+                        .context("BACKUP_ETAG_MISSING")?
+                        .into())
+                }
+                Write::Delete { key } => {
+                    self.client
+                        .delete_object()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .send()
+                        .await
+                        .map_err(error)?;
+                    Ok(String::new())
+                }
+                Write::DeleteIfMatch { key, etag } => {
+                    self.client.delete_object().bucket(&self.bucket).key(key).if_match(etag).send().await.map_err(error)?;
+                    Ok(String::new())
+                }
+                Write::CreateMultipart { key, sha256 } => Ok(self
+                    .client
+                    .create_multipart_upload()
+                    .content_type(content_type(&key))
+                    .metadata("sha256", sha256)
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(error)?
+                    .upload_id()
+                    .context("BACKUP_UPLOAD_ID_MISSING")?
+                    .into()),
+                Write::UploadPart {
+                    key,
+                    upload_id,
+                    part,
+                    body,
+                } => Ok(self
+                    .client
+                    .upload_part()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .upload_id(upload_id)
+                    .part_number(i32::try_from(part)?)
+                    .body(ByteStream::from(body))
+                    .send()
+                    .await
+                    .map_err(error)?
+                    .e_tag()
+                    .context("BACKUP_ETAG_MISSING")?
+                    .into()),
+                Write::UploadFilePart {
+                    key,
+                    upload_id,
+                    part,
+                    path,
+                    offset,
+                    bytes,
+                    progress,
+                } => {
+                    let body = ByteStream::read_from()
+                        .path(path)
+                        .offset(offset)
+                        .length(aws_sdk_s3::primitives::Length::Exact(bytes))
+                        .build()
+                        .await
+                        .context("BACKUP_SOURCE_UNAVAILABLE")?;
+                    let (body, finished) = upload_body(body, bytes, progress);
+                    Ok(upload_response(finished, self
+                        .client
+                        .upload_part()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .upload_id(upload_id)
+                        .part_number(i32::try_from(part)?)
+                        .content_length(i64::try_from(bytes)?)
+                        .body(body)
+                        .customize()
+                        .config_override(upload_config(bytes))
+                        .send()).await?
+                        .e_tag()
+                        .context("BACKUP_ETAG_MISSING")?
+                        .into())
+                }
+                Write::CompleteMultipart {
+                    key,
+                    upload_id,
+                    parts,
+                } => {
+                    let parts = parts
+                        .into_iter()
+                        .map(|(n, e)| {
+                            Ok(CompletedPart::builder()
+                                .part_number(i32::try_from(n)?)
+                                .e_tag(e)
+                                .build())
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(self
+                        .client
+                        .complete_multipart_upload()
+                        .if_none_match("*")
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .upload_id(upload_id)
+                        .multipart_upload(
+                            CompletedMultipartUpload::builder()
+                                .set_parts(Some(parts))
+                                .build(),
+                        )
+                        .send()
+                        .await
+                        .map_err(error)?
+                        .e_tag()
+                        .context("BACKUP_ETAG_MISSING")?
+                        .into())
+                }
+                Write::AbortMultipart { key, upload_id } => {
+                    self.client
+                        .abort_multipart_upload()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .upload_id(upload_id)
+                        .send()
+                        .await
+                        .map_err(error)?;
+                    Ok(String::new())
+                }
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn targets_cannot_redirect_credentials_to_an_arbitrary_host_or_prefix() {
+        let valid = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
+        assert!(validate_target(valid, "test-bucket", "yingqu/v1/").is_ok());
+        for endpoint in [
+            "http://127.0.0.1",
+            "https://example.com",
+            "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com.evil.test",
+            "https://user:pass@0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+        ] {
+            assert!(validate_target(endpoint, "test-bucket", "yingqu/v1/").is_err());
+        }
+        for prefix in ["", "/", "yingqu", "yingqu/../", "yingqu//v1/"] {
+            assert!(validate_target(valid, "test-bucket", prefix).is_err());
+        }
+    }
+    #[test]
+    fn generic_s3_accepts_dotted_bucket_names_without_relaxing_r2(){
+        assert!(validate_s3_target("https://s3.example.com","my.video.archive","sync/").is_ok());
+        assert!(validate_target("https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com","my.video.archive","sync/").is_err());
+        for bucket in [".abc","abc.","abc..def","127.0.0.1"] {assert!(validate_s3_target("https://s3.example.com",bucket,"sync/").is_err());}
+    }
+}
+
+fn upload_config(bytes: u64) -> aws_sdk_s3::config::Builder {
+    // Read timeout starts before the request body is sent. Budget for 64 KiB/s
+    // plus connection/response overhead; SDK stalled-stream protection still
+    // terminates a body that stops making progress, independently of its size.
+    let budget = Duration::from_secs(bytes.div_ceil(64 * 1024).saturating_add(60));
+    aws_sdk_s3::config::Builder::new()
+        .timeout_config(aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(budget)
+            .operation_timeout(budget)
+            .build())
+        .stalled_stream_protection(aws_sdk_s3::config::StalledStreamProtectionConfig::enabled()
+            .grace_period(Duration::from_secs(20)).build())
+}
+
+// Includes flushing the final buffered bytes: this starts when the HTTP client
+// consumes the last frame, not when the remote server acknowledges receipt.
+const UPLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn upload_body(body: ByteStream, bytes: u64, progress: Option<Arc<AtomicU64>>)
+    -> (ByteStream, tokio::sync::watch::Receiver<bool>) {
+    let (finished, receiver) = tokio::sync::watch::channel(false);
+    let body = ByteStream::new(body.into_inner().map_preserve_contents(move |body| {
+        let progress = progress.clone();
+        let finished = finished.clone();
+        let mut count = 0u64;
+        SdkBody::from_body_1_x(body.map_frame(move |frame| {
+            if let Some(data) = frame.data_ref() {
+                count += data.len() as u64;
+                if let Some(progress) = &progress { progress.store(count, Ordering::Relaxed); }
+                if count >= bytes { finished.send_replace(true); }
+            }
+            frame
+        }))
+    }));
+    (body, receiver)
+}
+
+async fn upload_response<T, E: ProvideErrorMetadata>(
+    mut finished: tokio::sync::watch::Receiver<bool>,
+    request: impl std::future::Future<Output = std::result::Result<T, SdkError<E>>>,
+) -> Result<T> {
+    tokio::pin!(request);
+    tokio::select! {
+        biased;
+        result = &mut request => return result.map_err(error),
+        completed = async { finished.wait_for(|done| *done).await.is_ok() } => {
+            if !completed { return request.await.map_err(error); }
+        }
+    }
+    tokio::time::timeout(UPLOAD_RESPONSE_TIMEOUT, request).await
+        .map_err(|_| anyhow!("BACKUP_NETWORK_ERROR"))?.map_err(error)
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    #[tokio::test]
+    async fn http_body_progress_counts_consumed_bytes_without_changing_content() {
+        let progress = Arc::new(AtomicU64::new(0));
+        let (body, finished) = upload_body(ByteStream::from(vec![7u8; 1234]), 1234, Some(progress.clone()));
+        assert_eq!(progress.load(Ordering::Relaxed), 0);
+        let bytes = body.collect().await.unwrap().into_bytes();
+        assert_eq!(bytes.as_ref(), vec![7u8; 1234]);
+        assert_eq!(progress.load(Ordering::Relaxed), 1234);
+        assert!(*finished.borrow());
+    }
+}
+
+#[cfg(test)]
+mod upload_timeout_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn fixture() -> (S3Store, tokio::net::TcpListener, tempfile::TempDir, std::path::PathBuf) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest()).region(Region::new("us-east-1"))
+            .endpoint_url(format!("http://{}", listener.local_addr().unwrap())).force_path_style(true)
+            .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(1))
+            .timeout_config(aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                .read_timeout(Duration::from_secs(30)).operation_timeout(Duration::from_secs(180)).build())
+            .build();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("upload.mp4");
+        std::fs::File::create(&path).unwrap().set_len(128 * 1024 * 1024).unwrap();
+        (S3Store { client: aws_sdk_s3::Client::from_conf(config), bucket: "test".into() }, listener, root, path)
+    }
+
+    #[tokio::test]
+    async fn request_timeout_xml_retries_the_same_part_but_other_bad_requests_do_not() {
+        for code in ["RequestTimeout", "InvalidRequest"] {
+            let (store, listener, _root, path) = fixture().await;
+            let mut server = tokio::spawn(async move {
+                let mut requests = Vec::new();
+                for attempt in 0..if code == "RequestTimeout" { 2 } else { 1 } {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut headers = Vec::new();
+                    while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); }
+                    let headers = String::from_utf8(headers).unwrap();
+                    let len: usize = headers.lines().find_map(|s| s.to_ascii_lowercase().strip_prefix("content-length:").map(|s| s.trim().parse().unwrap())).unwrap();
+                    let mut body = vec![0; len]; socket.read_exact(&mut body).await.unwrap();
+                    requests.push((headers.lines().next().unwrap().to_owned(), body));
+                    let (status, body) = if attempt == 0 {
+                        ("400 Bad Request", format!("<Error><Code>{code}</Code><Message>test</Message><RequestId>test</RequestId></Error>"))
+                    } else { ("200 OK", String::new()) };
+                    socket.write_all(format!("HTTP/1.1 {status}\r\nETag: \"ok\"\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+                requests
+            });
+            let result = tokio::time::timeout(Duration::from_secs(10), super::super::s3_provider::upload_part_with_retry(&store, Write::UploadFilePart {
+                key: "video.mp4".into(), upload_id: "same-upload".into(), part: 7, path,
+                offset: 4096, bytes: 1024, progress: None,
+            }, &|| Ok(()))).await.expect("part retry exceeded test deadline");
+            let requests = match tokio::time::timeout(Duration::from_secs(10), &mut server).await {
+                Ok(result) => result.unwrap(),
+                Err(_) => { server.abort(); panic!("expected retry never reached server"); }
+            };
+            if code == "RequestTimeout" {
+                assert_eq!(result.unwrap(), "\"ok\"");
+                assert_eq!(requests.len(), 2);
+                assert_eq!(requests[0], requests[1]);
+                assert!(requests[0].0.contains("partNumber=7"));
+                assert!(requests[0].0.contains("uploadId=same-upload"));
+            } else {
+                assert_eq!(result.unwrap_err().to_string(), "BACKUP_REQUEST_REJECTED");
+                assert_eq!(requests.len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_upload_without_response_has_a_separate_deadline() {
+        for multipart in [false, true] {
+            let (store, listener, _root, path) = fixture().await;
+            let (read, received) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); }
+                let headers = String::from_utf8(headers).unwrap();
+                let len: u64 = headers.lines().find_map(|s| s.to_ascii_lowercase().strip_prefix("content-length:").map(|s| s.trim().parse().unwrap())).unwrap();
+                assert_eq!(tokio::io::copy(&mut (&mut socket).take(len), &mut tokio::io::sink()).await.unwrap(), len);
+                read.send(()).unwrap();
+                // Keep the connection open after consuming the entire body.
+                let mut byte = [0]; let _ = socket.read(&mut byte).await;
+            });
+            let operation = if multipart { Write::UploadFilePart {
+                key: "video.mp4".into(), upload_id: "upload".into(), part: 1, path,
+                offset: 0, bytes: 128 * 1024 * 1024, progress: None,
+            }} else { Write::PutFile {
+                key: "video.mp4".into(), path, bytes: 128 * 1024 * 1024, sha256: "a".repeat(64), progress: None,
+            }};
+            let request = tokio::spawn(async move { store.write(operation).await });
+            tokio::time::timeout(Duration::from_secs(10), received).await.unwrap().unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(70), request).await.unwrap().unwrap();
+            assert_eq!(result.unwrap_err().to_string(), "BACKUP_NETWORK_ERROR");
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn progressing_upload_can_receive_its_response_after_thirty_seconds() {
+        let (store, listener, _root, path) = fixture().await;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); }
+            let headers = String::from_utf8(headers).unwrap();
+            let len: usize = headers.lines().find_map(|s| s.to_ascii_lowercase().strip_prefix("content-length:").map(|s| s.trim().parse().unwrap())).unwrap();
+            let mut remaining = len;
+            let mut buffer = vec![0; 256 * 1024];
+            while remaining > 0 {
+                let n = remaining.min(buffer.len());
+                socket.read_exact(&mut buffer[..n]).await.unwrap();
+                remaining -= n;
+                tokio::time::sleep(Duration::from_millis(65)).await;
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nETag: \"ok\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        });
+        let start = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(60), store.write(Write::UploadFilePart {
+            key: "video.mp4".into(), upload_id: "upload".into(), part: 1, path,
+            offset: 0, bytes: 128 * 1024 * 1024, progress: None,
+        })).await.unwrap().unwrap();
+        assert_eq!(result, "\"ok\"");
+        assert!(start.elapsed() > Duration::from_secs(30));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_upload_times_out_without_waiting_for_size_budget() {
+        let (store, listener, _root, path) = fixture().await;
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let result = tokio::time::timeout(Duration::from_secs(45), store.write(Write::PutFile {
+            key: "video.mp4".into(), path, bytes: 128 * 1024 * 1024, sha256: "a".repeat(64), progress: None,
+        })).await;
+        server.abort();
+        assert_eq!(result.unwrap().unwrap_err().to_string(), "BACKUP_NETWORK_ERROR");
+    }
+}
+
+#[cfg(test)]
+mod content_type_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn content_types_match_supported_video_image_and_json_formats() {
+        for (extension, expected) in [
+            ("json", "application/json"),
+            ("mp4", "video/mp4"),
+            ("mov", "video/quicktime"),
+            ("mkv", "video/matroska"),
+            ("webm", "video/webm"),
+            ("jpg", "image/jpeg"),
+            ("jpeg", "image/jpeg"),
+            ("png", "image/png"),
+            ("webp", "image/webp"),
+            ("unknown", "application/octet-stream"),
+            ("MP4", "video/mp4"),
+        ] {
+            assert_eq!(
+                content_type(&format!("prefix/media/asset/file.{extension}")),
+                expected
+            );
+        }
+        assert_eq!(
+            content_type("prefix/probes/conditional"),
+            "application/octet-stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn sdk_sends_content_type_on_put_file_and_multipart_and_match_on_delete() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..5 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let end = loop {
+                    let mut part = [0; 4096];
+                    let count = socket.read(&mut part).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&part[..count]);
+                    if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..end].to_vec())
+                    .unwrap()
+                    .to_ascii_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length:")
+                            .map(|v| v.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < end + length {
+                    let mut part = [0; 4096];
+                    let count = socket.read(&mut part).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&part[..count]);
+                }
+                let body = if headers.starts_with("post ") {
+                    "<InitiateMultipartUploadResult><Bucket>fixture</Bucket><Key>media/a/video.webm</Key><UploadId>fixture-upload</UploadId></InitiateMultipartUploadResult>"
+                } else {
+                    ""
+                };
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nETag: \"fixture-etag\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                requests.push(headers);
+            }
+            requests
+        });
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .endpoint_url(endpoint)
+            .force_path_style(true)
+            .credentials_provider(Credentials::new(
+                "fixture-key",
+                "fixture-secret",
+                None,
+                None,
+                "test",
+            ))
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(1))
+            .build();
+        let store = S3Store {
+            client: aws_sdk_s3::Client::from_conf(config),
+            bucket: "fixture".into(),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("video.mp4");
+        std::fs::write(&file, b"fixture-video").unwrap();
+        let work = async {
+            store
+                .write(Write::Put {
+                    key: "records/a.json".into(),
+                    body: b"{}".to_vec(),
+                    condition: Condition::Absent,
+                })
+                .await
+                .unwrap();
+            store
+                .write(Write::Put {
+                    key: "media/a/cover.png".into(),
+                    body: vec![1, 2, 3],
+                    condition: Condition::Absent,
+                })
+                .await
+                .unwrap();
+            store
+                .write(Write::PutFile {
+                    key: "media/a/video.mp4".into(),
+                    path: file,
+                    bytes: 13,
+                    sha256: "a".repeat(64),
+                    progress: None,
+                })
+                .await
+                .unwrap();
+            store
+                .write(Write::CreateMultipart {
+                    key: "media/a/video.webm".into(),
+                    sha256: "b".repeat(64),
+                })
+                .await
+                .unwrap();
+            store
+                .write(Write::DeleteIfMatch {
+                    key: "records/a.json".into(),
+                    etag: "fixture-version".into(),
+                })
+                .await
+                .unwrap();
+            server.await.unwrap()
+        };
+        let requests = tokio::time::timeout(Duration::from_secs(10), work)
+            .await
+            .unwrap();
+        for (headers, expected) in requests.iter().take(4).zip([
+            "application/json",
+            "image/png",
+            "video/mp4",
+            "video/webm",
+        ]) {
+            assert!(
+                headers.contains(&format!("content-type: {expected}\r\n")),
+                "{expected} header absent"
+            );
+        }
+        assert!(requests[4].contains("if-match: fixture-version\r\n"));
+    }
+}

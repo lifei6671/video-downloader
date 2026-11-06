@@ -468,6 +468,250 @@ def mix_posts_params(
     }
 
 
+def related_posts_params(
+    *,
+    item_id: str,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/api/related/item_list/``.
+
+    One batch, not a page: the answer's ``cursor`` is ``-1`` and there is no
+    ``hasMore`` (measured 2026-10-20 with a guest, where ``count=30`` returned
+    27 posts).
+    """
+    return {
+        **base_params(profile),
+        "itemID": str(item_id),
+        "count": str(count),
+        "coverFormat": COVER_FORMAT,
+    }
+
+
+def music_detail_params(
+    *, music_id: str, profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``/api/music/detail/``. ``musicId``, lower-case d."""
+    return {**base_params(profile), "musicId": str(music_id)}
+
+
+def music_posts_params(
+    *,
+    music_id: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/api/music/item_list/``.
+
+    ``musicID`` here, upper-case D, where the detail says ``musicId``: the
+    two paths spell the same id differently, and each answers only its own
+    spelling. The cursor is an item offset.
+    """
+    return {
+        **base_params(profile),
+        "musicID": str(music_id),
+        "cursor": _cursor(cursor),
+        "count": str(count),
+        "coverFormat": COVER_FORMAT,
+    }
+
+
+def hashtag_detail_params(
+    *,
+    challenge_id: str | None = None,
+    challenge_name: str | None = None,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/api/challenge/detail/``, by id or by name.
+
+    Both answer (measured 2026-10-20). Which one a value is never gets
+    guessed from its digits: ``#2024`` is a name, and sending it as
+    ``challengeId=2024`` asks for a different hashtag. A tag link names its
+    hashtag, and :data:`dtk.worker.parsing.NAMED_BY_LINK` hands it over as one.
+    """
+    ident = (challenge_id or "").strip()
+    name = (challenge_name or "").strip().lstrip("#")
+    if ident and name:
+        raise InvalidParam(
+            "a hashtag is looked up by its id or by its name, not both",
+            details={"endpoint": "tiktok.hashtag_detail", "fields": ["hashtag_id", "name"]},
+        )
+    if ident:
+        if not ident.isdigit():
+            raise InvalidParam(
+                "hashtag_id is the number TikTok issues; pass a name as name",
+                details={"endpoint": "tiktok.hashtag_detail", "field": "hashtag_id"},
+            )
+        return {**base_params(profile), "challengeId": ident}
+    if not name:
+        raise InvalidParam(
+            "a hashtag needs its id or its name",
+            details={"endpoint": "tiktok.hashtag_detail", "missing": ["hashtag_id", "name"]},
+        )
+    return {**base_params(profile), "challengeName": name}
+
+
+def hashtag_posts_params(
+    *,
+    challenge_id: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/api/challenge/item_list/``, which takes the id only.
+
+    A name is refused here rather than sent: ``challengeID=<name>`` is an
+    HTTP 400 and ``illegal ID given``, the same answer as an id nobody has,
+    which would tell the caller the hashtag does not exist.
+    """
+    ident = str(challenge_id).strip()
+    if not ident.isdigit():
+        raise InvalidParam(
+            "the posts under a TikTok hashtag are listed by its numeric id; "
+            "look the name up with /hashtag first and pass the hashtag_id it returns",
+            details={"endpoint": "tiktok.hashtag_posts", "field": "hashtag_id"},
+        )
+    return {
+        **base_params(profile),
+        "challengeID": ident,
+        "cursor": _cursor(cursor),
+        "count": str(count),
+        "coverFormat": COVER_FORMAT,
+    }
+
+
+#: What the search page says a query came from when it is typed into the box.
+SEARCH_SOURCE: Final = "normal_search"
+
+
+def _keyword(keyword: str) -> str:
+    text = str(keyword).strip()
+    if not text:
+        raise InvalidParam("a search needs a keyword", details={"field": "keyword"})
+    return text
+
+
+def search_posts_params(
+    *,
+    keyword: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/api/search/item/full/``. The page pages it by ``offset``."""
+    return {
+        **base_params(profile),
+        "keyword": _keyword(keyword),
+        "offset": _cursor(cursor),
+        "count": str(count),
+        "search_source": SEARCH_SOURCE,
+    }
+
+
+def search_authors_params(
+    *,
+    keyword: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/api/search/user/full/``, which pages by ``cursor``.
+
+    Not ``offset`` as the post search does: measured 2026-10-20, ``offset=10``
+    answered the first page again, where ``cursor=10`` moved on.
+    """
+    return {
+        **base_params(profile),
+        "keyword": _keyword(keyword),
+        "cursor": _cursor(cursor),
+        "count": str(count),
+        "search_source": SEARCH_SOURCE,
+    }
+
+
+def author_mixes_params(
+    *,
+    sec_uid: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/api/user/playlist/``: the playlists an author made."""
+    return {
+        **base_params(profile),
+        "secUid": str(sec_uid),
+        "cursor": _cursor(cursor),
+        "count": str(count),
+    }
+
+
+#: What the live page says it is when it asks about a room by its owner.
+LIVE_SOURCE_TYPE: Final = "54"
+
+
+def live_room_params(*, unique_id: str, profile: ClientProfile = DEFAULT_PROFILE) -> dict[str, str]:
+    """Parameters for ``/api-live/user/room/``: a live room, by its owner's
+    @handle - the only thing a ``/@handle/live`` link carries."""
+    handle = str(unique_id).strip().lstrip("@")
+    if not handle:
+        raise InvalidParam(
+            "a TikTok live room is named by its @handle", details={"field": "room_id"}
+        )
+    return {**base_params(profile), "uniqueId": handle, "sourceType": LIVE_SOURCE_TYPE}
+
+
+def live_room_by_id_params(
+    *, room_id: str, profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``webcast.tiktok.com/webcast/room/info/``: a live room by
+    the broadcast's own ``room_id``, the ``live_id`` a room answer carries."""
+    broadcast = str(room_id).strip()
+    if not broadcast.isdigit():
+        raise InvalidParam("a TikTok broadcast id is a number", details={"field": "live_id"})
+    return {**base_params(profile), "room_id": broadcast}
+
+
+#: How many broadcasts one ``check_alive`` call asks about. The platform took
+#: 200 in one call on 2026-10-26 and answered each; the cap is ours, half
+#: that, to keep a query an ordinary URL length.
+MAX_LIVE_IDS: Final = 100
+
+
+def live_ids(value: str) -> tuple[str, ...]:
+    """A comma-separated list of broadcast ids, checked and with repeats gone.
+
+    Here rather than in the route alone so that every caller - REST, MCP, a
+    task replayed from the queue - is held to the same list.
+    """
+    seen: dict[str, None] = {}
+    for part in str(value).split(","):
+        text = part.strip()
+        if not text:
+            continue
+        if not text.isdigit():
+            raise InvalidParam(
+                "a TikTok broadcast id is a number",
+                details={"field": "live_ids", "value": text[:32]},
+            )
+        seen[text] = None
+    if not seen:
+        raise InvalidParam("name at least one broadcast", details={"field": "live_ids"})
+    if len(seen) > MAX_LIVE_IDS:
+        raise InvalidParam(
+            f"at most {MAX_LIVE_IDS} broadcasts at a time",
+            details={"field": "live_ids", "count": len(seen), "maximum": MAX_LIVE_IDS},
+        )
+    return tuple(seen)
+
+
+def live_status_params(
+    *, room_ids: str, profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``webcast.tiktok.com/webcast/room/check_alive/``."""
+    return {**base_params(profile), "room_ids": ",".join(live_ids(room_ids))}
+
+
 #: ``scene`` selects which side of the follow graph ``/api/user/list/`` returns.
 #: The endpoint path is identical for both, so this value is the whole request.
 FOLLOWERS_SCENE: Final = "67"

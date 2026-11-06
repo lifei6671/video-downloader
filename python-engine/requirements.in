@@ -1,5 +1,6 @@
-yt-dlp==2026.8.19
+yt-dlp==2026.10.26
 yt-dlp-ejs==0.8.0
+certifi==2026.10.23
 pydantic==2.14.1
 structlog==26.1.0
 httpx==0.28.1

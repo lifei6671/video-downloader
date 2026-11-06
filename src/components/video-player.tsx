@@ -1,17 +1,20 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { ExternalLink, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, errorText, type Task } from '@/api';
+import { api, errorText, type Task, type BackupAsset } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { readPlaybackPosition, writePlaybackPosition } from '@/lib/playback-position';
 
-function PlaybackSession({ task, open, close, removedIds }: { task: Task; open: boolean; close: () => void; removedIds: ReadonlySet<string> }) {
+type PlaybackSubject = {id: string; path: string | null; completed_at: number | null; video: {title?: string; width?: number | null; height?: number | null} | null; asset?: boolean};
+
+function PlaybackSession({ task, open, close, removedIds, onAspectRatio }: { task: PlaybackSubject; open: boolean; close: () => void; removedIds: ReadonlySet<string>; onAspectRatio: (ratio: number) => void }) {
   const video = useRef<HTMLVideoElement>(null);
   const session = useRef({ active: true, fallback: false, externalPending: false });
-  const sourceRequest = useRef<Promise<string> | null>(null);
+  const sourceRequest = useRef<Promise<{path: string | null; source: string}> | null>(null);
+  const identity = useRef(task);
   const progress = useRef({ metadataReady: false, lastSavedAt: 0, storageFailed: false });
   const [source, setSource] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -24,7 +27,7 @@ function PlaybackSession({ task, open, close, removedIds }: { task: Task; open: 
     const now = performance.now();
     if (!force && (element.seeking || now - progress.current.lastSavedAt < 5000)) return;
     try {
-      writePlaybackPosition(task, element.ended || element.currentTime >= element.duration ? 0 : element.currentTime);
+      writePlaybackPosition(identity.current, element.ended || element.currentTime >= element.duration ? 0 : element.currentTime);
       progress.current.lastSavedAt = now;
     } catch (reason) {
       progress.current.storageFailed = true;
@@ -50,7 +53,8 @@ function PlaybackSession({ task, open, close, removedIds }: { task: Task; open: 
     releaseVideo();
     setSource(undefined);
     try {
-      await api.play(task.id);
+      if (task.asset) { await api.ensureAsset(task.id); if (!session.current.active) return; await api.playAsset(task.id); }
+      else await api.play(task.id);
       if (session.current.active) {
         toast.info(manual ? '已使用系统播放器打开' : '内置播放不可用，已使用系统播放器打开');
         close();
@@ -91,10 +95,10 @@ function PlaybackSession({ task, open, close, removedIds }: { task: Task; open: 
   useEffect(() => {
     if (!open) return;
     let active = true;
-    sourceRequest.current ??= api.playbackSource(task.id);
+    sourceRequest.current ??= task.asset ? api.assetPlaybackSource(task.id) : api.playbackSource(task.id).then(source => ({path: task.path, source}));
     sourceRequest.current.then(value => {
-      if (active && session.current.active && !session.current.fallback) setSource(value);
-    }).catch(() => { if (active) void openExternal(); });
+      if (active && session.current.active && !session.current.fallback) { identity.current = {...task, path: value.path}; setSource(value.source); }
+    }).catch(reason => { if (active) { if (task.asset) { setLoading(false); setFailure(errorText(reason)); } else void openExternal(); } });
     return () => { active = false; };
   }, [task.id, open]);
 
@@ -112,7 +116,8 @@ function PlaybackSession({ task, open, close, removedIds }: { task: Task; open: 
           if (!session.current.active || session.current.fallback) return;
           const element = event.currentTarget;
           if (!element.videoWidth || !element.videoHeight) { void openExternal(); return; }
-          const position = readPlaybackPosition(task);
+          onAspectRatio(element.videoWidth / element.videoHeight);
+          const position = readPlaybackPosition(identity.current);
           if (position > 0 && Number.isFinite(element.duration) && position < element.duration) element.currentTime = position;
           progress.current.metadataReady = true;
         }}
@@ -124,18 +129,24 @@ function PlaybackSession({ task, open, close, removedIds }: { task: Task; open: 
   </>;
 }
 
-export function VideoPlayer({ task, close, returnFocus, fallbackFocus, removedIds }: { task: Task | null; close: () => void; returnFocus: HTMLElement | null; fallbackFocus: () => HTMLElement | null; removedIds: ReadonlySet<string> }) {
+export function VideoPlayer({ task, asset, close, returnFocus, fallbackFocus, removedIds }: { task: Task | null; asset?: BackupAsset | null; close: () => void; returnFocus: HTMLElement | null; fallbackFocus: () => HTMLElement | null; removedIds: ReadonlySet<string> }) {
   const focus = useRef<HTMLElement | null>(null);
-  const lastTask = useRef<Task | null>(null);
-  if (task) { focus.current = returnFocus; lastTask.current = task; }
-  return <Dialog open={!!task} onOpenChange={open => { if (!open) close(); }}>
-    <DialogContent className="video-player-dialog" onCloseAutoFocus={event => {
+  const lastTask = useRef<PlaybackSubject | null>(null);
+  const [measured, setMeasured] = useState<{ id: string; ratio: number } | null>(null);
+  const subject: PlaybackSubject | null = task ?? (asset ? { id: asset.asset_id, path: asset.path, completed_at: null, video: asset.metadata, asset: true } : null);
+  if (subject) { focus.current = returnFocus; lastTask.current = subject; }
+  const current = lastTask.current;
+  const initialRatio = current?.video?.width && current.video.height ? current.video.width / current.video.height : 16 / 9;
+  const ratio = measured?.id === current?.id ? measured?.ratio : initialRatio;
+  const playerStyle = { '--video-player-ratio': ratio && Number.isFinite(ratio) && ratio > 0 ? ratio : 16 / 9 } as CSSProperties;
+  return <Dialog open={!!subject} onOpenChange={open => { if (!open) close(); }}>
+    <DialogContent className="video-player-dialog" style={playerStyle} onCloseAutoFocus={event => {
       event.preventDefault();
       const target = focus.current;
       (target?.isConnected && !target.closest('[inert]') ? target : fallbackFocus())?.focus({ preventScroll: true });
     }}>
       <DialogHeader className="pr-8"><DialogTitle className="line-clamp-2">{lastTask.current?.video?.title?.trim() || '视频播放'}</DialogTitle><DialogDescription className="sr-only">本地视频播放器</DialogDescription></DialogHeader>
-      {lastTask.current && <PlaybackSession key={lastTask.current.id} task={lastTask.current} open={!!task} close={close} removedIds={removedIds} />}
+      {current && <PlaybackSession key={current.id} task={current} open={!!subject} close={close} removedIds={removedIds} onAspectRatio={ratio => setMeasured({ id: current.id, ratio })} />}
     </DialogContent>
   </Dialog>;
 }

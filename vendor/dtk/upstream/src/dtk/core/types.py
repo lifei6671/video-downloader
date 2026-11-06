@@ -12,6 +12,50 @@ from enum import StrEnum
 class Platform(StrEnum):
     DOUYIN = "douyin"
     TIKTOK = "tiktok"
+    #: Back in v5.1.6. v4 had it; the rewrite left it out because it shares
+    #: neither the signing nor the identity machinery with the other two.
+    BILIBILI = "bilibili"
+
+
+class CommentSort(StrEnum):
+    """The order a post's top-level comments come back in.
+
+    Only Bilibili lets a caller choose. Douyin and TikTok rank comments their
+    own way, by engagement, which is what HOT asks for - so HOT is accepted
+    everywhere and NEW is refused where it cannot be honoured, rather than
+    answered with the hottest comments under a request for the newest.
+    """
+
+    HOT = "hot"
+    NEW = "new"
+
+
+class PopularBoard(StrEnum):
+    """Which site-curated list ``/{platform}/popular`` reads.
+
+    Bilibili's four, named for what they are rather than for its paths: what
+    is popular now, the weekly selection, the editors' all-time selection, and
+    the site-wide top 100.
+    """
+
+    HOT = "hot"
+    WEEKLY = "weekly"
+    PRECIOUS = "precious"
+    RANK = "rank"
+
+
+class TrendingBoard(StrEnum):
+    """Which board ``/{platform}/trending`` reads.
+
+    Douyin's four hot lists - the main one, entertainment, society and the
+    challenge board - named for what they hold. Bilibili has the one, its hot
+    search, and answers ``hot`` only.
+    """
+
+    HOT = "hot"
+    ENTERTAINMENT = "entertainment"
+    SOCIETY = "society"
+    CHALLENGE = "challenge"
 
 
 class ContentKind(StrEnum):
@@ -31,6 +75,16 @@ class DownloadState(StrEnum):
     RUNNING = "running"
     DONE = "done"
     PARTIAL = "partial"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class TranscriptionState(StrEnum):
+    """Lifecycle of one durable video transcription."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -139,8 +193,30 @@ class RejectReason(StrEnum):
     #: retired, still minting, or belongs to another platform. Distinct from
     #: NO_IDENTITY because the pool is fine and only this request is refused.
     PINNED_UNAVAILABLE = "pinned_unavailable"
+    #: The request needs a signed-in identity and rotation has none to give.
+    #: Distinct from NO_IDENTITY because minting cannot fix it: only an
+    #: operator importing a logged-in cookie can.
+    NO_LOGIN = "no_login"
     QUEUE_FULL = "queue_full"
     WAIT_TIMEOUT = "wait_timeout"
+
+
+class LoginNeed(StrEnum):
+    """What a request loses when a guest identity serves it.
+
+    Measured per endpoint, not assumed: a platform that tightens one endpoint
+    for guests usually leaves the rest alone, and routing everything to the few
+    signed-in accounts an operator has would wear them out for nothing.
+    """
+
+    #: A guest gets the same answer as a signed-in account.
+    NONE = "none"
+    #: A guest gets an answer, but a lesser one - Douyin leaves the newest
+    #: posts out of an author's first page. Signed-in identities are used when
+    #: rotation has one; otherwise a guest answers and the result says so.
+    PREFERRED = "preferred"
+    #: A guest gets nothing usable, so one is never sent.
+    REQUIRED = "required"
 
 
 class Scope(StrEnum):
@@ -148,6 +224,7 @@ class Scope(StrEnum):
 
     DOUYIN_READ = "douyin:read"
     TIKTOK_READ = "tiktok:read"
+    BILIBILI_READ = "bilibili:read"
     IDENTITY_MANAGE = "identity:manage"
     #: Read what this instance has already stored. Separate from the platform
     #: read scopes on purpose: an operator may open a platform endpoint to
@@ -164,7 +241,15 @@ class Scope(StrEnum):
     #: because starting one spends an identity, fills a disk and is the only
     #: read-shaped call in this API with a lasting side effect on the host.
     MEDIA_WRITE = "media:write"
+    TRANSCRIPTION_READ = "transcription:read"
+    TRANSCRIPTION_WRITE = "transcription:write"
     ADMIN = "admin"
+
+
+#: One read scope per platform, derived so a platform added to the enum cannot
+#: be left out of "may read any platform" - which is what happened in nine
+#: places when this was a literal pair and Bilibili arrived.
+PLATFORM_READ_SCOPES: tuple[Scope, ...] = tuple(Scope(f"{p.value}:read") for p in Platform)
 
 
 class Language(StrEnum):

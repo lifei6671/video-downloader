@@ -15,7 +15,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-pytest 包含 Rust/Python 进程集成测试，必须先构建探针；测试使用隔离 HTTP fixture，不访问真实平台。运行依赖固定 yt-dlp 2026.8.19 与 DTK 5.1.3 白名单切片，协议 v3，具体版本见锁文件。
+pytest 包含 Rust/Python 进程集成测试，必须先构建探针；测试使用隔离 HTTP fixture，不访问真实平台。运行依赖固定 yt-dlp 2026.10.26 与 DTK 5.1.10 白名单切片，协议 v3，具体版本见锁文件。
 
 ## macOS 开发与打包
 
@@ -106,9 +106,14 @@ npm ci
 npm run desktop
 ```
 
-前端检查：`npm run build`。完整桌面编译：`npm run desktop:build`（不生成安装器）。Rust 桌面门禁：`cargo test --manifest-path src-tauri/Cargo.toml`、`cargo clippy --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings`。
+Windows 桌面主程序的 Debug 和 Release 构建均使用 GUI 子系统，启动时不附带命令行窗口；`m1-probe` 保留命令行探针用途。调试诊断可将标准输出和错误重定向到本机日志，预览时正常显示应用窗口。
 
-在设置页分别保存两平台 Cookie、User-Agent 与 HTTP/SOCKS5 代理，再粘贴作品链接。Cookie 直接存本机应用数据目录的 SQLite，在设置页多行文本框回显；含密码的代理存系统凭据。下载目录默认为系统下载目录下的 Yingqu，可通过系统目录选择器修改。解析最多同时一个，下载默认同时 2 个、可在设置调整为 1–3 个，超出名额按提交顺序等待；提高上限立即补位，降低不打断已有下载。取消等待进程退出与暂存清理；重启保留记录及已解析预览，解析中/排队/下载中标记中断，不自动恢复下载。可复用缓存和封面/图集字节保存在 SQLite，命中时不请求详情，下载时仍重新解析；见 [解析缓存](parse-cache-validation.md)。
+前端检查：`npm run build`。完整桌面编译：`npm run desktop:build`（不生成安装器）。该命令先使用项目 `.venv` 执行打包引擎检查，对照当前 Rust 的引擎及 yt-dlp 版本；切换分支后若提示 sidecar 版本不匹配，先按本文 PyInstaller 命令重建整个 `python-engine/dist/video-engine/`，再编译桌面程序，不复用其他分支的忽略产物。Rust 桌面门禁：`cargo test --manifest-path src-tauri/Cargo.toml`、`cargo clippy --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings`。
+
+桌面 release 构建必须设置 `YINGQU_TELEGRAM_API_ID`（正 `i32` 整数）和 `YINGQU_TELEGRAM_API_HASH`（32 位 ASCII 十六进制字符串），否则 Rust 构建检查直接失败。`telegram-app.local.json` 仅用于 debug，不会自动用于 release 预览；本机打包需在构建进程环境中显式提供身份，不能把值写入命令行或日志。应用身份的来源与存储约定见 [Telegram 构建配置](telegram-storage-implementation.md#构建与本机应用身份)。CI 和 Release 工作流的桌面打包步骤从同名 GitHub Actions Secrets 注入这两个变量；缺失 Secrets 会阻止生成可交付应用，不使用测试身份代替。无需身份的核心离线测试和 debug 开发仍可运行。
+
+
+在设置页分别保存两平台 Cookie、User-Agent 与 HTTP/SOCKS5 代理，再粘贴作品链接。Cookie 直接存本机应用数据目录的 SQLite，在设置页多行文本框回显；含密码的代理存系统凭据。下载目录默认为系统下载目录下的 Yingqu，可通过系统目录选择器修改。解析最多同时一个，下载默认同时 2 个、可在设置调整为 1–3 个，超出名额按提交顺序等待；提高上限立即补位，降低不打断已有下载。取消等待进程退出与暂存清理；重启保留记录及已解析预览，解析中/排队/下载中先标记中断，后台服务就绪后把已提交下载的中断任务按原 FIFO 自动重新排队，保留任务 ID、规格和原请求时间，从头重新下载。主动取消、其他业务失败和未提交预览不自动下载。可复用缓存和封面/图集字节保存在 SQLite，命中时不请求详情，下载时仍重新解析；见 [解析缓存](parse-cache-validation.md)。
 
 并发队列、手动重试、移除历史及删除本地作品已实现。按 2026-10-21 用户要求，单条移除记录和本地删除均直接执行、不二次确认；本地删除同时移除下载任务和数据库下载记录。重试复用原任务记录，保留 ID、创建时间、实际 resolver 与所选规格，清空上次进度和错误，以最新设置重新解析并从头下载；解析失败且无作品信息时需重新粘贴链接。Debug 开发可执行文件依赖仓库内的打包引擎目录；Release 从应用资源目录加载完整引擎。Windows 干净环境与 macOS 验收在 M3 完成。[M2 单任务验证](m2-validation.md) · [并发与队列验证](m2-queue-validation.md) · [重试与历史管理验证](m2-history-validation.md)。
 
@@ -123,6 +128,30 @@ npm run desktop
 预览浮层内也可右键图片“另存为…”或“复制封面”，复用相同保存和剪贴板路径；复制时读取当前浮层图片的原尺寸像素。浮层按图片宽高收缩，长标题不撑宽，保留关闭控件所需的最小宽度，并在窗口内等比缩放。菜单可用 Shift+F10 打开，Esc 先关闭菜单，再关闭浮层。尺寸及浮层菜单回归见 `tests/cover-preview-fit.browser.js`。
 
 新下载的抖音、TikTok、YouTube 视频仍获取平台可用的最高分辨率封面，与 Telegram 一样经校验后只存现有 SQLite 封面缓存；下载目录只保存视频，不再生成同名 `.cover.jpg/png/webp`。列表沿用受控封面读取命令并支持重启和提交恢复。封面获取或缓存更新失败不影响视频完成，已有预览封面仍可显示。删除本地视频同时删除对应任务、下载记录和提交证据；移除最后一个同身份任务或预览时，同事务清空封面 BLOB，保留解析元数据、别名及本地文件。旧版封面文件保持原样，不自动迁移、删除或联网补处理；图集原图保存方式不变。行尾的复制原链接、本地删除不再收进二级菜单，和播放、文件夹、列表移除一样使用图标及 Tooltip，本地删除默认红色。`tests/task-actions.browser.js` 覆盖三视口、键盘、无确认、复制、失败、pending 和迟到事件；Rust 历史/封面测试覆盖文件删除、数据库记录清理、失败后重试和重启。批量清理历史保留确认，但只清理当前平台 Tab（全部 Tab 覆盖所有平台），不受搜索条件影响；无元数据的 Telegram 任务按链接归类，后端继续保护进行中的任务与独立解析缓存。单条删除不再聚焦顶部搜索框。成功删除/清理的可见项向上淡出并折叠占位，下方条目平滑上移；失败保留行，减少动态效果时立即移除。动画回归入口为 `tests/task-removal-motion.browser.js`。取消任务及重复下载的确认保持现有行为。
+
+## 通知样式与原生 CSP
+
+Sonner 的 `sonner/dist/styles.css` 通过 `src/style.css` 编入正式 CSS。原生 Tauri CSP 会拒绝其运行时注入的 `<style>`；不能只依赖浏览器开发预览，否则 Toast 会失去固定定位并挤开应用外壳。不要为此放宽 CSP。
+
+`src/lib/style-nonce.ts` 从 Tauri 已加 nonce 的启动样式读取当前文档 nonce，使用现有 `get-nonce` 配置 `react-style-singleton`，并传给 Radix Select.Viewport。这样 Dialog、AlertDialog、Sheet、DropdownMenu、ContextMenu 的滚动锁及 Select 的滚动条规则均在原 CSP 下生效。`get-nonce` 沿用锁文件已有的 1.0.1，声明为直接依赖；不生成固定 nonce，不关闭 CSP。审计与原生验证见 [CSP 组件验证](csp-component-validation.md)。
+
+组件测试使用独立入口和输出目录，不随正常桌面程序构建：
+
+```powershell
+node --input-type=module -e "import {build} from 'vite'; await build({configFile:'vite.config.ts',build:{outDir:'.local/csp-audit/dist',rollupOptions:{input:'tests/fixtures/csp-components.html'}}});"
+npm exec vite -- preview --host 127.0.0.1 --port 1427 --strictPort --outDir .local/csp-audit/dist
+# 另一终端打开测试页面后执行：
+playwright-cli --session csp-components open http://127.0.0.1:1427/tests/fixtures/csp-components.html
+playwright-cli --session csp-components run-code --filename tests/csp-components-browser.mjs
+```
+
+`tests/settings-layout-browser.mjs` 在生产预览中设置拒绝内联样式的 CSP，模拟读取备份凭据失败后出现通知，验证远端备份选中时从其他页面返回、三种视口、键盘及长表单滚动。执行：`playwright-cli --session settings-layout run-code --filename tests/settings-layout-browser.mjs`。原生程序仍需单独验证通知位置。
+
+`cargo test --manifest-path src-tauri/Cargo.toml settings_enable -- --test-threads=1` 验证网络写入已接收但不返回时启停仍完成、请求取消、探针超时、凭据/清理记录保留、连接中完成下载的空间关联和停用防止迟到连接重新启用。
+
+`tests/backup-settings-actions-browser.mjs` 使用隔离 IPC 覆盖启停、后台连接中仍可停用、错误重试/成功状态刷新且不覆盖草稿、停用后停止本机轮询、默认空间启用门槛、不迁移历史视频、必填星号与字段错误、三视口按钮过渡及减少动态效果、引用删除确认/取消/失败重试、确认前新引用保护和空配置直接删除。Rust `cargo test --manifest-path src-tauri/Cargo.toml settings_actions -- --test-threads=1` 验证启停持久化、队列断点、配置引用、凭据清理、本机视频和未同步文案保留，以及同目标显式重连。
+
+`tests/backup-space-tabs-browser.mjs` 对生产预览验证空间 Tab、新建后增加 Tab、草稿保留、后续保存不切换默认、显式切换及失败保持原默认、三视口键盘、Tab 名称 Tooltip 及无升级弹窗；同时逐项比较与平台账号 Tab 的字号、内边距、颜色及高度。名称覆盖双击/F2 原位编辑、Enter/失焦只保存一次、Esc 取消、输入法选字不提交、失败保留输入并重试、跨 Tab 保存与凭据草稿隔离，以及重新打开后的持久化；只有新建表单显示独立名称输入框。`tests/backup-first-default-browser.mjs` 另验证 Telegram / S3 分别作为首个配置时自动成为默认、保留全局启停、后续配置不替换默认，以及账号按钮的“切换其他账号”文案。`tests/csp-components-browser.mjs` 在严格 CSP 下验证原位输入框的定位、字号和高度。后端相关回归为 `cargo test --manifest-path src-tauri/Cargo.toml p3_ -- --test-threads=1`；设置页显式提交必填 `activate=false`、建库与清理策略参数。`cargo test --manifest-path src-tauri/Cargo.toml single_protocol -- --test-threads=1` 验证保存/启用直接使用已有凭据、原身份与媒体保留、中断恢复，以及连接测试不改写库。名称通过随备份 schema v1 首次创建的本机 `backup_space_names` 表持久化，不为旧表补结构或回填数据。保留天数清空后关闭自动清理，会恢复有效默认值 30，保存仍显式提交完整策略参数。
 
 ## 界面构建版本
 
@@ -176,6 +205,8 @@ git push --atomic origin master v1.3.0
 .venv/bin/python scripts/update_dtk_vendor.py --source /path/to/upstream
 ```
 
+若新版本引入当前白名单缺失的源码，先审核导入与实际调用边界，再用 `--update --include-file <上游相对路径>` 显式补入；可重复指定。脚本先核验现有切片，所有新增源码仍须通过路径、补丁与依赖审计，成功后才整体替换。Windows 应用补丁时强制 LF，生成哈希与干净检出一致。
+
 审核新的完整提交 SHA 后同步：
 
 ```sh
@@ -203,6 +234,12 @@ npm run build
 
 握手核对 manifest 的 DTK commit/version。源码变更后必须重新生成 sidecar，再构建完整应用。离线升级回归包括新版本同步、补丁冲突、未知服务依赖、本地修改保护、原图优先及 404/410 降级、网络/身份错误不降级、多文件校验和恢复。离线通过后，用有效视频与图集分别执行双平台真实冒烟，并在 Windows、macOS arm64、macOS Intel 各自验收安装包；不得用手工 fixture 或旧引擎结果替代。此次结果见 [双引擎验收](dual-engine-validation.md)。
 
+## 启动首屏验证
+
+`index.html` 保留无需 JavaScript 的启动提示，React 接管后移除；更新说明通过动态导入按需加载。修改启动路径后，先执行 `npm run build`，再运行 `npm exec vite -- preview --host 127.0.0.1 --port 1421 --strictPort`，使用已安装的 Playwright CLI 执行 `tests/startup-paint-browser.mjs`。脚本使用独立页面与模拟 IPC，不访问用户数据或远端服务；延迟首屏脚本验证启动内容，覆盖 1440×900、1280×800、1024×680，并验证更新说明延迟加载及 GFM 表格。
+
+2026-10-30 验证：类型检查、前端构建及上述浏览器回归通过。首屏 JS 从 778,688 bytes 降至 620,248 bytes，Markdown 独立块为 159,081 bytes；这是构建体积对比，不是启动耗时测量。Windows 原生冷启动耗时及 WebView 初始化阶段：`NOT_RUN`，浏览器模拟结果不能代替原生验收。
+
 ## 运行依赖管理
 
 入口为系统设置 → 运行依赖。缺失时由用户点击下载 FFmpeg/FFprobe、Deno 或 Fun-ASR-Nano 模型（CPU / Windows CUDA）到应用数据目录 runtime，已有系统工具优先。修改 Python 依赖模块后必须重建 PyInstaller 引擎；协议 v3、引擎 0.12.0。检查、下载、取消和平台验收见 [运行依赖说明](runtime-dependencies.md)。
@@ -223,3 +260,16 @@ CMake 不在 PATH 时使用 `--cmake <绝对路径>`。构建沿用 `.local/sens
 验证入口使用 `.local/nano-verification/runtime/`，不读取平台凭据或更改用户安装。`--download-models` 下载三份约 1.2 GiB 权重，SHA-256 校验后执行真实加载/推理；短视频使用 Matroska 与 PCM16 无损音轨，避免 AAC 二次编码改变参考样本。`--long-seconds 600` 可单独测试合成长期音频，不替代自然视频准确率验证。
 
 前端检查 `npm run build`。浏览器 IPC 隔离回归为 `tests/nano-cuda.browser.js`、`tests/transcription.browser.js`、`tests/transcription-model.browser.js`、`tests/transcript-overflow.browser.js` 与 `tests/runtime-dependencies.browser.js`，覆盖模型名称、旧 CPU/CUDA 结果、下载取消、长文本和三个视口。真实 Tauri 单独验证，不以 mock 替代。完整记录见[集成与验收](fun-asr-nano.md)。
+
+## 多设备云端同步
+
+提供商配置、空间切换、连接初始化与隔离在线用例见[多设备同步维护](multi-device-sync-operations.md)。本轮实际结果见[验证记录](r2-sync-validation.md)，R2、通用 S3、浏览器和原生结果分别记录。
+
+删除记录清理回归：`cargo test --manifest-path src-tauri/Cargo.toml retention_ -- --test-threads=1`。使用两个独立数据库、设备ID、本地目录和Memory对象库验证保留期限、无时间记录、索引CAS并发/失败、删除结果未知、活动记录保护、保留本机未同步文案后重新上传、旧删除任务停止、策略隔离、后台维护与空间切换取消/恢复。`cargo test --manifest-path src-tauri/Cargo.toml content_type_tests -- --test-threads=1` 使用localhost HTTP fixture直接观察AWS SDK的普通PUT、文件PUT、分片创建Content-Type以及条件删除If-Match请求头；不访问真实云端。MKV使用IANA注册的`video/matroska`（[RFC 9559](https://www.rfc-editor.org/rfc/rfc9559.html#section-27.18)）。浏览器Tab用例同时验证清理默认关闭、非法保留天数不提交、草稿/空间隔离和保存；多设备浏览器验证保留本机视频可以显式重新上传。
+
+
+### 个人备份浅层目录验证
+
+新媒体统一使用`media/<asset_id>/<kind>-<SHA256>.<ext>`，视频、封面和文案共用目录；删除后重新上传的修订标识只进入文件名。当前不承诺多设备同时上传与上传断点续传，大文件仍流式分片，每次重试从第1片开始。历史引用按原键读取、恢复和删除，不做生产数据批量迁移。
+
+`cargo test --locked --manifest-path src-tauri/Cargo.toml flat_ -- --test-threads=1`覆盖同目录布局、相同文案复用、历史深层对象恢复/删除、发布失败保留旧封面和文案、未知CreateMultipart结果、整次重试重传第1片和取消清理。`retention_`继续验证删除与重新上传、旧删除任务、墓碑清理及本机未同步内容保护。在线`p6_real_r2_v2_multipart_restart`改验重启从第1片重传，仍默认ignored，不能读取生产配置运行。实际结果见[验证记录](r2-sync-validation.md)。

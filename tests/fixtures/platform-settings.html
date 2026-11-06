@@ -2,7 +2,7 @@
 <body><div id="root"></div><script type="module">
 // Isolated IPC fixture: synthetic cookies only, no native credentials or network.
 import {api} from '/src/api';
-const initial={download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'test-only',proxy:null,cookie_configured:platform==='youtube',http_chunk_size:null})),tdl:{enabled:false,path:null}};
+const initial={download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'test-only',proxy:null,cookie_configured:platform==='youtube',http_chunk_size:null}))};
 let settings=JSON.parse(sessionStorage.getItem('profile-settings')||'null')||initial;
 let cookies=JSON.parse(sessionStorage.getItem('profile-cookies')||'null')||{douyin:'',tiktok:'',youtube:'session=fixture'};
 let proxies=JSON.parse(sessionStorage.getItem('profile-proxies')||'null')||Object.fromEntries(settings.profiles.map(p=>[p.platform,p.proxy]));
@@ -17,7 +17,7 @@ api.proxy=async platform=>{
   if(state.failProxy)throw 'CREDENTIAL_ERROR';
   return proxies[platform];
 };
-api.tdlLoginStatus=async()=>null;
+api.telegramStorageStatus=async()=>({configured:false,operation_id:null,phase:'signed_out',account:null,last_error:null,qr:null,qr_expires_at:null});
 api.save=async config=>{
   state.calls.push(structuredClone(config));
   if(state.holdSave)await new Promise(resolve=>state.release=resolve);

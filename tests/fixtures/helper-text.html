@@ -2,7 +2,7 @@
 <body><div id="root"></div><script type="module">
 // Isolated UI fixture: synthetic data only; no native credentials or platform network.
 import {api} from '/src/api';
-const settings={download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'fixture-agent',proxy:platform==='youtube'?'http://127.0.0.1:7890/':null,cookie_configured:true,http_chunk_size:null})),tdl:{enabled:false,path:null}};
+const settings={download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'fixture-agent',proxy:platform==='youtube'?'http://127.0.0.1:7890/':null,cookie_configured:true,http_chunk_size:null}))};
 api.settings=async()=>structuredClone(settings);
 let tasks=[];
 let listener=()=>{};
@@ -12,9 +12,8 @@ api.tasks=async()=>structuredClone(tasks);
 api.subscribe=async callback=>{listener=callback;return()=>{if(listener===callback)listener=()=>{}}};
 api.cookie=async()=>'session=fixture';
 api.proxy=async platform=>settings.profiles.find(p=>p.platform===platform).proxy;
-api.tdlLoginStatus=async()=>null;
+api.telegramStorageStatus=async()=>({configured:false,operation_id:null,phase:'signed_out',account:null,last_error:null,qr:null,qr_expires_at:null});
 api.cover=async()=>Array.from(new Uint8Array(await (await fetch('/src-tauri/icons/64x64.png')).arrayBuffer()));
-api.checkTdl=async()=>({path:'C:\\Fixture\\tdl.exe',version:'9.1.0'});
 api.checkRuntimeDependencies=async()=>({directory:'C:\\FixtureRuntime',platform:'win32-x64',tools:[{id:'ffmpeg',available:false,provider:'ffmpeg',version:null,path:null,source:null,can_install:true},{id:'javascript',available:true,provider:'node',version:'22.14.0',path:'C:\\Fixture\\node.exe',source:'system',can_install:true}]});
 api.resolve=async()=>{
   if(!state.resolveSuccess)throw 'NETWORK_ERROR';

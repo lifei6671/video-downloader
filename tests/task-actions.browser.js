@@ -24,7 +24,7 @@ async page => {
     for(const label of ['打开文件夹','从列表移除','复制原链接','删除本地视频'])
       check(await video.getByRole('button',{name:label,exact:true}).count()===0,'secondary action remains inline');
     let menu=await open(video);
-    check((await menu.getByRole('menuitem').allTextContents()).map(text=>text.trim()).join(',')==='打开文件夹,提取文案,复制原链接,复制本地地址,从列表移除,删除本地视频','menu order or missing operation');
+    check((await menu.getByRole('menuitem').allTextContents()).map(text=>text.trim()).join(',')==='打开文件夹,提取文案,复制原链接,复制本地地址,保存封面,复制封面,从列表移除,删除本地视频','menu order or missing operation');
     const danger=menu.getByRole('menuitem',{name:'删除本地视频',exact:true});
     check(await danger.getAttribute('data-variant')==='destructive','dangerous action loses semantics');
     await page.keyboard.press('Escape');
@@ -69,7 +69,7 @@ async page => {
   }
   for(const [scenario,label,type] of [['actions-remove-error','从列表移除','remove'],['actions-delete-error','删除本地视频','delete-file']]) {
     await load(scenario);await act(row('可播放视频'),label);
-    await page.locator('[data-sonner-toast][data-type="error"]').waitFor();
+    await page.locator('[data-sonner-toast][data-type="error"]').filter({hasText:scenario==='actions-remove-error'?'无法保存任务记录':'文件操作失败'}).waitFor();
     check(await row('可播放视频').isVisible(),'failure removed task');
     const retryMenu=await open(row('可播放视频'));
     check(await retryMenu.getByRole('menuitem',{name:label,exact:true}).isEnabled(),'failure prevents retry');

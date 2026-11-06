@@ -1,12 +1,20 @@
 # 运行依赖
 
-2026-10-18 用户授权工具下载，2026-10-23 将语音模型更换为 Fun-ASR-Nano。入口：**系统设置 → 运行依赖**。协议 v3，当前引擎 0.12.0；旧 sidecar 不具备完整能力，必须与应用一起重建分发。
+2026-10-18 用户授权工具下载，2026-10-23 将语音模型更换为 Fun-ASR-Nano。入口：**系统设置 → 运行依赖**。协议 v3，当前分支引擎 0.14.2；旧 sidecar 不具备完整能力，必须与应用一起重建分发。
+
+2026-11-04 同步 yt-dlp 2026.10.26、DTK 5.1.10 及 certifi 2026.10.23，EJS 保持上游匹配的 0.8.0。源码与许可见 [上游说明](../vendor/UPSTREAM.md)。本次本机打包/启动日志位于忽略目录 `.local/local-build/20261104-telegram-transfer/`；用户已停止进一步测试，未重跑真实平台及自动回归。下文保留的验收结果是对应日期的历史证据。
+
+Windows Release 构建完成，打包引擎握手为 `0.14.2 / yt-dlp 2026.10.26`。默认应用标识启动遇到已有备份库 `BACKUP_UNSUPPORTED_SCHEMA`，没有迁移或清空旧数据；另用忽略目录的构建配置生成 `me.disign.yingqu.transfer-preview-20261104`，预先建立空数据目录，避免收养旧 `com.yingqu.desktop` 目录。“映取（本地预览）”窗口已启动，免安装目录为上述构建目录的 `app/`，包含完整引擎及许可证。该预览使用独立账号配置和资料库，不能把它等同于原数据升级验收。
+
+此后按用户要求加入本地 v1/v5 → v6 兼容迁移，已完成原库完整备份、迁移专项及副本核对，并以正常应用标识成功打开原资料库；旧任务及发送证据保留，自动云同步先暂停。当前正常版免安装目录为 `.local/backup-schema-migration/app/`，具体支持范围及原库核对结果见[迁移记录](backup-schema-migration.md)。未恢复传输测试或执行远端格式转换。
 
 每次应用启动自动检查一次；前端应用层持有检查结果、错误与正在进行的依赖操作，切换主菜单或设置分类不重新发起检查。自动检查失败后保留错误，由用户点击“重新检测”重试；安装完成后使用后端返回的重新检测结果。仅保留本次运行状态，不将依赖可用状态持久化到下一次启动。
 
+Telegram 备份视频缺少时长或尺寸时使用本地 FFprobe 探测，随 FFmpeg 一起提供；已有有效属性的视频不需要额外探测。探测只读取原文件，取消时复用同一进程回收链路。
+
 ## 行为与边界
 
-依赖各自使用独立卡片和操作：缺失 FFmpeg 的卡片提供“下载 FFmpeg”，JavaScript 卡片提供“下载 Deno”，模型卡片提供“下载语音模型”；点击只安装该项，进度和取消留在同一卡片，不提供汇总下载按钮。下载、修复和取消按钮与依赖说明共用卡片内容区，不设置独立灰色操作页脚或分隔线。依赖安装仍串行，安装期间其他下载按钮禁用。已可用系统工具不重复安装，模型保留显式修复入口；tdl 沿用自行安装与路径选择。运行依赖标题、依赖说明和“重新检测”组成固定头部，只有下方卡片列表滚动。卡片滚动容器保留 1px 边框留白、右侧 12px 内容间距，保持 shadcn Card 的外侧 ring 四边完整显示、卡片不贴住滚动条。
+依赖各自使用独立卡片和操作：缺失 FFmpeg 的卡片提供“下载 FFmpeg”，JavaScript 卡片提供“下载 Deno”，模型卡片提供“下载语音模型”；点击只安装该项，进度和取消留在同一卡片，不提供汇总下载按钮。下载、修复和取消按钮与依赖说明共用卡片内容区，不设置独立灰色操作页脚或分隔线。依赖安装仍串行，安装期间其他下载按钮禁用。已可用系统工具不重复安装，模型保留显式修复入口。Telegram 使用内置 grammers，不再提供外部工具路径配置。运行依赖标题、依赖说明和“重新检测”组成固定头部，只有下方卡片列表滚动。卡片滚动容器保留 1px 边框留白、右侧 12px 内容间距，保持 shadcn Card 的外侧 ring 四边完整显示、卡片不贴住滚动条。
 
 - 检测复用 `python-engine/local_tools.py`，实际执行版本命令。FFmpeg 必须可执行；YouTube 的 JavaScript 运行时要求 Deno 2.3+ 或 Node.js 22+，满足其一即可。无法执行、低版本或过期链接按不可用处理。
 - 当前进程 PATH、注册表 PATH、常见工具安装目录的发现保持原样；系统候选后补充应用数据目录 `runtime/ffmpeg`、`runtime/javascript`。后续媒体操作使用同一目录和发现逻辑。
@@ -48,3 +56,19 @@ CPU 模型安装在 `<应用数据目录>/runtime/fun-asr-nano/`，CUDA 在 `run
 ## 旧安装保留
 
 原 `runtime/sensevoice/`、`runtime/sensevoice-cuda/` 与 `sensevoice-backend.json` 保留，不自动删除，也不参与新模型可用性判断或后端选择。旧模型不能满足 Nano 依赖，用户需单独下载 Nano；旧文案可继续查看、复制和导出，新提取使用成功安装并选定的 Nano CPU 或 Windows CUDA 版。旧 SenseVoice CUDA 验证见[历史记录](sensevoice-transcription-validation.md)。
+
+
+## 本地预览的跨分支引擎错配修复
+
+2026-10-30 本地预览出现 `ENGINE_PROTOCOL_ERROR`，原因是当前 Rust 要求 `0.14.0`，而忽略目录中的已打包 sidecar 来自其他分支，为 `0.17.0`。依赖检测在握手阶段被拒绝，UI因此只保留独立检测的tdl卡片；不是系统工具或已下载模型丢失。
+
+修改 `scripts/check_packaged_engine.py` 对照 Rust 的 `ENGINE_VERSION` 和 `YTDLP_VERSION`，新增 `scripts/check-desktop-engine.mjs` 与 `package.json` 的 `predesktop:build`，复用项目 `.venv` 和既有资源检查。Windows/macOS分别选择对应解释器和引擎路径，失败阻止后续桌面构建。未修改运行期版本约束来容忍错误产物。
+
+验证：
+
+- 原 `0.17.0` 产物执行 `npm run predesktop:build` 退出1，明确报告预期 `0.14.0`，见 `.local/runtime-engine-stale-check.log`。
+- `.venv/Scripts/python.exe -m PyInstaller --noconfirm --distpath python-engine/dist --workpath python-engine/build python-engine/pyinstaller.spec` 退出0，见 `.local/runtime-engine-rebuild.log`。
+- 重建后 `npm run predesktop:build` 退出0，见 `.local/runtime-engine-preflight.log`；整个新引擎目录复制到 `src-tauri/target/release/video-engine/`，旧生成目录保留于 `.local/runtime-engine-previous-0.17.0/`，未改动用户数据目录。
+- `.venv/Scripts/python.exe scripts/check_packaged_engine.py src-tauri/target/release/video-engine/video-engine.exe` 通过，版本 `0.14.0`、yt-dlp `2026.08.19`。
+- 对release资源中的真实exe发送 `check_dependencies`，使用临时空runtime目录，退出0，返回ffmpeg、javascript、fun-asr-nano三项合法结果。证据 `.local/runtime-engine-detection.json`；空目录中模型未安装属于预期，不代表用户真实模型状态。
+- 独立 CHILD_AGENT 代码审查PASSED，无未解决P0/P1/P2。未操作用户桌面；当前原生页面缓存的失败由用户点击“重新检测”刷新。本次Windows修复不替代macOS和安装包验收。

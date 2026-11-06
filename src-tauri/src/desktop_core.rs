@@ -3,7 +3,7 @@ use crate::{
     parse_cache,
     python_bridge::PythonBridge,
     settings::{self, Settings},
-    tdl_bridge::{self, TdlSettings},
+    telegram_download,
 };
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
@@ -19,6 +19,8 @@ use tokio::sync::watch;
 use uuid::Uuid;
 #[path = "transcription.rs"]
 pub mod transcription;
+#[path = "task_actions.rs"]
+pub mod task_actions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +37,10 @@ pub enum Status {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
+    #[serde(default)]
+    pub insertion_id: i64,
+    #[serde(default)]
+    pub asset_id: Option<String>,
     pub revision: u64,
     pub status: Status,
     pub video: Option<Value>,
@@ -50,6 +56,8 @@ pub struct Task {
     pub error: Option<String>,
     pub path: Option<PathBuf>,
     pub created_at: u64,
+    #[serde(default)]
+    pub download_requested_at: Option<u64>,
     pub completed_at: Option<u64>,
     pub canceling: bool,
     #[serde(default)]
@@ -58,6 +66,8 @@ pub struct Task {
     pub queue_order: Option<u64>,
     #[serde(default)]
     pub download_requested: bool,
+    #[serde(default)]
+    pub duplicate_confirmed: bool,
     #[serde(default)]
     pub cover_path: Option<PathBuf>,
     #[serde(default)]
@@ -77,6 +87,24 @@ pub struct Task {
     // Only a validated, normalized Telegram URL; never the pasted share text.
     #[serde(default)]
     pub telegram_link: Option<String>,
+}
+
+#[derive(Default)]
+struct DownloadProgressCadence {
+    emitted_at: Option<Instant>,
+    merging: bool,
+}
+impl DownloadProgressCadence {
+    fn should_emit(&mut self, event: &Value, at: Instant) -> bool {
+        let merging = event["phase"] == "merging";
+        let phase_changed = merging && !self.merging;
+        if !phase_changed && self.emitted_at.is_some_and(|last| at.duration_since(last) < Duration::from_secs(1)) {
+            return false;
+        }
+        self.emitted_at = Some(at);
+        self.merging |= merging;
+        true
+    }
 }
 
 #[derive(Default)]
@@ -143,8 +171,9 @@ fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
     task.video.as_ref().is_some_and(|video| {
         tasks.iter().any(|old| {
             old.id != task.id
-                && old.status == Status::Completed
-                && !file_missing(old)
+                && (matches!(old.status, Status::Queued | Status::Downloading)
+                    || (old.status == Status::Parsing && old.download_requested)
+                    || (old.status == Status::Completed && !file_missing(old)))
                 && old
                     .video
                     .as_ref()
@@ -153,14 +182,24 @@ fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
     })
 }
 
+#[derive(Clone, serde::Serialize)]
+pub struct DeleteActivity {
+    pub operation_id: String,
+    pub companion: Option<String>,
+    pub step: String,
+}
+
 pub enum TaskEvent {
+    DeleteActivity(Option<DeleteActivity>),
+    BackupAssetDeleted(String),
     Updated(Box<Task>),
     Removed(String),
+    RemovedFromSpace { id: String, space_id: String },
     Transcription(Box<transcription::Snapshot>),
 }
 
 struct Active {
-    tdl: Option<TdlSettings>,
+    telegram: bool,
     download_after_resolve: bool,
     profiles: Value,
     directory: PathBuf,
@@ -168,7 +207,16 @@ struct Active {
     cancel: watch::Sender<bool>,
     done: watch::Receiver<bool>,
 }
+fn running_downloads(inner: &Inner) -> usize {
+    inner.downloads.iter().filter(|id| inner.tasks.iter().any(|task| &task.id == *id && task.error.as_deref() != Some("TELEGRAM_RECONNECTING"))).count()
+}
+
 struct Inner {
+    backup_cancel: watch::Sender<bool>,
+    backup_started: bool,
+    telegram_recovery_epoch: u64,
+    backup_wake: Arc<tokio::sync::Notify>,
+    backup_restores: HashMap<String,crate::backup::restore::Shared>,
     db: Connection,
     tasks: Vec<Task>,
     settings: Settings,
@@ -179,16 +227,35 @@ struct Inner {
     dependency_cancel: Option<watch::Sender<bool>>,
     transcription: Option<transcription::ActiveTranscription>,
     transcription_unsaved: HashMap<String, transcription::Snapshot>,
-    tdl_login_cancel: Option<watch::Sender<bool>>,
-    tdl_login_control: Option<tdl_bridge::LoginControl>,
 }
 pub struct Core {
+    backup_display_db: Mutex<Connection>,
+    pub(crate) backup_file_presence: Mutex<crate::backup::reconcile::FilePresence>,
+    task_actions: Mutex<HashMap<String, task_actions::PendingAction>>,
+    delete_activity: Mutex<Option<DeleteActivity>>,
+    pub telegram_accounts: crate::telegram_accounts::TelegramAccounts,
+    pub(crate) backup_wake: Arc<tokio::sync::Notify>,
+    pub(crate) backup_window_wake: tokio::sync::Notify,
+    pub(crate) delete_queue_wake: tokio::sync::Notify,
+    pub(crate) deferred_pulls: crate::backup::sync_engine::DeferredPulls,
+    pub(crate) backup_foreground: std::sync::atomic::AtomicBool,
+    pub(crate) backup_active_probes: Mutex<HashSet<String>>,
+    pub(crate) backup_config_lock: tokio::sync::Mutex<()>,
+    pub(crate) backup_restore_lock: tokio::sync::Mutex<()>,
+    restore_file_locks: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    backup_history_registered: Mutex<HashMap<String, (i64, Option<tokio::time::Instant>)>>,
+    // Transfers and per-asset deletion share this lease; global maintenance is exclusive.
+    pub(crate) backup_write_lock: tokio::sync::RwLock<()>,
+    pub(crate) telegram_map_refresh: tokio::sync::Mutex<()>,
     _instance_lock: std::fs::File,
     inner: Mutex<Inner>,
     program: String,
     args: Vec<String>,
     runtime_directory: PathBuf,
-    tdl_session: tdl_bridge::Session,
+    #[cfg(test)]
+    pub(crate) telegram_source: Mutex<Option<telegram_download::Factory>>,
+    #[cfg(test)]
+    pub(crate) local_media_fixture: Mutex<Option<crate::local_media::Fixture>>,
     emit: Arc<dyn Fn(TaskEvent) + Send + Sync>,
 }
 
@@ -258,8 +325,26 @@ fn persist(db: &Connection, task: &Task) -> Result<()> {
     .context("DATABASE_ERROR")?;
     Ok(())
 }
-fn publish(inner: &mut Inner, task: Task, emit: &dyn Fn(TaskEvent)) -> Result<()> {
-    persist(&inner.db, &task)?;
+fn persist_new_attempt(db: &Connection, task: &Task) -> Result<()> {
+    let tx = db.unchecked_transaction().context("DATABASE_ERROR")?;
+    tx.execute("DELETE FROM commit_intents WHERE task_id=?", [&task.id])
+        .context("DATABASE_ERROR")?;
+    persist(&tx, task)?;
+    tx.commit().context("DATABASE_ERROR")?;
+    Ok(())
+}
+fn publish(inner: &mut Inner, mut task: Task, emit: &dyn Fn(TaskEvent)) -> Result<()> {
+    let tx = inner.db.transaction().context("DATABASE_ERROR")?;
+    crate::backup::repository::associate(&tx, &mut task)?;
+    persist(&tx, &task)?;
+    let insertion_id = tx.query_row("SELECT rowid FROM download_tasks WHERE id=?", [&task.id], |row| row.get(0))
+        .context("DATABASE_ERROR")?;
+    if task.insertion_id != insertion_id {
+        task.insertion_id = insertion_id;
+        persist(&tx, &task)?;
+    }
+    tx.commit().context("DATABASE_ERROR")?;
+    if task.status==Status::Completed {inner.backup_wake.notify_waiters();}
     if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
         *old = task.clone();
     } else {
@@ -301,35 +386,49 @@ impl Core {
             .context("IO_ERROR")?;
         instance_lock.try_lock().context("APP_ALREADY_RUNNING")?;
         let mut db = Connection::open(db_path).context("DATABASE_ERROR")?;
-        db.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);
+        db.pragma_update(None, "foreign_keys", true)?;
+        // Snapshot the master database before the single, atomic schema upgrade.
+        let backup_migration = crate::backup::schema_migration::prepare(&db)?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+        let schema_tx = db.unchecked_transaction()?;
+        schema_tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS commit_intents(task_id TEXT PRIMARY KEY,source TEXT NOT NULL,
                 target TEXT NOT NULL,size INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS task_staging(task_id TEXT PRIMARY KEY,path TEXT NOT NULL);",
         )
         .context("DATABASE_ERROR")?;
-        let has_manifest = db
+        let has_manifest = schema_tx
             .prepare("PRAGMA table_info(commit_intents)")?
             .query_map([], |r| r.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?
             .iter()
             .any(|column| column == "manifest");
         if !has_manifest {
-            db.execute("ALTER TABLE commit_intents ADD COLUMN manifest TEXT", [])?;
+            schema_tx.execute("ALTER TABLE commit_intents ADD COLUMN manifest TEXT", [])?;
         }
-        let migrate_cache = parse_cache::init(&db)?;
-        transcription::init(&db)?;
+        let migrate_cache = parse_cache::init(&schema_tx)?;
+        transcription::init(&schema_tx)?;
+        settings::init(&schema_tx)?;
+        crate::backup::repository::init_in_transaction(&schema_tx, backup_migration)?;
+        schema_tx.commit()?;
+        transcription::recover(&db)?;
         let settings = settings::load(&db, directory)?;
+        let telegram_accounts = crate::telegram_accounts::TelegramAccounts::load(&db)?;
+        telegram_accounts.configure_proxy(settings.profiles.iter().find(|p| p.platform == "telegram").cloned());
         let mut tasks = {
             let mut query =
-                db.prepare("SELECT snapshot FROM download_tasks ORDER BY rowid DESC")?;
+                db.prepare("SELECT rowid,snapshot FROM download_tasks ORDER BY rowid DESC")?;
             let strings = query
-                .query_map([], |r| r.get::<_, String>(0))?
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             strings
                 .iter()
-                .map(|s| serde_json::from_str::<Task>(s))
+                .map(|(insertion_id, snapshot)| {
+                    let mut task = serde_json::from_str::<Task>(snapshot)?;
+                    task.insertion_id = *insertion_id;
+                    Ok(task)
+                })
                 .collect::<serde_json::Result<Vec<_>>>()?
         };
         // Seed reusable metadata/previews from existing records where assets exist.
@@ -458,7 +557,7 @@ impl Core {
                                             .video
                                             .as_ref()
                                             .is_none_or(|v| v["platform"] != "telegram")
-                                            || crate::files::tdl_recovery_valid(
+                                            || crate::files::telegram_recovery_valid(
                                                 Path::new(&target),
                                                 size,
                                             ))
@@ -488,7 +587,10 @@ impl Core {
                     Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
                     Err(_) => bail!("DATABASE_ERROR"),
                 }
-                persist(&db, task)?;
+                let tx=db.transaction()?;
+                crate::backup::repository::associate(&tx,task)?;
+                persist(&tx,task)?;
+                tx.commit()?;
             }
             // Also restore the cache flag if a crash occurred between the video
             // file commit / cover cache write and publishing the completed task.
@@ -517,9 +619,30 @@ impl Core {
         for (id, path) in staging {
             cleanup_staging(&db, &id, Path::new(&path))?;
         }
+        let backup_wake=Arc::new(tokio::sync::Notify::new());
         Ok(Arc::new(Self {
+            telegram_accounts,
+            task_actions: Mutex::default(),
+            delete_activity: Default::default(),
+            backup_wake:backup_wake.clone(),
+            backup_window_wake:Default::default(),
+            delete_queue_wake:tokio::sync::Notify::new(),
+            deferred_pulls:Default::default(),
+            backup_foreground:std::sync::atomic::AtomicBool::new(true),
+            backup_active_probes:Mutex::new(HashSet::new()),
+            backup_config_lock: tokio::sync::Mutex::new(()),
+            backup_restore_lock: tokio::sync::Mutex::new(()),
+            restore_file_locks: Mutex::default(),
+            backup_history_registered: Default::default(),
+            backup_write_lock: tokio::sync::RwLock::new(()),
+            telegram_map_refresh: tokio::sync::Mutex::new(()),
             _instance_lock: instance_lock,
             inner: Mutex::new(Inner {
+                backup_cancel: watch::channel(false).0,
+                backup_started: false,
+                telegram_recovery_epoch: 0,
+                backup_wake,
+                backup_restores: HashMap::new(),
                 db,
                 tasks,
                 settings,
@@ -530,13 +653,16 @@ impl Core {
                 dependency_cancel: None,
                 transcription: None,
                 transcription_unsaved: HashMap::new(),
-                tdl_login_cancel: None,
-                tdl_login_control: None,
             }),
             program,
             args,
             runtime_directory: db_path.parent().context("IO_ERROR")?.join("runtime"),
-            tdl_session: tdl_bridge::Session::default(),
+            backup_file_presence: Mutex::default(),
+            backup_display_db: Mutex::new(Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?),
+            #[cfg(test)]
+            telegram_source: Mutex::new(None),
+            #[cfg(test)]
+            local_media_fixture: Mutex::new(None),
             emit: Arc::new(emit),
         }))
     }
@@ -554,112 +680,395 @@ impl Core {
             })
             .collect()
     }
-    pub fn settings(&self) -> Settings {
-        self.inner.lock().unwrap().settings.clone()
+
+    pub fn backup_asset(&self, id: &str) -> Result<Option<crate::backup::model::Asset>> {
+        crate::backup::repository::asset(&self.inner.lock().unwrap().db, id)
     }
-    pub fn save_tdl(&self, mut config: TdlSettings) -> Result<Settings> {
-        if config
-            .path
-            .as_ref()
-            .is_some_and(|p| !p.is_absolute() || !p.is_file())
-        {
-            bail!("TDL_UNAVAILABLE");
-        }
+
+    pub fn backup_assets(&self) -> Result<Vec<crate::backup::model::Asset>> {
+        crate::backup::repository::list_assets(&self.inner.lock().unwrap().db)
+    }
+    /// Register local history only while the selected backup worker is ready.
+    /// Existing space membership, cancellation and deletion evidence always win.
+    pub(crate) fn register_backup_history(&self, space: &str) -> Result<usize> {
+        use rusqlite::OptionalExtension;
         let mut inner = self.inner.lock().unwrap();
         if inner.closing {
-            bail!("INVALID_STATE");
+            return Ok(0);
         }
-        if inner.tdl_login_cancel.is_some() {
-            bail!("TDL_BUSY");
+        let enabled:bool=inner.db.query_row("SELECT EXISTS(SELECT 1 FROM backup_current_space c JOIN backup_spaces s USING(space_id) JOIN backup_provider_config p USING(space_id) WHERE c.id=1 AND s.space_id=?1 AND s.enabled=1 AND p.protocol=2 AND p.capabilities_json IS NOT NULL AND p.provider_type IN ('s3','telegram') AND COALESCE((SELECT enabled FROM backup_sync_preference WHERE id=1),s.enabled)=1)",[space],|r|r.get(0))?;
+        if !enabled {
+            return Ok(0);
         }
-        config.session_directory = inner.settings.tdl.session_directory.clone();
-        inner.db.execute("INSERT INTO tdl_settings(id,enabled,path) VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,path=excluded.path",
-            params![config.enabled, config.path.as_ref().map(|p| p.to_string_lossy().into_owned())]).context("DATABASE_ERROR")?;
-        inner.settings.tdl = config;
-        Ok(inner.settings.clone())
-    }
-    pub fn tdl_login_running(&self) -> bool {
-        self.inner.lock().unwrap().tdl_login_cancel.is_some()
-    }
-    pub fn tdl_login_status(&self) -> Option<tdl_bridge::LoginStatus> {
-        self.inner
-            .lock()
-            .unwrap()
-            .tdl_login_control
-            .as_ref()
-            .map(|control| control.state.borrow().clone())
-    }
-    pub fn submit_tdl_password(
-        &self,
-        login_id: &str,
-        password: zeroize::Zeroizing<String>,
-    ) -> Result<()> {
-        let inner = self.inner.lock().unwrap();
-        if inner.closing {
-            bail!("INVALID_STATE");
+        let generation: i64 = inner.db.query_row("SELECT generation FROM backup_history_generation WHERE id=1", [], |r| r.get(0))?;
+        let mut registered = self.backup_history_registered.lock().unwrap();
+        if registered.get(space).is_some_and(|(saved, retry)| *saved == generation && retry.is_none_or(|deadline| tokio::time::Instant::now() < deadline)) { return Ok(0); }
+        let detached = {
+            let mut q=inner.db.prepare("SELECT a.asset_id FROM media_assets a WHERE a.asset_state='active' AND NOT EXISTS(SELECT 1 FROM backup_space_assets m WHERE m.local_asset_id=a.asset_id) AND NOT EXISTS(SELECT 1 FROM backup_operations o WHERE o.asset_id=a.asset_id) AND NOT EXISTS(SELECT 1 FROM asset_hidden_history h WHERE h.asset_id=a.asset_id)")?;
+            let rows = q
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<HashSet<_>>>()?;
+            rows
+        };
+        let tasks = inner
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.status == Status::Completed
+                    && task.files.is_empty()
+                    && task
+                        .video
+                        .as_ref()
+                        .is_some_and(|v| v["kind"].as_str().unwrap_or("video") == "video")
+                    && task
+                        .asset_id
+                        .as_ref()
+                        .is_none_or(|id| detached.contains(id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if tasks.is_empty() {
+            registered.insert(space.to_owned(), (generation, None));
+            return Ok(0);
         }
+        let tx = inner.db.unchecked_transaction()?;
+        let mut updated = vec![];
+        let mut missing_file = false;
+        for mut task in tasks {
+            let known:Option<(String,String,bool)>=tx.query_row("SELECT a.asset_id,a.asset_state,EXISTS(SELECT 1 FROM backup_space_assets m WHERE m.local_asset_id=a.asset_id) OR EXISTS(SELECT 1 FROM backup_operations o WHERE o.asset_id=a.asset_id) OR EXISTS(SELECT 1 FROM asset_hidden_history h WHERE h.asset_id=a.asset_id) FROM media_assets a WHERE (?1 IS NOT NULL AND a.asset_id=?1) OR (?1 IS NULL AND a.task_id=?2)",params![task.asset_id,task.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            if let Some((id, state, protected)) = known {
+                if task.asset_id.is_none() {
+                    task.asset_id = Some(id);
+                    task.revision += 1;
+                    persist(&tx, &task)?;
+                    updated.push(task.clone());
+                }
+                if state != "active" || protected {
+                    continue;
+                }
+            } else if task.asset_id.is_some() {
+                continue;
+            }
+            let Some(path) = task.path.as_ref().filter(|p| p.is_file()) else {
+                missing_file = true;
+                continue;
+            };
+            let source = transcription::Source::read(path)?;
+            crate::backup::repository::associate(&tx, &mut task)?;
+            let Some(id) = task.asset_id.as_ref() else {
+                continue;
+            };
+            if crate::backup::repository::transcript(&tx, id)?.is_none() {
+                if let Some(snapshot) = transcription::load(&tx, &task.id)? {
+                    if snapshot.result.as_ref().is_some_and(|r| r.source == source) {
+                        crate::backup::repository::preserve_transcript(&tx, &snapshot)?;
+                    }
+                }
+            }
+            crate::backup::sync_engine::register_download(&tx, id)?;
+            if !updated.iter().any(|t| t.id == task.id) {
+                task.revision += 1;
+            }
+            persist(&tx, &task)?;
+            if let Some(old) = updated.iter_mut().find(|t| t.id == task.id) {
+                *old = task;
+            } else {
+                updated.push(task);
+            }
+        }
+        tx.commit()?;
+        for task in &updated {
+            if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
+                *old = task.clone();
+            }
+        }
+        let generation = inner.db.query_row("SELECT generation FROM backup_history_generation WHERE id=1", [], |r| r.get(0))?;
+        registered.insert(space.to_owned(), (generation, missing_file.then(|| tokio::time::Instant::now() + std::time::Duration::from_secs(30))));
+        drop(registered);
+        drop(inner);
+        for task in &updated {
+            (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+        }
+        if !updated.is_empty() {
+            self.backup_wake.notify_waiters();
+        }
+        Ok(updated.len())
+    }
+    pub fn telegram_storage_device_id(&self) -> Result<String> {
+        self.backup_db(crate::backup::repository::device_id)
+    }
+
+    pub(crate) fn backup_db<T>(&self, action: impl FnOnce(&Connection)->Result<T>) -> Result<T> {
+        action(&self.inner.lock().unwrap().db)
+    }
+
+    pub(crate) fn backup_display_db<T>(&self, action: impl FnOnce(&Connection)->Result<T>) -> Result<T> {
+        action(&self.backup_display_db.lock().unwrap())
+    }
+
+    pub fn asset_transcript(&self, id: &str) -> Result<Option<crate::backup::model::AssetTranscript>> {
+        crate::backup::repository::transcript(&self.inner.lock().unwrap().db, id)
+    }
+
+    pub async fn verify_backup_asset(&self, id: &str) -> Result<()> {
+        let (_sender,cancel)=watch::channel(false);
+        self.verify_backup_asset_cancelable(id,cancel).await
+    }
+    pub(crate) async fn verify_backup_asset_cancelable(&self, id: &str, extra:watch::Receiver<bool>) -> Result<()> {
+        let (path, cancel) = {
+            let inner = self.inner.lock().unwrap();
+            let asset = crate::backup::repository::asset(&inner.db, id)?.context("BACKUP_ASSET_NOT_FOUND")?;
+            (asset.path.context("FILE_MISSING")?, inner.backup_cancel.subscribe())
+        };
+        let (hash, source) = tokio::task::spawn_blocking(move || crate::backup::repository::fingerprint_with_cancel(&path, || *cancel.borrow() || *extra.borrow() || extra.has_changed().is_err())).await??;
+        crate::backup::repository::save_fingerprint(&self.inner.lock().unwrap().db, id, &hash, &source)
+    }
+
+    pub fn start_backup_service(self: &Arc<Self>) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closing || inner.backup_started {
+            return;
+        }
+        inner.backup_started = true;
+        self.restore_interrupted_downloads(&mut inner);
+        let core = Arc::clone(self);
+        let cancel = inner.backup_cancel.subscribe();
         inner
-            .tdl_login_control
-            .as_ref()
-            .context("INVALID_STATE")?
-            .submit(login_id, password)
-    }
-    pub fn cancel_tdl_login(&self) -> Result<()> {
-        if let Some(cancel) = &self.inner.lock().unwrap().tdl_login_cancel {
-            let _ = cancel.send(true);
+            .workers
+            .push(tokio::spawn(crate::backup::sync_engine::run(core, cancel)));
+        let recovery_core = self.clone();
+        let mut recovery_stop = inner.backup_cancel.subscribe();
+        let recovery_epoch = inner.telegram_recovery_epoch;
+        let recovery_binding = self.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download);
+        inner.workers.push(tokio::spawn(async move {
+            loop {
+                let current = recovery_core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download);
+                if !Arc::ptr_eq(&recovery_binding.session, &current.session) || recovery_core.inner.lock().unwrap().telegram_recovery_epoch != recovery_epoch { break; }
+                if *recovery_stop.borrow() { break; }
+                let candidates: Vec<_> = recovery_core.inner.lock().unwrap().tasks.iter().filter(|task|
+                    task.status == Status::Failed && task.telegram_link.is_some()
+                    && task.error.as_deref().is_some_and(crate::telegram_reconnect::network_error)
+                ).cloned().collect();
+                for task in candidates {
+                    if *recovery_stop.borrow() { break; }
+                    let format = task.video.as_ref().and_then(|v| v["selected_format_id"].as_str()).map(str::to_owned);
+                    let _ = recovery_core.resolve_task(task.telegram_link.unwrap(), Some(&task.id), "grammers".into(), format, task.download_requested, Some((task.revision, recovery_epoch)));
+                }
+                tokio::select! { biased;
+                    _ = recovery_stop.wait_for(|v| *v) => break,
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {},
+                }
+            }
+        }));
+        let repairs: Vec<_> = inner
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.status == Status::Completed
+                    && task.path.is_some()
+                    && task.video.as_ref().is_some_and(|video| {
+                        video["platform"] == "telegram"
+                            && ["width", "height", "duration_ms"]
+                                .iter()
+                                .any(|field| video[*field].as_u64().is_none_or(|n| n == 0))
+                    })
+            })
+            .cloned()
+            .collect();
+        if !repairs.is_empty() {
+            let core = self.clone();
+            inner.workers.push(tokio::spawn(async move {
+                core.repair_telegram_metadata(repairs).await;
+            }));
         }
+    }
+    async fn repair_telegram_metadata(self: &Arc<Self>, tasks: Vec<Task>) {
+        for expected in tasks {
+            if self.inner.lock().unwrap().closing {
+                break;
+            }
+            let Some(path) = expected.path.as_ref().filter(|path| {
+                std::fs::symlink_metadata(path).is_ok_and(|m| {
+                    m.is_file() && !m.file_type().is_symlink() && m.len() == expected.bytes
+                })
+            }) else {
+                continue;
+            };
+            let metadata = self
+                .probe_video_metadata(path, &format!("telegram-metadata-{}", expected.id), async {
+                    loop {
+                        if self.inner.lock().unwrap().closing {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                })
+                .await;
+            let metadata = match metadata {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if error.to_string() != "CANCELED" {
+                        eprintln!("Telegram metadata probe: {error}");
+                    }
+                    continue;
+                }
+            };
+            let result = (|| -> Result<()> {
+                let mut inner = self.inner.lock().unwrap();
+                if inner.closing {
+                    return Ok(());
+                }
+                let Some(mut task) = inner
+                    .tasks
+                    .iter()
+                    .find(|task| {
+                        task.id == expected.id
+                            && task.status == Status::Completed
+                            && task.path == expected.path
+                            && task.completed_at == expected.completed_at
+                    })
+                    .cloned()
+                else {
+                    return Ok(());
+                };
+                let Some(video) = task.video.as_mut() else {
+                    return Ok(());
+                };
+                if video["platform"] != "telegram" {
+                    return Ok(());
+                }
+                let before = video.clone();
+                telegram_download::fill_missing_attributes(video, &metadata);
+                if *video == before {
+                    return Ok(());
+                }
+                parse_cache::update_telegram_metadata(&inner.db, video)?;
+                task.revision += 1;
+                publish(&mut inner, task, &*self.emit)
+            })();
+            if let Err(error) = result {
+                eprintln!("Telegram metadata repair: {error}");
+            }
+        }
+    }
+
+    pub(crate) fn stop_telegram_recovery(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.telegram_recovery_epoch = inner.telegram_recovery_epoch.wrapping_add(1);
+    }
+
+    pub fn wake_backup(&self) {self.backup_wake.notify_waiters();}
+    pub fn current_delete_activity(&self) -> Option<DeleteActivity> {
+        self.delete_activity.lock().expect("delete activity lock poisoned").clone()
+    }
+
+    pub(crate) fn replace_delete_activity(&self, activity: Option<DeleteActivity>) -> Option<DeleteActivity> {
+        let previous = std::mem::replace(&mut *self.delete_activity.lock().expect("delete activity lock poisoned"), activity.clone());
+        (self.emit)(TaskEvent::DeleteActivity(activity));
+        previous
+    }
+
+    pub fn set_backup_foreground(&self,foreground:bool) {self.backup_foreground.store(foreground,std::sync::atomic::Ordering::Relaxed);if foreground {self.backup_window_wake.notify_waiters();}}
+    pub(crate) fn backup_cancellation(&self)->watch::Receiver<bool> {self.inner.lock().unwrap().backup_cancel.subscribe()}
+
+    pub(crate) async fn probe_video_metadata(
+        &self,
+        source: &std::path::Path,
+        operation: &str,
+        cancel: impl std::future::Future<Output = ()>,
+    ) -> Result<serde_json::Value> {
+        let _ = operation;
+        #[cfg(test)]
+        if let Some(fixture) = self.local_media_fixture.lock().unwrap().clone() {
+            return fixture("probe", source);
+        }
+        crate::local_media::probe(source, &self.runtime_directory, cancel).await
+    }
+    async fn extract_telegram_cover(
+        &self,
+        source: &Path,
+        cancel: impl std::future::Future<Output = ()>,
+    ) -> Result<Value> {
+        #[cfg(test)]
+        if let Some(fixture) = self.local_media_fixture.lock().unwrap().clone() {
+            return fixture("cover", source);
+        }
+        crate::local_media::extract(source, &self.runtime_directory, cancel).await
+    }
+
+    pub async fn ensure_local_video(self:&Arc<Self>,asset_id:&str)->Result<PathBuf> {
+        let mut receiver={
+            let mut inner=self.inner.lock().unwrap();
+            if inner.closing {bail!("CANCELED");}
+            if let Some(shared)=inner.backup_restores.get(asset_id) {shared.result.clone()} else {
+                let (sender,receiver)=watch::channel(None);
+                let (cancel,mut cancellation)=watch::channel(false);
+                inner.backup_restores.insert(asset_id.into(),crate::backup::restore::Shared{result:receiver.clone(),cancel});
+                let core=self.clone();let id=asset_id.to_owned();
+                inner.workers.push(tokio::spawn(async move {
+                    let outcome=tokio::select!{_=cancellation.changed()=>Err(anyhow::anyhow!("CANCELED")),result=crate::backup::restore::ensure_current(&core,&id)=>result}.map_err(|e|e.to_string());
+                    if let Err(error)=&outcome {
+                        let _=core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='blocked',last_error=?2 WHERE asset_id=?1 AND kind='restore' AND state='running'",params![id,error])?;db.execute("UPDATE asset_local_files SET local_state='missing' WHERE asset_id=? AND local_state='restoring'",[&id])?;Ok(())});
+                    }
+                    sender.send_replace(Some(outcome));
+                    core.inner.lock().unwrap().backup_restores.remove(&id);
+                }));receiver
+            }
+        };
+        let result=receiver.wait_for(|r|r.is_some()).await.context("CANCELED")?.clone().context("CANCELED")?;
+        result.map_err(anyhow::Error::msg)
+    }
+
+    /// A foreground delete waits only for file work on the same asset.
+    pub(crate) async fn restore_file_guard(&self, asset: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.restore_file_locks.lock().unwrap();
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(asset).and_then(std::sync::Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(asset.into(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
+    }
+
+    pub fn cancel_asset_restore(&self,id:&str)->Result<()> {
+        crate::backup::restore::cancel(self,id)?;
+        if let Some(shared)=self.inner.lock().unwrap().backup_restores.get(id){shared.cancel.send_replace(true);}
         Ok(())
     }
-    pub async fn login_tdl(self: &Arc<Self>, path: Option<PathBuf>) -> Result<Settings> {
-        let (send, receive) = tokio::sync::oneshot::channel();
-        {
-            let mut inner = self.inner.lock().unwrap();
-            if inner.closing {
-                bail!("INVALID_STATE");
-            }
-            if inner.tdl_login_cancel.is_some() || inner.active.values().any(|a| a.tdl.is_some()) {
-                bail!("TDL_BUSY");
-            }
-            let (cancel, receiver) = watch::channel(false);
-            inner.tdl_login_cancel = Some(cancel);
-            let (control, input) = tdl_bridge::LoginControl::new();
-            let state = control.state.clone();
-            inner.tdl_login_control = Some(control);
-            let core = self.clone();
-            let worker = tokio::spawn(async move {
-                let result = tdl_bridge::login(
-                    path.as_deref(),
-                    &core.runtime_directory.join("tdl-sessions"),
-                    receiver,
-                    state,
-                    input,
-                )
-                .await;
-                let mut inner = core.inner.lock().unwrap();
-                let result = result.and_then(|scratch| {
-                    if inner.closing || inner.tdl_login_cancel.as_ref().is_some_and(|c| *c.borrow()) {
-                        bail!("CANCELED");
-                    }
-                    let directory = scratch.path().join("data");
-                    let transaction = inner.db.transaction().context("DATABASE_ERROR")?;
-                    transaction.execute("INSERT INTO tdl_settings(id,enabled,path,session_directory) VALUES(1,0,?1,?2) ON CONFLICT(id) DO UPDATE SET path=excluded.path,session_directory=excluded.session_directory",
-                        params![path.as_ref().map(|p| p.to_string_lossy().into_owned()), directory.to_string_lossy()]).context("DATABASE_ERROR")?;
-                    // Metadata learned under another account must not serve as a new preview.
-                    transaction.execute_batch("DELETE FROM parse_cache_images WHERE cache_key IN (SELECT cache_key FROM parse_cache WHERE platform='telegram'); DELETE FROM parse_cache WHERE platform='telegram'; DELETE FROM parse_cache_aliases WHERE platform='telegram';").context("DATABASE_ERROR")?;
-                    transaction.commit().context("DATABASE_ERROR")?;
-                    inner.settings.tdl.path = path;
-                    inner.settings.tdl.session_directory = Some(directory);
-                    let _ = scratch.keep();
-                    Ok(inner.settings.clone())
-                });
-                inner.tdl_login_cancel = None;
-                inner.tdl_login_control = None;
-                let _ = send.send(result);
-            });
-            inner.workers.retain(|worker| !worker.is_finished());
-            inner.workers.push(worker);
-        }
-        receive.await.context("TDL_LOGIN_FAILED")?
+    pub async fn cancel_asset_transcription(&self,id:&str)->Result<()> {
+        let operation={let inner=self.inner.lock().unwrap();inner.transcription.as_ref().filter(|a| a.snapshot.task_id==id || inner.tasks.iter().any(|t|t.id==a.snapshot.task_id && t.asset_id.as_deref()==Some(id))).map(|a|(a.snapshot.task_id.clone(),a.snapshot.operation_id.clone()))};
+        if let Some((task,operation))=operation {self.cancel_transcription(&task,&operation).await?;}
+        Ok(())
+    }
+    pub(crate) fn mark_asset_missing(&self,id:&str)->Result<()> {
+        let mut inner=self.inner.lock().unwrap();
+        let mut tasks:Vec<Task>=inner.tasks.iter().filter(|t|t.asset_id.as_deref()==Some(id)).cloned().collect();
+        let tx=inner.db.unchecked_transaction()?;
+        tx.execute("UPDATE asset_local_files SET local_state='missing',path=NULL WHERE asset_id=?",[id])?;
+        for task in &mut tasks {task.path=None;task.file_missing=true;task.revision+=1;persist(&tx,task)?;}
+        tx.commit()?;
+        for task in tasks {if let Some(old)=inner.tasks.iter_mut().find(|t|t.id==task.id){*old=task.clone();}(self.emit)(TaskEvent::Updated(Box::new(task)));}
+        Ok(())
+    }
+    pub(crate) fn commit_asset_file(&self,id:&str,path:&Path,hash:&str,source:&Value)->Result<()> {
+        let mut inner=self.inner.lock().unwrap();
+        let mut tasks:Vec<Task>=inner.tasks.iter().filter(|t|t.asset_id.as_deref()==Some(id)).cloned().collect();
+        let tx=inner.db.unchecked_transaction()?;
+        tx.execute("UPDATE asset_local_files SET path=?2,bytes=?3,sha256=?4,source_json=?5,local_state='present',verified_at=unixepoch() WHERE asset_id=?1",params![id,path.to_string_lossy(),source["size"].as_i64().context("BACKUP_INVALID_SIZE")?,hash,source.to_string()])?;
+        for task in &mut tasks {task.path=Some(path.to_owned());task.file_missing=false;task.revision+=1;persist(&tx,task)?;}
+        let transcripts=transcription::rebind_asset_source(&tx,id,hash,source)?;
+        tx.commit()?;
+        for snapshot in transcripts {(self.emit)(TaskEvent::Transcription(Box::new(snapshot.summary())));}
+        for task in tasks {if let Some(old)=inner.tasks.iter_mut().find(|t|t.id==task.id){*old=task.clone();}(self.emit)(TaskEvent::Updated(Box::new(task)));}
+        Ok(())
+    }
+    pub fn settings(&self) -> Settings {
+        self.inner.lock().unwrap().settings.clone()
     }
     pub fn cookie(&self, platform: &str) -> Result<String> {
         settings::cookie(&self.inner.lock().unwrap().settings, platform)
@@ -821,10 +1230,40 @@ impl Core {
         );
         Ok((filename, body))
     }
+    pub async fn save_profile_with_network(&self, update: settings::ProfileUpdate) -> Result<Settings> {
+        settings::validate_profile_update(&self.settings(), &update)?;
+        let network = if update.platform == "telegram" && update.proxy.is_some() {
+            Some(self.telegram_accounts.network_sessions()?)
+        } else { None };
+        let changed = if update.platform == "telegram" {
+            if let Some(requested) = &update.proxy {
+                let normalized = |value: &str| -> Result<Option<url::Url>> {
+                    if value.is_empty() { return Ok(None); }
+                    let (mut proxy, _) = settings::parse_proxy("telegram", value)?;
+                    proxy.set_path("/");
+                    Ok(Some(proxy))
+                };
+                let requested = normalized(requested)?;
+                // An unreadable old credential must not prevent replacing or clearing it.
+                match self.proxy("telegram").and_then(|current| normalized(current.as_deref().unwrap_or(""))) {
+                    Ok(current) => requested != current,
+                    Err(_) => true,
+                }
+            } else { false }
+        } else { false };
+        if !changed { return self.save_profile(update); }
+        let network = network.as_ref().expect("changed Telegram proxy owns its snapshot");
+        let mut paused = Vec::with_capacity(network.sessions.len());
+        for session in &network.sessions { paused.push(session.pause_network().await?); }
+        // Guards keep connection admission and state locked through persistence.
+        self.save_profile(update)
+    }
     pub fn save_profile(&self, update: settings::ProfileUpdate) -> Result<Settings> {
         let mut inner = self.inner.lock().unwrap();
         let Inner { db, settings, .. } = &mut *inner;
-        settings::save_profile(db, settings, update)?;
+        let result = settings::save_profile(db, settings, update);
+        self.telegram_accounts.configure_proxy(settings.profiles.iter().find(|p| p.platform == "telegram").cloned());
+        result?;
         Ok(settings.clone())
     }
     pub fn set_directory(&self, path: PathBuf) -> Result<Settings> {
@@ -854,7 +1293,7 @@ impl Core {
     }
 
     pub fn resolve(self: &Arc<Self>, input: String) -> Result<Task> {
-        self.resolve_task(input, None, "auto".into(), None)
+        self.resolve_task(input, None, "auto".into(), None, false, None)
     }
 
     pub fn resolve_with_resolver(
@@ -862,10 +1301,10 @@ impl Core {
         input: String,
         resolver: String,
     ) -> Result<Task> {
-        if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk" | "tdl") {
+        if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk" | "grammers") {
             bail!("CONFIG_INVALID");
         }
-        self.resolve_task(input, None, resolver, None)
+        self.resolve_task(input, None, resolver, None, false, None)
     }
 
     pub fn image(&self, id: &str, index: usize) -> Result<Vec<u8>> {
@@ -925,14 +1364,14 @@ impl Core {
                     .context("INVALID_ENGINE_RESULT")?;
             video.validate()?;
             (
-                video.canonical_url,
-                video.resolver,
+                if video.platform == "telegram" { task.telegram_link.clone().unwrap_or(parse_cache::telegram_source(&inner.db, task.video.as_ref().unwrap())?) } else { video.canonical_url },
+                if video.platform == "telegram" { "grammers".into() } else { video.resolver },
                 task.video.as_ref().unwrap()["selected_format_id"]
                     .as_str()
                     .map(str::to_owned),
             )
         };
-        self.resolve_task(input, Some(id), resolver, format_id)
+        self.resolve_task(input, Some(id), resolver, format_id, true, None)
     }
 
     pub fn remove_history(&self, id: &str) -> Result<()> {
@@ -992,9 +1431,33 @@ impl Core {
     }
 
     fn remove_history_records(&self, inner: &mut Inner, ids: Vec<String>) -> Result<Vec<String>> {
-        if ids.is_empty() {
-            return Ok(ids);
+        if ids.is_empty() { return Ok(ids); }
+        self.remove_history_records_with(inner, ids, None, |_| Ok(()))
+    }
+
+    pub(crate) fn finish_asset_deletion(&self, asset: &str, operation: &str) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let tasks: Vec<_> = inner.tasks.iter().filter(|task| task.asset_id.as_deref() == Some(asset)).collect();
+        if tasks.iter().any(|task| !matches!(task.status, Status::Completed | Status::Failed | Status::Canceled)
+            || inner.active.contains_key(&task.id) || inner.downloads.contains(&task.id)
+            || inner.transcription.as_ref().is_some_and(|active| active.snapshot.task_id == task.id)) {
+            bail!("TASK_BUSY");
         }
+        let ids = tasks.into_iter().map(|task| task.id.clone()).collect();
+        let space: String = inner.db.query_row("SELECT space_id FROM backup_operations WHERE operation_id=?1 AND asset_id=?2 AND kind='delete'",params![operation,asset],|row|row.get(0))?;
+        self.remove_history_records_with(&mut inner, ids, Some(&space), |tx| {
+            tx.execute("DELETE FROM asset_hidden_history WHERE asset_id=?",[asset])?;
+            tx.execute("INSERT OR IGNORE INTO asset_deletion_hidden_history(space_id,asset_id) VALUES(?1,?2)",params![space,asset])?;
+            tx.execute("UPDATE asset_remote_objects SET remote_state='deleted' WHERE space_id=?1 AND asset_id=?2",params![space,asset])?;
+            tx.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.local_cleanup_done',json('true'),'$.local_cleanup_ms',CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE operation_id=?",[operation])?;
+            Ok(())
+        })?;
+        drop(inner);
+        (self.emit)(TaskEvent::BackupAssetDeleted(operation.to_owned()));
+        Ok(())
+    }
+
+    fn remove_history_records_with(&self, inner: &mut Inner, ids: Vec<String>, space: Option<&str>, update: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>) -> Result<Vec<String>> {
         let removing: HashSet<_> = ids.iter().map(String::as_str).collect();
         let retained: HashSet<_> = inner
             .tasks
@@ -1027,6 +1490,9 @@ impl Core {
             .collect();
         let tx = inner.db.transaction().context("DATABASE_ERROR")?;
         for id in &ids {
+            tx.execute("INSERT OR IGNORE INTO asset_hidden_history SELECT asset_id FROM media_assets WHERE task_id=?",[id]).context("DATABASE_ERROR")?;
+            tx.execute("UPDATE media_assets SET task_id=NULL WHERE task_id=?", [id])
+                .context("DATABASE_ERROR")?;
             tx.execute("DELETE FROM video_transcripts WHERE task_id=?", [id])
                 .context("DATABASE_ERROR")?;
             tx.execute("DELETE FROM commit_intents WHERE task_id=?", [id])
@@ -1037,6 +1503,7 @@ impl Core {
         for video in release_covers {
             parse_cache::clear_cover(&tx, &video)?;
         }
+        update(&tx)?;
         tx.commit().context("DATABASE_ERROR")?;
         // Staging records, if cleanup previously failed, remain available for
         // startup cleanup. Removing history never touches a completed video.
@@ -1045,7 +1512,10 @@ impl Core {
             .transcription_unsaved
             .retain(|id, _| !removing.contains(id.as_str()));
         for id in &ids {
-            (self.emit)(TaskEvent::Removed(id.clone()));
+            (self.emit)(match space {
+                Some(space) => TaskEvent::RemovedFromSpace { id: id.clone(), space_id: space.to_owned() },
+                None => TaskEvent::Removed(id.clone()),
+            });
         }
         Ok(ids)
     }
@@ -1145,19 +1615,21 @@ impl Core {
         retry_id: Option<&str>,
         resolver: String,
         requested_format: Option<String>,
+        download_after_resolve: bool,
+        recovery_revision: Option<(u64, u64)>,
     ) -> Result<Task> {
         if input.trim().is_empty() || input.len() > 8192 {
             bail!("INVALID_INPUT");
         }
-        let telegram = tdl_bridge::is_telegram(&input);
+        let telegram = telegram_download::is_telegram(&input);
         let resolver = if telegram {
-            tdl_bridge::message_link(&input)?;
-            if !matches!(resolver.as_str(), "auto" | "tdl") {
+            telegram_download::message_link(&input)?;
+            if !matches!(resolver.as_str(), "auto" | "grammers") {
                 bail!("UNSUPPORTED_CONTENT");
             }
-            "tdl".to_owned()
+            "grammers".to_owned()
         } else {
-            if resolver == "tdl" {
+            if resolver == "grammers" {
                 bail!("INVALID_INPUT");
             }
             resolver
@@ -1166,6 +1638,7 @@ impl Core {
         if inner.closing || inner.tasks.iter().any(|t| t.status == Status::Parsing) {
             bail!("TASK_BUSY");
         }
+        if recovery_revision.is_some_and(|(_, epoch)| inner.telegram_recovery_epoch != epoch) { bail!("TELEGRAM_ACCOUNT_MISMATCH"); }
         let previous = if let Some(id) = retry_id {
             let task = inner
                 .tasks
@@ -1175,6 +1648,9 @@ impl Core {
             if !matches!(task.status, Status::Failed | Status::Canceled) {
                 bail!("INVALID_STATE");
             }
+            if recovery_revision.is_some_and(|(revision, _)| task.status != Status::Failed || task.revision != revision || !task.error.as_deref().is_some_and(crate::telegram_reconnect::network_error)) {
+                bail!("INVALID_STATE");
+            }
             if inner.active.contains_key(id) || inner.downloads.contains(id) {
                 bail!("TASK_BUSY");
             }
@@ -1182,28 +1658,18 @@ impl Core {
         } else {
             None
         };
-        let download_after_resolve = previous.is_some();
-        let mut cached = parse_cache::find(&inner.db, &input, &resolver)?;
+        let mut cached = if telegram { None } else { parse_cache::find(&inner.db, &input, &resolver)? };
         if let (Some(cached), Some(format_id)) = (&mut cached, &requested_format) {
             apply_video_format(&mut cached.video, format_id)?;
         }
-        let tdl = if telegram {
-            if inner.tdl_login_cancel.is_some() {
-                bail!("TDL_BUSY");
-            }
-            if !inner.settings.tdl.enabled {
-                bail!("TDL_EXPERIMENTAL_DISABLED");
-            }
-            Some(inner.settings.tdl.clone())
-        } else {
-            None
-        };
         let profiles = if telegram {
             json!({})
         } else {
             settings::snapshot(&inner.settings)?
         };
         let mut task = Task {
+            insertion_id: previous.as_ref().map_or(0, |task| task.insertion_id),
+            asset_id: previous.as_ref().and_then(|t| t.asset_id.clone()),
             id: previous
                 .as_ref()
                 .map(|t| t.id.clone())
@@ -1220,11 +1686,13 @@ impl Core {
             error: None,
             path: None,
             created_at: previous.as_ref().map_or_else(now, |t| t.created_at),
+            download_requested_at: download_after_resolve.then(|| chrono::Utc::now().timestamp_millis().max(0) as u64),
             completed_at: None,
             canceling: false,
             file_missing: false,
             queue_order: None,
             download_requested: download_after_resolve,
+            duplicate_confirmed: previous.as_ref().is_some_and(|task| task.duplicate_confirmed),
             cover_path: None,
             cover_error: None,
             files: Vec::new(),
@@ -1234,7 +1702,7 @@ impl Core {
             cached_at: None,
             cover_cached: false,
             telegram_link: if telegram {
-                Some(tdl_bridge::message_link(&input)?.url)
+                Some(telegram_download::message_link(&input)?.url)
             } else {
                 None
             },
@@ -1253,22 +1721,19 @@ impl Core {
                 Err(_) => bail!("DATABASE_ERROR"),
             }
             // Old commit evidence must never complete a new attempt on restart.
-            let tx = inner.db.transaction().context("DATABASE_ERROR")?;
-            tx.execute("DELETE FROM commit_intents WHERE task_id=?", [&task.id])
-                .context("DATABASE_ERROR")?;
-            persist(&tx, &task)?;
-            tx.commit().context("DATABASE_ERROR")?;
+            persist_new_attempt(&inner.db, &task)?;
             *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
             (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
         } else {
             publish(&mut inner, task.clone(), &*self.emit)?;
+            task.insertion_id = inner.tasks.iter().find(|stored| stored.id == task.id).unwrap().insertion_id;
         }
         let directory = inner.settings.download_directory.clone();
         let filename_template = inner.settings.filename_template.clone();
         inner.active.insert(
             task.id.clone(),
             Active {
-                tdl: tdl.clone(),
+                telegram,
                 download_after_resolve,
                 profiles: profiles.clone(),
                 directory: directory.clone(),
@@ -1296,8 +1761,8 @@ impl Core {
         inner.workers.retain(|worker| !worker.is_finished());
         let worker = tokio::spawn(async move {
             let result = async {
-                if let Some(config) = tdl {
-                    return core.resolve_telegram(&config, &input, &id, cancellation.clone()).await;
+                if telegram {
+                    return core.resolve_telegram(&input, &id, cancellation.clone()).await;
                 }
                 if parse_cache::share_url(&input).is_some() {
                     let has_cache: bool = core.inner.lock().unwrap().db.query_row(
@@ -1411,13 +1876,17 @@ impl Core {
         if task.canceling {
             task.status = Status::Canceled;
             task.error = None;
+        } else if inner.closing && (!downloading || result.is_err()) {
+            task.status = Status::Failed;
+            task.error = Some("INTERRUPTED".into());
         } else {
             match result {
                 Ok(video) if !downloading => {
+                    task.error = None;
                     task.video = Some(video);
                     task.status = Status::Ready;
                 }
-                Ok(_) => task.status = Status::Completed,
+                Ok(_) => { task.error = None; task.status = Status::Completed; },
                 Err(error) => {
                     task.status = Status::Failed;
                     task.error = Some(
@@ -1432,7 +1901,7 @@ impl Core {
             }
         }
         if task.status == Status::Ready
-            && !previously_downloaded(&inner.tasks, &task)
+            && (task.duplicate_confirmed || !previously_downloaded(&inner.tasks, &task))
             && inner
                 .active
                 .get(id)
@@ -1469,7 +1938,7 @@ impl Core {
     }
 
     pub fn set_max_downloads(self: &Arc<Self>, value: u8) -> Result<Settings> {
-        if !(1..=3).contains(&value) {
+        if !(1..=5).contains(&value) {
             bail!("CONFIG_INVALID");
         }
         let mut inner = self.inner.lock().unwrap();
@@ -1501,6 +1970,7 @@ impl Core {
             bail!("INVALID_STATE");
         }
         apply_video_format(task.video.as_mut().context("INVALID_STATE")?, format_id)?;
+        task.duplicate_confirmed = false;
         task.revision += 1;
         publish(&mut inner, task.clone(), &*self.emit)?;
         Ok(task)
@@ -1525,32 +1995,23 @@ impl Core {
         if task.status != Status::Ready && !deferred {
             bail!("INVALID_STATE");
         }
-        if (deferred
-            || task
-                .video
-                .as_ref()
-                .is_some_and(|v| v["platform"] == "telegram"))
-            && !inner.settings.tdl.enabled
-        {
-            bail!("TDL_EXPERIMENTAL_DISABLED");
-        }
         if !confirm_duplicate && previously_downloaded(&inner.tasks, &task) {
             bail!("ALREADY_DOWNLOADED");
         }
-        if !inner.active.contains_key(id) {
+        task.duplicate_confirmed |= confirm_duplicate;
+        self.queue_download(&mut inner, task, true)?;
+        self.dispatch(&mut inner);
+        Ok(())
+    }
+
+    fn queue_download(self: &Arc<Self>, inner: &mut Inner, mut task: Task, new_request: bool) -> Result<()> {
+        let deferred = task.video.is_none() && task.telegram_link.is_some();
+        if !inner.active.contains_key(&task.id) {
             let telegram = deferred
                 || task
                     .video
                     .as_ref()
                     .is_some_and(|v| v["platform"] == "telegram");
-            let tdl = if telegram {
-                if inner.tdl_login_cancel.is_some() {
-                    bail!("TDL_BUSY");
-                }
-                Some(inner.settings.tdl.clone())
-            } else {
-                None
-            };
             let profiles = if telegram {
                 json!({})
             } else {
@@ -1561,9 +2022,9 @@ impl Core {
             let directory = inner.settings.download_directory.clone();
             let filename_template = inner.settings.filename_template.clone();
             inner.active.insert(
-                id.to_owned(),
+                task.id.clone(),
                 Active {
-                    tdl,
+                    telegram,
                     download_after_resolve: deferred,
                     profiles,
                     directory,
@@ -1574,11 +2035,20 @@ impl Core {
             );
         }
         let filename_template = inner.settings.filename_template.clone();
-        inner.active.get_mut(id).context("INVALID_STATE")?.filename_template = filename_template;
+        inner.active.get_mut(&task.id).context("INVALID_STATE")?.filename_template = filename_template;
         task.status = Status::Queued;
         task.error = None;
+        task.bytes = 0;
+        task.speed_bps = None;
+        task.eta_seconds = None;
+        task.merging = false;
+        task.completed_items = None;
         task.download_requested = true;
-        task.queue_order = Some(
+        if new_request {
+            task.download_requested_at = Some(chrono::Utc::now().timestamp_millis().max(0) as u64);
+        }
+        if new_request || task.queue_order.is_none() {
+            task.queue_order = Some(
             inner
                 .tasks
                 .iter()
@@ -1586,54 +2056,47 @@ impl Core {
                 .max()
                 .unwrap_or(0)
                 + 1,
-        );
+            );
+        }
         task.revision += 1;
-        publish(&mut inner, task, &*self.emit)?;
-        self.dispatch(&mut inner);
+        persist_new_attempt(&inner.db, &task)?;
+        *inner.tasks.iter_mut().find(|stored| stored.id == task.id).context("TASK_NOT_FOUND")? = task.clone();
+        (self.emit)(TaskEvent::Updated(Box::new(task)));
         Ok(())
+    }
+
+    fn restore_interrupted_downloads(self: &Arc<Self>, inner: &mut Inner) {
+        let mut pending: Vec<_> = inner.tasks.iter().filter(|task|
+            task.download_requested && task.status == Status::Failed
+                && task.error.as_deref() == Some("INTERRUPTED")
+                && (task.video.is_some() || task.telegram_link.is_some())
+        ).cloned().collect();
+        pending.sort_by_key(|task| (task.queue_order.unwrap_or(u64::MAX), task.insertion_id));
+        for mut task in pending {
+            if let Err(error) = self.queue_download(inner, task.clone(), false) {
+                inner.active.remove(&task.id);
+                task.status = Status::Failed;
+                task.error = Some(error.to_string());
+                task.revision += 1;
+                let _ = publish(inner, task, &*self.emit);
+                eprintln!("startup_download event=queue_failed");
+            }
+        }
+        self.dispatch(inner);
     }
 
     // This lock covers slot reservation and FIFO selection, including concurrent
     // submissions, settings changes, cancellation, and process completion.
     fn dispatch(self: &Arc<Self>, inner: &mut Inner) {
-        while !inner.closing && inner.downloads.len() < usize::from(inner.settings.max_downloads) {
-            let waiting_channel = inner
-                .tasks
-                .iter()
-                .filter(|t| {
-                    matches!(t.status, Status::Queued | Status::Parsing)
-                        && t.download_requested
-                        && t.video.is_none()
-                        && t.telegram_link.is_some()
-                })
-                .filter_map(|t| t.queue_order)
-                .min();
-            let telegram_busy = inner.active.iter().any(|(id, active)| {
-                active.tdl.is_some()
-                    && (inner.downloads.contains(id)
-                        || inner
-                            .tasks
-                            .iter()
-                            .any(|t| t.id == *id && t.status == Status::Parsing))
-            });
+        while !inner.closing && running_downloads(inner) < usize::from(inner.settings.max_downloads) {
             let Some(id) = inner
                 .tasks
                 .iter()
-                .filter(|t| t.status == Status::Queued)
-                .filter(|t| {
-                    if t.video.is_none() {
-                        !telegram_busy
-                            && !inner
-                                .tasks
-                                .iter()
-                                .any(|other| other.status == Status::Parsing)
-                    } else {
-                        // Later Telegram downloads must not keep an unknown channel
-                        // waiting forever. Other platforms may use free slots.
-                        !inner.active.get(&t.id).is_some_and(|a| a.tdl.is_some())
-                            || waiting_channel.is_none_or(|order| t.queue_order < Some(order))
-                    }
-                })
+                .filter(|t| t.status == Status::Queued && !inner.downloads.contains(&t.id))
+                .filter(|t| !(t.telegram_link.is_some() || t.video.as_ref().is_some_and(|v| v["platform"] == "telegram"))
+                    || !self.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download).session.reconnect.waiting()
+                    || !inner.tasks.iter().any(|other| inner.active.contains_key(&other.id) && other.error.as_deref() == Some("TELEGRAM_RECONNECTING")))
+                .filter(|t| t.video.is_some() || !inner.tasks.iter().any(|other| other.status == Status::Parsing))
                 .min_by_key(|t| t.queue_order)
                 .map(|t| t.id.clone())
             else {
@@ -1659,39 +2122,79 @@ impl Core {
         }
     }
 
+    fn telegram_connection_progress(self: &Arc<Self>, id: &str, event: &Value) {
+        let Some(waiting) = event["reconnecting"].as_bool() else { return; };
+        let mut inner = self.inner.lock().unwrap();
+        let Some(task) = inner.tasks.iter_mut().find(|t| t.id == id) else { return; };
+        if task.canceling { return; }
+        let error = waiting.then(|| "TELEGRAM_RECONNECTING".to_owned());
+        if task.error == error { return; }
+        task.error = error;
+        if !waiting { task.bytes = 0; }
+        task.speed_bps = None;
+        task.eta_seconds = None;
+        task.revision += 1;
+        (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+        if waiting { self.dispatch(&mut inner); }
+    }
+
+    pub(crate) async fn wait_telegram_slot(self: &Arc<Self>, id: &str, mut cancel: watch::Receiver<bool>) -> Result<()> {
+        loop {
+            {
+                let mut inner = self.inner.lock().unwrap();
+                if inner.closing || *cancel.borrow() { bail!("CANCELED"); }
+                let task = inner.tasks.iter().find(|t|t.id==id).context("TASK_NOT_FOUND")?;
+                if task.canceling { bail!("CANCELED"); }
+                if task.error.as_deref() != Some("TELEGRAM_RECONNECTING") { return Ok(()); }
+                if !inner.downloads.contains(id) || running_downloads(&inner) < inner.settings.max_downloads as usize {
+                    let task = inner.tasks.iter_mut().find(|t|t.id==id).unwrap();
+                    task.error = None;
+                    task.bytes = 0;
+                    task.speed_bps = None;
+                    task.eta_seconds = None;
+                    task.revision += 1;
+                    (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+                    self.dispatch(&mut inner);
+                    return Ok(());
+                }
+            }
+            tokio::select! { biased;
+                _ = cancel.wait_for(|v|*v) => bail!("CANCELED"),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+            }
+        }
+    }
+
     async fn resolve_telegram(
         self: &Arc<Self>,
-        config: &TdlSettings,
         input: &str,
         id: &str,
         cancel: watch::Receiver<bool>,
     ) -> Result<Value> {
-        let channel = parse_cache::tdl_channel(&self.inner.lock().unwrap().db, input)?;
-        let video = self
-            .tdl_session
-            .operation(config, input, None, None, |_| {}, cancel, channel)
-            .await?;
+        let previous = self.inner.lock().unwrap().tasks.iter().find(|task| task.id == id).and_then(|task|task.video.clone());
+        let outcome = telegram_download::operation(self, id, input, None, None, |event| self.telegram_connection_progress(id, &event), cancel).await?;
+        let video = outcome.value;
+        if let Some(previous) = &previous {
+            if previous["platform"] == "telegram" && previous["video_id"] != video["video_id"] {
+                parse_cache::forget_telegram_channel(&self.inner.lock().unwrap().db,input,previous)?;
+                bail!(telegram_download::ALIAS_IDENTITY_MISMATCH);
+            }
+        }
         let identity: Video =
             serde_json::from_value(video.clone()).context("INVALID_ENGINE_RESULT")?;
         identity.validate()?;
         let mut inner = self.inner.lock().unwrap();
-        let cached = parse_cache::save(&mut inner.db, &video, Vec::new(), None, now())?;
+        let cached = parse_cache::save(&mut inner.db, &video, Vec::new(), outcome.cover, now())?;
         parse_cache::remember(&inner.db, input, &cached.video)?;
         let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
         task.cached_at = Some(cached.saved_at);
+        task.cover_cached = cached.has_cover;
         Ok(cached.video)
     }
 
     fn start_deferred(self: &Arc<Self>, inner: &mut Inner, id: &str) -> Result<()> {
         let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
         let input = task.telegram_link.clone().context("INVALID_STATE")?;
-        let config = inner
-            .active
-            .get(id)
-            .unwrap()
-            .tdl
-            .clone()
-            .context("INVALID_STATE")?;
         let (cancel, cancellation) = watch::channel(false);
         let (done, done_rx) = watch::channel(false);
         task.status = Status::Parsing;
@@ -1706,7 +2209,7 @@ impl Core {
         inner.workers.retain(|worker| !worker.is_finished());
         inner.workers.push(tokio::spawn(async move {
             let result = core
-                .resolve_telegram(&config, &input, &id, cancellation)
+                .resolve_telegram(&input, &id, cancellation)
                 .await;
             core.inner.lock().unwrap().downloads.remove(&id);
             core.finish(&id, result, false);
@@ -1722,13 +2225,13 @@ impl Core {
             .get(id)
             .expect("queued task has configuration snapshot");
         let profiles = active.profiles.clone();
-        let tdl = active.tdl.clone();
+        let telegram = active.telegram;
         let directory = active.directory.clone();
         let filename_template = active.filename_template.clone();
         let naming_time = crate::naming::current_time();
         let video = task.video.clone().context("INVALID_STATE")?;
-        let tdl_input = if tdl.is_some() {
-            Some(parse_cache::tdl_source(&inner.db, &video)?)
+        let telegram_input = if telegram {
+            Some(parse_cache::telegram_source(&inner.db, &video)?)
         } else {
             None
         };
@@ -1753,13 +2256,13 @@ impl Core {
                 std::fs::create_dir(&media).context("IO_ERROR")?;
                 core.inner.lock().unwrap().db.execute("INSERT OR REPLACE INTO task_staging VALUES(?1,?2)",
                     params![id,stage.path().to_string_lossy()]).context("DATABASE_ERROR")?;
-                let mut last = Instant::now() - Duration::from_secs(1);
+                let mut cadence = DownloadProgressCadence::default();
                 let mut transfer_rate = YoutubeTransferRate::default();
                 let youtube = video["platform"] == "youtube";
                 let progress = |mut event: Value| {
+                        if event["reconnecting"].is_boolean() { core.telegram_connection_progress(&id, &event); return; }
                         if youtube { transfer_rate.update(&mut event, Instant::now()); }
-                        if last.elapsed() < Duration::from_millis(250) && event["phase"] != "merging" { return; }
-                        last = Instant::now();
+                        if !cadence.should_emit(&event, Instant::now()) { return; }
                         let mut inner = core.inner.lock().unwrap();
                         let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
                         if task.canceling { return; }
@@ -1774,16 +2277,33 @@ impl Core {
                         task.revision += 1;
                         (core.emit)(TaskEvent::Updated(Box::new(task.clone())));
                     };
-                let result = if let Some(config) = tdl {
-                    match core.tdl_session.operation(&config, tdl_input.as_deref().context("INVALID_ENGINE_RESULT")?, Some(&video), Some(&media), progress, cancellation.clone(), None).await {
-                        Ok(mut result) => {
+                let result = if telegram {
+                    match telegram_download::operation(&core, &id, telegram_input.as_deref().context("INVALID_ENGINE_RESULT")?, Some(&video), Some(&media), progress, cancellation.clone()).await {
+                        Ok(outcome) => {
+                            let mut result = outcome.value;
+                            if let Some(body) = outcome.cover {
+                                let saved:Result<()> = async {
+                                    let mut cover_file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(media.join("cover")).await.context("IO_ERROR")?;
+                                    tokio::io::AsyncWriteExt::write_all(&mut cover_file, &body).await.context("IO_ERROR")?;
+                                    tokio::io::AsyncWriteExt::flush(&mut cover_file).await.context("IO_ERROR")?;
+                                    Ok(())
+                                }.await;
+                                if saved.is_ok() {
+                                    result["cover_filename"] = "cover".into();
+                                    result["cover_bytes"] = (body.len() as u64).into();
+                                }
+                            }
+                            if result["width"].as_u64().is_none() || result["height"].as_u64().is_none() || result["duration_ms"].as_u64().is_none() {
+                                let mut metadata_cancel = cancellation.clone();
+                                match core.probe_video_metadata(&media.join(result["filename"].as_str().context("INVALID_ENGINE_RESULT")?), &id, async { let _ = metadata_cancel.wait_for(|v|*v).await; }).await {
+                                    Ok(metadata) => telegram_download::fill_missing_attributes(&mut result, &metadata),
+                                    Err(error) if error.to_string()=="CANCELED" => return Err(error),
+                                    Err(_) => {},
+                                }
+                            }
+                            if result["cover_filename"].is_string() { Ok(result) } else {
                             let mut cover_cancel = cancellation.clone();
-                            let cover = PythonBridge::operation_cancellable(
-                                &core.program, &core.args, &id, "extract_cover",
-                                json!({"runtime_directory":core.runtime_directory,
-                                    "staging_dir":media,"filename":result["filename"]}),
-                                |_| {}, async { let _ = cover_cancel.wait_for(|v| *v).await; },
-                            ).await;
+                            let cover = core.extract_telegram_cover(&media.join(result["filename"].as_str().context("INVALID_ENGINE_RESULT")?), async { let _ = cover_cancel.wait_for(|v| *v).await; }).await;
                             match cover {
                                 Err(error) if error.to_string() == "CANCELED" => Err(error),
                                 cover => {
@@ -1793,6 +2313,7 @@ impl Core {
                                     }
                                     Ok(result)
                                 }
+                            }
                             }
                         }
                         Err(error) => Err(error),
@@ -1806,19 +2327,25 @@ impl Core {
                             "image_count":video["images"].as_array().map(Vec::len)},"staging_dir":media}),
                     progress, async { let _ = cancellation.wait_for(|v| *v).await; }).await
                 };
-                if result.as_ref().is_err_and(|error| error.root_cause().to_string() == tdl_bridge::ALIAS_IDENTITY_MISMATCH) {
+                if result.as_ref().is_err_and(|error| error.root_cause().to_string() == telegram_download::ALIAS_IDENTITY_MISMATCH) {
                     // A freshly resolved public bootstrap proved this exact alias
                     // stale. Do not retry or remove a concurrently updated mapping.
-                    parse_cache::forget_tdl_channel(&core.inner.lock().unwrap().db,
-                        tdl_input.as_deref().context("INVALID_ENGINE_RESULT")?, &video)?;
+                    parse_cache::forget_telegram_channel(&core.inner.lock().unwrap().db,
+                        telegram_input.as_deref().context("INVALID_ENGINE_RESULT")?, &video)?;
                 }
-                if result.as_ref().is_err_and(|error| error.to_string() == "TDL_MEDIA_CHANGED") {
-                    parse_cache::invalidate_tdl(&mut core.inner.lock().unwrap().db, &video)?;
+                if result.as_ref().is_err_and(|error| error.to_string() == "TELEGRAM_MEDIA_CHANGED") {
+                    parse_cache::invalidate_telegram(&mut core.inner.lock().unwrap().db, &video)?;
                 }
                 let committed = result.and_then(|result| {
                     let mut inner = core.inner.lock().unwrap();
                     let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
                     if task.canceling { bail!("CANCELED"); }
+                    let mut video = video;
+                    if telegram {
+                        telegram_download::merge_attributes(&mut video, &result);
+                        parse_cache::update_telegram_metadata(&inner.db, &video)?;
+                        task.video = Some(video.clone());
+                    }
                     if video["selected_format_id"].is_string() && result["format_id"] != video["selected_format_id"] {
                         bail!("INVALID_ENGINE_RESULT");
                     }
@@ -1905,6 +2432,7 @@ impl Core {
     }
 
     pub async fn cancel(self: &Arc<Self>, id: &str) -> Result<()> {
+        self.cancel_waiting_task_action(id);
         let mut done = {
             let mut inner = self.inner.lock().unwrap();
             let mut task = inner
@@ -1942,16 +2470,15 @@ impl Core {
         Ok(())
     }
     pub async fn shutdown(self: &Arc<Self>) {
+        self.close_task_action_admission();
         let (active, workers) = {
             let mut inner = self.inner.lock().unwrap();
             inner.closing = true;
+            inner.backup_cancel.send_replace(true);
             if let Some(active) = &inner.transcription {
                 let _ = active.cancel.send(true);
             }
             if let Some(cancel) = &inner.dependency_cancel {
-                let _ = cancel.send(true);
-            }
-            if let Some(cancel) = &inner.tdl_login_cancel {
                 let _ = cancel.send(true);
             }
             let active = inner
@@ -1963,23 +2490,35 @@ impl Core {
                         .iter()
                         .any(|t| t.id == **id && t.status != Status::Ready)
                 })
-                .map(|(id, a)| (id.clone(), a.done.clone()))
+                .map(|(id, a)| {
+                    let _ = a.cancel.send(true);
+                    (id.clone(), a.done.clone())
+                })
                 .collect::<Vec<_>>();
+            let queued = inner
+                .tasks
+                .iter()
+                .filter(|task| task.status == Status::Queued)
+                .cloned()
+                .collect::<Vec<_>>();
+            for mut task in queued {
+                task.status = Status::Failed;
+                task.error = Some("INTERRUPTED".into());
+                task.canceling = false;
+                task.speed_bps = None;
+                task.eta_seconds = None;
+                task.merging = false;
+                task.revision += 1;
+                if publish(&mut inner, task.clone(), &*self.emit).is_err() {
+                    task.error = Some("DATABASE_ERROR".into());
+                    *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
+                    (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+                }
+                inner.active.remove(&task.id);
+            }
             (active, std::mem::take(&mut inner.workers))
         };
-        let cancellations = active
-            .iter()
-            .map(|(id, _)| {
-                let core = self.clone();
-                let id = id.clone();
-                tokio::spawn(async move {
-                    let _ = core.cancel(&id).await;
-                })
-            })
-            .collect::<Vec<_>>();
-        for cancellation in cancellations {
-            let _ = cancellation.await;
-        }
+        self.telegram_accounts.shutdown().await;
         for (_, mut done) in active {
             let _ = done.wait_for(|v| *v).await;
         }
@@ -1994,6 +2533,116 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod task_action_tests {
+        include!("task_action_tests.rs");
+    }
+    mod download_duplicate_tests {
+        include!("download_duplicate_tests.rs");
+    }
+
+    #[tokio::test]
+    async fn telegram_proxy_can_be_replaced_when_its_old_secret_is_missing() {
+        for replacement in ["", "socks5://127.0.0.1:9"] {
+            let root = tempfile::tempdir().unwrap();
+            let app = core(root.path());
+            {
+                let mut inner = app.inner.lock().unwrap();
+                let profile = inner.settings.profiles.iter_mut().find(|p| p.platform == "telegram").unwrap();
+                profile.proxy = Some("socks5://127.0.0.1:1080/".into());
+                // A new random, nonexistent proxy entry, never a real Telegram session.
+                profile.credential_ref = Some(format!("yingqu-transfer-test-{}", uuid::Uuid::new_v4()));
+            }
+            assert!(app.proxy("telegram").is_err());
+            let result = app.save_profile_with_network(settings::ProfileUpdate {
+                platform: "telegram".into(), user_agent: "test".into(), cookie: None,
+                proxy: Some(replacement.into()), http_chunk_size: None,
+            }).await;
+            if let Err(error) = result {
+                // The existing writer reports old-secret cleanup failures after persistence.
+                assert!(matches!(error.to_string().as_str(), "CREDENTIAL_CLEANUP_ERROR" | "CREDENTIAL_ERROR"));
+            }
+            assert_eq!(app.proxy("telegram").unwrap(), (!replacement.is_empty()).then(|| format!("{replacement}/")));
+            assert!(app.settings().profiles.iter().find(|p| p.platform == "telegram").unwrap().credential_ref.is_none());
+            drop(app.telegram_accounts.network_sessions().unwrap());
+            app.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_proxy_database_failure_keeps_old_profile_and_releases_paused_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let update = |proxy: &str| settings::ProfileUpdate {
+            platform: "telegram".into(), user_agent: "test".into(), cookie: None,
+            proxy: Some(proxy.into()), http_chunk_size: None,
+        };
+        app.save_profile(update("socks5://127.0.0.1:9")).unwrap();
+        let session = app.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session;
+        session.set_test_view(crate::backup::telegram_session::Phase::Ready, "123");
+        app.backup_db(|db| {
+            db.execute_batch("CREATE TEMP TRIGGER reject_proxy_save BEFORE INSERT ON platform_settings WHEN NEW.platform='telegram' BEGIN SELECT RAISE(ABORT,'synthetic settings failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(app.save_profile_with_network(update("socks5://127.0.0.1:10")).await.err().unwrap().to_string(), "DATABASE_ERROR");
+        assert_eq!(app.proxy("telegram").unwrap().as_deref(), Some("socks5://127.0.0.1:9/"));
+        assert!(matches!(session.status().phase, crate::backup::telegram_session::Phase::Ready));
+        drop(app.telegram_accounts.network_sessions().unwrap());
+        let pause = tokio::time::timeout(Duration::from_secs(1), session.pause_network()).await.unwrap().unwrap();
+        drop(pause);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_an_in_progress_asset_fingerprint() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let path = root.path().join("fingerprint.mp4");
+        std::fs::write(&path, vec![0_u8; 128 * 1024]).unwrap();
+        let cancel = app.inner.lock().unwrap().backup_cancel.subscribe();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (result, finished) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let outcome = tokio::task::spawn_blocking(move || {
+                let started = Mutex::new(Some(started));
+                let checks = std::sync::atomic::AtomicUsize::new(0);
+                crate::backup::repository::fingerprint_with_cancel(&path, || {
+                    // Pause at the second block boundary to make shutdown deterministic.
+                    if checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
+                        started.lock().unwrap().take().unwrap().send(()).unwrap();
+                        while !*cancel.borrow() { std::thread::yield_now(); }
+                    }
+                    *cancel.borrow()
+                })
+            }).await.unwrap();
+            let _ = result.send(outcome.map(|_| ()).map_err(|e|e.to_string()));
+        });
+        app.inner.lock().unwrap().workers.push(worker);
+        ready.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), app.shutdown()).await.unwrap();
+        assert_eq!(finished.await.unwrap().unwrap_err(), "CANCELED");
+        drop(app);
+        let reopened = core(root.path());
+        reopened.shutdown().await;
+    }
+
+    #[test]
+    fn download_progress_emits_at_one_second_intervals_and_merging_immediately() {
+        let mut cadence = DownloadProgressCadence::default();
+        let start = Instant::now();
+        let progress = json!({"bytes":10,"total_bytes":100});
+        assert!(cadence.should_emit(&progress, start));
+        for millis in [1, 250, 500, 750, 999] {
+            assert!(!cadence.should_emit(&progress, start + Duration::from_millis(millis)));
+        }
+        assert!(cadence.should_emit(&progress, start + Duration::from_secs(1)));
+        assert!(!cadence.should_emit(&progress, start + Duration::from_millis(1999)));
+        assert!(cadence.should_emit(&progress, start + Duration::from_secs(2)));
+        let merging = json!({"bytes":100,"phase":"merging"});
+        assert!(cadence.should_emit(&merging, start + Duration::from_millis(2100)));
+        assert!(!cadence.should_emit(&merging, start + Duration::from_millis(2200)));
+        assert!(cadence.should_emit(&merging, start + Duration::from_millis(3100)));
+        assert!(DownloadProgressCadence::default().should_emit(&progress, start), "each task and retry starts independently");
+    }
 
     #[test]
     fn youtube_speed_samples_aggregate_bytes_instead_of_resetting_hook_rates() {
@@ -2522,7 +3171,7 @@ mod tests {
         std::fs::write(&video_path, b"original video").unwrap();
         std::fs::write(&cover_path, b"original cover").unwrap();
         std::fs::write(album_path.join("001.jpg"), b"original image").unwrap();
-        let telegram = json!({"platform":"telegram","video_id":"100_9","resolver":"tdl","kind":"video",
+        let telegram = json!({"platform":"telegram","video_id":"100_9","resolver":"grammers","kind":"video",
             "canonical_url":"https://t.me/c/100/9","selected_format_id":"original",
             "formats":[{"format_id":"original","container":"mp4","filesize":4096}]});
         let mut retained_video = telegram.clone();
@@ -2649,7 +3298,7 @@ mod tests {
                 parse_cache::cover(&inner.db, &retained_video).unwrap(),
                 cover
             );
-            assert!(parse_cache::find(&inner.db, "https://t.me/c/100/9", "tdl")
+            assert!(parse_cache::find(&inner.db, "https://t.me/c/100/9", "grammers")
                 .unwrap()
                 .is_some());
         }
@@ -2702,7 +3351,7 @@ mod tests {
                     }
                     if platform == "telegram" {
                         video["video_id"] = "100_9".into();
-                        video["resolver"] = "tdl".into();
+                        video["resolver"] = "grammers".into();
                         video["selected_format_id"] = "original".into();
                         video["formats"] =
                             json!([{"format_id":"original","container":"mp4","filesize":4096}]);
@@ -2753,6 +3402,32 @@ mod tests {
                 .unwrap(),
             4
         );
+    }
+
+    #[tokio::test]
+    async fn stale_telegram_recovery_is_rejected_before_task_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let sample = app.resolve("valid".into()).unwrap();
+        let mut task = wait(&app, &sample.id, Status::Ready).await;
+        task.status = Status::Failed;
+        task.error = Some("TELEGRAM_CONNECTION_ERROR".into());
+        task.telegram_link = Some("https://t.me/c/100/9".into());
+        task.video = None;
+        let epoch = {
+            let mut inner = app.inner.lock().unwrap();
+            inner.active.remove(&task.id);
+            publish(&mut inner, task.clone(), &*app.emit).unwrap();
+            inner.telegram_recovery_epoch
+        };
+        app.stop_telegram_recovery(); // Account switch/logout begins before taking its task snapshot.
+        let error = app.resolve_task(task.telegram_link.clone().unwrap(), Some(&task.id), "grammers".into(), None, false, Some((task.revision,epoch))).err().unwrap();
+        assert_eq!(error.to_string(), "TELEGRAM_ACCOUNT_MISMATCH");
+        let current = app.list().into_iter().find(|t|t.id==task.id).unwrap();
+        assert_eq!(current.status, Status::Failed);
+        assert_eq!(current.revision, task.revision);
+        assert!(!app.inner.lock().unwrap().active.contains_key(&task.id));
+        app.shutdown().await;
     }
 
     fn core(root: &Path) -> Arc<Core> {
@@ -3212,7 +3887,9 @@ mod tests {
             drop(app);
             // No retry or sleep: shutdown must release every worker reference.
             let reopened = core(root.path());
-            assert!(reopened.list().iter().any(|t| t.id == task.id));
+            let restored = reopened.list().into_iter().find(|t| t.id == task.id).unwrap();
+            assert_eq!(restored.status, Status::Completed);
+            assert!(restored.path.unwrap().is_file());
         }
     }
 
@@ -3281,6 +3958,8 @@ mod tests {
         std::fs::write(&target, b"complete").unwrap();
         let mut task = Task {
             id: "recover".into(),
+            insertion_id: 0,
+            asset_id: None,
             revision: 1,
             status: Status::Downloading,
             video: None,
@@ -3293,11 +3972,13 @@ mod tests {
             error: None,
             path: None,
             created_at: now(),
+            download_requested_at: None,
             completed_at: None,
             canceling: false,
             file_missing: false,
             queue_order: None,
             download_requested: false,
+            duplicate_confirmed: false,
             cover_path: None,
             cover_error: None,
             files: Vec::new(),
@@ -3451,10 +4132,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_clears_unmoved_commit_intent_before_downloading_again() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = enqueue(&app, "8609").await;
+        started(root.path(), "8609").await;
+        app.shutdown().await;
+        drop(app);
+        let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
+        let source = root.path().join(format!("yingqu-{}-old-staging", task.id));
+        std::fs::create_dir(&source).unwrap();
+        let staged_file = source.join("video.mp4");
+        std::fs::write(&staged_file, b"old bytes").unwrap();
+        db.execute("INSERT INTO task_staging(task_id,path) VALUES(?1,?2)", params![task.id,source.to_string_lossy()]).unwrap();
+        db.execute("INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,9)",params![task.id,staged_file.to_string_lossy(),root.path().join("not-moved.mp4").to_string_lossy()]).unwrap();
+        drop(db);
+        let app = core(root.path());
+        assert!(!source.exists());
+        assert_eq!(app.list()[0].error.as_deref(),Some("INTERRUPTED"));
+        app.start_backup_service();
+        assert_eq!(app.inner.lock().unwrap().db.query_row("SELECT count(*) FROM commit_intents WHERE task_id=?",[&task.id],|r|r.get::<_,i64>(0)).unwrap(),0);
+        release(root.path(), "8609");
+        let done=wait(&app,&task.id,Status::Completed).await;
+        assert!(done.path.unwrap().is_file());
+        assert_eq!(app.list().len(),1);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn startup_restores_interrupted_downloads_in_original_fifo_order() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        app.set_max_downloads(1).unwrap();
+        let first = enqueue(&app,"8601").await;
+        started(root.path(),"8601").await;
+        let second = enqueue(&app,"8602").await;
+        let original = app.list();
+        app.shutdown().await;
+        drop(app);
+        std::fs::remove_file(root.path().join("started-8601")).unwrap();
+        let app = core(root.path());
+        assert!(app.list().iter().all(|task| task.error.as_deref()==Some("INTERRUPTED")));
+        app.start_backup_service();
+        started(root.path(),"8601").await;
+        assert!(!root.path().join("started-8602").exists());
+        let second_waiting = app.list().into_iter().find(|task|task.id==second.id).unwrap();
+        assert_eq!(second_waiting.status,Status::Queued);
+        assert_eq!(second_waiting.bytes,0);
+        for task in app.list() {
+            let before = original.iter().find(|previous|previous.id==task.id).unwrap();
+            assert_eq!(task.insertion_id,before.insertion_id);
+            assert_eq!(task.queue_order,before.queue_order);
+            assert_eq!(task.download_requested_at,before.download_requested_at);
+            assert_eq!(task.video.as_ref().unwrap()["selected_format_id"],before.video.as_ref().unwrap()["selected_format_id"]);
+        }
+        let workers = app.inner.lock().unwrap().workers.len();
+        app.start_backup_service();
+        assert_eq!(app.inner.lock().unwrap().workers.len(),workers);
+        release(root.path(),"8601");
+        wait(&app,&first.id,Status::Completed).await;
+        started(root.path(),"8602").await;
+        release(root.path(),"8602");
+        wait(&app,&second.id,Status::Completed).await;
+        assert_eq!(app.list().len(),2);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn startup_skips_canceled_business_failures_and_unsubmitted_previews() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let done = enqueue(&app,"9105").await;
+        wait(&app,&done.id,Status::Completed).await;
+        let failed = enqueue(&app,"7305").await;
+        started(root.path(),"7305").await;
+        release(root.path(),"7305");
+        wait(&app,&failed.id,Status::Failed).await;
+        let canceled = enqueue(&app,"8305").await;
+        started(root.path(),"8305").await;
+        app.cancel(&canceled.id).await.unwrap();
+        let draft = app.resolve("valid".into()).unwrap();
+        wait(&app,&draft.id,Status::Ready).await;
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        let before: Vec<_> = app.list().into_iter().map(|task|(task.id,task.status,task.error,task.revision)).collect();
+        app.start_backup_service();
+        let after: Vec<_> = app.list().into_iter().map(|task|(task.id,task.status,task.error,task.revision)).collect();
+        assert_eq!(before,after);
+        assert!(app.inner.lock().unwrap().downloads.is_empty());
+        assert!(app.inner.lock().unwrap().active.is_empty());
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn startup_resumes_an_accepted_duplicate_without_requiring_new_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let first = enqueue(&app,"8606").await;
+        started(root.path(),"8606").await;
+        release(root.path(),"8606");
+        let first = wait(&app,&first.id,Status::Completed).await;
+        let original = std::fs::read(first.path.as_ref().unwrap()).unwrap();
+        std::fs::remove_file(root.path().join("release-8606")).unwrap();
+        std::fs::remove_file(root.path().join("started-8606")).unwrap();
+        let repeat = app.resolve("hold:8606".into()).unwrap();
+        wait(&app,&repeat.id,Status::Ready).await;
+        app.download(&repeat.id,true).unwrap();
+        started(root.path(),"8606").await;
+        app.shutdown().await;
+        drop(app);
+        std::fs::remove_file(root.path().join("started-8606")).unwrap();
+        let app = core(root.path());
+        app.start_backup_service();
+        started(root.path(),"8606").await;
+        release(root.path(),"8606");
+        let repeat = wait(&app,&repeat.id,Status::Completed).await;
+        assert_ne!(first.path,repeat.path);
+        assert_eq!(std::fs::read(first.path.unwrap()).unwrap(),original);
+        assert_eq!(app.list().len(),2);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn fifo_completion_failure_and_queued_cancellation_release_slots() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        assert_eq!(app.settings().max_downloads, 2);
+        assert_eq!(app.settings().max_downloads, 3);
+        app.set_max_downloads(2).unwrap();
         let a = enqueue(&app, "8001").await;
         let b = enqueue(&app, "7002").await;
         started(root.path(), "8001").await;
@@ -3519,6 +4324,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn five_download_slots_dispatch_and_reduce_without_interrupting() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        assert_eq!(app.settings().max_downloads, 3);
+        app.set_max_downloads(5).unwrap();
+        let mut tasks = Vec::new();
+        for id in ["8151", "8152", "8153", "8154", "8155", "8156"] {
+            tasks.push(enqueue(&app, id).await);
+        }
+        for id in ["8151", "8152", "8153", "8154", "8155"] {
+            started(root.path(), id).await;
+        }
+        assert!(!root.path().join("started-8156").exists());
+        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 5);
+        app.set_max_downloads(4).unwrap();
+        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 5);
+        app.cancel(&tasks[0].id).await.unwrap();
+        assert_eq!(app.list().iter().find(|task| task.id == tasks[5].id).unwrap().status, Status::Queued);
+        app.cancel(&tasks[1].id).await.unwrap();
+        started(root.path(), "8156").await;
+        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 4);
+        app.set_max_downloads(5).unwrap();
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(app.settings().max_downloads, 5);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn changing_limit_preserves_running_tasks_and_persists_without_resetting_directory() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
@@ -3535,7 +4370,7 @@ mod tests {
             1
         );
         assert!(app.set_max_downloads(0).is_err());
-        assert!(app.set_max_downloads(4).is_err());
+        assert!(app.set_max_downloads(6).is_err());
         assert_eq!(app.settings().max_downloads, 1);
         app.set_max_downloads(3).unwrap();
         for id in ["8101", "8102", "8103"] {
@@ -3566,7 +4401,12 @@ mod tests {
         app.set_directory(root.path().to_owned()).unwrap();
         assert_eq!(app.settings().max_downloads, 2);
         app.shutdown().await;
-        assert!(app.list().iter().all(|t| t.status == Status::Canceled));
+        for id in [&a.id, &b.id, &c.id] {
+            assert_eq!(app.list().iter().find(|t| &t.id == id).unwrap().status, Status::Canceled);
+        }
+        let interrupted = app.list().into_iter().find(|t| t.id == d.id).unwrap();
+        assert_eq!(interrupted.status, Status::Failed);
+        assert_eq!(interrupted.error.as_deref(), Some("INTERRUPTED"));
         drop(app);
         let app = core(root.path());
         assert_eq!(app.settings().max_downloads, 2);
@@ -3621,11 +4461,12 @@ mod tests {
         let parsing = app.resolve("block".into()).unwrap();
         app.shutdown().await;
         for id in [&b.id, &c.id, &parsing.id] {
-            assert_eq!(
-                app.list().iter().find(|t| &t.id == id).unwrap().status,
-                Status::Canceled
-            );
+            let task = app.list().into_iter().find(|t| &t.id == id).unwrap();
+            assert_eq!(task.status, Status::Failed);
+            assert_eq!(task.error.as_deref(), Some("INTERRUPTED"));
+            assert!(!task.canceling);
         }
+        assert!(app.inner.lock().unwrap().active.is_empty());
         assert!(!root.path().join("started-8203").exists());
         assert_eq!(
             std::fs::read_dir(root.path().join("downloads"))
@@ -3633,23 +4474,89 @@ mod tests {
                 .count(),
             0
         );
+        drop(app);
+        let reopened = core(root.path());
+        for id in [&b.id, &c.id, &parsing.id] {
+            let task = reopened.list().into_iter().find(|t| &t.id == id).unwrap();
+            assert_eq!(task.status, Status::Failed);
+            assert_eq!(task.error.as_deref(), Some("INTERRUPTED"));
+        }
+        let canceled = reopened.list().into_iter().find(|t| t.id == a.id).unwrap();
+        assert_eq!(canceled.status, Status::Canceled);
+        assert!(canceled.error.is_none());
+        reopened.shutdown().await;
     }
 
     #[tokio::test]
-    async fn restart_interrupts_persisted_queue_without_starting_engine() {
+    async fn restart_interrupts_persisted_active_tasks_without_starting_engine() {
+        for status in [Status::Parsing, Status::Queued, Status::Downloading] {
+            let root = tempfile::tempdir().unwrap();
+            let app = core(root.path());
+            let task = app.resolve("valid".into()).unwrap();
+            let mut ready = wait(&app, &task.id, Status::Ready).await;
+            ready.status = status;
+            ready.queue_order = Some(1);
+            persist(&app.inner.lock().unwrap().db, &ready).unwrap();
+            drop(app);
+            let app = core(root.path());
+            assert_eq!(app.list()[0].status, Status::Failed);
+            assert_eq!(app.list()[0].error.as_deref(), Some("INTERRUPTED"));
+            assert!(app.inner.lock().unwrap().active.is_empty());
+            app.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_preserves_an_in_flight_user_cancellation() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        let task = app.resolve("valid".into()).unwrap();
-        let mut ready = wait(&app, &task.id, Status::Ready).await;
-        ready.status = Status::Queued;
-        ready.queue_order = Some(1);
-        persist(&app.inner.lock().unwrap().db, &ready).unwrap();
+        let task = enqueue(&app, "8401").await;
+        started(root.path(), "8401").await;
+        {
+            let mut inner = app.inner.lock().unwrap();
+            let mut canceling = inner.tasks.iter().find(|t| t.id == task.id).unwrap().clone();
+            // User intent is already recorded; exit may now stop the worker.
+            canceling.canceling = true;
+            canceling.revision += 1;
+            publish(&mut inner, canceling, &*app.emit).unwrap();
+        }
+        app.shutdown().await;
+        drop(app);
+        let reopened = core(root.path());
+        let canceled = reopened.list().into_iter().find(|t| t.id == task.id).unwrap();
+        assert_eq!(canceled.status, Status::Canceled);
+        assert!(canceled.error.is_none());
+        assert!(!canceled.canceling);
+        assert!(!root.path().join("downloads/douyin").exists());
+        reopened.shutdown().await;
+    }
+    #[tokio::test]
+    async fn insertion_order_uses_original_database_rowids_for_legacy_snapshots() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let first = app.resolve("valid".into()).unwrap();
+        wait(&app, &first.id, Status::Ready).await;
+        let second = app.resolve("valid".into()).unwrap();
+        wait(&app, &second.id, Status::Ready).await;
+        assert!(first.insertion_id > 0);
+        assert!(second.insertion_id > first.insertion_id);
+        app.shutdown().await;
         drop(app);
         let app = core(root.path());
-        assert_eq!(app.list()[0].status, Status::Failed);
-        assert_eq!(app.list()[0].error.as_deref(), Some("INTERRUPTED"));
-        assert!(app.inner.lock().unwrap().active.is_empty());
+        app.backup_db(|db| {
+            db.execute("UPDATE download_tasks SET snapshot=json_remove(json_set(snapshot,'$.created_at',CASE WHEN id=? THEN 9999999999 ELSE 1 END),'$.insertion_id')", [&first.id])?;
+            Ok(())
+        }).unwrap();
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        let tasks = app.list();
+        assert_eq!(tasks.iter().map(|task|task.id.as_str()).collect::<Vec<_>>(), vec![second.id.as_str(),first.id.as_str()]);
+        assert_eq!(tasks[0].insertion_id,second.insertion_id);
+        assert_eq!(tasks[1].insertion_id,first.insertion_id);
+        app.shutdown().await;
     }
+
     #[tokio::test]
     async fn retry_reuses_record_with_new_settings_and_survives_restart() {
         let root = tempfile::tempdir().unwrap();
@@ -3671,6 +4578,8 @@ mod tests {
         .unwrap();
         let retry = app.retry(&old.id).unwrap();
         assert_eq!(retry.id, old.id);
+        assert!(old.insertion_id > 0);
+        assert_eq!(retry.insertion_id, old.insertion_id);
         assert_eq!(retry.created_at, old.created_at);
         assert!(retry.revision > canceled.revision);
         assert_eq!(retry.bytes, 0);
@@ -3697,6 +4606,7 @@ mod tests {
         let restored = &app.list()[0];
         assert_eq!(restored.id, old.id);
         assert_eq!(restored.created_at, old.created_at);
+        assert_eq!(restored.insertion_id, old.insertion_id);
         assert_eq!(restored.status, Status::Completed);
         assert_eq!(restored.path, completed.path);
         app.shutdown().await;
@@ -4218,12 +5128,7 @@ mod tests {
         let mut legacy = original.clone();
         legacy.video.as_mut().unwrap()["selected_format_id"] = Value::Null;
         assert!(previously_downloaded(&[legacy], &different));
-        for status in [
-            Status::Failed,
-            Status::Canceled,
-            Status::Queued,
-            Status::Downloading,
-        ] {
+        for status in [Status::Failed, Status::Canceled, Status::Ready] {
             let mut old = original.clone();
             old.status = status;
             assert!(!previously_downloaded(&[old], &ready));
@@ -4333,4 +5238,65 @@ mod tests {
         );
         app.shutdown().await;
     }
+    #[test]
+    fn asset_deletion_finalization_retains_the_existing_busy_guard() {
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::open(&root.path().join("busy-delete.sqlite"), root.path().join("downloads"), "unused".into(), vec![], |_| {}).unwrap();
+        let task: Task = serde_json::from_value(json!({"id":"busy-task","asset_id":"busy-asset","revision":1,"status":"queued","video":null,"bytes":0,"total_bytes":null,"speed_bps":null,"error":null,"path":null,"created_at":1,"completed_at":null,"canceling":false})).unwrap();
+        core.inner.lock().unwrap().tasks.push(task);
+        assert_eq!(core.finish_asset_deletion("busy-asset", "unstarted-operation").unwrap_err().to_string(), "TASK_BUSY");
+        assert_eq!(core.list().len(), 1);
+    }
+
+    #[test]
+    fn asset_deletion_event_keeps_operation_space_after_switching_spaces() {
+        let root = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let core = Core::open(&root.path().join("scoped-delete.sqlite"), root.path().join("downloads"), "unused".into(), vec![], move |event| captured.lock().unwrap().push(event)).unwrap();
+        let task: Task = serde_json::from_value(json!({"id":"task","asset_id":"asset","revision":1,"status":"completed","video":null,"bytes":0,"total_bytes":null,"speed_bps":null,"error":null,"path":null,"created_at":1,"completed_at":2,"canceling":false})).unwrap();
+        {
+            let mut inner = core.inner.lock().unwrap();
+            persist(&inner.db, &task).unwrap();
+            inner.db.execute_batch("
+                INSERT INTO backup_spaces VALUES('A','a','','','','',0),('B','b','','','','',1);
+                INSERT INTO backup_current_space VALUES(1,'B');
+                INSERT INTO media_assets VALUES('asset','task','{}','video.mp4',NULL,24,'active');
+                INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES('delete','A','asset','delete','running','finalizing','{}');
+            ").unwrap();
+            inner.tasks.push(task);
+        }
+        core.finish_asset_deletion("asset", "delete").unwrap();
+        let captured = events.lock().unwrap();
+        assert!(captured.iter().any(|event| matches!(event, TaskEvent::RemovedFromSpace { id, space_id } if id == "task" && space_id == "A")));
+        assert!(!captured.iter().any(|event| matches!(event, TaskEvent::Removed(_))));
+        assert!(core.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_request_time_survives_progress_cancel_and_restart_with_legacy_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let parsed = app.resolve("hold:78001".into()).unwrap();
+        let ready = wait(&app, &parsed.id, Status::Ready).await;
+        assert!(ready.download_requested_at.is_none());
+        let before = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        app.download(&ready.id, false).unwrap();
+        let running = wait(&app, &ready.id, Status::Downloading).await;
+        let requested = running.download_requested_at.unwrap();
+        assert!(requested >= before);
+        assert_eq!(app.list().iter().find(|t| t.id == ready.id).unwrap().download_requested_at, Some(requested));
+        app.cancel(&ready.id).await.unwrap();
+        let canceled = app.list().into_iter().find(|t|t.id==ready.id).unwrap();
+        assert_eq!(canceled.status, Status::Canceled);
+        assert_eq!(canceled.download_requested_at, Some(requested));
+        let mut legacy = serde_json::to_value(&canceled).unwrap();
+        legacy.as_object_mut().unwrap().remove("download_requested_at");
+        assert!(serde_json::from_value::<Task>(legacy).unwrap().download_requested_at.is_none());
+        app.shutdown().await;drop(app);
+        let reopened = core(root.path());
+        assert_eq!(reopened.list().iter().find(|t| t.id == ready.id).unwrap().download_requested_at, Some(requested));
+        reopened.shutdown().await;
+    }
+
 }

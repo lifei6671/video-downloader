@@ -8,15 +8,33 @@ export function TaskRemovalRow({ id, removing, onExited, children }: {
   children: ReactNode;
 }) {
   const row = useRef<HTMLDivElement>(null);
+  const focused = useRef(false);
   useLayoutEffect(() => {
-    if (!removing || !row.current) return;
+    if (!row.current) return;
     const node = row.current;
+    if (!removing) { node.inert = false; return; }
+    const active = document.activeElement;
+    let restoreFocus: (() => void) | undefined;
+    if (node.contains(active) || active === document.body && focused.current) {
+      const neighbor = [node.nextElementSibling, node.previousElementSibling].find(element => element && !element.hasAttribute('inert'))
+        ?? Array.from(node.parentElement?.children ?? []).find(element => element !== node && !element.hasAttribute('inert'));
+      const target = neighbor?.querySelector<HTMLElement>('button:not(:disabled):not([aria-disabled="true"]), [tabindex="0"]')
+        ?? node.closest<HTMLElement>('[role="tabpanel"]');
+      const panel = node.closest<HTMLElement>('[role="tabpanel"]');
+      restoreFocus = () => {
+        if (document.activeElement === document.body || node.contains(document.activeElement)) {
+          (target?.isConnected ? target : panel?.isConnected ? panel : null)?.focus({preventScroll:true});
+        }
+      };
+      restoreFocus();
+    }
+    node.inert = true;
+    let done = false;
+    const finish = () => { if (!done) { done = true; onExited(id); if (restoreFocus) requestAnimationFrame(restoreFocus); } };
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      onExited(id);
+      finish();
       return;
     }
-    let done = false;
-    const finish = () => { if (!done) { done = true; onExited(id); } };
     const animation = node.animate([
       { height: `${node.getBoundingClientRect().height}px`, paddingBottom: getComputedStyle(node).paddingBottom, opacity: 1, transform: 'translateY(0)' },
       { height: '0px', paddingBottom: '0px', opacity: 0, transform: 'translateY(-12px)' },
@@ -25,5 +43,5 @@ export function TaskRemovalRow({ id, removing, onExited, children }: {
     animation.finished.then(finish, () => {});
     return () => { animation.cancel(); finish(); };
   }, [id, removing, onExited]);
-  return <div ref={row} role="listitem" data-task-row={id} data-removing={removing || undefined} inert={removing} className="task-list-item shrink-0">{children}</div>;
+  return <div ref={row} role="listitem" data-task-row={id} data-removing={removing || undefined} onFocusCapture={() => { focused.current = true; }} onBlurCapture={event => { if (event.relatedTarget) focused.current = event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget); }} className="task-list-item shrink-0">{children}</div>;
 }

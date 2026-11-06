@@ -1,5 +1,6 @@
 """Offline startup check of the complete PyInstaller onedir, without Python on PATH."""
 import json
+import re
 import os
 import subprocess
 import sys
@@ -28,4 +29,13 @@ if result.returncode != 3:
 ready = json.loads(result.stdout.strip())
 if ready.get('type') != 'ready' or ready.get('protocol_version') != 3:
     raise RuntimeError(f'Invalid engine handshake: {ready}')
+# Branch switches can leave a valid but incompatible ignored sidecar in dist/.
+# Match the same versions enforced by Rust, not just the wire protocol version.
+bridge_source = (Path(__file__).resolve().parents[1] / 'src-tauri/src/python_bridge.rs').read_text('utf-8')
+for field, constant in [('engine_version', 'ENGINE_VERSION'), ('yt_dlp_version', 'YTDLP_VERSION')]:
+    expected = re.search(rf'pub const {constant}: &str = "([^"]+)";', bridge_source)
+    if expected is None:
+        raise RuntimeError(f'Cannot read Rust engine contract: {constant}')
+    if ready.get(field) != expected.group(1):
+        raise RuntimeError(f'Bundled {field} mismatch: expected {expected.group(1)}, got {ready.get(field)}. Rebuild the Python sidecar before the desktop app.')
 print(f"Packaged engine ready: {ready['engine_version']}, yt-dlp {ready['yt_dlp_version']}")

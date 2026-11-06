@@ -40,7 +40,7 @@ async page => {
   await page.getByRole('button',{name:'下载任务',exact:true}).click();
   await page.locator('.task-row-status').getByText('队列第 1 位',{exact:true}).waitFor();results.push('existing queue');
   await load('failure');const originalInput=await input.inputValue();
-  await background.click();await page.getByRole('alert').filter({hasText:'网络连接失败'}).waitFor();
+  await background.click();await page.locator('[data-sonner-toast][data-type="error"]').filter({hasText:'网络连接失败'}).waitFor();
   check(await input.inputValue()===originalInput && await background.isEnabled(),'failure discarded preview');
   await page.getByText('原作品',{exact:true}).waitFor();results.push('failure retains preview');
   await load('pending');await background.click();

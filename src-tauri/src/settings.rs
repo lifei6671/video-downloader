@@ -25,8 +25,6 @@ pub struct Settings {
     pub filename_template: String,
     pub max_downloads: u8,
     pub profiles: Vec<Profile>,
-    #[serde(default)]
-    pub tdl: crate::tdl_bridge::TdlSettings,
 }
 
 #[derive(Deserialize)]
@@ -57,13 +55,12 @@ fn entry(reference: &str) -> Result<keyring::Entry> {
     keyring::Entry::new("com.yingqu.desktop", reference).context("CREDENTIAL_ERROR")
 }
 
-pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
+pub(crate) fn init(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS app_settings (id INTEGER PRIMARY KEY CHECK(id=1), directory TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS platform_settings (
            platform TEXT PRIMARY KEY, user_agent TEXT NOT NULL, proxy TEXT,
-           cookie TEXT NOT NULL, credential_ref TEXT);
-         CREATE TABLE IF NOT EXISTS tdl_settings (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL, path TEXT);",
+           cookie TEXT NOT NULL, credential_ref TEXT);",
     ).context("DATABASE_ERROR")?;
     let has_chunk_size = db
         .prepare("PRAGMA table_info(platform_settings)")?
@@ -75,16 +72,6 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         db.execute_batch("ALTER TABLE platform_settings ADD COLUMN http_chunk_size INTEGER")
             .context("DATABASE_ERROR")?;
     }
-    let has_session = db
-        .prepare("PRAGMA table_info(tdl_settings)")?
-        .query_map([], |r| r.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .iter()
-        .any(|name| name == "session_directory");
-    if !has_session {
-        db.execute_batch("ALTER TABLE tdl_settings ADD COLUMN session_directory TEXT")
-            .context("DATABASE_ERROR")?;
-    }
     let has_limit = db
         .prepare("PRAGMA table_info(app_settings)")?
         .query_map([], |r| r.get::<_, String>(1))?
@@ -92,7 +79,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         .iter()
         .any(|name| name == "max_downloads");
     if !has_limit {
-        db.execute_batch("ALTER TABLE app_settings ADD COLUMN max_downloads INTEGER NOT NULL DEFAULT 2 CHECK(max_downloads BETWEEN 1 AND 3);")
+        db.execute_batch("ALTER TABLE app_settings ADD COLUMN max_downloads INTEGER NOT NULL DEFAULT 3 CHECK(max_downloads BETWEEN 1 AND 5);")
             .context("DATABASE_ERROR")?;
     }
     let has_template = db.prepare("PRAGMA table_info(app_settings)")?
@@ -102,6 +89,32 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         db.execute_batch("ALTER TABLE app_settings ADD COLUMN filename_template TEXT NOT NULL DEFAULT '{platform}/{user_name}-{content}'")
             .context("DATABASE_ERROR")?;
     }
+    // Older installations have a DEFAULT 2 column with a 1..=3 CHECK.
+    // SQLite requires rebuilding the table to widen that constraint; retain
+    // the user's directory, naming rule and chosen limit in one transaction.
+    let limit_default: String = db.query_row(
+        "SELECT dflt_value FROM pragma_table_info('app_settings') WHERE name='max_downloads'",
+        [], |row| row.get(0),
+    ).context("DATABASE_ERROR")?;
+    if limit_default == "2" {
+        db.execute_batch(
+            "CREATE TABLE app_settings_expanded (
+               id INTEGER PRIMARY KEY CHECK(id=1), directory TEXT NOT NULL,
+               max_downloads INTEGER NOT NULL DEFAULT 3 CHECK(max_downloads BETWEEN 1 AND 5),
+               filename_template TEXT NOT NULL DEFAULT '{platform}/{user_name}-{content}');
+             INSERT INTO app_settings_expanded(id,directory,max_downloads,filename_template)
+               SELECT id,directory,max_downloads,filename_template FROM app_settings;
+             DROP TABLE app_settings;
+             ALTER TABLE app_settings_expanded RENAME TO app_settings;",
+        ).context("DATABASE_ERROR")?;
+    }
+    Ok(())
+}
+
+pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
+    let tx = db.unchecked_transaction().context("DATABASE_ERROR")?;
+    init(&tx)?;
+    tx.commit().context("DATABASE_ERROR")?;
     let filename_template = match db.query_row("SELECT filename_template FROM app_settings WHERE id=1", [], |r| r.get::<_, String>(0)) {
         Ok(value) => { crate::naming::validate(&value).context("DATABASE_ERROR")?; value },
         Err(rusqlite::Error::QueryReturnedNoRows) => crate::naming::DEFAULT_TEMPLATE.into(),
@@ -112,8 +125,8 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         [],
         |r| r.get::<_, u8>(0),
     ) {
-        Ok(value @ 1..=3) => value,
-        Err(rusqlite::Error::QueryReturnedNoRows) => 2,
+        Ok(value @ 1..=5) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => 3,
         _ => bail!("DATABASE_ERROR"),
     };
     let directory = db.query_row("SELECT directory FROM app_settings WHERE id=1", [], |r| {
@@ -125,7 +138,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         Err(_) => bail!("DATABASE_ERROR"),
     };
     let mut profiles = Vec::new();
-    for platform in ["douyin", "tiktok", "youtube"] {
+    for platform in ["douyin", "tiktok", "youtube", "telegram"] {
         let row = db.query_row(
             "SELECT user_agent,proxy,cookie,credential_ref,http_chunk_size FROM platform_settings WHERE platform=?",
             [platform],
@@ -154,27 +167,11 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
     if profiles.iter().any(|p| p.http_chunk_size.is_some_and(|n| p.platform != "youtube" || !valid_chunk_size(n))) {
         bail!("DATABASE_ERROR");
     }
-    let tdl = match db.query_row(
-        "SELECT enabled,path,session_directory FROM tdl_settings WHERE id=1",
-        [],
-        |r| {
-            Ok(crate::tdl_bridge::TdlSettings {
-                enabled: r.get(0)?,
-                path: r.get::<_, Option<String>>(1)?.map(PathBuf::from),
-                session_directory: r.get::<_, Option<String>>(2)?.map(PathBuf::from),
-            })
-        },
-    ) {
-        Ok(value) => value,
-        Err(rusqlite::Error::QueryReturnedNoRows) => crate::tdl_bridge::TdlSettings::default(),
-        Err(_) => bail!("DATABASE_ERROR"),
-    };
     Ok(Settings {
         download_directory,
         filename_template,
         max_downloads,
         profiles,
-        tdl,
     })
 }
 
@@ -192,6 +189,9 @@ pub fn cookie(settings: &Settings, platform: &str) -> Result<String> {
 // Explicit settings-editor read; ordinary settings only contain the public address.
 pub fn proxy(settings: &Settings, platform: &str) -> Result<Option<String>> {
     let profile = settings.profiles.iter().find(|p| p.platform == platform).context("CONFIG_INVALID")?;
+    profile_proxy(profile)
+}
+pub(crate) fn profile_proxy(profile: &Profile) -> Result<Option<String>> {
     match &profile.credential_ref {
         Some(reference) => Ok(Some(
             String::from_utf8(entry(reference)?.get_secret().context("CREDENTIAL_ERROR")?)
@@ -203,7 +203,7 @@ pub fn proxy(settings: &Settings, platform: &str) -> Result<Option<String>> {
 
 pub fn snapshot(settings: &Settings) -> Result<Value> {
     let mut profiles = serde_json::Map::new();
-    for profile in &settings.profiles {
+    for profile in settings.profiles.iter().filter(|p| p.platform != "telegram") {
         let proxy = proxy(settings, &profile.platform)?;
         let mut value = json!({"user_agent": profile.user_agent, "proxy": proxy, "cookie": profile.cookie});
         if profile.platform == "youtube" {
@@ -214,34 +214,54 @@ pub fn snapshot(settings: &Settings) -> Result<Value> {
     Ok(Value::Object(profiles))
 }
 
+pub(crate) fn parse_proxy(platform: &str, proxy: &str) -> Result<(url::Url, u16)> {
+    let parsed = url::Url::parse(proxy).context("CONFIG_INVALID")?;
+    let authority = proxy.split_once("://").context("CONFIG_INVALID")?.1.split('/').next().unwrap();
+    let port: u16 = authority.rsplit_once(':').context("CONFIG_INVALID")?.1.parse().context("CONFIG_INVALID")?;
+    if proxy.len() > 2000
+        || !matches!(parsed.scheme(), "http" | "socks5")
+        || platform == "telegram" && parsed.scheme() != "socks5"
+        || parsed.host_str().is_none()
+        || port == 0
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/" && !parsed.path().is_empty()
+    {
+        bail!("CONFIG_INVALID");
+    }
+    Ok((parsed, port))
+}
+
+pub(crate) fn validate_profile_update(settings: &Settings, update: &ProfileUpdate) -> Result<()> {
+    let profile = settings.profiles.iter().find(|p| p.platform == update.platform).context("CONFIG_INVALID")?;
+    if let Some(value) = update.http_chunk_size {
+        if update.platform != "youtube" || value.is_some_and(|n| !valid_chunk_size(n)) {
+            bail!("CONFIG_INVALID");
+        }
+    }
+    if update.user_agent.is_empty() || update.user_agent.len() > 2048 || update.user_agent.contains(['\r', '\n']) {
+        bail!("CONFIG_INVALID");
+    }
+    let cookie = update.cookie.as_deref().map(str::trim).unwrap_or(&profile.cookie);
+    if cookie.len() > 60_000 || cookie.contains(['\r', '\n']) { bail!("CONFIG_INVALID"); }
+    if let Some(proxy) = update.proxy.as_deref().filter(|proxy| !proxy.is_empty()) {
+        parse_proxy(&update.platform, proxy)?;
+    }
+    Ok(())
+}
+
 pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpdate) -> Result<()> {
+    validate_profile_update(settings, &update)?;
     let profile = settings
         .profiles
         .iter_mut()
         .find(|p| p.platform == update.platform)
         .context("CONFIG_INVALID")?;
-    let http_chunk_size = match update.http_chunk_size {
-        Some(value) => {
-            if update.platform != "youtube" || value.is_some_and(|n| !valid_chunk_size(n)) {
-                bail!("CONFIG_INVALID");
-            }
-            value
-        }
-        None => profile.http_chunk_size,
-    };
-    if update.user_agent.is_empty()
-        || update.user_agent.len() > 2048
-        || update.user_agent.contains(['\r', '\n'])
-    {
-        bail!("CONFIG_INVALID");
-    }
+    let http_chunk_size = update.http_chunk_size.unwrap_or(profile.http_chunk_size);
     let cookie = update
         .cookie
         .map(|cookie| cookie.trim().to_owned())
         .unwrap_or_else(|| profile.cookie.clone());
-    if cookie.len() > 60_000 || cookie.contains(['\r', '\n']) {
-        bail!("CONFIG_INVALID");
-    }
     let mut reference = profile.credential_ref.clone();
     let mut new_credential = None;
     let mut public_proxy = profile.proxy.clone();
@@ -250,30 +270,7 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
         if proxy.is_empty() {
             public_proxy = None;
         } else {
-            let mut parsed = url::Url::parse(&proxy).context("CONFIG_INVALID")?;
-            let authority = proxy
-                .split_once("://")
-                .context("CONFIG_INVALID")?
-                .1
-                .split('/')
-                .next()
-                .unwrap();
-            let port: u16 = authority
-                .rsplit_once(':')
-                .context("CONFIG_INVALID")?
-                .1
-                .parse()
-                .context("CONFIG_INVALID")?;
-            if proxy.len() > 2000
-                || !matches!(parsed.scheme(), "http" | "socks5")
-                || parsed.host_str().is_none()
-                || port == 0
-                || parsed.query().is_some()
-                || parsed.fragment().is_some()
-                || parsed.path() != "/" && !parsed.path().is_empty()
-            {
-                bail!("CONFIG_INVALID");
-            }
+            let (mut parsed, port) = parse_proxy(&update.platform, &proxy)?;
             if !parsed.username().is_empty() || parsed.password().is_some() {
                 let id = Uuid::new_v4().to_string();
                 entry(&id)?
@@ -337,6 +334,16 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn obsolete_external_tool_settings_are_ignored_and_preserved() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE tdl_settings(id INTEGER PRIMARY KEY, enabled INTEGER, path TEXT, session_directory TEXT); INSERT INTO tdl_settings VALUES(1,1,'missing-tool','old-session');").unwrap();
+        let settings = load(&db,PathBuf::from("downloads")).unwrap();
+        assert!(serde_json::to_value(settings).unwrap().get("tdl").is_none());
+        assert_eq!(db.query_row("SELECT session_directory FROM tdl_settings",[],|r|r.get::<_,String>(0)).unwrap(),"old-session");
+        let fresh = Connection::open_in_memory().unwrap(); load(&fresh,PathBuf::from("downloads")).unwrap();
+        assert_eq!(fresh.query_row("SELECT count(*) FROM sqlite_master WHERE name='tdl_settings'",[],|r|r.get::<_,u32>(0)).unwrap(),0);
+    }
     #[test]
     fn proxy_editor_reads_persisted_addresses_and_preserves_failure_semantics() {
         let db = Connection::open_in_memory().unwrap();
@@ -629,7 +636,7 @@ mod tests {
         )
         .unwrap();
         let restored = load(&db, PathBuf::new()).unwrap();
-        assert_eq!(restored.profiles.len(), 3);
+        assert_eq!(restored.profiles.len(), 4);
         assert_eq!(
             super::cookie(&restored, "youtube").unwrap(),
             "session=fixture"
@@ -641,7 +648,7 @@ mod tests {
             .contains("session=fixture"));
     }
     #[test]
-    fn existing_settings_migrate_with_default_two_and_preserve_directory() {
+    fn existing_settings_migrate_with_default_three_and_preserve_directory() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE app_settings(id INTEGER PRIMARY KEY, directory TEXT NOT NULL);
@@ -650,8 +657,59 @@ mod tests {
         .unwrap();
         let restored = load(&db, PathBuf::from("default")).unwrap();
         assert_eq!(restored.download_directory, PathBuf::from("old-downloads"));
-        assert_eq!(restored.max_downloads, 2);
+        assert_eq!(restored.max_downloads, 3);
         assert_eq!(restored.filename_template, crate::naming::DEFAULT_TEMPLATE);
-        assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 2);
+        assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 3);
     }
+    #[test]
+    fn download_limit_migration_preserves_values_and_allows_five() {
+        for previous in 1..=3 {
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch(
+                "CREATE TABLE app_settings(id INTEGER PRIMARY KEY CHECK(id=1), directory TEXT NOT NULL,
+                   max_downloads INTEGER NOT NULL DEFAULT 2 CHECK(max_downloads BETWEEN 1 AND 3),
+                   filename_template TEXT NOT NULL DEFAULT '{platform}/{user_name}-{content}');",
+            ).unwrap();
+            db.execute("INSERT INTO app_settings VALUES(1,'saved-directory',?1,'custom/{link_id}')", [previous]).unwrap();
+            let restored = load(&db, PathBuf::from("unused")).unwrap();
+            assert_eq!(restored.max_downloads, previous);
+            assert_eq!(restored.download_directory, PathBuf::from("saved-directory"));
+            assert_eq!(restored.filename_template, "custom/{link_id}");
+            for value in [4, 5] {
+                db.execute("UPDATE app_settings SET max_downloads=?1", [value]).unwrap();
+                assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, value);
+            }
+            for invalid in [0, 6] {
+                assert!(db.execute("UPDATE app_settings SET max_downloads=?1", [invalid]).is_err());
+            }
+            db.execute("DELETE FROM app_settings", []).unwrap();
+            db.execute("INSERT INTO app_settings(id,directory) VALUES(1,'new-directory')", []).unwrap();
+            assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 3);
+        }
+    }
+    #[test]
+    fn fresh_download_limit_defaults_to_three_before_and_after_directory_save() {
+        let db = Connection::open_in_memory().unwrap();
+        assert_eq!(load(&db, PathBuf::from("default")).unwrap().max_downloads, 3);
+        db.execute("INSERT INTO app_settings(id,directory) VALUES(1,'saved-directory')", []).unwrap();
+        assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 3);
+        db.execute("UPDATE app_settings SET max_downloads=5", []).unwrap();
+        assert_eq!(load(&db, PathBuf::new()).unwrap().max_downloads, 5);
+    }
+    #[test]
+    fn telegram_proxy_is_persisted_separately_and_excluded_from_engine_snapshot() {
+        let db = Connection::open_in_memory().unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        let edit = |proxy: &str| ProfileUpdate { platform:"telegram".into(), user_agent:"Telegram".into(), cookie:None, proxy:Some(proxy.into()), http_chunk_size:None };
+        save_profile(&db, &mut settings, edit("socks5://127.0.0.1:1080")).unwrap();
+        let restored = load(&db, PathBuf::new()).unwrap();
+        assert_eq!(proxy(&restored,"telegram").unwrap().as_deref(), Some("socks5://127.0.0.1:1080/"));
+        assert!(proxy(&restored,"youtube").unwrap().is_none());
+        assert!(snapshot(&restored).unwrap().get("telegram").is_none());
+        assert!(save_profile(&db,&mut settings,edit("http://127.0.0.1:1080")).is_err());
+        assert_eq!(proxy(&settings,"telegram").unwrap(), proxy(&restored,"telegram").unwrap());
+        save_profile(&db,&mut settings,edit("")).unwrap();
+        assert!(proxy(&load(&db,PathBuf::new()).unwrap(),"telegram").unwrap().is_none());
+    }
+
 }

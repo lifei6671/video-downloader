@@ -1,3 +1,5 @@
+> 历史记录：此 tdl HTTP 方案已退役，当前实现见 [Telegram 下载](telegram-download.md)。以下内容仅保留旧版本契约和验收证据。
+
 # Telegram 原始视频 HTTP 实验模式
 
 映取调用用户自行安装的 tdl，**不绑定版本号**，v0.20.4 是已进行真实验证的基线，不分发或自动安装 tdl，不使用 Telethon，不解析终端进度条。用户点击后可在界面内扫码、输入 2FA，由隐藏伪终端中的官方 tdl 创建独立会话；不导入、迁移或覆盖既有登录。抖音、TikTok、YouTube 继续使用原有 Python 引擎。

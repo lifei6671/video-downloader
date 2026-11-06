@@ -9,10 +9,21 @@ default-run = "yingqu"
 desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-clipboard-manager"]
 
 [build-dependencies]
+serde_json = "1"
 tauri-build = { version = "2", optional = true , features = [] }
 
 [dependencies]
 anyhow = "1"
+futures-util = "0.3"
+md5 = "0.8"
+base64 = "0.22"
+qrcode = { version = "0.14.1", default-features = false }
+mime_guess = "2"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+grammers-client = { version = "0.11.0", default-features = false, features = ["proxy"] }
+grammers-session = { version = "0.11.0", default-features = false, features = ["serde"] }
+aws-sdk-s3 = { version = "1.156", default-features = false, features = ["rt-tokio", "rustls", "default-https-client"] }
+http-body-util = "0.1"
 chrono = "0.4.45"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,11 +31,9 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "nat
 semver = "1"
 tempfile = "3"
 same-file = "1"
-portable-pty = "0.9"
-vt100 = "0.16"
 zeroize = "1.9.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "io-std", "fs", "net", "time", "signal", "sync"] }
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 sha2 = "0.10"
@@ -50,4 +59,10 @@ required-features = ["desktop"]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Security"] }
+
+[patch.crates-io]
+grammers-mtsender = { path = "../vendor/grammers-mtsender" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

@@ -24,10 +24,10 @@ async page => {
     const recheck = header.getByRole('button', { name: '重新检测', exact: true });
     const policy = header.getByText('优先使用系统已有工具；语音模型仅在点击下载后保存到应用目录。', { exact: true });
     const fixedBefore = await Promise.all([heading, recheck, policy].map(item => item.boundingBox()));
-    check(await area.locator('[data-slot="card"]:visible').count() === 4, 'dependency cards must be separate');
+    check(await area.locator('[data-slot="card"]:visible').count() === 3, 'dependency cards must be separate');
     check(await card('CUDA 可选加速').count()===0,'CUDA must not be a separate dependency');
     check(await area.getByRole('button', { name: '下载缺失依赖', exact: true }).count() === 0, 'ambiguous aggregate download label remains');
-    for (const title of ['FFmpeg', 'JavaScript 运行时', 'tdl', '语音转录模型 Fun-ASR-Nano']) {
+    for (const title of ['FFmpeg', 'JavaScript 运行时', '语音转录模型 Fun-ASR-Nano']) {
       const current = card(title);
       await current.scrollIntoViewIfNeeded();
       const geometry = await current.evaluate(element => {
@@ -78,7 +78,7 @@ async page => {
     await page.screenshot({ path: '.local/runtime-ui/cards-top-' + width + '.png' });
     await card('语音转录模型 Fun-ASR-Nano').getByText('CPU 本地识别',{exact:true}).waitFor();
     check(await card('语音转录模型 Fun-ASR-Nano').getByText('模型大小：约 1.2 GiB', { exact: true }).isVisible(), 'model size disappeared after installation');
-    cases.push(width + 'x' + height + ': fixed title/toolbar, spacing/arrows, four intact cards, per-tool download, CPU version');
+    cases.push(width + 'x' + height + ': fixed title/toolbar, spacing/arrows, three intact cards, per-tool download, CPU version');
   }
   await load('runtime-mixed');
   check(await card('FFmpeg').getByRole('button', { name: '下载 FFmpeg', exact: true }).count() === 0, 'installed FFmpeg offered duplicate install');

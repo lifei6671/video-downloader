@@ -30,8 +30,8 @@ impl Video {
     pub fn validate(&self) -> Result<()> {
         if self.platform == "telegram" {
             if self.kind != "video"
-                || self.resolver != "tdl"
-                || !crate::tdl_bridge::validate_identity(&self.video_id, &self.canonical_url)
+                || !matches!(self.resolver.as_str(), "grammers" | "tdl")
+                || !crate::telegram_download::validate_identity(&self.video_id, &self.canonical_url)
             {
                 bail!("INVALID_ENGINE_RESULT");
             }
@@ -167,7 +167,7 @@ pub(crate) fn video_header_valid(container: &str, head: &[u8]) -> bool {
     }
 }
 
-pub(crate) fn tdl_recovery_valid(path: &Path, size: u64) -> bool {
+pub(crate) fn telegram_recovery_valid(path: &Path, size: u64) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };

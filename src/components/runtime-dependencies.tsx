@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, Check, Download, FolderOpen, RefreshCw, Square } from 'lucide-react';
 import { api, errorText, type ModelVariant, type RuntimeProgress, type RuntimeStatus, type RuntimeTool } from '@/api';
 import { Button } from '@/components/ui/button';
@@ -68,7 +68,7 @@ export function RuntimeDependenciesToolbar({ runtime }: { runtime: ReturnType<ty
   return <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">优先使用系统已有工具；语音模型仅在点击下载后保存到应用目录。</p><Button variant="outline" disabled={busy} onClick={() => void check()}>{checking ? <Spinner aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}{checking ? '正在检测…' : '重新检测'}</Button></div>;
 }
 
-export function RuntimeDependencies({ runtime, children }: { runtime: ReturnType<typeof useRuntimeDependencies>; children?: ReactNode }) {
+export function RuntimeDependencies({ runtime }: { runtime: ReturnType<typeof useRuntimeDependencies> }) {
   const { status, checking, installing, progress, error, notice, canceling, busy, install, cancel, variant } = runtime;
   const renderTool = (tool: RuntimeTool) => {
       const info = descriptions[tool.id], working = installing === tool.id;
@@ -84,12 +84,11 @@ export function RuntimeDependencies({ runtime, children }: { runtime: ReturnType
       </Card>;
   };
   return <div className="flex min-w-0 flex-col gap-4" aria-busy={busy}>
-    {error && <Alert variant={error === 'CANCELED' ? 'default' : 'destructive'} role="alert"><AlertCircle aria-hidden="true" /><AlertDescription>{errorText(error)}</AlertDescription></Alert>}
+    {error && <Alert variant={error === 'CANCELED' ? 'default' : 'destructive'} role="alert"><AlertCircle aria-hidden="true" /><AlertDescription>{error === 'CANCELED' ? '依赖操作已取消' : errorText(error)}</AlertDescription></Alert>}
     {notice && <Alert role="status"><Check aria-hidden="true" /><AlertDescription>{notice}</AlertDescription></Alert>}
     {error === 'DEPENDENCY_BUSY' && <Button variant="outline" disabled={canceling} onClick={() => void cancel()}><Square aria-hidden="true" />取消正在进行的依赖操作</Button>}
     {status?.tools.filter(tool => tool.id !== 'fun-asr-nano').map(renderTool)}
 
-    {children}
     {status?.tools.filter(tool => tool.id === 'fun-asr-nano').map(renderTool)}
     {!status && !checking && !error && <p className="text-xs text-muted-foreground">检测后显示依赖版本与实际可执行路径。</p>}
     {status && <p className="flex items-start gap-2 break-all text-xs text-muted-foreground"><FolderOpen className="size-4 shrink-0" aria-hidden="true" />下载位置：{status.directory}<span className="shrink-0">{status.platform}</span></p>}

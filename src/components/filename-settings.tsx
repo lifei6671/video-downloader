@@ -17,6 +17,9 @@ const variables = [
 export type FilenamePreviewCache = { template: string; preview: FilenamePreview };
 
 export function FilenameSettings({ settings, saved, previewCache }: { settings: Settings; saved: (settings: Settings) => void; previewCache: RefObject<FilenamePreviewCache | null> }) {
+  // The naming protocol stays portable; the editor follows the native directory.
+  const separator = /^(?:[A-Za-z]:[\\/]|\\\\)/.test(settings.download_directory) ? '\\' : '/';
+  const nativePath = (value: string) => separator === '\\' ? value.replaceAll('/', '\\') : value;
   const savedTemplate = settings.filename_template ?? defaultTemplate;
   const cached = previewCache.current?.template === savedTemplate ? previewCache.current.preview : null;
   const [template, setTemplate] = useState(settings.filename_template ?? defaultTemplate);
@@ -100,8 +103,20 @@ export function FilenameSettings({ settings, saved, previewCache }: { settings: 
     <CardContent><FieldGroup className="gap-4">
       <Field data-invalid={!!error}>
         <FieldLabel htmlFor="filename-template" className="sr-only">文件命名规则</FieldLabel>
-        <Input id="filename-template" ref={input} value={template} disabled={saving} maxLength={512} autoComplete="off" spellCheck={false} aria-invalid={!!error} aria-describedby="filename-template-help filename-template-error" onChange={event => change(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void save(); } }} />
-        <FieldDescription id="filename-template-help">用 / 分隔文件夹，扩展名自动保留。图集规则用于目录名称。</FieldDescription>
+        <Input id="filename-template" ref={input} value={nativePath(template)} disabled={saving} maxLength={512} autoComplete="off" spellCheck={false} aria-invalid={!!error} aria-describedby="filename-template-help filename-template-error" onChange={event => {
+          const field = event.currentTarget;
+          const value = separator === '\\' ? field.value.replaceAll('\\', '/') : field.value;
+          const displayed = nativePath(value);
+          if (field.value !== displayed) {
+            // Separator replacement is length-preserving; keep the editing range
+            // even when the canonical value (and therefore React state) is unchanged.
+            const start = field.selectionStart, end = field.selectionEnd;
+            field.value = displayed;
+            field.setSelectionRange(start, end);
+          }
+          change(value);
+        }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void save(); } }} />
+        <FieldDescription id="filename-template-help">用 {separator} 分隔文件夹，扩展名自动保留。图集规则用于目录名称。</FieldDescription>
         <FieldError id="filename-template-error">{error}</FieldError>
       </Field>
       <Field>
@@ -110,8 +125,8 @@ export function FilenameSettings({ settings, saved, previewCache }: { settings: 
       </Field>
       <Field>
         <FieldLabel id="filename-preview-label">实时预览</FieldLabel>
-        <div role="status" aria-busy={checking} aria-labelledby="filename-preview-label" className="filename-preview min-h-12 rounded-md border-[0.5px] bg-surface-subtle p-3 break-all">{preview ? preview.segments.map((segment, index) => segment.variable ? <span key={index} data-filename-variable={segment.variable} title={`{${segment.variable}}`}>{segment.text}</span> : <span key={index}>{segment.text}</span>) : <span className="text-xs text-muted-foreground">{checking ? '正在预览…' : '请修正规则后预览'}</span>}</div>
-        <FieldDescription className="break-all">{preview ? `示例路径：${displayPath(settings.download_directory).replace(/[\\/]$/, '')}/${preview.path}` : '预览使用示例作品'}</FieldDescription>
+        <div role="status" aria-busy={checking} aria-labelledby="filename-preview-label" className="filename-preview min-h-12 rounded-md border-[0.5px] bg-surface-subtle p-3 break-all">{preview ? preview.segments.map((segment, index) => segment.variable ? <span key={index} data-filename-variable={segment.variable} title={`{${segment.variable}}`}>{nativePath(segment.text)}</span> : <span key={index}>{nativePath(segment.text)}</span>) : <span className="text-xs text-muted-foreground">{checking ? '正在预览…' : '请修正规则后预览'}</span>}</div>
+        <FieldDescription className="break-all">{preview ? `示例路径：${nativePath(displayPath(settings.download_directory)).replace(/[\\/]$/, '')}${separator}${nativePath(preview.path)}` : '预览使用示例作品'}</FieldDescription>
       </Field>
     </FieldGroup></CardContent>
     <CardFooter className="justify-end"><Button disabled={saving || checking || !!error || !dirty} onClick={() => void save()}>{saving ? '保存中…' : '保存命名规则'}</Button></CardFooter>

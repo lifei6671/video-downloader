@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -20,6 +20,35 @@ use yingqu_core::{
 };
 
 type AppCore = Arc<Core>;
+type TelegramStorageView = yingqu_core::backup::telegram_session::View;
+#[tauri::command]
+fn telegram_storage_status(core: State<AppCore>, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> TelegramStorageView {
+    core.telegram_accounts.status(purpose.unwrap_or_default())
+}
+#[tauri::command]
+async fn telegram_storage_resume(core: State<'_, AppCore>, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> Result<TelegramStorageView, String> {
+    core.telegram_accounts.resume(&core, purpose.unwrap_or_default()).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn telegram_storage_login_qr(core: State<'_, AppCore>, purpose: Option<yingqu_core::telegram_accounts::Purpose>, other_account: Option<bool>) -> Result<TelegramStorageView, String> {
+    core.telegram_accounts.login(&core, purpose.unwrap_or_default(), if other_account.unwrap_or(false) { yingqu_core::telegram_accounts::LoginMode::OtherAccount } else { yingqu_core::telegram_accounts::LoginMode::Reuse }).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn telegram_storage_password(core: State<'_, AppCore>, operation_id: String, password: String, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> Result<TelegramStorageView, String> {
+    core.telegram_accounts.password(&core, purpose.unwrap_or_default(), &operation_id, password).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn telegram_storage_cancel(core: State<'_, AppCore>, operation_id: String, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> Result<TelegramStorageView, String> {
+    core.telegram_accounts.cancel(purpose.unwrap_or_default(), &operation_id).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn telegram_storage_logout(core: State<'_, AppCore>, operation_id: String, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> Result<TelegramStorageView, String> {
+    core.telegram_accounts.logout(&core, purpose.unwrap_or_default(), &operation_id).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn telegram_storage_channels(core: State<'_, AppCore>, operation_id: String, purpose: Option<yingqu_core::telegram_accounts::Purpose>) -> Result<Vec<yingqu_core::backup::telegram_session::Channel>, String> {
+    core.telegram_accounts.binding(purpose.unwrap_or_default()).session.channels(&operation_id).await.map_err(|e| e.to_string())
+}
 fn error(error: anyhow::Error) -> String {
     error
         .to_string()
@@ -27,6 +56,139 @@ fn error(error: anyhow::Error) -> String {
         .next()
         .unwrap_or("IO_ERROR")
         .into()
+}
+#[tauri::command]
+fn hide_asset_history(core:State<AppCore>,asset_id:String)->Result<(),String>{yingqu_core::backup::lifecycle::hide_history(&core,&asset_id).map_err(error)}
+#[tauri::command]
+async fn release_local_video(core:State<'_,AppCore>,asset_id:String)->Result<(),String>{yingqu_core::backup::lifecycle::release(&core,&asset_id).await.map_err(error)}
+#[tauri::command]
+async fn delete_asset_and_backup(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<String,String>{yingqu_core::backup::sync_delete::delete(&core,&space_id,&asset_id).await.map_err(error)}
+#[tauri::command]
+async fn ensure_local_video(core:State<'_,AppCore>,asset_id:String)->Result<String,String>{core.ensure_local_video(&asset_id).await.map(|p|p.to_string_lossy().into_owned()).map_err(error)}
+#[tauri::command]
+fn cancel_asset_restore(core:State<AppCore>,asset_id:String)->Result<(),String>{core.cancel_asset_restore(&asset_id).map_err(error)}
+#[tauri::command]
+async fn prepare_asset_playback(app:tauri::AppHandle,core:State<'_,AppCore>,asset_id:String)->Result<String,String>{
+    let path=core.ensure_local_video(&asset_id).await.map_err(error)?;
+    app.asset_protocol_scope().allow_file(&path).map_err(|_|"PLAYBACK_SOURCE_FAILED".to_string())?;Ok(path.to_string_lossy().into_owned())
+}
+#[tauri::command]
+async fn play_asset(app:tauri::AppHandle,core:State<'_,AppCore>,asset_id:String)->Result<(),String>{
+    let path=core.ensure_local_video(&asset_id).await.map_err(error)?;
+    app.opener().open_path(path.to_string_lossy(),None::<&str>).map_err(|_|"PLAYBACK_OPEN_FAILED".into())
+}
+#[tauri::command]
+async fn start_asset_transcription(core:State<'_,AppCore>,asset_id:String,force:Option<bool>)->Result<yingqu_core::desktop_core::transcription::Snapshot,String>{
+    core.ensure_local_video(&asset_id).await.map_err(error)?;
+    core.start_transcription(&asset_id,force.unwrap_or(false)).map_err(error)
+}
+#[tauri::command]
+fn copy_asset_transcript(app:tauri::AppHandle,core:State<AppCore>,asset_id:String)->Result<(),String>{
+    let value=core.asset_transcript(&asset_id).map_err(error)?.ok_or("TRANSCRIPTION_NOT_FOUND")?;
+    app.clipboard().write_text(value.text).map_err(|_|"CLIPBOARD_ERROR".into())
+}
+#[tauri::command]
+async fn export_asset_transcript(app:tauri::AppHandle,core:State<'_,AppCore>,asset_id:String)->Result<Option<String>,String>{
+    let text=core.asset_transcript(&asset_id).map_err(error)?.ok_or("TRANSCRIPTION_NOT_FOUND")?;
+    let source=core.backup_asset(&asset_id).map_err(error)?.and_then(|a|a.path);
+    let (tx,rx)=tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("导出视频文案").set_file_name("video-transcript.txt").add_filter("文本文件",&["txt"]).save_file(move |file|{let _=tx.send(file);});
+    let Some(file)=rx.await.map_err(|_|"IO_ERROR")? else {return Ok(None);};let path=file.into_path().map_err(|_|"IO_ERROR")?;
+    yingqu_core::desktop_core::transcription::export_text(&text.text,source.as_deref(),&path).map_err(error)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+#[tauri::command]
+async fn list_backup_assets(core:State<'_, AppCore>,space_id:String,verify_local:Option<bool>)->Result<Vec<yingqu_core::backup::reconcile::DisplayEntry>,String>{
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || yingqu_core::backup::reconcile::list_for_display_cached(&core, &space_id, verify_local.unwrap_or(true)))
+        .await.map_err(|e| e.to_string())?.map_err(error)
+}
+#[tauri::command]
+async fn refresh_backup_assets(core:State<'_,AppCore>,space_id:String)->Result<yingqu_core::backup::reconcile::Refresh,String>{
+    let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;
+    let engine=yingqu_core::backup::sync_engine::SyncEngine::new(core.inner().clone(),provider);
+    let imported=engine.refresh().await.map_err(error)?;
+    Ok(yingqu_core::backup::reconcile::Refresh{imported,unchanged:0,rejected:vec![]})
+}
+#[tauri::command]
+async fn get_asset_transcript(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<Option<yingqu_core::backup::model::AssetTranscript>,String>{
+    if let Some(value)=yingqu_core::backup::sync_read::cached_transcript(&core,&space_id,&asset_id).map_err(error)? {return Ok(Some(value));}
+    let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;
+    yingqu_core::backup::sync_read::transcript(&core,provider.as_ref(),&asset_id).await.map_err(error)
+}
+#[tauri::command]
+async fn get_asset_cover(core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<tauri::ipc::Response,String>{
+    if let Some(body)=yingqu_core::backup::sync_read::cached_cover(&core,&space_id,&asset_id).map_err(error)? {return Ok(tauri::ipc::Response::new(body));}
+    let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;
+    yingqu_core::backup::sync_read::cover(&core,provider.as_ref(),&asset_id).await.map(tauri::ipc::Response::new).map_err(error)
+}
+#[tauri::command]
+fn get_backup_settings(core: State<AppCore>) -> Result<Option<yingqu_core::backup::spaces::View>,String> {
+    yingqu_core::backup::spaces::get(&core).map_err(error)
+}
+#[tauri::command]
+async fn save_backup_settings(core: State<'_,AppCore>, config: yingqu_core::backup::spaces::Update) -> Result<yingqu_core::backup::spaces::View,String> {
+    yingqu_core::backup::spaces::save(&core,config).await.map_err(error)
+}
+#[tauri::command]
+async fn test_backup_connection(core: State<'_,AppCore>, config: yingqu_core::backup::spaces::Update) -> Result<(),String> {
+    yingqu_core::backup::spaces::test_draft(&core,config).await.map_err(error)
+}
+#[tauri::command]
+fn get_backup_credentials(core: State<AppCore>, space_id: String) -> Result<yingqu_core::backup::settings::Credentials,String> {
+    yingqu_core::backup::settings::credentials(&core,&space_id,&yingqu_core::backup::settings::SystemVault).map_err(error)
+}
+#[tauri::command]
+fn get_backup_delete_activity(core: State<AppCore>) -> Option<yingqu_core::desktop_core::DeleteActivity> {
+    core.current_delete_activity()
+}
+#[tauri::command]
+async fn list_backup_operations(core: State<'_, AppCore>, space_id: Option<String>) -> Result<Vec<yingqu_core::backup::scheduler::Operation>,String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || yingqu_core::backup::scheduler::operations_for_display(&core, space_id.as_deref()))
+        .await.map_err(|e| e.to_string())?.map_err(error)
+}
+#[tauri::command]
+fn retry_backup_operation(core: State<AppCore>, operation_id:String) -> Result<(),String> {
+    yingqu_core::backup::scheduler::retry(&core,&operation_id).map_err(error)
+}
+#[tauri::command]
+fn start_asset_backup(core: State<AppCore>, space_id:String, asset_id:String) -> Result<(),String> {
+    yingqu_core::backup::sync_engine::request_upload(core.inner(),&space_id,&asset_id).map_err(error)
+}
+#[tauri::command]
+fn list_backup_spaces(core:State<AppCore>)->Result<Vec<yingqu_core::backup::spaces::View>,String>{yingqu_core::backup::spaces::list(&core).map_err(error)}
+#[tauri::command]
+fn get_backup_sync_enabled(core:State<AppCore>)->Result<bool,String>{yingqu_core::backup::spaces::enabled(&core).map_err(error)}
+#[tauri::command]
+async fn set_backup_sync_enabled(core:State<'_,AppCore>,enabled:bool)->Result<bool,String>{yingqu_core::backup::spaces::set_enabled(core.inner(),enabled).await.map_err(error)}
+#[tauri::command]
+fn get_backup_space_usage(core:State<AppCore>,space_id:String)->Result<yingqu_core::backup::spaces::Usage,String>{yingqu_core::backup::spaces::usage(&core,&space_id).map_err(error)}
+#[tauri::command]
+async fn delete_backup_space(core:State<'_,AppCore>,space_id:String,confirmed:bool)->Result<(),String>{yingqu_core::backup::spaces::remove(core.inner(),&space_id,confirmed).await.map_err(error)}
+#[tauri::command]
+fn rename_backup_space(core:State<AppCore>,space_id:String,display_name:String)->Result<yingqu_core::backup::spaces::View,String>{yingqu_core::backup::spaces::rename(&core,&space_id,&display_name).map_err(error)}
+#[tauri::command]
+async fn select_backup_space(core:State<'_,AppCore>,space_id:String)->Result<yingqu_core::backup::spaces::View,String>{yingqu_core::backup::spaces::select(core.inner(),&space_id).await.map_err(error)}
+#[tauri::command]
+fn get_backup_local_data(core:State<AppCore>,space_id:String,asset_id:String)->Result<yingqu_core::backup::conflicts::LocalData,String>{yingqu_core::backup::conflicts::local_data(&core,&space_id,&asset_id).map_err(error)}
+#[tauri::command]
+async fn get_backup_conflict(core:State<'_,AppCore>,space_id:String,asset_id:String,conflict_id:String)->Result<yingqu_core::backup::conflicts::VersionView,String>{let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;yingqu_core::backup::conflicts::detail(&core,provider.as_ref(),&asset_id,&conflict_id).await.map_err(error)}
+#[tauri::command]
+async fn resolve_backup_conflict(core:State<'_,AppCore>,space_id:String,asset_id:String,conflict_id:String,adopt:bool)->Result<(),String>{let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;yingqu_core::backup::conflicts::resolve(core.inner(),provider.as_ref(),&asset_id,&conflict_id,adopt).await.map_err(error)}
+#[tauri::command]
+async fn export_backup_local_data(app:tauri::AppHandle,core:State<'_,AppCore>,space_id:String,asset_id:String)->Result<Option<String>,String>{
+    let value=yingqu_core::backup::conflicts::export_data(&core,&space_id,&asset_id).map_err(error)?;
+    let body=serde_json::to_vec_pretty(&value).map_err(|e|error(e.into()))?;
+    let(tx,rx)=tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("导出本机待处理数据").set_file_name(format!("{asset_id}-local.json")).add_filter("JSON",&["json"]).save_file(move|file|{let _=tx.send(file);});
+    let Some(file)=rx.await.map_err(|_|"IO_ERROR")? else{return Ok(None)};
+    let path=file.into_path().map_err(|_|"IO_ERROR")?;
+    tokio::fs::write(&path,body).await.map_err(|e|error(e.into()))?;Ok(Some(path.to_string_lossy().into_owned()))
+}
+#[tauri::command]
+fn cancel_backup_operation(core: State<AppCore>, operation_id:String) -> Result<(),String> {
+    yingqu_core::backup::scheduler::cancel(&core,&operation_id).map_err(error)
 }
 #[tauri::command]
 fn list_tasks(core: State<AppCore>) -> Vec<Task> {
@@ -117,71 +279,6 @@ async fn export_video_transcript(
 #[tauri::command]
 fn get_settings(core: State<AppCore>) -> Settings {
     core.settings()
-}
-#[tauri::command]
-fn save_tdl_settings(
-    core: State<AppCore>,
-    config: yingqu_core::tdl_bridge::TdlSettings,
-) -> Result<Settings, String> {
-    core.save_tdl(config).map_err(error)
-}
-#[tauri::command]
-async fn select_tdl_executable(
-    app: tauri::AppHandle,
-    core: State<'_, AppCore>,
-) -> Result<Option<String>, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let dialog = app.dialog().file().set_title("选择 tdl 可执行文件");
-    #[cfg(windows)]
-    let dialog = dialog.add_filter("可执行文件", &["exe"]);
-    let dialog = if let Some(parent) = core.settings().tdl.path.as_ref().and_then(|p| p.parent()) {
-        dialog.set_directory(parent)
-    } else {
-        dialog
-    };
-    dialog.pick_file(move |file| {
-        let _ = tx.send(file);
-    });
-    rx.await
-        .map_err(|_| "IO_ERROR")?
-        .map(|file| {
-            file.into_path()
-                .map(|p| p.to_string_lossy().into_owned())
-                .map_err(|_| "IO_ERROR".into())
-        })
-        .transpose()
-}
-#[tauri::command]
-async fn check_tdl(
-    path: Option<std::path::PathBuf>,
-) -> Result<yingqu_core::tdl_bridge::TdlStatus, String> {
-    yingqu_core::tdl_bridge::check(path.as_deref())
-        .await
-        .map_err(error)
-}
-#[tauri::command]
-async fn login_tdl(
-    core: State<'_, AppCore>,
-    path: Option<std::path::PathBuf>,
-) -> Result<Settings, String> {
-    core.login_tdl(path).await.map_err(error)
-}
-#[tauri::command]
-fn cancel_tdl_login(core: State<AppCore>) -> Result<(), String> {
-    core.cancel_tdl_login().map_err(error)
-}
-#[tauri::command]
-fn tdl_login_status(core: State<AppCore>) -> Option<yingqu_core::tdl_bridge::LoginStatus> {
-    core.tdl_login_status()
-}
-#[tauri::command]
-fn submit_tdl_password(
-    core: State<AppCore>,
-    login_id: String,
-    password: String,
-) -> Result<(), String> {
-    core.submit_tdl_password(&login_id, zeroize::Zeroizing::new(password))
-        .map_err(error)
 }
 #[tauri::command]
 fn read_clipboard_text(app: tauri::AppHandle) -> Result<String, String> {
@@ -294,7 +391,7 @@ fn get_task_image(core: State<AppCore>, task_id: String, index: usize) -> Result
 }
 #[tauri::command]
 async fn save_profile(core: State<'_, AppCore>, update: ProfileUpdate) -> Result<Settings, String> {
-    core.save_profile(update).map_err(error)
+    core.save_profile_with_network(update).await.map_err(error)
 }
 #[tauri::command]
 async fn set_max_downloads(core: State<'_, AppCore>, value: u8) -> Result<Settings, String> {
@@ -336,14 +433,26 @@ async fn start_download(
 }
 #[tauri::command]
 async fn retry_task(core: State<'_, AppCore>, task_id: String) -> Result<Task, String> {
-    core.retry(&task_id).map_err(error)
+    core.task_action(
+        &task_id,
+        yingqu_core::desktop_core::task_actions::Action::Retry,
+    )
+    .await
+    .map_err(error)?
+    .ok_or_else(|| "TASK_NOT_FOUND".to_owned())
 }
+
 #[tauri::command]
 async fn remove_history(core: State<'_, AppCore>, task_id: String) -> Result<(), String> {
-    core.remove_after_transcription(&task_id, false)
-        .await
-        .map_err(error)
+    core.task_action(
+        &task_id,
+        yingqu_core::desktop_core::task_actions::Action::Remove,
+    )
+    .await
+    .map(|_| ())
+    .map_err(error)
 }
+
 #[tauri::command]
 fn clear_download_history(
     core: State<AppCore>,
@@ -353,10 +462,15 @@ fn clear_download_history(
 }
 #[tauri::command]
 async fn delete_local_file(core: State<'_, AppCore>, task_id: String) -> Result<(), String> {
-    core.remove_after_transcription(&task_id, true)
-        .await
-        .map_err(error)
+    core.task_action(
+        &task_id,
+        yingqu_core::desktop_core::task_actions::Action::Delete,
+    )
+    .await
+    .map(|_| ())
+    .map_err(error)
 }
+
 #[tauri::command]
 async fn cancel_task(core: State<'_, AppCore>, task_id: String) -> Result<(), String> {
     core.cancel(&task_id).await.map_err(error)
@@ -528,6 +642,7 @@ fn cancel_runtime_dependency(core: State<AppCore>) -> Result<(), String> {
     core.cancel_dependency().map_err(error)
 }
 fn show_main_window(app: &tauri::AppHandle) {
+    app.state::<AppCore>().set_backup_foreground(true);
     if app.state::<AtomicBool>().load(Ordering::SeqCst) {
         return;
     }
@@ -601,17 +716,30 @@ fn main() {
                 engine.to_string_lossy().into_owned(),
                 vec![],
                 move |event| match event {
+                    TaskEvent::DeleteActivity(activity) => {
+                        let _ = handle.emit("backup_delete_activity", activity);
+                    }
+                    TaskEvent::BackupAssetDeleted(operation) => {
+                        let _ = handle.emit("backup_asset_deleted", operation);
+                    }
                     TaskEvent::Updated(task) => {
                         let _ = handle.emit("task_updated", task);
                     }
                     TaskEvent::Removed(id) => {
                         let _ = handle.emit("task_removed", id);
                     }
+                    TaskEvent::RemovedFromSpace { id, space_id } => {
+                        let _ = handle.emit("task_removed", serde_json::json!({ "id": id, "space_id": space_id }));
+                    }
                     TaskEvent::Transcription(snapshot) => {
                         let _ = handle.emit("transcription_updated", snapshot);
                     }
                 },
             )?;
+            let backup_core = core.clone();
+            tauri::async_runtime::spawn(async move { backup_core.start_backup_service(); });
+            let account_core = core.clone();
+            tauri::async_runtime::spawn(async move { account_core.telegram_accounts.restore_saved().await; });
             app.manage(core);
             let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出映取", true, None::<&str>)?;
@@ -644,6 +772,10 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            telegram_storage_status, telegram_storage_resume, telegram_storage_login_qr, telegram_storage_password, telegram_storage_cancel, telegram_storage_logout, telegram_storage_channels,
+            ensure_local_video,cancel_asset_restore,prepare_asset_playback,play_asset,start_asset_transcription,copy_asset_transcript,
+            hide_asset_history,release_local_video,delete_asset_and_backup,export_asset_transcript,list_backup_assets,refresh_backup_assets,get_asset_transcript,get_asset_cover,
+            get_backup_settings,get_backup_credentials,save_backup_settings,test_backup_connection,get_backup_delete_activity,list_backup_operations,start_asset_backup,retry_backup_operation,cancel_backup_operation,list_backup_spaces,get_backup_sync_enabled,set_backup_sync_enabled,get_backup_space_usage,delete_backup_space,rename_backup_space,select_backup_space,get_backup_local_data,get_backup_conflict,resolve_backup_conflict,export_backup_local_data,
             list_video_transcripts,
             get_video_transcript,
             start_video_transcription,
@@ -652,13 +784,6 @@ fn main() {
             export_video_transcript,
             list_tasks,
             get_settings,
-            save_tdl_settings,
-            select_tdl_executable,
-            login_tdl,
-            cancel_tdl_login,
-            tdl_login_status,
-            submit_tdl_password,
-            check_tdl,
             read_clipboard_text,
             copy_cover_image,
             get_profile_cookie,
@@ -702,12 +827,14 @@ fn main() {
                 ..
             } if label == "main" => {
                 api.prevent_close();
+                app.state::<AppCore>().set_backup_foreground(false);
                 if let Some(window) = app.get_webview_window("main") {
                     if let Err(error) = window.hide() {
                         eprintln!("Unable to hide main window: {error}");
                     }
                 }
             }
+            tauri::RunEvent::WindowEvent {label,event:tauri::WindowEvent::Focused(focused),..} if label=="main" => {app.state::<AppCore>().set_backup_foreground(focused);}
             tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
                 api.prevent_exit();
                 request_exit(app);

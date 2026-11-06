@@ -11,7 +11,7 @@ async page => {
     const group = page.getByRole('group', {name: platform === 'telegram' ? '频道信息' : '作者信息', exact: true});
     await group.waitFor();
     check((await group.innerText()).includes(platform === 'telegram' ? 'channel_name' : '作者昵称'), `name: ${platform}`);
-    check((await group.innerText()).includes('ID:'), `id: ${platform}`);
+    check((await group.innerText()).includes('ID:') === (platform !== 'telegram'), `id visibility: ${platform}`);
     const hasAvatar = !['telegram', 'missing', 'broken'].includes(platform);
     if (hasAvatar) {
       await group.getByRole('img').waitFor();
@@ -23,7 +23,7 @@ async page => {
     for (const pageName of ['下载作品', '下载任务']) {
       await page.getByRole('button', {name: pageName, exact: true}).click();
       if (pageName === '下载任务') {
-        check((await group.innerText()).trim() === (platform === 'telegram' ? '100' : '作者昵称'), `task name must prefer nickname then ID: ${platform}`);
+        check((await group.innerText()).trim() === (platform === 'telegram' ? 'channel_name' : '作者昵称'), `task name must prefer channel name or nickname: ${platform}`);
       }
       for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
         await page.setViewportSize({width, height});

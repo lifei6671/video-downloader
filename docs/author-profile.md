@@ -9,9 +9,9 @@
 - 头像资料请求和头像下载各使用 5 秒网络超时，头像上限 2 MiB，只接受 JPEG/PNG/WebP。暂存名称固定 `author-avatar`，Rust 校验字节数及格式后写入 `parse_cache.author_avatar BLOB`；迁移仅添加可空列。远程头像 URL 不进入事件、任务快照或 SQLite。
 - 头像是可选资源：资料缺失、网络失败或头像无效不影响作品解析/下载。头像通过 `get_author_avatar(taskId)` 读取任务对应缓存，前端使用 Blob URL 和 shadcn Avatar 占位。预览与任务列表展示昵称、ID和头像，搜索支持作者昵称/ID。
 - 相同作品再次解析、作者 ID 不变时可保留已有头像；作者 ID 改变时清空旧头像。移除最后一个同作品任务或预览时，沿用封面引用清理事务清空头像，保留作者文字元数据与解析别名。
-- Telegram 当前 tdl HTTP 接口不提供频道标题/头像。展示已确认的频道 ID、输入链接中可用的公开频道用户名；缺少公开名时显示“Telegram 频道”。不将频道 ID 冒充个人 ID，不推测标题或头像。
+- Telegram 原生 SDK 从已解析的频道资料读取真实标题，写入 `author_profile.nickname` 和兼容的 `author`；频道 ID 仍保留为稳定身份及本地作者搜索条件，普通作者区不再用 ID 代替频道名称，完整 ID 在任务详情可查。历史记录缺标题时沿用已有名称或公开用户名，否则显示“Telegram 频道”，不自动联网补全历史任务，不推测头像。旧 Telegram 解析缓存下次访问时按新的 SDK 缓存修订刷新，下载或重试也会更新已确认的频道名；频道改名不改变媒体文档身份，也不触发旧文件重命名。
 
-协议仍为 v3，Python/Rust 引擎版本同步到 0.13.0，需要重新构建 sidecar；可复用解析缓存按引擎版本失效。
+作者字段沿用 JSON Lines v3 的可选资料契约；Telegram SDK 解析缓存使用独立修订，不改变 Python 引擎协议或备份协议。
 
 上游依据：[yt-dlp TikTok/Douyin](https://github.com/yt-dlp/yt-dlp/blob/2026.08.19/yt_dlp/extractor/tiktok.py)、[YouTube 频道解析](https://github.com/yt-dlp/yt-dlp/blob/2026.08.19/yt_dlp/extractor/youtube/_tab.py)。不修改 vendored 上游。
 

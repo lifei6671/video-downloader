@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Final
 
+from dtk.core.errors import InvalidParam
 from dtk.platforms.base import ClientProfile, ProfileSource, browser_version
 
 #: Douyin's web client identifies itself as a Chinese-locale desktop browser.
@@ -254,6 +255,33 @@ def author_collections_params(
     }
 
 
+def author_bookmarks_params(
+    *,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/aweme/listcollection/``.
+
+    Every post the session has bookmarked, whatever folder it sits in - the
+    videos tab under bookmarks on the account's own page. ``collects/list/``
+    is a different thing: it lists the folders, and an account can have
+    bookmarks and no folders at all (#790).
+
+    No user id, for the reason ``author_collections_params`` gives. ``count``
+    and ``cursor`` are returned here like any other parameter and moved into
+    the POST body by the endpoint's ``form``; the cursor is the opaque value
+    the previous page handed back, ``"0"`` for the first.
+    """
+    return {
+        **base_params(profile),
+        "publish_video_strategy_type": "2",
+        "pc_libra_divert": profile.os_name,
+        "count": str(count),
+        "cursor": _cursor(cursor),
+    }
+
+
 def collection_posts_params(
     *,
     collection_id: str,
@@ -297,6 +325,248 @@ def mix_posts_params(
         "cursor": _cursor(cursor),
         "count": str(count),
     }
+
+
+def related_posts_params(
+    *,
+    aweme_id: str,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/aweme/related/``.
+
+    The page asks for the next batch with ``refresh_index`` and a
+    ``filterGids`` list of what it already showed, which is state only the
+    page holds; one batch is what can be asked for honestly, so the first is
+    what this sends. Measured 2026-10-20 with a guest: ``count=20`` came back
+    as 10 posts, the same 10 as ``count=10``.
+    """
+    return {
+        **base_params(profile),
+        "aweme_id": str(aweme_id),
+        "count": str(count),
+        "filterGids": "",
+        "refresh_index": "1",
+    }
+
+
+def music_detail_params(
+    *, music_id: str, profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/music/detail/``."""
+    return {**base_params(profile), "music_id": str(music_id)}
+
+
+def music_posts_params(
+    *,
+    music_id: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/music/aweme/``.
+
+    The cursor is an item offset. Measured 2026-10-20 with a guest: ``count``
+    above 13 or so is answered with 13, and the next page starts where the
+    answer's ``cursor`` says.
+    """
+    return {
+        **base_params(profile),
+        "music_id": str(music_id),
+        "cursor": _cursor(cursor),
+        "count": str(count),
+    }
+
+
+def hashtag_detail_params(
+    *, ch_id: str, profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/challenge/detail/``. A hashtag is a
+    "challenge" in every path and field name Douyin uses for it."""
+    return {**base_params(profile), "ch_id": str(ch_id)}
+
+
+def author_mixes_params(
+    *,
+    sec_user_id: str,
+    cursor: str | None = None,
+    count: int = DEFAULT_PAGE_SIZE,
+    profile: ClientProfile = DEFAULT_PROFILE,
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/mix/list/``: an author's series, paged by
+    an offset ``cursor``."""
+    return {
+        **base_params(profile),
+        "sec_user_id": str(sec_user_id),
+        "req_from": CHANNEL,
+        "cursor": _cursor(cursor),
+        "count": str(count),
+    }
+
+
+def live_room_params(*, web_rid: str, profile: ClientProfile = DEFAULT_PROFILE) -> dict[str, str]:
+    """Parameters for ``live.douyin.com/webcast/room/web/enter/``.
+
+    Not the ``www.douyin.com`` base set: the live site is its own web app
+    with its own short list, read off the live page's request. ``web_rid``
+    is the number in a ``live.douyin.com/<n>`` link - not the room id the
+    answer carries, which changes with every broadcast.
+    """
+    rid = str(web_rid).strip()
+    if not rid.isdigit():
+        raise InvalidParam(
+            "a Douyin live room is the number in its live.douyin.com link",
+            details={"field": "room_id"},
+        )
+    return {
+        **_live_site_params(profile),
+        "web_rid": rid,
+        "enter_source": "",
+        "is_need_double_stream": "false",
+    }
+
+
+def _live_site_params(profile: ClientProfile) -> dict[str, str]:
+    """What every call the live site's own page makes carries."""
+    return {
+        "aid": AID,
+        "app_name": "douyin_web",
+        "live_id": "1",
+        "device_platform": "web",
+        "language": profile.browser_language,
+        "enter_from": "web_live",
+        "cookie_enabled": "true",
+        "screen_width": str(profile.screen_width),
+        "screen_height": str(profile.screen_height),
+        "browser_language": profile.browser_language,
+        "browser_platform": profile.browser_platform,
+        "browser_name": profile.browser_name,
+        "browser_version": profile.browser_version,
+    }
+
+
+#: Which of a room's lists ``ranklist/audience`` answers with. 30 is the
+#: audience list beside the stream; 0 to 3 and 31 were refused with 10011 and
+#: 17 answered an empty list, on one room on 2026-10-26.
+AUDIENCE_RANK_TYPE: Final = "30"
+
+
+def live_ranking_params(
+    *, room_id: str, profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``live.douyin.com/webcast/ranklist/audience/``.
+
+    The live site's own list, with the broadcast by its own ``room_id`` - the
+    ``live_id`` a room answer carries, not the web_rid. Measured on one room
+    on 2026-10-26: without ``webcast_sdk_version`` the list stops at 100
+    viewers instead of 200. Without ``anchor_id`` - the room's owner, which a
+    room answer would have to be asked for first - the top 20 were the same
+    and 199 of the 200, the list moving between the two calls.
+    """
+    broadcast = str(room_id).strip()
+    if not broadcast.isdigit():
+        raise InvalidParam(
+            "a Douyin broadcast is the number a room answer gives as live_id",
+            details={"field": "live_id"},
+        )
+    return {
+        **_live_site_params(profile),
+        "webcast_sdk_version": "2450",
+        "room_id": broadcast,
+        "rank_type": AUDIENCE_RANK_TYPE,
+    }
+
+
+#: ``(board_type, board_sub_type)`` for each board, as the hot page asks.
+_TRENDING_BOARDS: Final[dict[str, tuple[str, str]]] = {
+    "hot": ("0", ""),
+    "entertainment": ("2", "2"),
+    "society": ("2", "4"),
+    "challenge": ("2", "hotspot_challenge"),
+}
+
+
+def trending_params(
+    *, board: str = "hot", profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``/aweme/v1/web/hot/search/list/``: one board, whole."""
+    if board not in _TRENDING_BOARDS:
+        raise InvalidParam(
+            f"Douyin has no {board!r} board",
+            details={"field": "board", "supported": sorted(_TRENDING_BOARDS)},
+        )
+    board_type, sub_type = _TRENDING_BOARDS[board]
+    return {
+        **base_params(profile),
+        "detail_list": "1",
+        "source": "6",
+        "board_type": board_type,
+        "board_sub_type": sub_type,
+    }
+
+
+#: The app a share link's reflow page belongs to: Douyin's own, not the web
+#: site's 6383.
+REFLOW_APP_ID: Final = "1128"
+
+
+def live_room_by_id_params(
+    *, room_id: str, profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``webcast.amemv.com/webcast/room/reflow/info/``.
+
+    The page an app's share link opens, which names the broadcast by its own
+    ``room_id`` - the one :func:`live_room_params` warns is not a web_rid.
+    This short list is all it needs: it answered a guest with the room on
+    2026-10-26 with no browser fields at all, the visitor values and the
+    signature being the signing layer's to add.
+    """
+    broadcast = str(room_id).strip()
+    if not broadcast.isdigit():
+        raise InvalidParam(
+            "a Douyin broadcast is the number in its share link", details={"field": "live_id"}
+        )
+    return {"type_id": "0", "live_id": "1", "room_id": broadcast, "app_id": REFLOW_APP_ID}
+
+
+#: How many broadcasts one ``check_alive`` call asks about. ``webcast.amemv.com``
+#: took 200 in one call on 2026-10-26; the cap is ours, half that, to keep a
+#: query an ordinary URL length.
+MAX_LIVE_IDS: Final = 100
+
+
+def live_ids(value: str) -> tuple[str, ...]:
+    """A comma-separated list of broadcast ids, checked and with repeats gone.
+
+    Here rather than in the route alone so that every caller - REST, MCP, a
+    task replayed from the queue - is held to the same list.
+    """
+    seen: dict[str, None] = {}
+    for part in str(value).split(","):
+        text = part.strip()
+        if not text:
+            continue
+        if not text.isdigit():
+            raise InvalidParam(
+                "a Douyin broadcast id is a number",
+                details={"field": "live_ids", "value": text[:32]},
+            )
+        seen[text] = None
+    if not seen:
+        raise InvalidParam("name at least one broadcast", details={"field": "live_ids"})
+    if len(seen) > MAX_LIVE_IDS:
+        raise InvalidParam(
+            f"at most {MAX_LIVE_IDS} broadcasts at a time",
+            details={"field": "live_ids", "count": len(seen), "maximum": MAX_LIVE_IDS},
+        )
+    return tuple(seen)
+
+
+def live_status_params(
+    *, room_ids: str, profile: ClientProfile = DEFAULT_PROFILE
+) -> dict[str, str]:
+    """Parameters for ``webcast.amemv.com/webcast/room/check_alive/``."""
+    return {**_live_site_params(profile), "room_ids": ",".join(live_ids(room_ids))}
 
 
 def comments_params(
@@ -360,6 +630,7 @@ __all__ = [
     "AID",
     "DEFAULT_PAGE_SIZE",
     "DEFAULT_PROFILE",
+    "author_bookmarks_params",
     "author_posts_params",
     "author_profile_params",
     "base_params",

@@ -29,17 +29,36 @@ generating them needs an identity and, for ``msToken``, a network round trip.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Final, Literal, Protocol, TypedDict, runtime_checkable
+from urllib.parse import urlencode
 
 from dtk.core.errors import InvalidParam
-from dtk.core.types import Platform
-from dtk.models import Author, Collection, Comment, Content, Page
+from dtk.core.types import LoginNeed, Platform
+from dtk.models import (
+    Author,
+    Collection,
+    Comment,
+    Content,
+    ContentPart,
+    Hashtag,
+    LiveRoom,
+    LiveStatus,
+    LiveViewer,
+    Mix,
+    MusicDetail,
+    Page,
+    TrendingTopic,
+)
 
 HttpMethod = Literal["GET", "POST"]
+
+#: What a browser sends with a ``key=value&...`` body, charset and all. Douyin's
+#: own page sends exactly this on ``listcollection``.
+FORM_CONTENT_TYPE: Final = "application/x-www-form-urlencoded; charset=UTF-8"
 
 #: A builder turns caller-facing arguments into a flat query string mapping.
 #: Values are left un-encoded: percent-encoding happens once, in the transport
@@ -59,7 +78,12 @@ class RequestSpec(TypedDict):
     url: str
     params: dict[str, str]
     headers: dict[str, str]
-    body: dict[str, Any] | None
+    #: The body as it goes on the wire, or None. Bytes rather than fields, and
+    #: encoded here rather than in the transport, for the reason the query is
+    #: sent verbatim: a_bogus hashes the body, so the signer and the transport
+    #: have to be handed the same bytes, and the one way to guarantee that is
+    #: to produce them once.
+    body: bytes | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +289,18 @@ def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def is_later_page(cursor: Any) -> bool:
+    """Whether a caller's cursor asks for anything but the first page.
+
+    ``"0"`` is a first page and not a later one: both platforms number the
+    start of a feed that way, and a client that echoes the cursor it started
+    with must not be routed as if it were paging.
+    """
+    if _is_blank(cursor):
+        return False
+    return str(cursor).strip() != "0"
+
+
 @dataclass(frozen=True, slots=True)
 class EndpointSpec:
     """One upstream endpoint.
@@ -297,9 +333,44 @@ class EndpointSpec:
     #: is how a burnt identity stays in rotation. The exception is an endpoint
     #: whose "no" IS silence - and that has to be measured, not assumed.
     empty_body_is_normal: bool = False
+    #: A top-level key whose null, in an answer that otherwise succeeded, means
+    #: the thing the request names does not exist. Measured per endpoint, never
+    #: assumed per platform: Bilibili's folder contents answer a folder that
+    #: does not exist with ``{"code": 0, "data": null}``, which read as an
+    #: empty folder, while its folder list answers an author with no folders
+    #: in the same shape - and there an empty page is the right answer.
+    absent_when_null: str | None = None
+    #: What a guest identity loses on the first page. See :class:`LoginNeed`.
+    login: LoginNeed = LoginNeed.NONE
+    #: The same, for every page after the first; None means as ``login``. Its
+    #: own field because the two differ: Douyin serves an author's first page
+    #: to a guest, short of the newest posts, and every later page to nobody
+    #: but a signed-in account.
+    paging_login: LoginNeed | None = None
+    #: Built parameters that travel as a form body instead of in the query, in
+    #: the order given. Douyin's ``listcollection`` is POST-only and its page
+    #: sends ``count`` and ``cursor`` nowhere but the body, in that order.
+    #: a_bogus hashes the body, which is why it is built once, here.
+    form: tuple[str, ...] = ()
+    #: Whether the answer belongs to the session that asks rather than to
+    #: anything the request names. Such an endpoint is served only to a pinned
+    #: identity: unpinned, rotation would pick an account at random, and the
+    #: shared cache would then hand that account's private list to the next
+    #: caller - a demo visitor included.
+    session_bound: bool = False
     #: Endpoint-specific headers merged over the adapter defaults.
     headers: tuple[tuple[str, str], ...] = ()
     summary: str = ""
+
+    def __post_init__(self) -> None:
+        if self.form and self.method != "POST":
+            raise ValueError(f"{self.name}: a form body needs POST, not {self.method}")
+
+    def login_for(self, params: Mapping[str, Any]) -> LoginNeed:
+        """What serving these caller arguments from a guest would cost."""
+        if self.paging_login is not None and is_later_page(params.get("cursor")):
+            return self.paging_login
+        return self.login
 
     def build_params(self, **kwargs: Any) -> dict[str, str]:
         """Validate required arguments and produce the query string mapping."""
@@ -333,13 +404,48 @@ class EndpointSpec:
         """Build the full :class:`RequestSpec` for this endpoint."""
         headers = dict(default_headers or {})
         headers.update(self.headers)
+        built = self.build_params(**kwargs)
+        if not self.form:
+            return RequestSpec(
+                method=self.method, url=self.path, params=built, headers=headers, body=None
+            )
+        fields = [(name, built[name]) for name in self.form if name in built]
         return RequestSpec(
             method=self.method,
             url=self.path,
-            params=self.build_params(**kwargs),
-            headers=headers,
-            body=None,
+            params={key: value for key, value in built.items() if key not in self.form},
+            headers={"Content-Type": FORM_CONTENT_TYPE, **headers},
+            body=urlencode(fields).encode(),
         )
+
+
+#: Folds a follow-up answer into the answer that asked for it. Pure, like a
+#: parser: two payloads in, one out.
+Merge = Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class FollowUp:
+    """A second request an answer needs before it can be parsed.
+
+    Bilibili's video detail has no playable file in it; the page asks
+    ``playurl`` for one with the part id the detail just returned. The adapter
+    says so by returning one of these, and the fetch layer makes the call -
+    scheduled, signed and logged like any other - and hands the parser the
+    merged payload. The platform package still performs no IO; it only
+    describes the call and how to combine the answers.
+    """
+
+    endpoint: str
+    #: Builder keywords, as for :meth:`PlatformAdapter.build_request`.
+    params: Mapping[str, Any]
+    merge: Merge
+    #: Whether the first answer means anything without this one. A video's
+    #: detail does - title, author and counts are real without the stream -
+    #: so by default a failed follow-up leaves the first answer to be parsed.
+    #: The weekly selection's index does not: it is a list of issue numbers,
+    #: and parsed on its own it would read as an issue with no videos in it.
+    required: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,6 +529,21 @@ class PlatformAdapter(Protocol):
         """Name the risk-control signature in ``payload``, or ``None``."""
         ...
 
+    def follow_up(
+        self,
+        endpoint: str,
+        payload: Mapping[str, Any],
+        params: Mapping[str, Any] | None = None,
+    ) -> FollowUp | None:
+        """A second call this answer needs before parsing, or ``None``.
+
+        Most answers are complete; see :class:`FollowUp` for the ones that are
+        not. ``params`` are the builder keywords the first call was made with,
+        for a follow-up that depends on what was asked as well as on what came
+        back - which part of a video, which issue of a list.
+        """
+        ...
+
     def parse_content(self, payload: Mapping[str, Any], *, fetched_at: datetime) -> Content: ...
 
     def parse_author(self, payload: Mapping[str, Any]) -> Author: ...
@@ -438,8 +559,12 @@ class PlatformAdapter(Protocol):
     def parse_collection_detail(self, payload: Mapping[str, Any]) -> Collection: ...
 
     def parse_collection_posts(
-        self, payload: Mapping[str, Any], *, fetched_at: datetime
-    ) -> Page[Content]: ...
+        self, payload: Mapping[str, Any], *, fetched_at: datetime, cursor: str | None = None
+    ) -> Page[Content]:
+        """``cursor`` is the one this page was asked for. Douyin and TikTok
+        hand the next one back and ignore it; Bilibili's folder answer says only
+        whether there is more, so the next page is computed from it."""
+        ...
 
     def parse_comments(
         self, payload: Mapping[str, Any], *, content_id: str | None = None
@@ -453,13 +578,94 @@ class PlatformAdapter(Protocol):
         parent_id: str | None = None,
     ) -> Page[Comment]: ...
 
+    def parse_content_parts(self, payload: Mapping[str, Any]) -> Page[ContentPart]: ...
+
+    def parse_popular(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        board: str,
+        fetched_at: datetime,
+        cursor: str | None = None,
+    ) -> Page[Content]:
+        """A site-curated list of posts. ``board`` is the capability that asked -
+        ``popular``, ``popular_weekly``, ``popular_precious`` or ``ranking`` -
+        and ``cursor`` the page it asked for, which a numbered list needs to
+        say what comes next."""
+        ...
+
+    def parse_related_posts(
+        self, payload: Mapping[str, Any], *, fetched_at: datetime
+    ) -> Page[Content]:
+        """The posts a platform recommends beside one, as one batch: none of
+        the three pages them in a way a caller could follow."""
+        ...
+
+    def parse_music_detail(self, payload: Mapping[str, Any]) -> MusicDetail: ...
+
+    def parse_music_posts(
+        self, payload: Mapping[str, Any], *, fetched_at: datetime
+    ) -> Page[Content]: ...
+
+    def parse_hashtag_detail(self, payload: Mapping[str, Any]) -> Hashtag: ...
+
+    def parse_hashtag_posts(
+        self, payload: Mapping[str, Any], *, fetched_at: datetime
+    ) -> Page[Content]: ...
+
+    def parse_search_posts(
+        self, payload: Mapping[str, Any], *, fetched_at: datetime
+    ) -> Page[Content]: ...
+
+    def parse_search_authors(self, payload: Mapping[str, Any]) -> Page[Author]: ...
+
+    def parse_author_mixes(self, payload: Mapping[str, Any]) -> Page[Mix]: ...
+
+    def parse_live_room(
+        self, payload: Mapping[str, Any], *, room_id: str | None = None
+    ) -> LiveRoom:
+        """``room_id`` is the one the request named, for a platform whose
+        answer does not repeat it: Douyin's never mentions the web_rid."""
+        ...
+
+    def parse_live_room_by_id(self, payload: Mapping[str, Any]) -> LiveRoom:
+        """The same room, asked for by the broadcast's own id rather than by
+        what its web link carries. A platform without such an id raises
+        ``UnsupportedContent``."""
+        ...
+
+    def parse_live_status(
+        self, payload: Mapping[str, Any], *, live_ids: Sequence[str] = ()
+    ) -> Page[LiveStatus]:
+        """Whether each broadcast asked about is still on air, as one page.
+
+        ``live_ids`` is the list the request named, in its order. The page
+        answers each of them, ``false`` for one the platform's answer leaves
+        out, so a caller can pair its list with the page by position."""
+        ...
+
+    def parse_live_ranking(self, payload: Mapping[str, Any]) -> Page[LiveViewer]:
+        """A broadcast's audience ranking, top first, as one page."""
+        ...
+
+    def parse_trending(self, payload: Mapping[str, Any]) -> Page[TrendingTopic]: ...
+
+    def parse_mix_posts(self, payload: Mapping[str, Any], *, fetched_at: datetime) -> Page[Content]:
+        """The posts in one mix. Douyin's and TikTok's answer in the author post
+        list's own envelope; Bilibili's season answer is a folder's."""
+        ...
+
 
 __all__ = [
+    "FORM_CONTENT_TYPE",
     "ClientProfile",
     "EndpointSpec",
     "EndpointTable",
+    "FollowUp",
     "HttpMethod",
+    "Merge",
     "ParamBuilder",
     "PlatformAdapter",
     "RequestSpec",
+    "is_later_page",
 ]

@@ -78,6 +78,8 @@ jobs:
           python scripts/check_packaged_engine.py $engine
       - name: Build desktop
         env:
+          YINGQU_TELEGRAM_API_ID: ${{ secrets.YINGQU_TELEGRAM_API_ID }}
+          YINGQU_TELEGRAM_API_HASH: ${{ secrets.YINGQU_TELEGRAM_API_HASH }}
           APPLE_SIGNING_IDENTITY: '-'
         run: |
           if ($IsMacOS) {

@@ -8,8 +8,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.0", yt_dlp_version="2026.08.19", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
-request = json.loads(sys.stdin.readline())
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.2", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+request = json.loads(sys.stdin.buffer.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
 platform = 'youtube' if source.hostname == 'www.youtube.com' else 'tiktok' if source.hostname == 'www.tiktok.com' else 'douyin'
@@ -62,6 +62,12 @@ if request['method'] == 'transcribe_video':
     text = '' if mode.startswith('silent') else '欢迎体验。\nEnglish text.'
     (stage / 'transcript.txt').write_text(text, encoding='utf-8', newline='\n')
     emit('transcribed', filename='transcript.txt', bytes=len(text.encode()), no_speech=not text, duration_seconds=3, backend=backend)
+    sys.exit(0)
+if request['method'] == 'probe_video':
+    assert set(params) == {'runtime_directory', 'source'}
+    assert Path(params['source']).is_file()
+    (Path(params['runtime_directory']).parent / 'metadata-probed').write_text('ready')
+    emit('video_metadata', width=1920, height=1080, duration_ms=2500)
     sys.exit(0)
 if request['method'] == 'extract_cover':
     assert set(params) == {'runtime_directory', 'staging_dir', 'filename'}

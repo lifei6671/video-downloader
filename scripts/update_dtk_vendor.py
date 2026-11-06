@@ -72,15 +72,23 @@ def check(manifest, check_patches=True):
     audit(SOURCE, manifest)
 
 
-def sync(source, ref, update):
+def sync(source, ref, update, include_files=()):
     manifest = json.loads(MANIFEST.read_text(encoding='utf-8'))
     ref = ref or manifest['upstream_commit']
     if not re.fullmatch(r'[0-9a-f]{40}', ref):
         raise ValueError('Use a complete commit SHA')
     if ref != manifest['upstream_commit'] and not update:
         raise ValueError('A new commit requires --update')
+    if include_files and not update:
+        raise ValueError('Adding reviewed source files requires --update')
     if SOURCE.exists():
         check(manifest, check_patches=not update)  # Never overwrite local edits or an incomplete slice.
+    existing = {item['path'] for item in manifest['files']}
+    for path in include_files:
+        path = Path(path).as_posix()
+        if path not in existing:
+            manifest['files'].append({'path': path})
+            existing.add(path)
     with tempfile.TemporaryDirectory(prefix='dtk-sync-') as temp:
         temp = Path(temp)
         if source is None:
@@ -108,8 +116,11 @@ def sync(source, ref, update):
             if not update and patch_hash != item['sha256']:
                 raise ValueError('Patch hash differs from manifest')
             item['sha256'] = patch_hash
-            git(staging, 'apply', '--check', str(patch))
-            git(staging, 'apply', str(patch))
+            # Hash the same LF bytes on Windows and clean cross-platform checkouts.
+            git(staging, '-c', 'core.autocrlf=false', '-c', 'core.eol=lf',
+                'apply', '--check', str(patch))
+            git(staging, '-c', 'core.autocrlf=false', '-c', 'core.eol=lf',
+                'apply', str(patch))
         init = (staging / 'src/dtk/__init__.py').read_text(encoding='utf-8')
         version = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', init)
         if not version:
@@ -148,9 +159,11 @@ if __name__ == '__main__':
     parser.add_argument('--source', type=Path)
     parser.add_argument('--ref')
     parser.add_argument('--update', action='store_true')
+    parser.add_argument('--include-file', action='append', default=[],
+                        help='explicitly reviewed upstream file to add during --update')
     args = parser.parse_args()
     if args.check:
         check(json.loads(MANIFEST.read_text(encoding='utf-8')))
     else:
-        sync(args.source, args.ref, args.update)
+        sync(args.source, args.ref, args.update, args.include_file)
     print('DTK source, import boundary and patches: PASS')

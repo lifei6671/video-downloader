@@ -9,9 +9,9 @@ if(new URLSearchParams(location.search).has('long'))tasks.push(...Array.from({le
 let listener=()=>{};
 window.taskPlatformsTest={calls:[],snapshot:()=>structuredClone(tasks),push:(id,platform)=>{const task=row(id,platform,'downloading');tasks.push(task);listener(structuredClone(task))}};
 api.tasks=async()=>structuredClone(tasks);
-api.settings=async()=>({download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'fixture',proxy:null,cookie_configured:false})),tdl:{enabled:false,path:null}});
+api.settings=async()=>({download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'fixture',proxy:null,cookie_configured:false}))});
 api.subscribe=async callback=>{listener=callback;return()=>{if(listener===callback)listener=()=>{}}};
-api.tdlLoginStatus=async()=>null;
+api.telegramStorageStatus=async()=>({configured:false,operation_id:null,phase:'signed_out',account:null,last_error:null,qr:null,qr_expires_at:null});
 api.cookie=async()=>'';
 api.proxy=async()=>null;
 api.reveal=async id=>{window.taskPlatformsTest.calls.push({type:'reveal',id})};

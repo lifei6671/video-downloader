@@ -1,2 +1,19 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><title>映取</title></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>映取</title>
+    <style>
+      /* Critical first-paint colors from DESIGN.md: slate-2 and slate-11. */
+      html, body { margin: 0; background: #f9f9fb; }
+      .startup-screen { min-height: 100dvh; display: grid; place-content: center; justify-items: center; gap: 12px; color: #60646c; font: 14px/20px system-ui, sans-serif; }
+      .startup-screen img { width: 48px; height: 48px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"><div class="startup-screen" role="status" aria-live="polite"><img src="/src-tauri/icons/64x64.png" alt="映取"><span>正在启动…</span></div></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
