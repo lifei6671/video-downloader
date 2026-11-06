@@ -130,6 +130,7 @@ pub struct Sender<T: Transport, M: Mtp> {
 
 struct Request {
     queued_at: Instant,
+    last_progress_at: Instant,
     body: Vec<u8>,
     media: bool,
     state: RequestState,
@@ -138,7 +139,11 @@ struct Request {
 
 impl Request {
     fn response_deadline(&self) -> Option<Instant> {
-        (!self.result.is_closed()).then(|| self.queued_at + Duration::from_secs(if self.is_file_transfer() { 24 } else { 55 }))
+        if self.result.is_closed() { return None; }
+        Some(if self.is_file_transfer() {
+            (self.last_progress_at + Duration::from_secs(60))
+                .min(self.queued_at + Duration::from_secs(599))
+        } else { self.queued_at + Duration::from_secs(55) })
     }
     fn is_file_transfer(&self) -> bool {
         if self.media { return true; }
@@ -233,6 +238,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
         self.requests.push(Request {
             queued_at: Instant::now(),
+            last_progress_at: Instant::now(),
             body,
             media: false,
             state: RequestState::NotSerialized,
@@ -282,8 +288,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         let (mut reader, mut writer) = self.stream.split();
         let sleep = sleep_until(self.next_ping);
         // A live TCP socket is not proof that Telegram is answering RPCs.
-        // File callers time out after 25s; retire this exact sender first so
-        // their retry cannot reuse it. Canceled callers never condemn a pool.
+        // File inactivity and total lifetime are separate. Retire this exact
+        // sender before the outer 600s budget; canceled callers do not condemn it.
         let response_deadline = self.requests.iter().filter_map(Request::response_deadline)
             .min();
 
@@ -381,6 +387,11 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
             )));
         }
 
+        // Encrypted response fragments cannot be attributed until the packet is
+        // complete. Bound this connection-level progress by each RPC's total cap.
+        for request in &mut self.requests {
+            if request.is_file_transfer() { request.last_progress_at = Instant::now(); }
+        }
         self.read_tail += n;
         trace!("read {} bytes from the network", n);
         trace!("trying to unpack buffer of {} bytes...", self.read_tail);
@@ -416,6 +427,13 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
     /// Handle `n` more written bytes being ready to process by the transport.
     fn on_net_write(&mut self, n: usize) {
+        if n > 0 && self.requests.iter().any(|r| r.is_file_transfer() && matches!(r.state, RequestState::Serialized(_))) {
+            for request in &mut self.requests {
+                if request.is_file_transfer() && !matches!(request.state, RequestState::Sent(_)) {
+                    request.last_progress_at = Instant::now();
+                }
+            }
+        }
         self.write_head += n;
         trace!(
             "written {} bytes to the network ({}/{})",
@@ -763,10 +781,10 @@ mod cancellation_tests {
         let (ping_tx, ping_rx) = oneshot::channel();
         let file = tl::functions::upload::SaveFilePart { file_id: 1, file_part: 0, bytes: vec![1; 1024] }.to_bytes();
         let mut requests = vec![
-            Request { queued_at: Instant::now(), media: false, body: file.clone(), state: RequestState::NotSerialized, result: file_tx },
-            Request { queued_at: Instant::now(), media: false, body: file, state: RequestState::NotSerialized, result: live_tx },
-            Request { queued_at: Instant::now(), media: false, body: tl::functions::help::GetConfig {}.to_bytes(), state: RequestState::NotSerialized, result: control_tx },
-            Request { queued_at: Instant::now(), media: false, body: tl::functions::PingDelayDisconnect { ping_id: 1, disconnect_delay: 60 }.to_bytes(), state: RequestState::NotSerialized, result: ping_tx },
+            Request { queued_at: Instant::now(), last_progress_at: Instant::now(), media: false, body: file.clone(), state: RequestState::NotSerialized, result: file_tx },
+            Request { queued_at: Instant::now(), last_progress_at: Instant::now(), media: false, body: file, state: RequestState::NotSerialized, result: live_tx },
+            Request { queued_at: Instant::now(), last_progress_at: Instant::now(), media: false, body: tl::functions::help::GetConfig {}.to_bytes(), state: RequestState::NotSerialized, result: control_tx },
+            Request { queued_at: Instant::now(), last_progress_at: Instant::now(), media: false, body: tl::functions::PingDelayDisconnect { ping_id: 1, disconnect_delay: 60 }.to_bytes(), state: RequestState::NotSerialized, result: ping_tx },
         ];
         drop(file_rx);
         drop(control_rx);

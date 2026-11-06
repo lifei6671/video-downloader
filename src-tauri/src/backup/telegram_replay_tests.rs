@@ -741,6 +741,7 @@ async fn telegram_t4_cancel_cleanup_then_upload_uses_new_operation_and_messages(
 struct MemoryTransport<'a>(&'a Remote);
 impl Transport for MemoryTransport<'_> {
     type Uploaded = ();
+    type Prepared = ();
     fn max_bytes(&self) -> u64 {
         100_000_000
     }
@@ -758,7 +759,7 @@ impl Transport for MemoryTransport<'_> {
     ) -> ProviderFuture<'a, ()> {
         Box::pin(async { unreachable!() })
     }
-    fn send<'a>(&'a self, _: (), _: String, _: i64, _: Option<crate::backup::provider::VideoAttributes>, _: &'a Io, _: &'a mut (dyn FnMut() -> Result<()> + Send)) -> ProviderFuture<'a, Option<i32>> {
+    fn send<'a>(&'a self, _: ((), ()), _: String, _: i64, _: Option<crate::backup::provider::VideoAttributes>, _: &'a Io, _: &'a mut (dyn FnMut() -> Result<()> + Send)) -> ProviderFuture<'a, Option<i32>> {
         Box::pin(async { unreachable!() })
     }
     fn inspect(&self, id: i32) -> ProviderFuture<'_, RemoteDocument> {

@@ -1136,6 +1136,31 @@ impl UploadState {
         Ok(())
     }
 }
+/// Retry only the same file part; Create/Complete and conditional writes are excluded.
+pub(super) async fn upload_part_with_retry(
+    store: &impl ObjectStore,
+    part: Write,
+    check: &(impl Fn() -> Result<()> + Sync),
+) -> Result<String> {
+    let Write::UploadFilePart { progress, .. } = &part else { bail!("BACKUP_INVALID_PART"); };
+    for attempt in 0..3 {
+        check()?;
+        if let Some(progress) = progress { progress.store(0, Ordering::Relaxed); }
+        match store.write(part.clone()).await {
+            Ok(etag) => return Ok(etag),
+            Err(error) if attempt < 2 && matches!(error.to_string().as_str(),
+                "BACKUP_NETWORK_ERROR" | "BACKUP_SERVICE_UNAVAILABLE" | "BACKUP_RATE_LIMITED") => {
+                for _ in 0..(10 * (attempt + 1)) {
+                    check()?;
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("last part attempt returns its result")
+}
+
 impl<S: ObjectStore> S3Provider<S> {
     // Callers validate the persisted scope, operation and key before discarding it.
     async fn discard_upload(&self, state: &UploadState) -> Result<()> {
@@ -1326,37 +1351,10 @@ impl<S: ObjectStore> S3Provider<S> {
                     }
                     state.completed_bytes = parts.iter().map(|p| p.bytes).sum();
                     checkpoint(&state)?;
-                    let mut attempt = 0;
-                    let etag = loop {
-                        check()?;
-                        if let Some(progress) = &progress {
-                            progress.store(0, Ordering::Relaxed);
-                        }
-                        let result = self.store.write(Write::UploadFilePart {
-                            key: key.clone(),
-                            upload_id: upload_id.clone(),
-                            part: number as u32,
-                            path: source.path.clone(),
-                            offset,
-                            bytes,
-                            progress: progress.clone(),
-                        })
-                        .await;
-                        match result {
-                            Ok(etag) => break etag,
-                            Err(error) if attempt < 2 && matches!(error.to_string().as_str(),
-                                "BACKUP_NETWORK_ERROR" | "BACKUP_SERVICE_UNAVAILABLE" | "BACKUP_RATE_LIMITED") => {
-                                // Same part number and byte range replace the uncertain part.
-                                // Never retry Create/Complete or conditional writes this way.
-                                attempt += 1;
-                                for _ in 0..(10 * attempt) {
-                                    check()?;
-                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                }
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    };
+                    let etag = upload_part_with_retry(&self.store, Write::UploadFilePart {
+                        key: key.clone(), upload_id: upload_id.clone(), part: number as u32,
+                        path: source.path.clone(), offset, bytes, progress: progress.clone(),
+                    }, &check).await?;
                     parts.retain(|p| p.number != number as u32);
                     parts.push(super::store::Part {
                         number: number as u32,

@@ -504,7 +504,7 @@ impl SenderPoolRunner {
         self.connection_pool.spawn(async move {
             let response = tokio::select! { biased;
                 _ = tx.closed() => return PoolEvent::Probe { id, dc, outcome: ProbeOutcome::Canceled },
-                response = tokio::time::timeout(Duration::from_secs(25), result) => response,
+                response = tokio::time::timeout(Duration::from_secs(600), result) => response,
             };
             let (response, failure) = match response {
                 Ok(Ok(response)) => (response, "probe_rpc_failed"),

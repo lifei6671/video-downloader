@@ -25,6 +25,12 @@ struct Loaded {
     bundle: Bundle,
     documents: Vec<tl::types::Document>,
 }
+pub(crate) struct PreparedBundle {
+    id: Option<i32>,
+    loaded: Loaded,
+    envelope: Envelope,
+    already_present: bool,
+}
 pub(super) fn display_heading(title: Option<&str>, filename: Option<&str>) -> Option<String> {
     [title, filename]
         .into_iter()
@@ -501,21 +507,13 @@ impl GrammersTransport {
             .map_err(rpc_error)?;
         Ok(())
     }
-    pub(super) async fn send_bundle(
-        &self,
-        uploaded: PreparedUpload,
-        envelope: Envelope,
-        random_id: i64,
-        video: Option<VideoAttributes>,
-        io: &Io,
-        before_publish: &mut (dyn FnMut() -> Result<()> + Send),
-    ) -> Result<Option<i32>> {
+    pub(super) async fn prepare_bundle(&self, envelope: &Envelope, io: &Io) -> Result<PreparedBundle> {
         let existing = if self.preferred_message.is_some() || (envelope.kind == "event"
             && self.new_delete_operation.as_deref() == Some(&envelope.operation_id))
         {
             None
         } else {
-            self.operation_bundle(&envelope, io).await?
+            self.operation_bundle(envelope, io).await?
         };
         let existing = match (existing, self.preferred_message) {
             (Some(existing), _) => Some(existing),
@@ -555,10 +553,10 @@ impl GrammersTransport {
         if let Some(old) = loaded.bundle.attachments.iter().find(|a| {
             a.envelope.operation_id == envelope.operation_id && a.envelope.kind == envelope.kind
         }) {
-            if old.envelope != envelope {
+            if old.envelope != *envelope {
                 bail!("TELEGRAM_OPERATION_MISMATCH");
             }
-            return Ok(id);
+            return Ok(PreparedBundle { id, loaded, envelope: envelope.clone(), already_present: true });
         }
         if loaded
             .bundle
@@ -568,6 +566,14 @@ impl GrammersTransport {
         {
             bail!("TELEGRAM_OPERATION_MISMATCH");
         }
+        Ok(PreparedBundle { id, loaded, envelope: envelope.clone(), already_present: false })
+    }
+    pub(super) async fn send_bundle(
+        &self, uploaded: PreparedUpload, prepared: PreparedBundle, random_id: i64,
+        video: Option<VideoAttributes>, before_publish: &mut (dyn FnMut() -> Result<()> + Send),
+    ) -> Result<Option<i32>> {
+        let PreparedBundle { id, mut loaded, envelope, already_present } = prepared;
+        if already_present { return Ok(id); }
         let media = self
             .client
             .invoke(&tl::functions::messages::UploadMedia {

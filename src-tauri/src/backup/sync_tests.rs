@@ -3829,3 +3829,50 @@ async fn telegram_space_summary_maps_only_active_network_errors_to_reconnecting(
     }
     f.core.shutdown().await;
 }
+
+#[tokio::test]
+async fn display_batches_multiple_spaces_without_waiting_for_task_lock() {
+    let (f, _, engine) = sync_fixture().await;
+    engine.execute_upload(&claim(&engine, &f.core)).await.unwrap();
+    let mut other = f.space.clone(); other.space_id = uuid::Uuid::new_v4().to_string(); other.prefix = "other/".into();
+    f.core.backup_db(|db| {
+        let tx = db.unchecked_transaction()?;
+        repository::save_space(&tx, &other)?;
+        for i in 0..500 {
+            let id = format!("display-{i}");
+            tx.execute("INSERT INTO media_assets SELECT ?1,NULL,metadata_json,original_filename,content_sha256,content_bytes,asset_state FROM media_assets WHERE asset_id=?2", params![id,f.id])?;
+            tx.execute("INSERT INTO asset_local_files SELECT ?1,path,bytes,sha256,source_json,verified_at,local_state FROM asset_local_files WHERE asset_id=?2", params![id,f.id])?;
+            for space in [&f.space.space_id, &other.space_id] {
+                tx.execute("INSERT INTO backup_space_assets(space_id,remote_asset_id,local_asset_id) VALUES(?1,?2,?2)", params![space,id])?;
+            }
+        }
+        tx.commit()?; Ok(())
+    }).unwrap();
+    let start = std::time::Instant::now();
+    let list = crate::backup::reconcile::list_for_display(&f.core, &other.space_id).unwrap();
+    assert_eq!(list.len(), 501);
+    for entry in list.iter().filter(|e| e.entry.asset.asset_id.starts_with("display-")) {
+        assert!(entry.in_current_space);
+        assert_eq!(entry.backup_locations.len(), 2);
+    }
+    eprintln!("asset_display assets=501 spaces=2 first_ms={:.3}", start.elapsed().as_secs_f64()*1000.0);
+    let start = std::time::Instant::now();
+    assert_eq!(crate::backup::reconcile::list_for_display_cached(&f.core, &other.space_id, false).unwrap().len(), 501);
+    eprintln!("asset_display assets=501 spaces=2 polling_ms={:.3}", start.elapsed().as_secs_f64()*1000.0);
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let owner = f.core.clone();
+    let holder = std::thread::spawn(move || owner.backup_db(|_| {
+        locked_tx.send(()).unwrap(); release_rx.recv().unwrap(); Ok(())
+    }).unwrap());
+    locked_rx.recv().unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let reader = f.core.clone(); let space = other.space_id;
+    let worker = std::thread::spawn(move || {
+        let result = crate::backup::reconcile::list_for_display_cached(&reader, &space, false).map(|v| v.len());
+        done_tx.send(result).unwrap();
+    });
+    let result = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+    release_tx.send(()).unwrap(); holder.join().unwrap(); worker.join().unwrap();
+    assert_eq!(result.expect("asset display waited for main task lock").unwrap(), 501);
+}

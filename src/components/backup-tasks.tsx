@@ -69,10 +69,10 @@ export function useBackupTasks() {
     return () => { disposed = true; };
   }, [settings]);
   const backupEnabled = !settingsLoaded ? undefined : !settings ? false : syncPreference?.settings === settings ? !syncPreference.enabled ? false : settings.enabled && !settings.connection_pending ? true : undefined : undefined;
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (verifyLocal = true) => {
     if (!settings) return;
     const sequence = ++reloadSequence.current;
-    const [list, ops, active] = await Promise.all([api.backupAssets(settings.space_id), api.backupOperations(settings.space_id),
+    const [list, ops, active] = await Promise.all([api.backupAssets(settings.space_id, verifyLocal), api.backupOperations(settings.space_id),
       settings.connection_pending || !settings.enabled ? api.backupSettings() : Promise.resolve(settings)]);
     if (live.current && currentSpace.current === settings.space_id && sequence === reloadSequence.current) {
       if (active?.space_id === settings.space_id && (active.enabled !== settings.enabled || active.connection_pending !== settings.connection_pending)) setSettings(active);
@@ -112,7 +112,7 @@ export function useBackupTasks() {
     const tick = async () => {
       if (running || disposed) return;
       running = true;
-      try { await reload(); pollError.current = ''; }
+      try { await reload(false); pollError.current = ''; }
       catch (e) { const message = errorText(e); if (live.current && pollError.current !== message) { pollError.current = message; toast.error(message, { id: 'backup-error' }); } }
       finally {
         running = false;

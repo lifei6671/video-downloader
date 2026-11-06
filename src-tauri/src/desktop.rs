@@ -98,7 +98,11 @@ async fn export_asset_transcript(app:tauri::AppHandle,core:State<'_,AppCore>,ass
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 #[tauri::command]
-fn list_backup_assets(core:State<AppCore>,space_id:String)->Result<Vec<yingqu_core::backup::reconcile::DisplayEntry>,String>{yingqu_core::backup::reconcile::list_for_display(&core,&space_id).map_err(error)}
+async fn list_backup_assets(core:State<'_, AppCore>,space_id:String,verify_local:Option<bool>)->Result<Vec<yingqu_core::backup::reconcile::DisplayEntry>,String>{
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || yingqu_core::backup::reconcile::list_for_display_cached(&core, &space_id, verify_local.unwrap_or(true)))
+        .await.map_err(|e| e.to_string())?.map_err(error)
+}
 #[tauri::command]
 async fn refresh_backup_assets(core:State<'_,AppCore>,space_id:String)->Result<yingqu_core::backup::reconcile::Refresh,String>{
     let provider=yingqu_core::backup::spaces::provider(&core,&space_id).map_err(error)?;

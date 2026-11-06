@@ -1,46 +1,44 @@
-# 备份网络稳定性与操作列表性能验证
+# 备份弱网与资产列表性能验证
 
-日期：2026-11-05。基线：`24cb3064de18e7f92509ec7963420edcf84f2646`。范围为本轮审查文档的六项优先问题；未提交或推送。
+日期：2026-11-06。基线：`78fd3313fbd6d8625cae5bfea5561e81d4017dc9`，初始工作区干净。按本次评审修复四项重点问题，并处理响应期限、空间索引和重复授权；未提交或推送。
 
-## 实现
+## 实现与边界
 
-1. S3 文件 PUT 和文件分片请求使用 `60s + bytes / 64KiB/s` 向上取整的独立 read/operation 预算，连接上限仍为 15 秒。启用 SDK 上传停滞保护，宽限期 20 秒；元数据仍使用原短超时。取消沿原任务 future 回收路径生效。
-2. Telegram 在准备附件、读取目标和生成 rich message 成功后，紧接实际发布 RPC 前同步持久化 `Sending`。准备阶段失败仍是 `Prepared`；已发出但回复丢失仍只对账，不盲目重发。
-3. 已初始化 sender 中未取消的文件 RPC 超过 24 秒、控制 RPC 超过 55 秒未完成时返回超时，按连接 ID 淘汰。媒体连接进入现有降级和冷却；恢复探测失败关闭被探测 generation，保留授权及发送日志。取消请求不参与健康超时判断。
-4. v8 增加轻量操作投影和同事务触发器，界面按空间通过独立只读 WAL 连接读取，不持有主任务锁。上传进度每秒只更新变化的独立列，避免反复解析、序列化和重写大 payload；恢复检查点保持原业务边界。按需恢复改为按空间、资产及状态直接查询。
-5. S3 分片对网络错误、503 等服务错误、限流最多尝试 3 次，退避 1/2 秒并每 100ms 检查取消；始终重用 upload ID、分片编号和字节范围。Create/Complete 与条件写不进入此局部重试。跨任务重启仍沿既有清理与重传契约。
-6. Telegram 已知目标消息的常规附件更新直接读取该消息，保留归属、operation/kind 与内容检查；缺少可靠位置或发送结果未知时仍使用历史查找和重复操作检查。
+1. **S3 RequestTimeout**：先按服务端错误码分类，HTTP 400 的 `RequestTimeout` 进入 `BACKUP_NETWORK_ERROR`，普通 400 拒绝不重试。分片沿用最多三次、1/2 秒退避与取消检查，每次重用 upload ID、part number 和字节范围；Create/Complete、条件写不进入局部重试。
+2. **S3 响应期限**：保留 `60s + bytes / 64KiB/s` 总预算、15 秒连接期限和 20 秒停滞宽限。HTTP 客户端消费最后一帧后，再限制等待响应最多 60 秒，覆盖文件 PUT 与 UploadPart，且不依赖进度回调。这个起点包含刷新最后的 socket 缓冲，不代表远端已确认接收。
+3. **Telegram 慢速分片**：sender 从固定 24 秒改为 60 秒无 socket 进展、599 秒总期限；分片和媒体恢复探测外层均为 600 秒。上传/下载文件 Io 使用 2,410 秒活动等待预算，容纳最多四次分片尝试与退避；元数据操作仍为 60 秒。未取消的请求到期仍淘汰对应连接，取消不参与健康超时。加密响应解析前不能归属单个请求，因此连接读取会刷新该连接的文件请求；总期限仍限制持续碎片流量。
+4. **Telegram 账号并发**：文件 RPC 超时后增加共享 semaphore 的每请求权重，实际并发从 16 依次降至 8/4/2/1；已等待的请求重新核对权重，多个文件共享降低后的预算。该预算实例内不自动升回。并发跨 DC 未授权恢复在锁内复查授权代次，成功导入后其余分片复用结果，不重复执行整组授权请求。
+5. **首次备份准备**：历史定位、归属与旧附件校验移到大文件上传前。视频确认后，封面和文案从同操作、同设备/代次的确认日志取得视频消息 ID，即使资产投影尚未发布也不再各扫一次历史。没有可靠位置或发送结果未知时继续历史对账；`Sending` 仍紧邻实际发布 RPC，旧未知发送记录不会自动重置。
+6. **资产列表**：Tauri 命令移至 `spawn_blocking`，通过独立只读连接的单事务批量读取。完整显示路径固定五条 SELECT，不按资产或空间追加独立查询；其他空间只读备份位置字段，当前空间才解析完整远端快照。保留隐藏、删除、冲突及附件语义。文件存在性按路径缓存 30 秒，轮询使用缓存；显式刷新与操作后的读取强制核验，省略新增 IPC 参数仍保持立即检查。
+7. **操作列表**：按是否提供空间拆开查询，按空间读取可使用既有索引，保留原排序与完整轻量历史。
 
-SDK 的 read timeout 从请求开始计时，不能当作上传完成后的纯响应等待上限；参考 [AWS Rust 超时说明](https://docs.aws.amazon.com/sdk-for-rust/latest/dg/timeouts.html)。同 upload ID/part number 重传替换该分片，参考 [S3 multipart 说明](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html)。
-
-原恢复 payload、封面及文案快照保留，未迁移为新的共享快照存储。已有 UI 用历史操作计算各资产状态，因此保留当前空间的完整薄历史；未新增历史分页页面或改变保留策略。文档列为后续处理的重复摘要计算、跨 DC 授权合并、多空间 N+1、S3 客户端复用不在本轮范围。
+上传前、流式上传中、上传后的完整摘要核验暂时保留。评审将其列为低优先级优化；当前没有引入稳定文件身份契约，不以大小/mtime 替代完整核验。文件缓存仅用于列表展示，不替代上传、恢复或删除的真实校验。S3 客户端复用、整任务断点续传和多设备同时写入也未扩展。
 
 ## 本地性能测量
 
-Windows debug Rust，真实临时 SQLite/WAL，每条操作包含约 128 KiB 的 payload；旧路径为持有主锁的七字段 `json_extract`，新路径包含读取及构造完整 UI Operation。单次测量，用于验证本轮瓶颈，不代表线上 P95。
+Windows debug Rust，真实临时 SQLite/WAL，501 条资产，其中 500 条同时属于两个空间。单次完整显示读取为 **12.512 ms**，缓存路径为 **10.269 ms**，包含 Rust 结果构造；不包含 IPC 与界面渲染，不代表线上 P95。测试同时验证主任务锁被另一个线程持有时，显示读取仍能在两秒测试期限内完成。
 
-| 历史记录数 | 原查询 | 新投影查询 |
-| --- | ---: | ---: |
-| 500 | 141.821 ms | 3.792 ms |
-| 2,000 | 434.738 ms | 7.620 ms |
-| 5,000 | 1,149.092 ms | 19.858 ms |
-
-独立读连接锁保持占用时，取消操作在 500ms 测试期限内完成。重复相同进度不会产生额外数据库变更，原恢复 payload 内容不变。
+上轮 2026-11-05 的操作投影测量是历史证据，本轮没有重测：5,000 条、每条约 128 KiB payload 的查询从 1,149.092 ms 降至 19.858 ms。不能将该数字与本次资产列表混作同一场景。
 
 ## 实际验证
 
 | 检查 | 结果 |
 | --- | --- |
-| `cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- --test-threads=4` | PASS，490 passed / 27 ignored |
-| `cargo test --manifest-path src-tauri/Cargo.toml --test backup_migration --locked` | PASS，6 passed / 1 ignored |
-| `cargo test --manifest-path vendor/grammers-mtsender/Cargo.toml --lib --features proxy --locked` | PASS，20 passed |
+| `cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=4` | PASS；核心库 497 passed / 27 ignored，集成 18 passed / 3 ignored，doc-tests 0 |
+| `cargo test --manifest-path vendor/grammers-mtsender/Cargo.toml --lib --features proxy --locked` | PASS，21 passed；集成审查补强取消期限测试后定向重跑该项 PASS |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml --features desktop --all-targets --locked -- -D warnings` | PASS |
 | `cargo clippy --manifest-path vendor/grammers-mtsender/Cargo.toml --lib --features proxy --locked -- -D warnings` | PASS |
 | `npm run build` | PASS，TypeScript 与生产前端构建 |
+| `tests/backup-delete-flow-browser.mjs` | PASS，三视口、列表/信息流、任务/纯资产共 12 场景，合成 IPC |
+| `tests/telegram-backup-locations-browser.mjs` | PASS，任务/纯资产各三视口，位置 Tooltip、键盘、轮询缓存与操作刷新 |
 | `git diff --check` | PASS |
 
-回归包含：本地 TCP 持续上传超过 30 秒后成功；停滞上传在 45 秒测试期限内失败；同会话分片瞬态恢复、连续失败恰好三次、退避取消及清理证据；Telegram 准备失败零发布、重试一次发布、回复丢失恢复；已初始化静默控制 socket 重建、静默媒体 socket 回退到健康控制连接、取消后复用健康连接；v7 回填、v1/v5/v6 升级、失败回滚和完整备份。
+新增回归包括：真实 SDK 接收 XML HTTP 400 RequestTimeout 后同会话重试成功，普通 InvalidRequest 400 不重试；128 MiB 请求体全部读完后服务端持续不回复，PUT/UploadPart 均在独立响应期限内结束；512 KiB 加密 Telegram 响应以 16 KiB/s 持续到达超过旧期限仍完整成功；16 个账号许可已占用并有等待者时降低预算；8 个并发跨 DC 未授权请求只导入一次；准备失败零上传、首次附件在无投影时复用视频确认日志；多空间批量读取、主锁隔离、文件缓存强制刷新及过期。
 
-连接测试使用合成授权 key 和回环 TCP。控制 socket 重建测试发出的是文件 RPC，覆盖 24 秒分支；普通控制 RPC 的 55 秒分支没有单独新增回归。已知附件零历史读取按调用路径核查，未用真实频道计数验收。真实 Telegram/S3 网络、原生 Tauri 运行、macOS、安装包验收：`NOT_RUN`，未使用真实用户凭据。忽略项不计通过。前端保留既有 sourcemap / bundle size 提示。
+浏览器使用现有 Playwright CLI 和 Vite 开发服务，不访问真实平台。位置测试同步适配当前卡片的状态文本/错误文本 Tooltip，保留位置完整文案、键盘和窗口边界断言，并新增轮询缓存与操作刷新 IPC 检查。
 
-独立交付复核采用 S3、Telegram、数据库/界面三个分区，加最终集成审查；最终结论以交付时冻结目标为准。
+真实 Telegram/S3/R2、原生 Tauri 运行、macOS、安装包验收：**NOT_RUN**。未使用真实用户凭据；忽略项不计通过。构建仍有既有 sourcemap/bundle size 提示和 Windows linker 提示。vendor 单独测试生成的临时 Cargo.lock 不纳入改动。
+
+## 交付复核
+
+按 S3、Telegram、资产列表/数据库三个分区执行 CHILD_AGENT 独立只读审查，并以各文件 SHA256 冻结检查。三个代码 checkpoint 均 PASSED；S3 测试缺少有界等待的发现已修复并复核。集成审查另发现取消测试仍只推进旧 25 秒，已改为 40 秒后发起存活请求、再推进 21 秒越过旧请求的 60 秒期限，确保不混入正常媒体空闲回收；定向测试通过。文档、浏览器测试及跨分区契约在最终集成审查中核对，最终结论以冻结目标与实际验证证据为准。

@@ -169,6 +169,10 @@ impl RemoteDocument {
 }
 pub(super) trait Transport: Send + Sync {
     type Uploaded: Send;
+    type Prepared: Send + Default;
+    fn prepare<'a>(&'a self, _envelope: &'a Envelope, _io: &'a Io) -> ProviderFuture<'a, Self::Prepared> {
+        Box::pin(async { Ok(Self::Prepared::default()) })
+    }
     fn max_bytes(&self) -> u64;
     fn can_upload(&self) -> bool;
     fn can_delete(&self) -> bool {
@@ -204,7 +208,7 @@ pub(super) trait Transport: Send + Sync {
     }
     fn send<'a>(
         &'a self,
-        uploaded: Self::Uploaded,
+        uploaded: (Self::Uploaded, Self::Prepared),
         caption: String,
         random_id: i64,
         video: Option<super::provider::VideoAttributes>,
@@ -315,6 +319,12 @@ impl Io {
             .expect("telegram transfer activity lock poisoned") = Instant::now();
     }
     pub(super) async fn run<T>(&self, work: impl Future<Output = Result<T>>) -> Result<T> {
+        self.run_with_idle(work, self.idle).await
+    }
+    pub(super) async fn run_file<T>(&self, work: impl Future<Output = Result<T>>) -> Result<T> {
+        self.run_with_idle(work, crate::telegram_transfer_engine::FILE_IO_TIMEOUT).await
+    }
+    async fn run_with_idle<T>(&self, work: impl Future<Output = Result<T>>, idle: Duration) -> Result<T> {
         self.check()?;
         self.touch();
         let mut cancel = self.cancel.clone();
@@ -327,7 +337,7 @@ impl Io {
                 _=cancel.wait_for(|v|*v)=>bail!("TELEGRAM_TRANSFER_CANCELED"),
                 _=stop.wait_for(|v|*v)=>{self.check()?;bail!("TELEGRAM_TRANSFER_CANCELED");},
                 _=abort.wait_for(|v|*v)=>bail!("TELEGRAM_TRANSFER_CANCELED"),
-                _=check.tick()=>{self.check()?;if self.activity.lock().expect("telegram transfer activity lock poisoned").elapsed()>=self.idle {bail!("TELEGRAM_TRANSFER_TIMEOUT");}},
+                _=check.tick()=>{self.check()?;if self.activity.lock().expect("telegram transfer activity lock poisoned").elapsed()>=idle {bail!("TELEGRAM_TRANSFER_TIMEOUT");}},
                 result=&mut work=>{self.check()?;return result;}
             }
         }
@@ -583,6 +593,7 @@ pub(super) async fn upload_with_timing(
             if source.bytes > transport.max_bytes() {
                 bail!("TELEGRAM_FILE_TOO_LARGE");
             }
+            let prepared = io.run(transport.prepare(&entry.envelope, io)).await?;
             source_unchanged(&source, io).await?;
             let mut video = if source.kind == "video" {
                 Some(source.video.clone().context("VIDEO_METADATA_UNAVAILABLE")?)
@@ -600,7 +611,7 @@ pub(super) async fn upload_with_timing(
                 hash: Sha256::new(),
                 bytes: 0,
             };
-            let uploaded = timing.run("upload", io.run(transport.upload_with_progress(
+            let uploaded = timing.run("upload", io.run_file(transport.upload_with_progress(
                     &mut reader,
                     source.bytes,
                     format!("yingqu-{}.{}", source.kind, source.container),
@@ -624,7 +635,7 @@ pub(super) async fn upload_with_timing(
                 entry.state = SendState::Sending;
                 journal.save(&entry)
             };
-            match timing.run("send", io.run(transport.send(uploaded, caption, random_id, video, io, &mut before_publish))).await
+            match timing.run("send", io.run(transport.send((uploaded, prepared), caption, random_id, video, io, &mut before_publish))).await
             {
                 Ok(message) => sent_message = message,
                 Err(error) => {
@@ -733,7 +744,7 @@ pub(super) async fn restore(
                 let mut buffer = vec![0_u8; 64 * 1024];
                 loop {
                     let count = io
-                        .run(async {
+                        .run_file(async {
                             reader
                                 .read(&mut buffer)
                                 .await

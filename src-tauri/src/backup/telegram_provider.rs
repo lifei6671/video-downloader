@@ -100,6 +100,22 @@ pub(super) fn for_upload(
         .or_else(|| source.path.file_name().and_then(|name| name.to_str()));
     Ok(transport.with_heading(title, filename))
 }
+
+pub(super) fn upload_destination(journal: &impl Journal, target: &Target, source: &MediaSource, projected: Option<&MediaRef>) -> Result<Option<i32>> {
+    if source.kind == "video" { return Ok(None); }
+    if let Some(entry) = journal.get(&source.operation_id, "video")? {
+        if entry.target != *target || entry.envelope.asset_id != source.asset_id
+            || entry.envelope.operation_id != source.operation_id || entry.envelope.device_id != source.device_id
+            || entry.envelope.generation != source.recreate_revision || entry.envelope.kind != "video" {
+            bail!("TELEGRAM_OPERATION_MISMATCH");
+        }
+        if entry.state != SendState::Confirmed { bail!("TELEGRAM_SEND_UNCONFIRMED"); }
+        let document = entry.document.context("TELEGRAM_SEND_EVIDENCE_INVALID")?;
+        document.check(&entry.envelope)?;
+        return Ok(Some(document.message_id));
+    }
+    projected.map(|reference| target.message_id(reference)).transpose()
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Library {
@@ -878,7 +894,8 @@ impl BackupProvider for TelegramProvider {
                         generation
                     };
                     source.recreate_revision = generation;
-                    let destination=if source.kind=="video" {None} else {projected.assets.get(&source.asset_id).filter(|s|!s.deleted).and_then(|s|s.media.as_ref()).map(|r|target.message_id(r)).transpose()?};
+                    let destination = upload_destination(&CoreJournal(core), &target, &source,
+                        projected.assets.get(&source.asset_id).filter(|s| !s.deleted).and_then(|s| s.media.as_ref()))?;
                     let mut destination=for_upload(core, &transport.for_message(destination), &target, &source)?;
                     telegram_transfer::prepare_video(core, &mut source, io).await?;
                     if source.kind == "video" && CoreJournal(core).get(&source.operation_id, &source.kind)?.is_none_or(|entry|entry.state==SendState::Prepared) {
@@ -951,7 +968,7 @@ impl BackupProvider for TelegramProvider {
                         let mut buffer = vec![0; 65536];
                         let mut remaining = bytes;
                         loop {
-                            let count = io.run(async { Ok(source.read(&mut buffer).await?) }).await?;
+                            let count = io.run_file(async { Ok(source.read(&mut buffer).await?) }).await?;
                             if count == 0 { break; }
                             remaining = remaining.checked_sub(count as u64).context("BACKUP_SIZE_MISMATCH")?;
                             io.run(async { Ok(writer.write_all(&buffer[..count]).await?) }).await?;

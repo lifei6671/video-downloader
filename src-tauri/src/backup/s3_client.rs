@@ -163,6 +163,7 @@ fn error<E: ProvideErrorMetadata>(error: SdkError<E>) -> anyhow::Error {
         (Some("NoSuchKey"), _) => "BACKUP_OBJECT_NOT_FOUND",
         (Some("NoSuchBucket"), _) => "BACKUP_BUCKET_NOT_FOUND",
         (Some("NoSuchUpload"), _) => "BACKUP_UPLOAD_EXPIRED",
+        (Some("RequestTimeout"), _) => "BACKUP_NETWORK_ERROR",
         (_, Some(412)) => "BACKUP_PRECONDITION_FAILED",
         (_, Some(409)) => "BACKUP_CONCURRENT_UPDATE",
         (_, Some(403)) => "BACKUP_ACCESS_DENIED",
@@ -408,8 +409,8 @@ impl ObjectStore for S3Store {
                     let body = ByteStream::from_path(path)
                         .await
                         .context("BACKUP_SOURCE_UNAVAILABLE")?;
-                    let body = observed_body(body, progress);
-                    Ok(self
+                    let (body, finished) = upload_body(body, bytes, progress);
+                    Ok(upload_response(finished, self
                         .client
                         .put_object()
                         .content_type(content_type(&key))
@@ -421,9 +422,7 @@ impl ObjectStore for S3Store {
                         .body(body)
                         .customize()
                         .config_override(upload_config(bytes))
-                        .send()
-                        .await
-                        .map_err(error)?
+                        .send()).await?
                         .e_tag()
                         .context("BACKUP_ETAG_MISSING")?
                         .into())
@@ -490,8 +489,8 @@ impl ObjectStore for S3Store {
                         .build()
                         .await
                         .context("BACKUP_SOURCE_UNAVAILABLE")?;
-                    let body = observed_body(body, progress);
-                    Ok(self
+                    let (body, finished) = upload_body(body, bytes, progress);
+                    Ok(upload_response(finished, self
                         .client
                         .upload_part()
                         .bucket(&self.bucket)
@@ -502,9 +501,7 @@ impl ObjectStore for S3Store {
                         .body(body)
                         .customize()
                         .config_override(upload_config(bytes))
-                        .send()
-                        .await
-                        .map_err(error)?
+                        .send()).await?
                         .e_tag()
                         .context("BACKUP_ETAG_MISSING")?
                         .into())
@@ -600,21 +597,43 @@ fn upload_config(bytes: u64) -> aws_sdk_s3::config::Builder {
             .grace_period(Duration::from_secs(20)).build())
 }
 
-fn observed_body(body: ByteStream, progress: Option<Arc<AtomicU64>>) -> ByteStream {
-    let Some(progress) = progress else {
-        return body;
-    };
-    ByteStream::new(body.into_inner().map_preserve_contents(move |body| {
+// Includes flushing the final buffered bytes: this starts when the HTTP client
+// consumes the last frame, not when the remote server acknowledges receipt.
+const UPLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn upload_body(body: ByteStream, bytes: u64, progress: Option<Arc<AtomicU64>>)
+    -> (ByteStream, tokio::sync::watch::Receiver<bool>) {
+    let (finished, receiver) = tokio::sync::watch::channel(false);
+    let body = ByteStream::new(body.into_inner().map_preserve_contents(move |body| {
         let progress = progress.clone();
+        let finished = finished.clone();
         let mut count = 0u64;
         SdkBody::from_body_1_x(body.map_frame(move |frame| {
             if let Some(data) = frame.data_ref() {
                 count += data.len() as u64;
-                progress.store(count, Ordering::Relaxed);
+                if let Some(progress) = &progress { progress.store(count, Ordering::Relaxed); }
+                if count >= bytes { finished.send_replace(true); }
             }
             frame
         }))
-    }))
+    }));
+    (body, receiver)
+}
+
+async fn upload_response<T, E: ProvideErrorMetadata>(
+    mut finished: tokio::sync::watch::Receiver<bool>,
+    request: impl std::future::Future<Output = std::result::Result<T, SdkError<E>>>,
+) -> Result<T> {
+    tokio::pin!(request);
+    tokio::select! {
+        biased;
+        result = &mut request => return result.map_err(error),
+        completed = async { finished.wait_for(|done| *done).await.is_ok() } => {
+            if !completed { return request.await.map_err(error); }
+        }
+    }
+    tokio::time::timeout(UPLOAD_RESPONSE_TIMEOUT, request).await
+        .map_err(|_| anyhow!("BACKUP_NETWORK_ERROR"))?.map_err(error)
 }
 
 #[cfg(test)]
@@ -623,11 +642,12 @@ mod progress_tests {
     #[tokio::test]
     async fn http_body_progress_counts_consumed_bytes_without_changing_content() {
         let progress = Arc::new(AtomicU64::new(0));
-        let body = observed_body(ByteStream::from(vec![7u8; 1234]), Some(progress.clone()));
+        let (body, finished) = upload_body(ByteStream::from(vec![7u8; 1234]), 1234, Some(progress.clone()));
         assert_eq!(progress.load(Ordering::Relaxed), 0);
         let bytes = body.collect().await.unwrap().into_bytes();
         assert_eq!(bytes.as_ref(), vec![7u8; 1234]);
         assert_eq!(progress.load(Ordering::Relaxed), 1234);
+        assert!(*finished.borrow());
     }
 }
 
@@ -652,6 +672,78 @@ mod upload_timeout_tests {
         let path = root.path().join("upload.mp4");
         std::fs::File::create(&path).unwrap().set_len(128 * 1024 * 1024).unwrap();
         (S3Store { client: aws_sdk_s3::Client::from_conf(config), bucket: "test".into() }, listener, root, path)
+    }
+
+    #[tokio::test]
+    async fn request_timeout_xml_retries_the_same_part_but_other_bad_requests_do_not() {
+        for code in ["RequestTimeout", "InvalidRequest"] {
+            let (store, listener, _root, path) = fixture().await;
+            let mut server = tokio::spawn(async move {
+                let mut requests = Vec::new();
+                for attempt in 0..if code == "RequestTimeout" { 2 } else { 1 } {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut headers = Vec::new();
+                    while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); }
+                    let headers = String::from_utf8(headers).unwrap();
+                    let len: usize = headers.lines().find_map(|s| s.to_ascii_lowercase().strip_prefix("content-length:").map(|s| s.trim().parse().unwrap())).unwrap();
+                    let mut body = vec![0; len]; socket.read_exact(&mut body).await.unwrap();
+                    requests.push((headers.lines().next().unwrap().to_owned(), body));
+                    let (status, body) = if attempt == 0 {
+                        ("400 Bad Request", format!("<Error><Code>{code}</Code><Message>test</Message><RequestId>test</RequestId></Error>"))
+                    } else { ("200 OK", String::new()) };
+                    socket.write_all(format!("HTTP/1.1 {status}\r\nETag: \"ok\"\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+                requests
+            });
+            let result = tokio::time::timeout(Duration::from_secs(10), super::super::s3_provider::upload_part_with_retry(&store, Write::UploadFilePart {
+                key: "video.mp4".into(), upload_id: "same-upload".into(), part: 7, path,
+                offset: 4096, bytes: 1024, progress: None,
+            }, &|| Ok(()))).await.expect("part retry exceeded test deadline");
+            let requests = match tokio::time::timeout(Duration::from_secs(10), &mut server).await {
+                Ok(result) => result.unwrap(),
+                Err(_) => { server.abort(); panic!("expected retry never reached server"); }
+            };
+            if code == "RequestTimeout" {
+                assert_eq!(result.unwrap(), "\"ok\"");
+                assert_eq!(requests.len(), 2);
+                assert_eq!(requests[0], requests[1]);
+                assert!(requests[0].0.contains("partNumber=7"));
+                assert!(requests[0].0.contains("uploadId=same-upload"));
+            } else {
+                assert_eq!(result.unwrap_err().to_string(), "BACKUP_REQUEST_REJECTED");
+                assert_eq!(requests.len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_upload_without_response_has_a_separate_deadline() {
+        for multipart in [false, true] {
+            let (store, listener, _root, path) = fixture().await;
+            let (read, received) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); }
+                let headers = String::from_utf8(headers).unwrap();
+                let len: u64 = headers.lines().find_map(|s| s.to_ascii_lowercase().strip_prefix("content-length:").map(|s| s.trim().parse().unwrap())).unwrap();
+                assert_eq!(tokio::io::copy(&mut (&mut socket).take(len), &mut tokio::io::sink()).await.unwrap(), len);
+                read.send(()).unwrap();
+                // Keep the connection open after consuming the entire body.
+                let mut byte = [0]; let _ = socket.read(&mut byte).await;
+            });
+            let operation = if multipart { Write::UploadFilePart {
+                key: "video.mp4".into(), upload_id: "upload".into(), part: 1, path,
+                offset: 0, bytes: 128 * 1024 * 1024, progress: None,
+            }} else { Write::PutFile {
+                key: "video.mp4".into(), path, bytes: 128 * 1024 * 1024, sha256: "a".repeat(64), progress: None,
+            }};
+            let request = tokio::spawn(async move { store.write(operation).await });
+            tokio::time::timeout(Duration::from_secs(10), received).await.unwrap().unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(70), request).await.unwrap().unwrap();
+            assert_eq!(result.unwrap_err().to_string(), "BACKUP_NETWORK_ERROR");
+            server.abort();
+        }
     }
 
     #[tokio::test]

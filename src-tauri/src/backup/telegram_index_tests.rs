@@ -17,6 +17,7 @@ struct Downloads {
 }
 impl Transport for Downloads {
     type Uploaded = ();
+    type Prepared = ();
     fn max_bytes(&self) -> u64 {
         16 * 1024 * 1024
     }
@@ -33,7 +34,7 @@ impl Transport for Downloads {
     }
     fn send<'a>(
         &'a self,
-        _: (),
+        _: ((), ()),
         _: String,
         _: i64,
         _: Option<VideoAttributes>,

@@ -24,7 +24,10 @@ pub(crate) const DOWNLOAD_PART: u64 = 512 * 1024;
 pub(crate) const UPLOAD_PART: u64 = 512 * 1024;
 const GLOBAL_REQUESTS: usize = 16;
 const MEMORY_BUDGET: usize = 64 * 1024 * 1024;
-const RPC_TIMEOUT: Duration = Duration::from_secs(25);
+// The sender detects 60s without socket progress and caps each file RPC at 599s.
+const RPC_TIMEOUT: Duration = Duration::from_secs(600);
+// A chunk can make four RPC attempts; enclosing media reads must not expire first.
+pub(crate) const FILE_IO_TIMEOUT: Duration = Duration::from_secs(4 * 600 + 10);
 
 #[derive(Clone)]
 pub(crate) struct Settings {
@@ -108,9 +111,10 @@ impl Plan {
 /// Shared across backup/download bindings with the same verified account id.
 pub(crate) struct Budget {
     requests: Arc<Semaphore>,
+    request_weight: AtomicUsize,
     media_connections: Arc<Semaphore>,
     cooldown: Mutex<Option<Instant>>,
-    authorization: tokio::sync::Mutex<()>,
+    authorization: tokio::sync::Mutex<HashMap<i32, u64>>,
 }
 impl Budget {
     pub fn account(id: &str) -> Arc<Self> {
@@ -133,9 +137,10 @@ impl Budget {
         }
         let budget = Arc::new(Self {
             requests: Arc::new(Semaphore::new(GLOBAL_REQUESTS)),
+            request_weight: AtomicUsize::new(1),
             media_connections: Arc::new(Semaphore::new(8)),
             cooldown: Mutex::new(None),
-            authorization: tokio::sync::Mutex::new(()),
+            authorization: tokio::sync::Mutex::new(HashMap::new()),
         });
         accounts.insert(id.into(), budget.clone());
         budget
@@ -151,15 +156,19 @@ impl Budget {
         Ok(())
     }
     async fn acquire(&self) -> Result<OwnedSemaphorePermit> {
-        self.check()?;
-        let permit = self
-            .requests
-            .clone()
-            .acquire_owned()
-            .await
-            .context("TELEGRAM_TRANSFER_CANCELED")?;
-        self.check()?;
-        Ok(permit)
+        loop {
+            self.check()?;
+            let weight = self.request_weight.load(Ordering::Relaxed);
+            let permit = self.requests.clone().acquire_many_owned(weight as u32).await
+                .context("TELEGRAM_TRANSFER_CANCELED")?;
+            self.check()?;
+            // Waiters enqueued before a timeout must also obey the reduced limit.
+            if weight == self.request_weight.load(Ordering::Relaxed) { return Ok(permit); }
+        }
+    }
+    fn slow_down(&self) {
+        let _ = self.request_weight.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+            |weight| Some((weight * 2).min(GLOBAL_REQUESTS)));
     }
     fn flood(&self, seconds: u32) {
         let until = Instant::now() + Duration::from_secs(u64::from(seconds));
@@ -293,6 +302,7 @@ pub(crate) async fn cover_chunk<T>(
     match tokio::time::timeout(RPC_TIMEOUT, work).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => {
+            if matches!(&error, InvocationError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut) { budget.slow_down(); }
             if let InvocationError::Rpc(ref rpc) = error {
                 if rpc.code == 420 {
                     budget.flood(rpc.value.unwrap_or(60));
@@ -300,7 +310,7 @@ pub(crate) async fn cover_chunk<T>(
             }
             Err(crate::backup::telegram_session::rpc_error(error))
         }
-        Err(_) => bail!("TELEGRAM_TRANSFER_TIMEOUT"),
+        Err(_) => { budget.slow_down(); bail!("TELEGRAM_TRANSFER_TIMEOUT"); },
     }
 }
 async fn rpc<'a, T>(
@@ -333,6 +343,7 @@ async fn rpc<'a, T>(
         let (error, retry) = match result {
             Ok(Ok(value)) => return Ok(value),
             Ok(Err(error)) => {
+                if matches!(&error, InvocationError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut) { budget.slow_down(); }
                 if let InvocationError::Rpc(ref e) = error {
                     if e.code == 420 {
                         budget.flood(e.value.unwrap_or(60));
@@ -365,7 +376,7 @@ async fn rpc<'a, T>(
                 ) || matches!(&error, InvocationError::Rpc(e) if e.code >= 500);
                 (crate::backup::telegram_session::rpc_error(error), retry)
             }
-            Err(_) => (anyhow::anyhow!("TELEGRAM_TRANSFER_TIMEOUT"), true),
+            Err(_) => { budget.slow_down(); (anyhow::anyhow!("TELEGRAM_TRANSFER_TIMEOUT"), true) },
         };
         stats.failures.fetch_add(1, Ordering::Relaxed);
         if let Some(part) = part {
@@ -488,6 +499,7 @@ impl DocumentSource {
                 offset: chunk.offset as i64,
                 limit: DOWNLOAD_PART as i32,
             };
+            let authorization = *self.budget.authorization.lock().await.get(&dc).unwrap_or(&0);
             // Keep raw routing errors here; retry classification is shared below.
             let result = rpc(&self.budget, &self.stats, Route::File, Some(part), || {
                 self.client.get(dc, &request)
@@ -526,7 +538,11 @@ impl DocumentSource {
                     self.document.lock().await.0.dc_id = dc;
                 }
                 Err(error) if error.to_string() == "TELEGRAM_DC_AUTH_REQUIRED" && !authorized => {
-                    let _lock = self.budget.authorization.lock().await;
+                    let mut generations = self.budget.authorization.lock().await;
+                    if generations.get(&dc).copied().unwrap_or(0) != authorization {
+                        authorized = true;
+                        continue;
+                    }
                     let home = rpc(&self.budget, &self.stats, Route::Main, None, || {
                         self.client.home_dc()
                     })
@@ -540,6 +556,7 @@ impl DocumentSource {
                         self.client.import(dc, &exported)
                     })
                     .await?;
+                    generations.insert(dc, authorization.wrapping_add(1));
                     authorized = true;
                 }
                 Err(error) if error.to_string() == "TELEGRAM_DC_AUTH_REQUIRED" => {

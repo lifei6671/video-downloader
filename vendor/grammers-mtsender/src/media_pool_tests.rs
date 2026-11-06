@@ -80,6 +80,9 @@ async fn answer(stream: &mut TcpStream, auth_id: &[u8], session: i64, request: i
     answer_body(stream, auth_id, session, request, &true.to_bytes(), 0).await;
 }
 async fn answer_body(stream: &mut TcpStream, auth_id: &[u8], session: i64, request: i64, result: &[u8], sequence: u32) {
+    stream.write_all(&answer_packet(auth_id, session, request, result, sequence)).await.unwrap();
+}
+fn answer_packet(auth_id: &[u8], session: i64, request: i64, result: &[u8], sequence: u32) -> Vec<u8> {
     use grammers_mtproto::transport::Transport as _;
     let auth = [7; 256];
     let body = [0xf35c6d01_u32.to_le_bytes().as_slice(), &request.to_le_bytes(), result].concat();
@@ -104,7 +107,7 @@ async fn answer_body(stream: &mut TcpStream, auth_id: &[u8], session: i64, reque
         framing.pack(&mut empty);
     }
     framing.pack(&mut packet);
-    stream.write_all(packet.as_ref()).await.unwrap();
+    packet.as_ref().to_vec()
 }
 
 // Stand in for an already-authorized ordinary DC connection so these tests
@@ -562,7 +565,7 @@ async fn initialized_silent_control_is_retired_and_next_request_reconnects() {
     let (auth, session, request, _) = request_packet(&mut old).await;
     answer_body(&mut old, &auth, session, request, &fixture_config(dc).to_bytes(), 0).await;
     let _ = file_packet(&mut old).await; // Initialized and accepts bytes, never answers.
-    tokio::time::pause(); tokio::time::advance(Duration::from_secs(24)).await; tokio::time::resume();
+    tokio::time::pause(); tokio::time::advance(Duration::from_secs(60)).await; tokio::time::resume();
     assert!(matches!(failed.await.unwrap(), Err(InvocationError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut));
     let h = handle.clone();
     let recovered = tokio::spawn(async move { h.raw_invoke_in_dc(dc, part()).await });
@@ -594,7 +597,7 @@ async fn silent_media_degrades_to_healthy_control_without_revoking_authorization
     let h = handle.clone();
     let stalled = tokio::spawn(async move { h.raw_invoke_in_dc(dc, part()).await });
     let _ = request_packet(&mut socket).await;
-    tokio::time::pause(); tokio::time::advance(Duration::from_secs(24)).await; tokio::time::resume();
+    tokio::time::pause(); tokio::time::advance(Duration::from_secs(60)).await; tokio::time::resume();
     assert!(matches!(stalled.await.unwrap(), Err(InvocationError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut));
     let h = handle.clone();
     let fallback = tokio::spawn(async move { h.raw_invoke_in_dc(dc, part()).await });
@@ -617,12 +620,16 @@ async fn canceled_file_deadline_keeps_the_healthy_media_connection() {
     let (mut socket, _) = listener.accept().await.unwrap();
     let _ = file_packet(&mut socket).await;
     canceled.abort(); let _ = canceled.await;
-    tokio::time::pause(); tokio::time::advance(Duration::from_secs(25)).await; tokio::time::resume();
+    tokio::time::pause(); tokio::time::advance(Duration::from_secs(40)).await; tokio::time::resume();
     let h = handle.clone();
     let live = tokio::spawn(async move { h.raw_invoke_in_dc(dc, part()).await });
     let (auth, session, request) = tokio::time::timeout(Duration::from_secs(2), file_packet(&mut socket)).await.unwrap();
+    // Cross the canceled request's 60-second deadline while a newer request
+    // keeps this socket active, independently of normal media idle eviction.
+    tokio::time::pause(); tokio::time::advance(Duration::from_secs(21)).await; tokio::time::resume();
+    tokio::task::yield_now().await;
     answer(&mut socket, &auth, session, request).await;
-    assert!(live.await.unwrap().is_ok());
+    assert!(tokio::time::timeout(Duration::from_secs(2), live).await.unwrap().unwrap().is_ok());
     handle.quit(); runner.await.unwrap();
 }
 
@@ -688,9 +695,40 @@ async fn file_packet(socket: &mut TcpStream) -> (Vec<u8>, i64, i64) {
             for _ in 0..n {
                 let id = i64::from_le_bytes(body[at..at+8].try_into().unwrap());
                 let bytes = i32::from_le_bytes(body[at+12..at+16].try_into().unwrap()) as usize;
-                if body[at+16..at+16+bytes] == part() { return (auth, session, id); }
+                if body[at+16..at+16+bytes].ends_with(&part()) { return (auth, session, id); }
                 at += 16 + bytes;
             }
         }
     }
+}
+
+#[tokio::test]
+async fn continuously_throttled_file_response_survives_the_old_total_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut pool = pool(listener.local_addr().unwrap());
+    let dc = pool.runner.session.home_dc_id().unwrap();
+    let _control = normal_control(&mut pool);
+    pool.runner.media_budget = Some(Arc::new(Semaphore::new(1)));
+    let handle = pool.handle.thin.clone();
+    let runner = tokio::spawn(pool.runner.run());
+    let h = handle.clone();
+    let warmup = tokio::spawn(async move { h.raw_invoke_in_dc(dc, part()).await });
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let (auth, session, request, _) = request_packet(&mut socket).await;
+    answer(&mut socket, &auth, session, request).await;
+    warmup.await.unwrap().unwrap();
+    let body = tl::types::upload::File { r#type: tl::types::storage::FileUnknown {}.into(), mtime: 0, bytes: vec![9; 512*1024] }.to_bytes();
+    let h = handle.clone();
+    let request = tokio::spawn(async move { h.raw_invoke_in_dc(dc, part()).await });
+    let (auth, session, id) = file_packet(&mut socket).await;
+    let packet = answer_packet(&auth, session, id, &body, 1);
+    let start = std::time::Instant::now();
+    // 512 KiB at 16 KiB/s, actual encrypted fragments on the local TCP socket.
+    for chunk in packet.chunks(16*1024) {
+        socket.write_all(chunk).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert_eq!(tokio::time::timeout(Duration::from_secs(2), request).await.unwrap().unwrap().unwrap(), body);
+    assert!(start.elapsed() > Duration::from_secs(30));
+    handle.quit(); runner.await.unwrap();
 }

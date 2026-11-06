@@ -50,7 +50,7 @@ export const api = {
   startAssetTranscription: (assetId: string, force = false) => invoke<VideoTranscript>('start_asset_transcription', { assetId, force }),
   copyAssetTranscript: (assetId: string) => invoke<void>('copy_asset_transcript', { assetId }),
   exportAssetTranscript: (assetId: string) => invoke<string | null>('export_asset_transcript', { assetId }),
-  backupAssets: (spaceId: string) => invoke<BackupAsset[]>('list_backup_assets', { spaceId }),
+  backupAssets: (spaceId: string, verifyLocal = true) => invoke<BackupAsset[]>('list_backup_assets', { spaceId, verifyLocal }),
   refreshBackupAssets: (spaceId: string) => invoke<{ imported: number; unchanged: number; rejected: string[] }>('refresh_backup_assets', { spaceId }),
   assetTranscript: (spaceId: string, assetId: string) => invoke<AssetTranscript | null>('get_asset_transcript', { spaceId, assetId }),
   assetCover: (spaceId: string, assetId: string) => invoke<ArrayBuffer>('get_asset_cover', { spaceId, assetId }),

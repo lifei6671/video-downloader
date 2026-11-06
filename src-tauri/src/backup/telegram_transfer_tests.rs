@@ -18,6 +18,7 @@ async fn preparation_failure_keeps_prepared_and_retry_publishes_once() {
     assert_eq!(upload(&net, &journal, &target(), source.clone(), &io).await.unwrap_err().to_string(), "TELEGRAM_CONNECTION_ERROR");
     assert_eq!(journal.entry(&source).state, SendState::Prepared);
     assert_eq!(net.sends.load(Ordering::SeqCst), 0);
+    assert_eq!(net.uploads.load(Ordering::SeqCst), 0);
     upload(&net, &journal, &target(), source.clone(), &io).await.unwrap();
     assert_eq!(journal.entry(&source).state, SendState::Confirmed);
     assert_eq!(net.sends.load(Ordering::SeqCst), 1);
@@ -85,6 +86,9 @@ impl TestJournal {
     }
 }
 impl Journal for TestJournal {
+    fn get(&self, operation: &str, kind: &str) -> Result<Option<Entry>> {
+        db::get(&self.0.lock().unwrap(), operation, kind)
+    }
     fn reserve(&self, entry: Entry) -> Result<Entry> {
         db::reserve(&self.0.lock().unwrap(), entry)
     }
@@ -131,6 +135,13 @@ impl Mock {
 }
 impl Transport for Mock {
     type Uploaded = Vec<u8>;
+    type Prepared = ();
+    fn prepare<'a>(&'a self, _: &'a Envelope, _: &'a Io) -> ProviderFuture<'a, ()> {
+        Box::pin(async move {
+            if self.prepare_failure.swap(false, Ordering::SeqCst) { bail!("TELEGRAM_CONNECTION_ERROR"); }
+            Ok(())
+        })
+    }
     fn max_bytes(&self) -> u64 {
         self.limit
     }
@@ -163,7 +174,7 @@ impl Transport for Mock {
     }
     fn send<'a>(
         &'a self,
-        body: Vec<u8>,
+        (body, _): (Vec<u8>, ()),
         caption: String,
         random_id: i64,
         video: Option<crate::backup::provider::VideoAttributes>,
@@ -171,7 +182,6 @@ impl Transport for Mock {
         before_publish: &'a mut (dyn FnMut() -> Result<()> + Send),
     ) -> ProviderFuture<'a, Option<i32>> {
         Box::pin(async move {
-            if self.prepare_failure.swap(false, Ordering::SeqCst) { bail!("TELEGRAM_CONNECTION_ERROR"); }
             before_publish()?;
             let id = self.sends.fetch_add(1, Ordering::SeqCst) as i32 + 1;
             self.random_ids.lock().unwrap().push(random_id);
@@ -1069,4 +1079,25 @@ async fn delete_index_transfer_timings_follow_parent_and_skip_reused_uploads() {
         }).unwrap();
     }
     core.shutdown().await;
+}
+
+#[tokio::test]
+async fn new_asset_attachments_reuse_confirmed_video_before_projection_exists() {
+    use super::super::telegram_provider::upload_destination;
+    let root = tempfile::tempdir().unwrap();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let net = Mock::new();
+    let video = source(root.path(), "video", b"original bytes");
+    let (_cancel, _stop, io) = io();
+    let receipt = upload(&net, &journal, &target(), video.clone(), &io).await.unwrap();
+    let id = target().message_id(&receipt.reference).unwrap();
+    for kind in ["cover", "transcript"] {
+        let mut attachment = video.clone(); attachment.kind = kind.into();
+        assert_eq!(upload_destination(&journal, &target(), &attachment, None).unwrap(), Some(id));
+        attachment.asset_id = "another-asset".into();
+        assert_eq!(upload_destination(&journal, &target(), &attachment, None).unwrap_err().to_string(), "TELEGRAM_OPERATION_MISMATCH");
+    }
+    let mut entry = journal.entry(&video); entry.state = SendState::Sending; journal.save(&entry).unwrap();
+    let mut attachment = video; attachment.kind = "cover".into();
+    assert_eq!(upload_destination(&journal, &target(), &attachment, None).unwrap_err().to_string(), "TELEGRAM_SEND_UNCONFIRMED");
 }

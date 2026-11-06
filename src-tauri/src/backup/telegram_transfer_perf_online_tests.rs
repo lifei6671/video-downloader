@@ -59,6 +59,10 @@ struct Measured<'a> {
 }
 impl Transport for Measured<'_> {
     type Uploaded = PreparedUpload;
+    type Prepared = <GrammersTransport as Transport>::Prepared;
+    fn prepare<'a>(&'a self, envelope: &'a Envelope, io: &'a Io) -> ProviderFuture<'a, Self::Prepared> {
+        self.inner.prepare(envelope, io)
+    }
     fn max_bytes(&self) -> u64 {
         self.inner.max_bytes()
     }
@@ -103,7 +107,7 @@ impl Transport for Measured<'_> {
     }
     fn send<'a>(
         &'a self,
-        uploaded: PreparedUpload,
+        uploaded: (PreparedUpload, Self::Prepared),
         caption: String,
         random: i64,
         video: Option<VideoAttributes>,

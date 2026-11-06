@@ -474,63 +474,50 @@ async fn transfer_once(
 }
 
 pub fn list(core: &Core, space: &str) -> Result<Vec<super::reconcile::Entry>> {
+    core.backup_display_db(|db| {
+        let tx = db.unchecked_transaction()?;
+        let mut assets = super::repository::list_assets(&tx)?;
+        for asset in &mut assets {
+            if asset.path.as_ref().is_some_and(|p| !p.is_file()) {
+                asset.path = None;
+                asset.local_state = "missing".into();
+            }
+        }
+        list_in(&tx, space, assets)
+    })
+}
+
+pub(super) fn list_in(db: &rusqlite::Connection, space: &str, assets: Vec<super::model::Asset>) -> Result<Vec<super::reconcile::Entry>> {
+    let mut query = db.prepare("SELECT m.local_asset_id,m.remote_deleted,m.pending_json,
+        (SELECT COUNT(*) FROM backup_conflicts c WHERE c.space_id=m.space_id AND c.remote_asset_id=m.remote_asset_id),
+        h.asset_id IS NOT NULL,d.asset_id IS NOT NULL,o.remote_state,r.record_json,
+        c.asset_id IS NOT NULL,t.asset_id IS NOT NULL
+        FROM backup_space_assets m
+        LEFT JOIN asset_hidden_history h ON h.asset_id=m.local_asset_id
+        LEFT JOIN asset_deletion_hidden_history d ON d.space_id=m.space_id AND d.asset_id=m.local_asset_id
+        LEFT JOIN asset_remote_objects o ON o.space_id=m.space_id AND o.asset_id=m.local_asset_id
+        LEFT JOIN asset_remote_records r ON r.space_id=m.space_id AND r.asset_id=m.local_asset_id
+        LEFT JOIN asset_covers c ON c.asset_id=m.local_asset_id
+        LEFT JOIN asset_transcripts t ON t.asset_id=m.local_asset_id WHERE m.space_id=?1")?;
+    let mut members = query.query_map([space], |r| Ok((r.get::<_,String>(0)?, (
+        r.get::<_,bool>(1)?, r.get::<_,String>(2)?, r.get::<_,i64>(3)? as usize, r.get::<_,bool>(4)?,
+        r.get::<_,bool>(5)?, r.get::<_,Option<String>>(6)?, r.get::<_,Option<String>>(7)?,
+        r.get::<_,bool>(8)?,r.get::<_,bool>(9)?,
+    ))))?.collect::<rusqlite::Result<std::collections::HashMap<_,_>>>()?;
     let mut entries = Vec::new();
-    for mut asset in core.backup_assets()? {
-        let member:Option<(bool,String,usize,bool)>=core.backup_db(|db|Ok(db.query_row("SELECT m.remote_deleted,m.pending_json,(SELECT COUNT(*) FROM backup_conflicts c WHERE c.space_id=m.space_id AND c.remote_asset_id=m.remote_asset_id),EXISTS(SELECT 1 FROM asset_hidden_history h WHERE h.asset_id=m.local_asset_id) FROM backup_space_assets m WHERE m.space_id=?1 AND m.local_asset_id=?2",params![space,asset.asset_id],|r|Ok((r.get(0)?,r.get(1)?,r.get::<_,i64>(2)? as usize,r.get(3)?))).optional()?))?;
-        let Some((deleted, pending, conflicts, hidden)) = member else {
-            continue;
-        };
+    for asset in assets {
+        let Some((deleted, pending, conflicts, hidden, deletion_hidden, remote_state, raw, local_cover, local_text)) = members.remove(&asset.asset_id) else { continue; };
         let pending = !serde_json::from_str::<PendingChanges>(&pending)?.is_empty();
-        if asset.path.as_ref().is_some_and(|p| !p.is_file()) {
-            asset.path = None;
-            asset.local_state = "missing".into();
-        }
-        let remote_state:Option<String>=core.backup_db(|db|Ok(db.query_row("SELECT remote_state FROM asset_remote_objects WHERE space_id=?1 AND asset_id=?2",params![space,asset.asset_id],|r|r.get(0)).optional()?))?;
         let deleting = remote_state.as_deref() == Some("pending_delete");
-        let deletion_hidden: bool = core.backup_db(|db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM asset_deletion_hidden_history WHERE space_id=?1 AND asset_id=?2)", params![space,asset.asset_id],|r|r.get(0))?))?;
-        if (hidden || deletion_hidden) && !deleting {
-            continue;
-        }
-        if deleted && asset.path.is_none() && !pending && conflicts == 0 && !deleting {
-            continue;
-        }
-        let raw:Option<String>=core.backup_db(|db|Ok(db.query_row("SELECT record_json FROM asset_remote_records WHERE space_id=?1 AND asset_id=?2",params![space,asset.asset_id],|r|r.get(0)).optional()?))?;
-        let snapshot = raw
-            .map(|v| serde_json::from_str::<AssetSnapshot>(&v))
-            .transpose()
-            .context("BACKUP_RECORD_UNAVAILABLE")?;
-        let (local_cover, local_text): (bool, bool) = core.backup_db(|db| {
-            Ok((
-                db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM asset_covers WHERE asset_id=?)",
-                    [&asset.asset_id],
-                    |r| r.get(0),
-                )?,
-                db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM asset_transcripts WHERE asset_id=?)",
-                    [&asset.asset_id],
-                    |r| r.get(0),
-                )?,
-            ))
-        })?;
+        if (hidden || deletion_hidden) && !deleting { continue; }
+        if deleted && asset.path.is_none() && !pending && conflicts == 0 && !deleting { continue; }
+        let snapshot = raw.map(|v| serde_json::from_str::<AssetSnapshot>(&v)).transpose().context("BACKUP_RECORD_UNAVAILABLE")?;
         entries.push(super::reconcile::Entry {
             has_cover: local_cover || snapshot.as_ref().is_some_and(|r| r.cover.is_some()),
             has_transcript: local_text || snapshot.as_ref().is_some_and(|r| r.transcript.is_some()),
-            asset,
-            space_id: space.into(),
-            remote_state: if deleting {
-                "pending_delete"
-            } else if deleted {
-                "deleted"
-            } else if pending {
-                "pending"
-            } else {
-                "backed_up"
-            }
-            .into(),
-            remote_deleted: deleted,
-            has_pending_local_changes: pending,
-            conflict_count: conflicts,
+            asset, space_id: space.into(),
+            remote_state: if deleting { "pending_delete" } else if deleted { "deleted" } else if pending { "pending" } else { "backed_up" }.into(),
+            remote_deleted: deleted, has_pending_local_changes: pending, conflict_count: conflicts,
             remote_revision: snapshot.as_ref().map_or(0, |r| r.revision),
         });
     }

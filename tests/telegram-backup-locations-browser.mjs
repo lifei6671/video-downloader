@@ -39,7 +39,8 @@ async page => {
     await p.goto(page.url().split('/').slice(0,3).join('/')+'/'); await button('下载任务').click();
     const row = p.locator(taskBacked ? '[data-task-row="local-task"]' : '[data-asset-id="asset"]');
     await row.locator('[data-complete="true"]').waitFor();
-    await row.locator('.backup-sync-tooltip').hover();
+    await p.waitForFunction(()=>window.calls.filter(c=>c.command==='list_backup_assets'&&c.args.verifyLocal===false).length>=2);
+    await row.locator('.task-card-message').hover();
     await p.getByRole('tooltip').filter({hasText:/^已备份至：视频归档$/}).waitFor();
     await button('系统设置').click();
     assert((await p.getByRole('navigation',{name:'设置分类'}).getByRole('button').allTextContents()).join('|') === '下载设置|平台账号|远端备份|运行依赖','Settings sections are out of order');
@@ -49,11 +50,11 @@ async page => {
     await p.getByRole('tab',{name:'Telegram 备份',exact:true}).click(); await button('设为默认').click();
     await p.waitForFunction(()=>window.current==='tg'); await p.getByText('默认备份空间已切换',{exact:true}).waitFor(); await button('下载任务').click();
     await row.locator('[data-complete="true"]').waitFor();
-    await row.locator('.backup-sync-tooltip').hover();
+    await row.locator('.task-card-message').hover();
     await p.getByRole('tooltip').filter({hasText:/^已备份至：视频归档$/}).waitFor();
     await p.evaluate(()=>{window.failedUpload=true;});
     await row.locator('[data-complete="true"]').waitFor({state:'detached'});
-    await row.locator('.backup-sync-tooltip').hover();
+    await row.locator('.task-card-notice').hover();
     await p.getByRole('tooltip').filter({hasText:'无法访问频道，请检查频道成员与管理权限'}).waitFor();
     await p.evaluate(()=>{window.failedUpload=false;});
     await row.locator('[data-complete="true"]').waitFor();
@@ -66,15 +67,26 @@ async page => {
     await item('上传云端').click();
     await p.waitForFunction(()=>window.calls.some(c=>c.command==='start_asset_backup'&&c.args.spaceId==='tg'&&c.args.assetId==='asset'));
     await row.locator('[data-complete="true"]:disabled').waitFor();
-    await row.locator('.backup-sync-tooltip').hover();
+    assert(await p.evaluate(()=>window.calls.some(c=>c.command==='list_backup_assets'&&c.args.spaceId==='tg'&&c.args.verifyLocal===true)), 'Upload action did not refresh local file presence');
+    await row.locator('.task-card-message').hover();
     await p.getByRole('tooltip').filter({hasText:/^已备份至：视频归档、Telegram 备份$/}).waitFor();
     for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
-      await p.setViewportSize({width,height});
+      await p.mouse.move(0, 0);
       await button('下载任务').focus();
-      await row.locator('.backup-sync-tooltip').focus();
+      await p.setViewportSize({width,height});
+      await row.locator('.task-card-message').scrollIntoViewIfNeeded();
+      await p.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await row.locator('.task-card-message').focus();
       await p.getByRole('tooltip').filter({hasText:/^已备份至：视频归档、Telegram 备份$/}).waitFor();
-      const tip = await p.getByRole('tooltip').boundingBox();
-      assert(tip.x>=0 && tip.y>=0 && tip.x+tip.width<=width && tip.y+tip.height<=height,'Backup tooltip escaped viewport');
+      const visibleTip = p.locator('[data-slot="tooltip-content"]').filter({hasText:'已备份至：视频归档、Telegram 备份'});
+      await visibleTip.waitFor({state:'visible'});
+      await p.waitForFunction(() => {
+        const tip = [...document.querySelectorAll('[data-slot="tooltip-content"]')].find(el => el.textContent.includes('已备份至：视频归档、Telegram 备份'));
+        const rect = tip?.getBoundingClientRect();
+        return rect && rect.width > 0 && rect.x >= 0 && rect.y >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+      });
+      const tip = await visibleTip.boundingBox();
+      assert(tip && tip.x>=0 && tip.y>=0 && tip.x+tip.width<=width && tip.y+tip.height<=height,'Backup tooltip escaped viewport');
       await p.keyboard.press('Escape');
       assert(await row.locator('[data-complete="true"]').isVisible(),'Card mode loses backup status');
       assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Horizontal overflow');

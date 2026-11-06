@@ -432,6 +432,7 @@ struct FileMock {
     authorizations: AtomicUsize,
     home: i32,
     fail_auth: bool,
+    auth_barrier: Option<Arc<tokio::sync::Barrier>>,
 }
 impl FileClient for FileMock {
     fn get<'a>(
@@ -453,7 +454,12 @@ impl FileClient for FileMock {
             assert_eq!(request.limit, DOWNLOAD_PART as i32);
             let reply = self.replies.lock().unwrap().pop_front();
             match reply {
-                Some(Reply::Error(code, message)) => Err(protocol_error(code, message)),
+                Some(Reply::Error(code, message)) => {
+                    if message == "AUTH_KEY_UNREGISTERED" {
+                        if let Some(barrier) = &self.auth_barrier { barrier.wait().await; }
+                    }
+                    Err(protocol_error(code, message))
+                },
                 Some(Reply::Disconnect) => Err(InvocationError::Io(std::io::Error::from(
                     std::io::ErrorKind::ConnectionReset,
                 ))),
@@ -687,4 +693,50 @@ async fn native_adapter_retries_disconnect_and_server_failure_but_not_flood_wait
             .starts_with("TELEGRAM_FLOOD_WAIT:"));
         assert_eq!(mock.calls.lock().unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn timeout_reduces_shared_actual_rpc_concurrency_including_existing_waiters() {
+    let budget = Budget::account(&uuid::Uuid::new_v4().to_string());
+    let other = Budget::account(&uuid::Uuid::new_v4().to_string());
+    let mut held = vec![];
+    for _ in 0..GLOBAL_REQUESTS { held.push(budget.acquire().await.unwrap()); }
+    let queued = budget.acquire(); tokio::pin!(queued);
+    assert!(tokio::time::timeout(Duration::from_millis(10), &mut queued).await.is_err());
+    budget.slow_down();
+    drop(held);
+    let first = queued.await.unwrap();
+    let mut held = vec![first];
+    for _ in 1..GLOBAL_REQUESTS/2 { held.push(budget.acquire().await.unwrap()); }
+    assert!(tokio::time::timeout(Duration::from_millis(10), budget.acquire()).await.is_err());
+    assert!(tokio::time::timeout(Duration::from_millis(10), other.acquire()).await.is_ok());
+    drop(held);
+    let stats = Stats::default(); let calls = AtomicUsize::new(0);
+    rpc(&budget, &stats, Route::File, None, || Box::pin(async {
+        if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
+        } else { Ok(()) }
+    })).await.unwrap();
+    let mut held = vec![];
+    for _ in 0..GLOBAL_REQUESTS/4 { held.push(budget.acquire().await.unwrap()); }
+    assert!(tokio::time::timeout(Duration::from_millis(10), budget.acquire()).await.is_err());
+    assert_eq!(stats.retries.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn concurrent_dc_auth_failures_share_one_export_import() {
+    let mock = Arc::new(FileMock {
+        replies: Mutex::new((0..8).map(|_| Reply::Error(401, "AUTH_KEY_UNREGISTERED")).collect()),
+        home: 1, auth_barrier: Some(Arc::new(tokio::sync::Barrier::new(8))), ..Default::default()
+    });
+    let source = Arc::new(adapter(mock.clone(), document()));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let source = source.clone();
+        tasks.spawn(async move { source.fetch(Chunk { index:0,offset:0,length:DOWNLOAD_PART as usize }).await });
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(result) = tasks.join_next().await { assert_eq!(result.unwrap().unwrap().len(), DOWNLOAD_PART as usize); }
+    }).await.unwrap();
+    assert_eq!(mock.authorizations.load(Ordering::Relaxed), 1);
 }

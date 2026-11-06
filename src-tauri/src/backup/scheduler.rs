@@ -80,11 +80,11 @@ pub fn operations(core: &Core) -> Result<Vec<Operation>> {
 /// UI state only. Keep captured media and recovery evidence in the worker payload.
 pub fn operations_for_display(core: &Core, space: Option<&str>) -> Result<Vec<Operation>> {
     core.backup_display_db(|db| {
-        let mut query = db.prepare("SELECT operation_id,space_id,asset_id,kind,state,phase,
+        let filter = if space.is_some() { " WHERE space_id=?1" } else { "" };
+        let mut query = db.prepare(&format!("SELECT operation_id,space_id,asset_id,kind,state,phase,
             summary_json,attempt,last_error,progress_bytes,progress_started
-            FROM backup_operation_display WHERE (?1 IS NULL OR space_id=?1)
-            ORDER BY created_at DESC,sequence DESC")?;
-        let rows = query.query_map([space], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get::<_,String>(6)?,row.get(7)?,row.get(8)?,row.get::<_,Option<i64>>(9)?,row.get::<_,Option<bool>>(10)?)))?;
+            FROM backup_operation_display{filter} ORDER BY created_at DESC,sequence DESC"))?;
+        let rows = query.query_map(rusqlite::params_from_iter(space), |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get::<_,String>(6)?,row.get(7)?,row.get(8)?,row.get::<_,Option<i64>>(9)?,row.get::<_,Option<bool>>(10)?)))?;
         rows.map(|row| {
             let (operation_id,space_id,asset_id,kind,state,phase,projection,attempt,last_error,bytes,started) = row?;
             let mut values: [Value; 7] = serde_json::from_str(&projection)?;

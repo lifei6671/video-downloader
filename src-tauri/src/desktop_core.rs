@@ -230,6 +230,7 @@ struct Inner {
 }
 pub struct Core {
     backup_display_db: Mutex<Connection>,
+    pub(crate) backup_file_presence: Mutex<crate::backup::reconcile::FilePresence>,
     task_actions: Mutex<HashMap<String, task_actions::PendingAction>>,
     delete_activity: Mutex<Option<DeleteActivity>>,
     pub telegram_accounts: crate::telegram_accounts::TelegramAccounts,
@@ -659,6 +660,7 @@ impl Core {
             program,
             args,
             runtime_directory: db_path.parent().context("IO_ERROR")?.join("runtime"),
+            backup_file_presence: Mutex::default(),
             backup_display_db: Mutex::new(Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?),
             #[cfg(test)]
             telegram_source: Mutex::new(None),

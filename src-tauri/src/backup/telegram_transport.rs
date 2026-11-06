@@ -682,6 +682,13 @@ fn document(message: &grammers_client::message::Message) -> Result<(RemoteDocume
 }
 impl Transport for GrammersTransport {
     type Uploaded = PreparedUpload;
+    type Prepared = Option<bundle::PreparedBundle>;
+    fn prepare<'a>(&'a self, envelope: &'a Envelope, io: &'a Io) -> ProviderFuture<'a, Self::Prepared> {
+        Box::pin(async move {
+            if envelope.kind == "library" { return Ok(None); }
+            self.prepare_bundle(envelope, io).await.map(Some)
+        })
+    }
     fn max_bytes(&self) -> u64 {
         self.max_bytes
     }
@@ -763,16 +770,16 @@ impl Transport for GrammersTransport {
     }
     fn send<'a>(
         &'a self,
-        uploaded: PreparedUpload,
+        (uploaded, prepared): (PreparedUpload, Self::Prepared),
         caption: String,
         random_id: i64,
         video: Option<VideoAttributes>,
-        io: &'a Io,
+        _io: &'a Io,
         before_publish: &'a mut (dyn FnMut() -> Result<()> + Send),
     ) -> ProviderFuture<'a, Option<i32>> {
         Box::pin(async move {
             let envelope:Envelope=serde_json::from_str(&caption).context("BACKUP_INVALID_MEDIA")?;
-            if envelope.kind!="library" {return self.send_bundle(uploaded,envelope,random_id,video,io,before_publish).await;}
+            if envelope.kind!="library" {return self.send_bundle(uploaded,prepared.context("TELEGRAM_SEND_EVIDENCE_INVALID")?,random_id,video,before_publish).await;}
             let uploaded = uploaded.file;
             let name = match &uploaded.raw {
                 tl::enums::InputFile::File(f) => f.name.clone(),

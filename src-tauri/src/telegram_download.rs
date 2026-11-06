@@ -544,7 +544,7 @@ async fn transfer(
     let mut telemetry = DownloadProgress::new(Instant::now());
     loop {
         let next = {
-            let next = timeout(IDLE_TIMEOUT, source.next(received));
+            let next = timeout(crate::telegram_transfer_engine::FILE_IO_TIMEOUT, source.next(received));
             tokio::pin!(next);
             loop {
                 tokio::select! {
