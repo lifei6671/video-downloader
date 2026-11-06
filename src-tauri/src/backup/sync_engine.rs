@@ -1510,6 +1510,8 @@ pub fn request_upload_with(
             // Cleanup can have removed confirmed messages: a resumed request needs fresh send identities.
             db.execute("UPDATE backup_operations SET state=CASE WHEN phase='cancel_cleaned' THEN 'completed' ELSE state END,phase=CASE WHEN phase='cancel_cleaned' THEN phase ELSE 'superseded' END WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state='canceled'",params![space,local])?;
         }
+        // Superseded operations whose cleanup is confirmed no longer need captured bodies.
+        db.execute("DELETE FROM backup_operation_captures WHERE operation_id IN (SELECT operation_id FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state='completed')", params![space,local])?;
         // An explicit retry also retries owned cleanup, retaining every send identity and receipt.
         db.execute("UPDATE backup_operations SET next_retry_at=NULL,
             payload_json=json_remove(payload_json,'$.cleanup_blocked','$.cleanup_attempt','$.cleanup_error')

@@ -15,11 +15,12 @@ use std::{
     pin::Pin,
     sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex},
     task::{Context as TaskContext, Poll},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, ReadBuf},
     sync::watch,
+    time::Instant,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -111,6 +111,7 @@ struct Mock {
     sends: AtomicUsize,
     inspects: AtomicUsize,
     downloads: AtomicUsize,
+    read_delay: Option<Duration>,
     lost_response: AtomicBool,
     hidden: AtomicBool,
     corrupt: AtomicBool,
@@ -263,6 +264,9 @@ impl Transport for Mock {
                 .clone();
             if self.corrupt.load(Ordering::SeqCst) {
                 body[0] ^= 1;
+            }
+            if let Some(delay) = self.read_delay {
+                return Ok(Box::new(SlowFirstRead {body:std::io::Cursor::new(body),ready:Box::pin(tokio::time::sleep(delay))}) as Box<dyn AsyncRead + Unpin + Send>);
             }
             Ok(Box::new(std::io::Cursor::new(body)) as Box<dyn AsyncRead + Unpin + Send>)
         })
@@ -1100,4 +1104,43 @@ async fn new_asset_attachments_reuse_confirmed_video_before_projection_exists() 
     let mut entry = journal.entry(&video); entry.state = SendState::Sending; journal.save(&entry).unwrap();
     let mut attachment = video; attachment.kind = "cover".into();
     assert_eq!(upload_destination(&journal, &target(), &attachment, None).unwrap_err().to_string(), "TELEGRAM_SEND_UNCONFIRMED");
+}
+
+struct SlowFirstRead {
+    body: std::io::Cursor<Vec<u8>>,
+    ready: Pin<Box<tokio::time::Sleep>>,
+}
+impl AsyncRead for SlowFirstRead {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buffer: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        use std::future::Future;
+        if self.ready.as_mut().poll(cx).is_pending() { return Poll::Pending; }
+        Pin::new(&mut self.body).poll_read(cx, buffer)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_media_verification_allows_seventy_second_chunk_and_cancels_promptly() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let net = Mock {read_delay:Some(Duration::from_secs(70)), ..Mock::new()};
+    let source = source(root.path(), "video", b"original verified media bytes");
+    let (cancel, _stop, io) = io();
+    let receipt = upload(&net, &journal, &target(), source, &io).await.unwrap();
+    let started = tokio::time::Instant::now();
+    super::super::telegram_lifecycle::verify(&net,&target(),&receipt.reference,&io).await.unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(70));
+    let destination = target();
+    let mut reading = Box::pin(super::super::telegram_lifecycle::verify(&net,&destination,&receipt.reference,&io));
+    assert!(tokio::time::timeout(Duration::from_secs(1), &mut reading).await.is_err());
+    cancel.send_replace(true);
+    assert_eq!(tokio::time::timeout(Duration::from_millis(100),reading).await.unwrap().unwrap_err().to_string(), "TELEGRAM_TRANSFER_CANCELED");
+}
+
+#[tokio::test(start_paused = true)]
+async fn control_requests_keep_the_short_timeout() {
+    let (_cancel,_stop,io) = io();
+    let start = tokio::time::Instant::now();
+    let result = io.run(async {tokio::time::sleep(Duration::from_secs(70)).await; Ok(())}).await;
+    assert_eq!(result.unwrap_err().to_string(),"TELEGRAM_TRANSFER_TIMEOUT");
+    assert_eq!(start.elapsed(),Duration::from_secs(60));
 }

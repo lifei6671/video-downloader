@@ -436,7 +436,20 @@ async fn telegram_t4_release_delete_lost_response_recreate_and_late_cleanup() {
         body,
         "other device retains its valid copy"
     );
+    let cleaned = uuid::Uuid::new_v4().to_string();
+    other.backup_db(|db| {
+        db.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'upload','canceled','cancel_cleaned','{\"receipt\":\"retained\"}')",rusqlite::params![cleaned,q.scope().space_id,asset])?;
+        db.execute("INSERT INTO backup_operation_captures VALUES(?1,?2)",rusqlite::params![cleaned,serde_json::json!({"cover":[1,2,3],"transcript":{"text":"old captured text"}}).to_string()])?;
+        Ok(())
+    }).unwrap();
     sync_engine::request_upload_with(&other, q.clone(), &asset).unwrap();
+    other.backup_db(|db| {
+        assert_eq!(db.query_row("SELECT state FROM backup_operations WHERE operation_id=?",[&cleaned],|r|r.get::<_,String>(0))?,"completed");
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM backup_operation_captures WHERE operation_id=?",[&cleaned],|r|r.get::<_,i64>(0))?,0);
+        assert_eq!(db.query_row("SELECT json_extract(payload_json,'$.receipt') FROM backup_operations WHERE operation_id=?",[&cleaned],|r|r.get::<_,String>(0))?,"retained");
+        Ok(())
+    }).unwrap();
+
     let upload = super::super::scheduler::operations(&other)
         .unwrap()
         .into_iter()
@@ -690,6 +703,8 @@ async fn telegram_t4_cancel_cleanup_then_upload_uses_new_operation_and_messages(
     let old = claim(&core, &engine);
     net.before_publish.store(true, Ordering::SeqCst);
     assert!(engine.execute_upload(&old).await.is_err());
+    let capture: String = core.backup_db(|db| Ok(db.query_row("SELECT capture_json FROM backup_operation_captures WHERE operation_id=?",[&old],|r|r.get(0))?)).unwrap();
+    assert!(serde_json::from_str::<serde_json::Value>(&capture).unwrap()["cover"].is_array());
     let (_c, c) = tokio::sync::watch::channel(false);
     let (_s, s) = tokio::sync::watch::channel(false);
     let io = Io::new(c, s, None);
@@ -722,9 +737,16 @@ async fn telegram_t4_cancel_cleanup_then_upload_uses_new_operation_and_messages(
         .unwrap();
     }
     assert!(net.data.lock().unwrap().documents.is_empty());
-    core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='canceled',phase='cancel_cleaned' WHERE operation_id=?",[&old])?;Ok(())}).unwrap();
+    super::super::scheduler::cancel(&core,&old).unwrap();
+    super::super::scheduler::finish_upload_cleanup(&core,&old).unwrap();
+    assert_eq!(core.backup_db(|db| Ok(db.query_row("SELECT capture_json FROM backup_operation_captures WHERE operation_id=?",[&old],|r|r.get::<_,String>(0))?)).unwrap(),capture);
     net.before_publish.store(false, Ordering::SeqCst);
     sync_engine::request_upload_with(&core, p.clone(), &asset).unwrap();
+    core.backup_db(|db| {
+        assert_eq!(db.query_row("SELECT state FROM backup_operations WHERE operation_id=?",[&old],|r|r.get::<_,String>(0))?,"completed");
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM backup_operation_captures WHERE operation_id=?",[&old],|r|r.get::<_,i64>(0))?,0);
+        Ok(())
+    }).unwrap();
     let new = claim(&core, &engine);
     assert_ne!(new, old);
     engine.execute_upload(&new).await.unwrap();

@@ -26,6 +26,8 @@ pub(crate) fn init_prepared(
     tx.execute_batch(include_str!("telegram-schema.sql"))?;
     tx.execute_batch(include_str!("operation-display.sql"))?;
     super::schema_migration::finish(&tx, &prepared)?;
+    // Reclaim captures left by older terminal paths, preserving uncertain/canceled work.
+    tx.execute("DELETE FROM backup_operation_captures WHERE operation_id IN (SELECT operation_id FROM backup_operations WHERE kind='upload' AND state='completed')", [])?;
     // History tasks exist in the desktop database, but not in standalone backup stores.
     if tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='download_tasks')", [], |r| r.get::<_,bool>(0))? {
         tx.execute_batch(include_str!("history-generation.sql"))?;

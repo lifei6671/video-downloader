@@ -370,3 +370,36 @@ async fn cleanup_never_overwrites_a_later_delete_or_remote_tombstone() {
         f.core.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn superseded_cleanup_reclaims_capture_atomically_and_retains_unfinished_evidence() {
+    let (f, provider, _) = sync_fixture().await;
+    let (old, _) = canceled_upload(&f,provider.scope());
+    let body = json!({"cover":vec![128u8;256*1024],"transcript":{"text":"captured text"}}).to_string();
+    f.core.backup_db(|db| {
+        db.execute("INSERT INTO backup_operation_captures VALUES(?1,?2)",params![old,body])?;
+        db.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES('keep',?1,?2,'upload','canceled','captured','{}')",params![f.space.space_id,f.id])?;
+        db.execute("INSERT INTO backup_operation_captures VALUES('keep',?1)",[&body])?;
+        db.execute_batch("CREATE TRIGGER fail_capture_cleanup BEFORE DELETE ON backup_operation_captures BEGIN SELECT RAISE(ABORT,'injected capture cleanup failure'); END;")?;
+        Ok(())
+    }).unwrap();
+    assert!(scheduler::finish_upload_cleanup(&f.core,&old).is_err());
+    let old_op = scheduler::operation(&f.core,&old).unwrap();
+    assert_eq!((old_op.state.as_str(),old_op.phase.as_str()),("canceled","superseded"));
+    f.core.backup_db(|db| {db.execute_batch("DROP TRIGGER fail_capture_cleanup;")?;Ok(())}).unwrap();
+    scheduler::finish_upload_cleanup(&f.core,&old).unwrap();
+    let old_op = scheduler::operation(&f.core,&old).unwrap();
+    assert_eq!((old_op.state.as_str(),old_op.phase.as_str()),("completed","cancel_cleaned"));
+    f.core.backup_db(|db| {
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM backup_operation_captures WHERE operation_id=?",[&old],|r|r.get::<_,i64>(0))?,0);
+        assert_eq!(db.query_row("SELECT capture_json FROM backup_operation_captures WHERE operation_id='keep'",[],|r|r.get::<_,String>(0))?,body);
+        assert_eq!(db.query_row("SELECT entry_json FROM telegram_media_sends WHERE operation_id=?",[&old],|r|r.get::<_,String>(0))?,r#"{"state":"sending","random_id":123,"evidence":"preserve"}"#);
+        // A pre-fix completed row is reclaimed on restart without touching its receipt.
+        db.execute("INSERT INTO backup_operation_captures VALUES(?1,?2)",params![old,body])?;
+        repository::init(db)?;
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM backup_operation_captures WHERE operation_id=?",[&old],|r|r.get::<_,i64>(0))?,0);
+        assert_eq!(db.query_row("SELECT capture_json FROM backup_operation_captures WHERE operation_id='keep'",[],|r|r.get::<_,String>(0))?,body);
+        Ok(())
+    }).unwrap();
+    f.core.shutdown().await;
+}

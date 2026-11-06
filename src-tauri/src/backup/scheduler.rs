@@ -158,6 +158,7 @@ pub(super) fn finish_upload_cleanup(core: &Core, id: &str) -> Result<()> {
             payload_json=json_remove(payload_json,'$.cleanup_blocked','$.cleanup_error','$.cleanup_attempt'),updated_at=unixepoch()
             WHERE operation_id=?1 AND (state='canceled' OR (state='blocked' AND last_error='BACKUP_ASSET_DELETED'))", [id])?;
         if changed == 0 { return Ok(()); }
+        tx.execute("DELETE FROM backup_operation_captures WHERE operation_id=?1 AND EXISTS(SELECT 1 FROM backup_operations WHERE operation_id=?1 AND kind='upload' AND state='completed')", [id])?;
         tx.execute("UPDATE backup_operations SET state='pending',last_error=NULL,next_retry_at=NULL,
             payload_json=json_remove(payload_json,'$.cleanup_dependency'),updated_at=unixepoch()
             WHERE kind='upload' AND state IN ('retry_wait','blocked') AND json_extract(payload_json,'$.cleanup_dependency')=?1

@@ -171,7 +171,7 @@ async fn read_index_body(
             let mut buffer = vec![0; 65536];
             loop {
                 let count = io
-                    .run(async { reader.read(&mut buffer).await.map_err(anyhow::Error::from) })
+                    .run_file(async { reader.read(&mut buffer).await.map_err(anyhow::Error::from) })
                     .await?;
                 if count == 0 {
                     break;

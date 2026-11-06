@@ -14,6 +14,7 @@ struct Downloads {
     body: Mutex<Vec<u8>>,
     calls: AtomicUsize,
     expired: AtomicBool,
+    read_delay: Option<std::time::Duration>,
 }
 impl Transport for Downloads {
     type Uploaded = ();
@@ -64,6 +65,9 @@ impl Transport for Downloads {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.expired.swap(false, Ordering::SeqCst) {
                 bail!("TELEGRAM_FILE_REFERENCE_EXPIRED");
+            }
+            if let Some(delay) = self.read_delay {
+                return Ok(Box::new(SlowFirstRead {body:std::io::Cursor::new(self.body.lock().unwrap().clone()),ready:Box::pin(tokio::time::sleep(delay))}) as Box<dyn AsyncRead + Unpin + Send>);
             }
             Ok(
                 Box::new(std::io::Cursor::new(self.body.lock().unwrap().clone()))
@@ -407,4 +411,38 @@ fn by_id_lookup_only_accepts_the_requested_broadcast_channel() {
         title: "fixture".into(), until_date: None,
     };
     assert!(checked_channel_reply(42, vec![forbidden.into()]).is_err());
+}
+
+struct SlowFirstRead {
+    body: std::io::Cursor<Vec<u8>>,
+    ready: Pin<Box<tokio::time::Sleep>>,
+}
+impl AsyncRead for SlowFirstRead {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buffer: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        use std::future::Future;
+        if self.ready.as_mut().poll(cx).is_pending() { return Poll::Pending; }
+        Pin::new(&mut self.body).poll_read(cx, buffer)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn uncached_index_body_allows_seventy_second_chunk_and_cancels_promptly() {
+    use std::time::Duration;
+    let body = b"uncached validated index bytes";
+    let source = Downloads { body:Mutex::new(body.to_vec()), read_delay:Some(Duration::from_secs(70)), ..Default::default() };
+    let cache = IndexBodyCache::default();
+    let (cancel, rx) = tokio::sync::watch::channel(false);
+    let (_stop, srx) = tokio::sync::watch::channel(false);
+    let io = Io::new(rx,srx,None);
+    let expected = document(body);
+    let started = tokio::time::Instant::now();
+    assert_eq!(read_index_body(&source,&cache,expected.clone(),&io,None).await.unwrap(),body);
+    assert!(started.elapsed() >= Duration::from_secs(70));
+    assert_eq!(source.calls.load(Ordering::SeqCst),1);
+    cache.lock().unwrap().clear();
+    let mut reading = Box::pin(read_index_body(&source,&cache,expected,&io,None));
+    assert!(tokio::time::timeout(Duration::from_secs(1),&mut reading).await.is_err());
+    cancel.send_replace(true);
+    assert_eq!(tokio::time::timeout(Duration::from_millis(100),reading).await.unwrap().unwrap_err().to_string(),"TELEGRAM_TRANSFER_CANCELED");
+    assert!(cache.lock().unwrap().is_empty());
 }
