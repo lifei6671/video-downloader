@@ -218,10 +218,11 @@ impl Connection {
             joining.runner.take();
         }
     }
-    async fn reconnect_if_stopped(self: &mut Arc<Self>, api_id: i32, proxy_url: Option<String>) {
+    async fn reconnect_if_stopped(self: &mut Arc<Self>, proxy_url: Option<String>) {
         if (self.stopped.load(Ordering::SeqCst) || self.proxy_url != proxy_url || self.runner.lock().expect("telegram runner").as_ref().is_none_or(|runner| runner.is_finished())) && !self.revoked.load(Ordering::SeqCst) {
             self.close().await;
-            *self = Self::start(self.session.clone(), api_id, proxy_url);
+            // Reconnect with the application identity that owns this session.
+            *self = Self::start(self.session.clone(), self.api_id, proxy_url);
         }
     }
 }
@@ -542,7 +543,7 @@ impl TelegramSession {
             if self.network_changing.load(Ordering::SeqCst) { bail!("TELEGRAM_NETWORK_CHANGED"); }
             if !matches!(self.status().phase, Phase::Ready) { return Ok(self.status()); }
             if let Some(connection) = state.connection.as_mut() {
-                connection.reconnect_if_stopped(connection.api_id, self.proxy_url()?).await;
+                connection.reconnect_if_stopped(self.proxy_url()?).await;
             }
             let view = self.status();
             self.authorize_downloads(&state, &view);
@@ -698,7 +699,7 @@ impl TelegramSession {
         }
         let result = async {
             if let Some(connection) = state.connection.as_mut().filter(|c| !c.revoked.load(Ordering::SeqCst)) {
-                connection.reconnect_if_stopped(AppIdentity::load()?.id, self.proxy_url()?).await;
+                connection.reconnect_if_stopped(self.proxy_url()?).await;
             }
             let connection = state
                 .connection
@@ -913,7 +914,7 @@ impl TelegramSession {
             .with_network_stop(network_stop);
         if let Some(connection) = state.connection.as_mut() {
             let _reconnect = super::delete_timing::setup_span("session_reconnect");
-            connection.reconnect_if_stopped(AppIdentity::load()?.id, self.proxy_url()?).await;
+            connection.reconnect_if_stopped(self.proxy_url()?).await;
         }
         let connection = state
             .connection
@@ -1010,7 +1011,7 @@ impl TelegramSession {
                 bail!("TELEGRAM_ACCOUNT_MISMATCH");
             }
             let connection = state.connection.as_mut().context("TELEGRAM_NOT_CONNECTED")?;
-            connection.reconnect_if_stopped(connection.api_id, self.proxy_url()?).await;
+            connection.reconnect_if_stopped(self.proxy_url()?).await;
             if connection.revoked.load(Ordering::SeqCst) || connection.session.revoked() {
                 bail!("TELEGRAM_AUTH_REQUIRED");
             }
@@ -1155,7 +1156,7 @@ impl TelegramSession {
         let mut cancel = self.operation(id)?;
         if let Some(connection) = state.connection.as_mut() {
             if connection.stopped.load(Ordering::SeqCst) && !connection.revoked.load(Ordering::SeqCst) {
-                connection.reconnect_if_stopped(AppIdentity::load()?.id, self.proxy_url()?).await;
+                connection.reconnect_if_stopped(self.proxy_url()?).await;
             }
         }
         let result = async {
@@ -1790,6 +1791,7 @@ mod tests {
         session.resume("unused".into()).await.unwrap();
         let next = session.register_connection().unwrap();
         assert_ne!(next.connection.generation, control.generation);
+        assert_eq!(next.connection.api_id, control.api_id, "reconnect preserves the session application identity");
         assert!(*lease.stopped().borrow());
         assert!(!*lease.cancellation().borrow(), "transport replacement is not an authorization failure");
         let mut auth = lease.cancellation();
@@ -1908,7 +1910,8 @@ mod tests {
             for return_error in [false,true] {
                 let (cancel,rx) = watch::channel(false);
                 let mut metadata = Box::pin(run(kind,rx));
-                assert!(tokio::time::timeout(Duration::from_millis(20),&mut metadata).await.is_err());
+                let pending = tokio::time::timeout(Duration::from_millis(20),&mut metadata).await;
+                assert!(pending.is_err(), "metadata must reach the local proxy without reloading application configuration: {pending:?}");
                 assert!(session.transfer.lock().unwrap().is_some(), "metadata entered the request registration");
                 if return_error {
                     cancel.send_replace(true);
@@ -2111,7 +2114,7 @@ mod tests {
         let runner = connection.runner.lock().unwrap().as_ref().unwrap().abort_handle();
         drop(ConnectingPool { connection:&connection, completed:false });
         assert!(connection.stopped.load(Ordering::SeqCst));
-        connection.reconnect_if_stopped(12, None).await;
+        connection.reconnect_if_stopped(None).await;
         assert!(runner.is_finished());
         connection.close().await;
     }
@@ -2256,7 +2259,7 @@ mod tests {
         assert!(connection.stopped.load(Ordering::SeqCst));
         // This is the exact reconnect path used by logout, without issuing a real sign-out RPC.
         let previous_generation = connection.generation;
-        connection.reconnect_if_stopped(12, None).await;
+        connection.reconnect_if_stopped(None).await;
         assert_ne!(connection.generation, previous_generation);
         assert!(old_runner.is_finished());
         assert!(!connection.stopped.load(Ordering::SeqCst));
