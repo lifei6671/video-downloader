@@ -365,6 +365,8 @@ pub(crate) async fn cover_chunk<T>(
         Err(_) => { budget.failed(permit.generation, true); bail!("TELEGRAM_TRANSFER_TIMEOUT"); },
     }
 }
+// Routing controls error handling; callers confirm valid file data separately.
+// Return the admitted generation so delayed replies cannot recover a newer window.
 async fn rpc<'a, T>(
     budget: &Budget,
     stats: &Stats,
@@ -373,7 +375,7 @@ async fn rpc<'a, T>(
     mut call: impl FnMut() -> Pin<
         Box<dyn Future<Output = std::result::Result<T, InvocationError>> + Send + 'a>,
     >,
-) -> Result<T> {
+) -> Result<(T, u64)> {
     for attempt in 0..4 {
         let permit = budget.acquire().await?;
         stats.attempts.fetch_add(1, Ordering::Relaxed);
@@ -394,10 +396,7 @@ async fn rpc<'a, T>(
         let generation = permit.generation;
         drop(permit);
         let (error, retry) = match result {
-            Ok(Ok(value)) => {
-                if matches!(route, Route::File) { budget.succeeded(generation); }
-                return Ok(value);
-            },
+            Ok(Ok(value)) => return Ok((value, generation)),
             Ok(Err(error)) => {
                 budget.failed(generation, matches!(&error, InvocationError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut));
                 if let InvocationError::Rpc(ref e) = error {
@@ -564,14 +563,19 @@ impl DocumentSource {
             })
             .await;
             match result {
-                Ok(tl::enums::upload::File::File(file)) => {
-                    ensure!(file.bytes.len() == chunk.length, "INCOMPLETE_MEDIA");
+                Ok((tl::enums::upload::File::File(file), request_generation)) => {
+                    if file.bytes.len() != chunk.length {
+                        self.budget.failed(request_generation, false);
+                        bail!("INCOMPLETE_MEDIA");
+                    }
+                    self.budget.succeeded(request_generation);
                     self.stats
                         .acknowledged
                         .fetch_add(file.bytes.len() as u64, Ordering::Relaxed);
                     return Ok(file.bytes);
                 }
-                Ok(tl::enums::upload::File::CdnRedirect(_)) => {
+                Ok((tl::enums::upload::File::CdnRedirect(_), request_generation)) => {
+                    self.budget.failed(request_generation, false);
                     bail!("TELEGRAM_CDN_UNSUPPORTED")
                 }
                 Err(error) if error.to_string() == "TELEGRAM_FILE_REFERENCE_EXPIRED" => {
@@ -601,12 +605,12 @@ impl DocumentSource {
                         authorized = true;
                         continue;
                     }
-                    let home = rpc(&self.budget, &self.stats, Route::Main, None, || {
+                    let (home, _) = rpc(&self.budget, &self.stats, Route::Main, None, || {
                         self.client.home_dc()
                     })
                     .await?;
                     ensure!(dc != home, "TELEGRAM_AUTH_REQUIRED");
-                    let exported = rpc(&self.budget, &self.stats, Route::Main, None, || {
+                    let (exported, _) = rpc(&self.budget, &self.stats, Route::Main, None, || {
                         self.client.export(dc)
                     })
                     .await?;

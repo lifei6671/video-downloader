@@ -882,3 +882,27 @@ async fn recovery_requires_both_stable_time_and_consecutive_file_successes() {
     cover_chunk(&budget, async { Ok(()) }).await.unwrap();
     assert_eq!(budget.window.lock().unwrap().weight, 1);
 }
+
+#[tokio::test]
+async fn only_valid_download_data_recovers_the_window() {
+    tokio::time::pause();
+    for reply in [Reply::Short, Reply::Cdn] {
+        let mock = file_mock(vec![], 1, false);
+        let source = adapter(mock.clone(), document());
+        let chunk = Chunk {index:0,offset:0,length:DOWNLOAD_PART as usize};
+        assert!(cover_chunk::<()>(&source.budget, async {
+            Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
+        }).await.is_err());
+        tokio::time::advance(Duration::from_secs(30)).await;
+        for _ in 0..31 { source.fetch(chunk).await.unwrap(); }
+        assert_eq!(source.budget.window.lock().unwrap().weight, 2);
+        assert_eq!(source.budget.window.lock().unwrap().successes, 31);
+        mock.replies.lock().unwrap().push_back(reply);
+        assert!(source.fetch(chunk).await.is_err());
+        assert_eq!(source.budget.window.lock().unwrap().weight, 2);
+        assert_eq!(source.budget.window.lock().unwrap().successes, 0);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        for _ in 0..32 { source.fetch(chunk).await.unwrap(); }
+        assert_eq!(source.budget.window.lock().unwrap().weight, 1);
+    }
+}
