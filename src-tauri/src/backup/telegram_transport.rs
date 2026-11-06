@@ -219,6 +219,7 @@ pub(super) struct GrammersTransport {
     bundle_heading: Option<String>,
     video_thumbnail: Option<Vec<u8>>,
     transfer_budget: std::sync::Arc<crate::telegram_transfer_engine::Budget>,
+    authorization: std::sync::Arc<crate::telegram_transfer_engine::Authorization>,
 }
 #[derive(Clone)]
 pub(super) struct IndexDocument {
@@ -487,7 +488,7 @@ impl GrammersTransport {
             })
         });
         Ok(Box::new(crate::telegram_transfer_engine::Reader::new(crate::telegram_transfer_engine::download(
-            self.client.clone(), document.clone(), refresh, self.transfer_budget.clone(),
+            self.client.clone(), document.clone(), refresh, self.transfer_budget.clone(), self.authorization.clone(),
         )?)))
     }
     pub(super) async fn media_reader(
@@ -516,7 +517,7 @@ impl GrammersTransport {
     pub(super) async fn connect(
         client: Client,
         target: &Target,
-        session: Option<&super::telegram_vault::VaultSession>,
+        session: &super::telegram_vault::VaultSession,
         request_kind: &str,
         upload_limit: impl Future<Output = Result<u64>>,
         io: &Io,
@@ -524,7 +525,7 @@ impl GrammersTransport {
         target.validate()?;
         let lookup = super::delete_timing::setup_span("channel_lookup");
         let id = target.channel_id.parse::<i64>()?;
-        let cached = if let Some(session) = session {
+        let cached = if matches!(request_kind, "publish_change" | "publish_delete" | "remote_cleanup") {
             cached_channel(&client, session, id, io).await?
         } else {
             None
@@ -585,6 +586,7 @@ impl GrammersTransport {
             bundle_heading: None,
             video_thumbnail: None,
             transfer_budget: crate::telegram_transfer_engine::Budget::account(&target.account_id),
+            authorization: session.file_authorization.clone(),
         })
     }
     async fn message(&self, id: i32) -> Result<grammers_client::message::Message> {

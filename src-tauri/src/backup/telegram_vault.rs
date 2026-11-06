@@ -80,6 +80,7 @@ struct Metadata {
 }
 
 pub(super) struct VaultSession {
+    pub(super) file_authorization: Arc<crate::telegram_transfer_engine::Authorization>,
     memory: MemorySession,
     metadata: Mutex<Metadata>,
     writes: tokio::sync::Mutex<()>,
@@ -140,6 +141,7 @@ impl VaultSession {
             .context("TELEGRAM_SESSION_STORAGE")??
         };
         Ok(Arc::new(Self {
+            file_authorization: Arc::default(),
             memory: MemorySession::from(data),
             metadata: Mutex::new(metadata),
             writes: tokio::sync::Mutex::new(()),

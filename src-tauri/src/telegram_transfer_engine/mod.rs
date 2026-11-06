@@ -108,13 +108,43 @@ impl Plan {
     }
 }
 
+struct RequestWindow {
+    generation: u64,
+    weight: usize,
+    successes: usize,
+    stable_since: tokio::time::Instant,
+}
+impl Default for RequestWindow {
+    fn default() -> Self {
+        Self { generation: 0, weight: 1, successes: 0, stable_since: tokio::time::Instant::now() }
+    }
+}
+#[derive(Debug)]
+struct RequestPermit {
+    _permit: OwnedSemaphorePermit,
+    generation: u64,
+}
+
+/// Owned by one live authorization session, never shared merely by account id.
+#[derive(Default)]
+pub(crate) struct Authorization(Mutex<HashMap<i32, Arc<DcAuthorization>>>);
+#[derive(Default)]
+struct DcAuthorization {
+    generation: AtomicU64,
+    importing: tokio::sync::Mutex<()>,
+}
+impl Authorization {
+    fn dc(&self, dc: i32) -> Arc<DcAuthorization> {
+        self.0.lock().expect("DC authorization").entry(dc).or_default().clone()
+    }
+}
+
 /// Shared across backup/download bindings with the same verified account id.
 pub(crate) struct Budget {
     requests: Arc<Semaphore>,
-    request_weight: AtomicUsize,
+    window: Mutex<RequestWindow>,
     media_connections: Arc<Semaphore>,
     cooldown: Mutex<Option<Instant>>,
-    authorization: tokio::sync::Mutex<HashMap<i32, u64>>,
 }
 impl Budget {
     pub fn account(id: &str) -> Arc<Self> {
@@ -137,10 +167,9 @@ impl Budget {
         }
         let budget = Arc::new(Self {
             requests: Arc::new(Semaphore::new(GLOBAL_REQUESTS)),
-            request_weight: AtomicUsize::new(1),
+            window: Mutex::new(RequestWindow::default()),
             media_connections: Arc::new(Semaphore::new(8)),
             cooldown: Mutex::new(None),
-            authorization: tokio::sync::Mutex::new(HashMap::new()),
         });
         accounts.insert(id.into(), budget.clone());
         budget
@@ -155,20 +184,43 @@ impl Budget {
         }
         Ok(())
     }
-    async fn acquire(&self) -> Result<OwnedSemaphorePermit> {
+    async fn acquire(&self) -> Result<RequestPermit> {
         loop {
             self.check()?;
-            let weight = self.request_weight.load(Ordering::Relaxed);
+            let (generation, weight) = {
+                let window = self.window.lock().expect("transfer window");
+                (window.generation, window.weight)
+            };
             let permit = self.requests.clone().acquire_many_owned(weight as u32).await
                 .context("TELEGRAM_TRANSFER_CANCELED")?;
             self.check()?;
-            // Waiters enqueued before a timeout must also obey the reduced limit.
-            if weight == self.request_weight.load(Ordering::Relaxed) { return Ok(permit); }
+            // A queued request must enter the current window, including after recovery.
+            if generation == self.window.lock().expect("transfer window").generation {
+                return Ok(RequestPermit { _permit: permit, generation });
+            }
         }
     }
-    fn slow_down(&self) {
-        let _ = self.request_weight.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
-            |weight| Some((weight * 2).min(GLOBAL_REQUESTS)));
+    fn failed(&self, generation: u64, timed_out: bool) {
+        let mut window = self.window.lock().expect("transfer window");
+        if generation != window.generation { return; }
+        window.successes = 0;
+        window.stable_since = tokio::time::Instant::now();
+        if timed_out {
+            window.weight = (window.weight * 2).min(GLOBAL_REQUESTS);
+            window.generation = window.generation.wrapping_add(1);
+        }
+    }
+    fn succeeded(&self, generation: u64) {
+        let mut window = self.window.lock().expect("transfer window");
+        if generation != window.generation || window.weight == 1 { return; }
+        window.successes += 1;
+        // Require both sustained progress and a stable interval before opening one step.
+        if window.successes >= 32 && window.stable_since.elapsed() >= Duration::from_secs(30) {
+            window.weight /= 2;
+            window.generation = window.generation.wrapping_add(1);
+            window.successes = 0;
+            window.stable_since = tokio::time::Instant::now();
+        }
     }
     fn flood(&self, seconds: u32) {
         let until = Instant::now() + Duration::from_secs(u64::from(seconds));
@@ -298,11 +350,11 @@ pub(crate) async fn cover_chunk<T>(
     budget: &Budget,
     work: impl Future<Output = std::result::Result<T, InvocationError>>,
 ) -> Result<T> {
-    let _permit = budget.acquire().await?;
+    let permit = budget.acquire().await?;
     match tokio::time::timeout(RPC_TIMEOUT, work).await {
-        Ok(Ok(value)) => Ok(value),
+        Ok(Ok(value)) => { budget.succeeded(permit.generation); Ok(value) },
         Ok(Err(error)) => {
-            if matches!(&error, InvocationError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut) { budget.slow_down(); }
+            budget.failed(permit.generation, matches!(&error, InvocationError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut));
             if let InvocationError::Rpc(ref rpc) = error {
                 if rpc.code == 420 {
                     budget.flood(rpc.value.unwrap_or(60));
@@ -310,7 +362,7 @@ pub(crate) async fn cover_chunk<T>(
             }
             Err(crate::backup::telegram_session::rpc_error(error))
         }
-        Err(_) => { budget.slow_down(); bail!("TELEGRAM_TRANSFER_TIMEOUT"); },
+        Err(_) => { budget.failed(permit.generation, true); bail!("TELEGRAM_TRANSFER_TIMEOUT"); },
     }
 }
 async fn rpc<'a, T>(
@@ -339,11 +391,15 @@ async fn rpc<'a, T>(
         let result = tokio::time::timeout(RPC_TIMEOUT, call()).await;
         drop(timer);
         drop(guard);
+        let generation = permit.generation;
         drop(permit);
         let (error, retry) = match result {
-            Ok(Ok(value)) => return Ok(value),
+            Ok(Ok(value)) => {
+                if matches!(route, Route::File) { budget.succeeded(generation); }
+                return Ok(value);
+            },
             Ok(Err(error)) => {
-                if matches!(&error, InvocationError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut) { budget.slow_down(); }
+                budget.failed(generation, matches!(&error, InvocationError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut));
                 if let InvocationError::Rpc(ref e) = error {
                     if e.code == 420 {
                         budget.flood(e.value.unwrap_or(60));
@@ -376,7 +432,7 @@ async fn rpc<'a, T>(
                 ) || matches!(&error, InvocationError::Rpc(e) if e.code >= 500);
                 (crate::backup::telegram_session::rpc_error(error), retry)
             }
-            Err(_) => { budget.slow_down(); (anyhow::anyhow!("TELEGRAM_TRANSFER_TIMEOUT"), true) },
+            Err(_) => { budget.failed(generation, true); (anyhow::anyhow!("TELEGRAM_TRANSFER_TIMEOUT"), true) },
         };
         stats.failures.fetch_add(1, Ordering::Relaxed);
         if let Some(part) = part {
@@ -457,6 +513,7 @@ impl FileClient for GrammersFileClient {
     }
 }
 pub(crate) struct DocumentSource {
+    authorization: Arc<Authorization>,
     client: Arc<dyn FileClient>,
     document: tokio::sync::Mutex<(tl::types::Document, usize)>,
     refresh: Refresh,
@@ -499,7 +556,8 @@ impl DocumentSource {
                 offset: chunk.offset as i64,
                 limit: DOWNLOAD_PART as i32,
             };
-            let authorization = *self.budget.authorization.lock().await.get(&dc).unwrap_or(&0);
+            let authorization = self.authorization.dc(dc);
+            let generation = authorization.generation.load(Ordering::Acquire);
             // Keep raw routing errors here; retry classification is shared below.
             let result = rpc(&self.budget, &self.stats, Route::File, Some(part), || {
                 self.client.get(dc, &request)
@@ -538,8 +596,8 @@ impl DocumentSource {
                     self.document.lock().await.0.dc_id = dc;
                 }
                 Err(error) if error.to_string() == "TELEGRAM_DC_AUTH_REQUIRED" && !authorized => {
-                    let mut generations = self.budget.authorization.lock().await;
-                    if generations.get(&dc).copied().unwrap_or(0) != authorization {
+                    let _importing = authorization.importing.lock().await;
+                    if authorization.generation.load(Ordering::Acquire) != generation {
                         authorized = true;
                         continue;
                     }
@@ -556,7 +614,7 @@ impl DocumentSource {
                         self.client.import(dc, &exported)
                     })
                     .await?;
-                    generations.insert(dc, authorization.wrapping_add(1));
+                    authorization.generation.fetch_add(1, Ordering::Release);
                     authorized = true;
                 }
                 Err(error) if error.to_string() == "TELEGRAM_DC_AUTH_REQUIRED" => {
@@ -701,6 +759,7 @@ fn document_download(
     document: tl::types::Document,
     refresh: Refresh,
     budget: Arc<Budget>,
+    authorization: Arc<Authorization>,
 ) -> Result<(Arc<dyn ChunkSource>, Plan)> {
     let settings = settings();
     let plan = Plan::new(
@@ -710,6 +769,7 @@ fn document_download(
     )?;
     Ok((
         Arc::new(DocumentSource {
+            authorization,
             client: Arc::new(GrammersFileClient(client)),
             document: tokio::sync::Mutex::new((document, 0)),
             refresh,
@@ -725,8 +785,9 @@ pub(crate) fn download(
     document: tl::types::Document,
     refresh: Refresh,
     budget: Arc<Budget>,
+    authorization: Arc<Authorization>,
 ) -> Result<Download> {
-    let (source, plan) = document_download(client, document, refresh, budget)?;
+    let (source, plan) = document_download(client, document, refresh, budget, authorization)?;
     Ok(Download::new(source, plan))
 }
 pub(crate) fn download_file(
@@ -734,8 +795,9 @@ pub(crate) fn download_file(
     document: tl::types::Document,
     refresh: Refresh,
     budget: Arc<Budget>,
+    authorization: Arc<Authorization>,
 ) -> Result<FileDownload> {
-    let (source, plan) = document_download(client, document, refresh, budget)?;
+    let (source, plan) = document_download(client, document, refresh, budget, authorization)?;
     Ok(FileDownload::new(source, plan))
 }
 

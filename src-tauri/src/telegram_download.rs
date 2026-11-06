@@ -139,6 +139,7 @@ struct SdkTransport {
     client: Client,
     iter: Option<crate::telegram_transfer_engine::FileDownload>,
     budget: std::sync::Arc<crate::telegram_transfer_engine::Budget>,
+    authorization: std::sync::Arc<crate::telegram_transfer_engine::Authorization>,
     covers: Vec<PhotoSize>,
 }
 impl Transport for SdkTransport {
@@ -207,7 +208,7 @@ impl Transport for SdkTransport {
                     Ok(raw)
                 })
             });
-            self.iter = Some(crate::telegram_transfer_engine::download_file(self.client.clone(), raw, refresh, self.budget.clone())?);
+            self.iter = Some(crate::telegram_transfer_engine::download_file(self.client.clone(), raw, refresh, self.budget.clone(), self.authorization.clone())?);
             Ok(result)
         })
     }
@@ -454,6 +455,7 @@ async fn operation_once(
                 .client(),
             iter: None,
             budget: crate::telegram_transfer_engine::Budget::account(&binding.session.status().account.context("TELEGRAM_AUTH_REQUIRED")?.id),
+            authorization: connection.as_ref().context("TELEGRAM_NOT_CONNECTED")?.file_authorization(),
             covers: vec![],
         })
     };

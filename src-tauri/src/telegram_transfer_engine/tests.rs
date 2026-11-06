@@ -433,6 +433,9 @@ struct FileMock {
     home: i32,
     fail_auth: bool,
     auth_barrier: Option<Arc<tokio::sync::Barrier>>,
+    authorized_dcs: Option<Mutex<HashSet<i32>>>,
+    auth_started: Option<Arc<Semaphore>>,
+    auth_release: Option<Arc<Semaphore>>,
 }
 impl FileClient for FileMock {
     fn get<'a>(
@@ -452,7 +455,9 @@ impl FileClient for FileMock {
                 .push((dc, request.offset, location.file_reference.clone()));
             assert!(!request.cdn_supported);
             assert_eq!(request.limit, DOWNLOAD_PART as i32);
-            let reply = self.replies.lock().unwrap().pop_front();
+            let unauthorized = self.authorized_dcs.as_ref().is_some_and(|dcs| !dcs.lock().unwrap().contains(&dc));
+            let reply = if unauthorized { Some(Reply::Error(401, "AUTH_KEY_UNREGISTERED")) }
+                else { self.replies.lock().unwrap().pop_front() };
             match reply {
                 Some(Reply::Error(code, message)) => {
                     if message == "AUTH_KEY_UNREGISTERED" {
@@ -505,14 +510,19 @@ impl FileClient for FileMock {
     }
     fn import<'a>(
         &'a self,
-        _dc: i32,
+        dc: i32,
         _exported: &'a tl::types::auth::ExportedAuthorization,
     ) -> RpcWork<'a, ()> {
-        Box::pin(async {
+        Box::pin(async move {
             self.authorizations.fetch_add(1, Ordering::Relaxed);
+            if dc == 2 {
+                if let Some(started) = &self.auth_started { started.add_permits(1); }
+                if let Some(release) = &self.auth_release { release.acquire().await.unwrap().forget(); }
+            }
             if self.fail_auth {
                 Err(protocol_error(401, "AUTH_KEY_UNREGISTERED"))
             } else {
+                if let Some(dcs) = &self.authorized_dcs { dcs.lock().unwrap().insert(dc); }
                 Ok(())
             }
         })
@@ -520,6 +530,7 @@ impl FileClient for FileMock {
 }
 fn adapter(mock: Arc<FileMock>, fresh: tl::types::Document) -> DocumentSource {
     DocumentSource {
+        authorization: Arc::default(),
         client: mock,
         document: tokio::sync::Mutex::new((document(), 0)),
         refresh: Arc::new(move || {
@@ -703,7 +714,7 @@ async fn timeout_reduces_shared_actual_rpc_concurrency_including_existing_waiter
     for _ in 0..GLOBAL_REQUESTS { held.push(budget.acquire().await.unwrap()); }
     let queued = budget.acquire(); tokio::pin!(queued);
     assert!(tokio::time::timeout(Duration::from_millis(10), &mut queued).await.is_err());
-    budget.slow_down();
+    budget.failed(held[0].generation, true);
     drop(held);
     let first = queued.await.unwrap();
     let mut held = vec![first];
@@ -739,4 +750,135 @@ async fn concurrent_dc_auth_failures_share_one_export_import() {
         while let Some(result) = tasks.join_next().await { assert_eq!(result.unwrap().unwrap().len(), DOWNLOAD_PART as usize); }
     }).await.unwrap();
     assert_eq!(mock.authorizations.load(Ordering::Relaxed), 1);
+}
+
+
+#[tokio::test]
+async fn broadcast_timeout_reduces_one_generation_only_and_recovers_across_files() {
+    let id = uuid::Uuid::new_v4().to_string();
+    let budget = Budget::account(&id);
+    let barrier = Arc::new(tokio::sync::Barrier::new(4));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let budget = budget.clone(); let barrier = barrier.clone();
+        tasks.spawn(async move {
+            let stats = Stats::default(); let mut calls = 0;
+            rpc(&budget, &stats, Route::File, None, || {
+                calls += 1; let first = calls == 1; let barrier = barrier.clone();
+                Box::pin(async move {
+                    if first {
+                        barrier.wait().await;
+                        Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
+                    } else { Ok(()) }
+                })
+            }).await
+        });
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(result) = tasks.join_next().await { result.unwrap().unwrap(); }
+    }).await.unwrap();
+    assert_eq!(budget.window.lock().unwrap().weight, 2);
+    // Later independent requests belong to new generations and can reduce again.
+    for weight in [4, 8] {
+        assert!(cover_chunk::<()>(&budget, async {
+            Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
+        }).await.is_err());
+        assert_eq!(budget.window.lock().unwrap().weight, weight);
+    }
+    let next_file = Budget::account(&id);
+    assert!(Arc::ptr_eq(&budget, &next_file));
+    // Hold an old result through a complete down/up cycle to detect generation ABA.
+    let stale = next_file.acquire().await.unwrap();
+    let stale_generation = stale.generation;
+    next_file.failed(stale_generation, true);
+    drop(stale);
+    tokio::time::pause();
+    for weight in [8, 4, 2, 1] {
+        for _ in 0..31 { cover_chunk(&next_file, async { Ok(()) }).await.unwrap(); }
+        assert_eq!(next_file.window.lock().unwrap().weight, weight * 2);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        cover_chunk(&next_file, async { Ok(()) }).await.unwrap();
+        assert_eq!(next_file.window.lock().unwrap().weight, weight);
+        if weight == 8 {
+            next_file.failed(stale_generation, true);
+            assert_eq!(next_file.window.lock().unwrap().weight, 8);
+        }
+    }
+    next_file.failed(stale_generation, true);
+    assert_eq!(next_file.window.lock().unwrap().weight, 1);
+    let mut held = vec![];
+    for _ in 0..16 { held.push(next_file.acquire().await.unwrap()); }
+    assert!(tokio::time::timeout(Duration::from_millis(1), next_file.acquire()).await.is_err());
+}
+
+#[tokio::test]
+async fn independent_sessions_import_separately_and_share_only_account_budget() {
+    let barrier = Arc::new(tokio::sync::Barrier::new(8));
+    let budget = Budget::account(&uuid::Uuid::new_v4().to_string());
+    let mut clients = vec![]; let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..2 {
+        let client = Arc::new(FileMock {
+            home: 1, authorized_dcs: Some(Mutex::new(HashSet::new())),
+            auth_barrier: Some(barrier.clone()), ..Default::default()
+        });
+        let authorization = Arc::new(Authorization::default());
+        clients.push(client.clone());
+        // Two documents per independent session must still share its authorization.
+        for _ in 0..2 {
+            let mut source = adapter(client.clone(), document());
+            source.budget = budget.clone(); source.authorization = authorization.clone();
+            let source = Arc::new(source);
+            for _ in 0..2 {
+                let source = source.clone();
+                tasks.spawn(async move { source.fetch(Chunk {index:0, offset:0, length:DOWNLOAD_PART as usize}).await });
+            }
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(result) = tasks.join_next().await { assert_eq!(result.unwrap().unwrap().len(), DOWNLOAD_PART as usize); }
+    }).await.unwrap();
+    for client in clients {
+        assert_eq!(client.authorizations.load(Ordering::Relaxed), 1);
+        assert!(client.authorized_dcs.as_ref().unwrap().lock().unwrap().contains(&2));
+    }
+}
+
+#[tokio::test]
+async fn slow_dc_import_does_not_block_an_authorized_dc() {
+    let started = Arc::new(Semaphore::new(0)); let release = Arc::new(Semaphore::new(0));
+    let client = Arc::new(FileMock {
+        home: 1, authorized_dcs: Some(Mutex::new(HashSet::from([3]))),
+        auth_started: Some(started.clone()), auth_release: Some(release.clone()), ..Default::default()
+    });
+    let source = Arc::new(adapter(client.clone(), document()));
+    let chunk = Chunk {index:0,offset:0,length:DOWNLOAD_PART as usize};
+    let blocked = { let source = source.clone(); tokio::spawn(async move { source.fetch(chunk).await }) };
+    tokio::time::timeout(Duration::from_secs(2), started.acquire()).await.unwrap().unwrap().forget();
+    let mut other = adapter(client.clone(), document());
+    other.authorization = source.authorization.clone(); other.budget = source.budget.clone();
+    other.document.lock().await.0.dc_id = 3;
+    assert_eq!(tokio::time::timeout(Duration::from_secs(1), other.fetch(chunk)).await.unwrap().unwrap().len(), DOWNLOAD_PART as usize);
+    assert!(!blocked.is_finished());
+    release.add_permits(1);
+    assert!(tokio::time::timeout(Duration::from_secs(2), blocked).await.unwrap().unwrap().is_ok());
+    assert_eq!(client.authorizations.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn recovery_requires_both_stable_time_and_consecutive_file_successes() {
+    let budget = Budget::account(&uuid::Uuid::new_v4().to_string());
+    tokio::time::pause();
+    assert!(cover_chunk::<()>(&budget, async {
+        Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
+    }).await.is_err());
+    for _ in 0..32 { cover_chunk(&budget, async { Ok(()) }).await.unwrap(); }
+    assert_eq!(budget.window.lock().unwrap().weight, 2, "success burst alone must not restore concurrency");
+    assert!(cover_chunk::<()>(&budget, async {
+        Err(InvocationError::Io(std::io::ErrorKind::ConnectionReset.into()))
+    }).await.is_err());
+    tokio::time::advance(Duration::from_secs(30)).await;
+    for _ in 0..31 { cover_chunk(&budget, async { Ok(()) }).await.unwrap(); }
+    assert_eq!(budget.window.lock().unwrap().weight, 2, "a failure must reset the success streak");
+    cover_chunk(&budget, async { Ok(()) }).await.unwrap();
+    assert_eq!(budget.window.lock().unwrap().weight, 1);
 }

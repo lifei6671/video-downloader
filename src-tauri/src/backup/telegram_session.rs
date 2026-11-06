@@ -1319,6 +1319,7 @@ pub(crate) struct DownloadConnection {
 }
 impl DownloadConnection {
     pub(crate) fn client(&self) -> Client { self.connection.enable_media_pool(); self.connection.client.clone() }
+    pub(crate) fn file_authorization(&self) -> Arc<crate::telegram_transfer_engine::Authorization> { self.connection.session.file_authorization.clone() }
     pub(crate) fn cancellation(&self) -> watch::Receiver<bool> { self.cancel.clone() }
     pub(crate) fn stopped(&self) -> watch::Receiver<bool> { self.connection.reader_stop.subscribe() }
     /// Release only this lease. The session owner stops and joins the pool.
@@ -1402,8 +1403,7 @@ async fn prepare_transport(
     let transport = GrammersTransport::connect(
         client.clone(),
         target,
-        matches!(kind, "publish_change" | "publish_delete" | "remote_cleanup")
-            .then_some(session),
+        session,
         kind,
         upload_limit,
         io,
