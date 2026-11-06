@@ -1201,8 +1201,6 @@ async fn telegram_t3_switch_to_s3_blocks_old_queue_and_keeps_original_pending_pa
 #[test]
 fn telegram_initial_schema_keeps_s3_unique_target_and_allows_multiple_telegram_spaces() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
-    db.execute_batch(include_str!("schema.sql")).unwrap();
-    db.execute_batch(include_str!("sync-schema.sql")).unwrap();
     repository::init(&db).unwrap();
     assert_eq!(db.query_row("SELECT COUNT(*) FROM telegram_media_sends",[],|r|r.get::<_,i64>(0)).unwrap(),0);
     db.execute(

@@ -307,16 +307,16 @@ mod display_tests {
     }
 
     #[test]
-    fn version_seven_backfill_and_projection_updates_are_atomic_and_scoped() {
+    fn projection_backfill_and_updates_are_atomic_and_scoped() {
         let root = tempfile::tempdir().unwrap();
         let core = Core::open(&root.path().join("app.sqlite"),root.path().join("downloads"),"unused".into(),vec![], |_| {}).unwrap();
         core.backup_db(|db| {
             db.execute_batch("DROP TRIGGER backup_display_insert; DROP TRIGGER backup_display_state; DROP TRIGGER backup_display_payload; DROP TRIGGER backup_display_delete; DROP TABLE backup_operation_display;
-                UPDATE backup_schema SET version=7;
                 INSERT INTO backup_spaces VALUES('a','a','','','','',0),('b','b','','','','',0);
                 INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES('a','a','upload','blocked','captured','{\"capture\":\"keep\",\"completed_bytes\":12}'),('b','b','delete','completed','completed','{}');")?;
-            super::super::repository::init(db)?;
-            assert_eq!(db.query_row("SELECT version FROM backup_schema",[],|r|r.get::<_,i64>(0))?,9);
+            let tx = db.unchecked_transaction()?;
+            tx.execute_batch(include_str!("operation-display.sql"))?;
+            tx.commit()?;
             Ok(())
         }).unwrap();
         let a = operations_for_display(&core,Some("a")).unwrap();

@@ -3,7 +3,7 @@ use anyhow::{bail, ensure, Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use std::{fs::OpenOptions, path::Path};
 
-const VERSION: i64 = 9;
+const VERSION: i64 = 1;
 const SPACES: &[&str] = &[
     "space_id",
     "library_id",
@@ -26,12 +26,6 @@ const CONFIG: &[&str] = &[
 
 pub(crate) struct Prepared {
     version: Option<i64>,
-}
-
-impl Prepared {
-    pub(crate) fn is_upgrade(&self) -> bool {
-        matches!(self.version, Some(1 | 5 | 6 | 7 | 8))
-    }
 }
 
 fn version(db: &Connection) -> Result<Option<i64>> {
@@ -71,99 +65,72 @@ pub(crate) fn prepare(db: &Connection) -> Result<Prepared> {
     ensure!(db.is_autocommit(), "BACKUP_SCHEMA_REQUIRES_AUTOCOMMIT");
     let old = version(db)?;
     match old {
-        None => return Ok(Prepared { version: old }),
-        Some(1 | 6 | 7 | 8 | VERSION) => {
-            // v1 was reused by the current-format rewrite. Do not mistake an older
-            // unrelated v1 layout for that format merely because its number matches.
+        None => {
+            // master has the desktop tables but no backup schema. Back it up before
+            // the single release migration changes settings or adds any tables.
+            let existing: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%')",
+                [], |row| row.get(0),
+            )?;
+            if existing {
+                snapshot(db, 0)?;
+            }
+        }
+        Some(VERSION | 9) => {
             columns(db, "backup_spaces", SPACES)?;
             columns(db, "asset_remote_objects", OBJECTS)?;
             columns(db, "backup_provider_config", CONFIG)?;
-            if old == Some(VERSION) {
-                return Ok(Prepared { version: old });
-            }
-        }
-        Some(5) => {
+            // The development branch previously reused v1. Its incomplete layout
+            // must not be mistaken for the consolidated release schema.
             columns(
                 db,
-                "backup_spaces",
+                "backup_operation_captures",
+                &["operation_id", "capture_json"],
+            )?;
+            columns(
+                db,
+                "backup_import_receipts",
                 &[
                     "space_id",
-                    "library_id",
-                    "endpoint",
-                    "bucket",
-                    "prefix",
-                    "role",
-                    "writer_device_id",
-                    "writer_epoch",
-                    "credential_ref",
-                    "enabled",
+                    "remote_asset_id",
+                    "remote_json",
+                    "version_json",
+                    "local_revision",
+                    "pending_json",
                 ],
             )?;
             columns(
                 db,
-                "asset_remote_objects",
+                "asset_deletion_hidden_history",
+                &["space_id", "asset_id"],
+            )?;
+            columns(
+                db,
+                "backup_operation_display",
                 &[
+                    "operation_id",
                     "space_id",
                     "asset_id",
-                    "record_key",
-                    "record_etag",
-                    "record_revision",
-                    "media_key",
-                    "cover_key",
-                    "transcript_key",
-                    "remote_state",
+                    "kind",
+                    "state",
+                    "phase",
+                    "summary_json",
+                    "attempt",
+                    "last_error",
+                    "created_at",
+                    "sequence",
+                    "progress_bytes",
+                    "progress_started",
                 ],
             )?;
-            columns(
-                db,
-                "backup_provider_config",
-                &[
-                    "space_id",
-                    "provider_type",
-                    "profile",
-                    "region",
-                    "path_style",
-                    "capabilities_json",
-                    "protocol",
-                    "migration_json",
-                ],
-            )?;
-            let migrating: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM backup_provider_config WHERE migration_json IS NOT NULL)",
-                [], |row| row.get(0),
-            )?;
-            ensure!(!migrating, "BACKUP_MIGRATION_REMOTE_UPGRADE_PENDING");
-            // Maintenance probe cleanup runs independently of the sync toggles.
-            // An unresolved legacy probe must not become an automatic remote write.
-            let cleanup: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM backup_probe_cleanup)",
-                [],
-                |row| row.get(0),
-            )?;
-            ensure!(!cleanup, "BACKUP_MIGRATION_PROBE_CLEANUP_PENDING");
-            // This is the only rebuilt table. Unknown indexes, triggers or
-            // incoming foreign keys could otherwise be lost or cascade on DROP.
-            let extra: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE tbl_name='backup_provider_config' COLLATE NOCASE
-                 AND type IN ('index','trigger') AND NOT(type='index'
-                 AND name='sqlite_autoindex_backup_provider_config_1' COLLATE NOCASE AND sql IS NULL))
-                 OR EXISTS(SELECT 1 FROM sqlite_master m,pragma_foreign_key_list(m.name) f
-                 WHERE m.type='table' AND f.\"table\"='backup_provider_config' COLLATE NOCASE)",
-                [],
-                |row| row.get(0),
-            )?;
-            ensure!(!extra, "BACKUP_MIGRATION_INVALID_STRUCTURE");
+            if old == Some(9) {
+                // Already-final development databases need only the consolidated
+                // version marker; never replay the removed intermediate migrations.
+                snapshot(db, 9)?;
+            }
         }
         _ => bail!("BACKUP_UNSUPPORTED_SCHEMA"),
     }
-    // A SQLite upgrade does not convert an incompatible remote protocol.
-    let incompatible: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM backup_provider_config WHERE protocol<>2)",
-        [],
-        |row| row.get(0),
-    )?;
-    ensure!(!incompatible, "BACKUP_MIGRATION_UNSUPPORTED_PROTOCOL");
-    snapshot(db, old.expect("recognized migration version"))?;
     Ok(Prepared { version: old })
 }
 
@@ -201,42 +168,17 @@ fn snapshot(db: &Connection, old: i64) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn apply(db: &Connection, prepared: &Prepared) -> Result<()> {
+pub(crate) fn check_unchanged(db: &Connection, prepared: &Prepared) -> Result<()> {
     ensure!(
         version(db)? == prepared.version,
         "BACKUP_MIGRATION_DATABASE_CHANGED"
     );
-    if prepared.version != Some(5) {
-        return Ok(());
-    }
-    db.execute_batch(include_str!("migrate-v5-v6.sql"))?;
-    columns(db, "backup_spaces", SPACES)?;
-    columns(db, "asset_remote_objects", OBJECTS)?;
-    columns(db, "backup_provider_config", CONFIG)?;
     Ok(())
 }
 
 pub(crate) fn finish(db: &Connection, prepared: &Prepared) -> Result<()> {
-    if prepared.version == Some(5) {
-        // Pause every automatic discovery/retention/upload path. Saved targets,
-        // credential references and all blocked/send evidence remain in place.
-        db.execute("UPDATE backup_spaces SET enabled=0", [])?;
-        db.execute("INSERT INTO backup_sync_preference VALUES(1,0) ON CONFLICT(id) DO UPDATE SET enabled=0", [])?;
-        db.execute("UPDATE backup_operations SET state='blocked',last_error='BACKUP_MIGRATION_REVIEW_REQUIRED' WHERE state IN ('pending','running','retry_wait')", [])?;
-    }
-    if matches!(prepared.version, Some(1 | 5 | 6)) {
-        // Completed local deletion is durable evidence for the old global hide.
-        // Preserve explicit hides without that evidence; never infer deletion
-        // merely from a missing file or a remote tombstone.
-        db.execute("INSERT OR IGNORE INTO asset_deletion_hidden_history(space_id,asset_id) SELECT o.space_id,o.asset_id FROM backup_operations o JOIN asset_hidden_history h ON h.asset_id=o.asset_id WHERE o.kind='delete' AND json_extract(o.payload_json,'$.local_cleanup_done')=1", [])?;
-        db.execute("DELETE FROM asset_hidden_history WHERE asset_id IN (SELECT asset_id FROM asset_deletion_hidden_history)", [])?;
-    }
     if prepared.version != Some(VERSION) {
-        db.execute("INSERT OR IGNORE INTO backup_operation_captures SELECT operation_id,json_extract(payload_json,'$.capture') FROM backup_operations WHERE kind='upload' AND json_type(payload_json,'$.capture')='object' AND state<>'completed'", [])?;
-        db.execute("UPDATE backup_operations SET payload_json=CASE WHEN state='completed' THEN json_remove(payload_json,'$.capture.cover','$.capture.transcript') ELSE json_remove(payload_json,'$.capture') END WHERE kind='upload' AND json_type(payload_json,'$.capture')='object'", [])?;
-    }
-    if prepared.version.is_some_and(|version| version < VERSION) {
-        db.execute("UPDATE backup_schema SET version=? WHERE id=1", [VERSION])?;
+        db.execute("INSERT INTO backup_schema(id,version) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET version=excluded.version", [VERSION])?;
     }
     Ok(())
 }

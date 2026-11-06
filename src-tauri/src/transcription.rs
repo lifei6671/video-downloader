@@ -112,6 +112,10 @@ fn persist_snapshot(db:&Connection,value:&Snapshot,new_result:bool)->Result<()> 
 }
 pub(super) fn init(db: &Connection) -> Result<()> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS video_transcripts(task_id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);")?;
+    Ok(())
+}
+
+pub(super) fn recover(db: &Connection) -> Result<()> {
     let mut query = db.prepare("SELECT task_id FROM video_transcripts")?;
     let ids = query
         .query_map([], |r| r.get::<_, String>(0))?

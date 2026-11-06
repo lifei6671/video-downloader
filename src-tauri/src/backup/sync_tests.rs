@@ -2265,7 +2265,7 @@ async fn p3_space_names_are_local_persistent_and_do_not_change_library_or_queue(
         db.query_row("SELECT version FROM backup_schema WHERE id=1", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        9
+        1
     );
     let after = scheduler::operations(&f.core)
         .unwrap()
@@ -3612,7 +3612,7 @@ fn current_sqlite_schema_is_idempotent_and_rejects_unknown_versions() {
         db.query_row("SELECT version FROM backup_schema", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        9
+        1
     );
     db.execute("UPDATE backup_schema SET version=99", [])
         .unwrap();

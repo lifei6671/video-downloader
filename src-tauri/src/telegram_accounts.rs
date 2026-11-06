@@ -74,8 +74,6 @@ pub struct TelegramAccounts {
 }
 impl TelegramAccounts {
     pub fn load(db: &Connection) -> Result<Self> {
-        db.execute_batch("CREATE TABLE IF NOT EXISTS telegram_account_bindings (
-            purpose TEXT PRIMARY KEY CHECK(purpose IN ('download','backup')), session_ref TEXT NOT NULL);")?;
         let default = crate::backup::repository::device_id(db)?;
         let load = |purpose: Purpose| -> Result<String> {
             let value: Option<String> = db

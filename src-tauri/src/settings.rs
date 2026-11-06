@@ -55,7 +55,7 @@ fn entry(reference: &str) -> Result<keyring::Entry> {
     keyring::Entry::new("com.yingqu.desktop", reference).context("CREDENTIAL_ERROR")
 }
 
-pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
+pub(crate) fn init(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS app_settings (id INTEGER PRIMARY KEY CHECK(id=1), directory TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS platform_settings (
@@ -97,8 +97,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         [], |row| row.get(0),
     ).context("DATABASE_ERROR")?;
     if limit_default == "2" {
-        let transaction = db.unchecked_transaction().context("DATABASE_ERROR")?;
-        transaction.execute_batch(
+        db.execute_batch(
             "CREATE TABLE app_settings_expanded (
                id INTEGER PRIMARY KEY CHECK(id=1), directory TEXT NOT NULL,
                max_downloads INTEGER NOT NULL DEFAULT 3 CHECK(max_downloads BETWEEN 1 AND 5),
@@ -108,8 +107,14 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
              DROP TABLE app_settings;
              ALTER TABLE app_settings_expanded RENAME TO app_settings;",
         ).context("DATABASE_ERROR")?;
-        transaction.commit().context("DATABASE_ERROR")?;
     }
+    Ok(())
+}
+
+pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
+    let tx = db.unchecked_transaction().context("DATABASE_ERROR")?;
+    init(&tx)?;
+    tx.commit().context("DATABASE_ERROR")?;
     let filename_template = match db.query_row("SELECT filename_template FROM app_settings WHERE id=1", [], |r| r.get::<_, String>(0)) {
         Ok(value) => { crate::naming::validate(&value).context("DATABASE_ERROR")?; value },
         Err(rusqlite::Error::QueryReturnedNoRows) => crate::naming::DEFAULT_TEMPLATE.into(),

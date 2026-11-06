@@ -155,7 +155,7 @@ async fn cover_read_honors_pending_edits_in_another_space() {
 
 #[tokio::test]
 async fn deleting_one_membership_keeps_other_space_visible_and_restorable_after_restart() {
-    for migrate in [false, true] {
+    for development in [false, true] {
         let (f, provider, engine) = sync_fixture().await;
         engine
             .execute_upload(&claim(&engine, &f.core))
@@ -207,14 +207,9 @@ async fn deleting_one_membership_keeps_other_space_visible_and_restorable_after_
         drop(engine);
         drop(other_engine);
         drop(core);
-        if migrate {
+        if development {
             let db = rusqlite::Connection::open(root.path().join("app.sqlite")).unwrap();
-            db.execute("UPDATE backup_schema SET version=6", [])
-                .unwrap();
-            db.execute("DROP TABLE asset_deletion_hidden_history", [])
-                .unwrap();
-            db.execute("INSERT INTO asset_hidden_history VALUES(?)", [&id])
-                .unwrap();
+            db.execute("UPDATE backup_schema SET version=9", []).unwrap();
         }
         let reopened = Core::open(
             &root.path().join("app.sqlite"),

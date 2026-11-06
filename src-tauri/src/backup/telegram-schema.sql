@@ -1,3 +1,5 @@
+CREATE TABLE IF NOT EXISTS telegram_account_bindings (
+ purpose TEXT PRIMARY KEY CHECK(purpose IN ('download','backup')),session_ref TEXT NOT NULL);
 -- Send evidence only. Scheduling remains owned by backup_operations / SyncEngine.
 CREATE TABLE IF NOT EXISTS telegram_media_sends (
     operation_id TEXT NOT NULL,

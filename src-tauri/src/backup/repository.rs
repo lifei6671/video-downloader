@@ -9,30 +9,33 @@ use std::{fs, io::Read, path::Path, time::UNIX_EPOCH};
 use uuid::Uuid;
 
 pub fn init(db: &Connection) -> Result<()> {
-    init_prepared(db, super::schema_migration::prepare(db)?)
+    let prepared = super::schema_migration::prepare(db)?;
+    let tx = db.unchecked_transaction()?;
+    init_in_transaction(&tx, prepared)?;
+    tx.commit()?;
+    Ok(())
 }
 
-pub(crate) fn init_prepared(
-    db: &Connection,
+/// The desktop startup includes its settings and account schema in this transaction.
+pub(crate) fn init_in_transaction(
+    tx: &Connection,
     prepared: super::schema_migration::Prepared,
 ) -> Result<()> {
-    if !db.is_autocommit() {
-        bail!("BACKUP_SCHEMA_REQUIRES_AUTOCOMMIT");
+    if tx.is_autocommit() {
+        bail!("BACKUP_SCHEMA_REQUIRES_TRANSACTION");
     }
-    let tx = db.unchecked_transaction()?;
-    super::schema_migration::apply(&tx, &prepared)?;
+    super::schema_migration::check_unchanged(tx, &prepared)?;
     tx.execute_batch(include_str!("schema.sql"))?;
     tx.execute_batch(include_str!("sync-schema.sql"))?;
     tx.execute_batch(include_str!("telegram-schema.sql"))?;
     tx.execute_batch(include_str!("operation-display.sql"))?;
-    super::schema_migration::finish(&tx, &prepared)?;
     // Reclaim captures left by older terminal paths, preserving uncertain/canceled work.
     tx.execute("DELETE FROM backup_operation_captures WHERE operation_id IN (SELECT operation_id FROM backup_operations WHERE kind='upload' AND state='completed')", [])?;
     // History tasks exist in the desktop database, but not in standalone backup stores.
     if tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='download_tasks')", [], |r| r.get::<_,bool>(0))? {
         tx.execute_batch(include_str!("history-generation.sql"))?;
     }
-    super::spaces::select_initial_default(&tx)?;
+    super::spaces::select_initial_default(tx)?;
     tx.execute(
         "INSERT OR IGNORE INTO backup_device(id,device_id) VALUES(1,?)",
         [Uuid::new_v4().to_string()],
@@ -51,7 +54,7 @@ pub(crate) fn init_prepared(
         "UPDATE asset_local_files SET local_state='missing' WHERE local_state='restoring'",
         [],
     )?;
-    tx.commit()?;
+    super::schema_migration::finish(tx, &prepared)?;
     Ok(())
 }
 

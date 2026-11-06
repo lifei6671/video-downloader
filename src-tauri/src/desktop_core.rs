@@ -387,37 +387,32 @@ impl Core {
         instance_lock.try_lock().context("APP_ALREADY_RUNNING")?;
         let mut db = Connection::open(db_path).context("DATABASE_ERROR")?;
         db.pragma_update(None, "foreign_keys", true)?;
-        // Back up recognized old databases before any startup schema or cache writes.
+        // Snapshot the master database before the single, atomic schema upgrade.
         let backup_migration = crate::backup::schema_migration::prepare(&db)?;
-        let backup_migration = if backup_migration.is_upgrade() {
-            // Keep migration failure atomic before unrelated cache initialization.
-            crate::backup::repository::init_prepared(&db, backup_migration)?;
-            None
-        } else {
-            Some(backup_migration)
-        };
-        db.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+        let schema_tx = db.unchecked_transaction()?;
+        schema_tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS commit_intents(task_id TEXT PRIMARY KEY,source TEXT NOT NULL,
                 target TEXT NOT NULL,size INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS task_staging(task_id TEXT PRIMARY KEY,path TEXT NOT NULL);",
         )
         .context("DATABASE_ERROR")?;
-        let has_manifest = db
+        let has_manifest = schema_tx
             .prepare("PRAGMA table_info(commit_intents)")?
             .query_map([], |r| r.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?
             .iter()
             .any(|column| column == "manifest");
         if !has_manifest {
-            db.execute("ALTER TABLE commit_intents ADD COLUMN manifest TEXT", [])?;
+            schema_tx.execute("ALTER TABLE commit_intents ADD COLUMN manifest TEXT", [])?;
         }
-        let migrate_cache = parse_cache::init(&db)?;
-        transcription::init(&db)?;
-        if let Some(prepared) = backup_migration {
-            crate::backup::repository::init_prepared(&db, prepared)?;
-        }
+        let migrate_cache = parse_cache::init(&schema_tx)?;
+        transcription::init(&schema_tx)?;
+        settings::init(&schema_tx)?;
+        crate::backup::repository::init_in_transaction(&schema_tx, backup_migration)?;
+        schema_tx.commit()?;
+        transcription::recover(&db)?;
         let settings = settings::load(&db, directory)?;
         let telegram_accounts = crate::telegram_accounts::TelegramAccounts::load(&db)?;
         telegram_accounts.configure_proxy(settings.profiles.iter().find(|p| p.platform == "telegram").cloned());

@@ -1,468 +1,360 @@
-use rusqlite::Connection;
-use std::{fs, path::Path};
-use yingqu_core::backup::repository;
+use rusqlite::{params, types::Value, Connection};
+use serde_json::json;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+use yingqu_core::{backup::repository, desktop_core::Core};
 
-const LEGACY: &str = include_str!("../../tests/fixtures/backup-v5.sql");
-
-#[test]
-fn v6_deletion_hides_are_scoped_atomically_without_losing_explicit_hides() {
-    let db = Connection::open_in_memory().unwrap();
-    repository::init(&db).unwrap();
-    db.execute_batch("INSERT INTO backup_spaces VALUES('space','library','https://unit.invalid','test','test/',NULL,1);
-        INSERT INTO backup_provider_config(space_id,provider_type,profile,protocol) VALUES('space','s3','r2',2);
-        INSERT INTO media_assets VALUES('deleted',NULL,'{}','video.mp4',NULL,4,'active');
-        INSERT INTO media_assets VALUES('hidden',NULL,'{}','video.mp4',NULL,4,'active');
-        INSERT INTO asset_hidden_history VALUES('deleted'),('hidden');
-        INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES('delete','space','deleted','delete','completed','completed','{\"local_cleanup_done\":true}');
-        DROP TABLE asset_deletion_hidden_history;
-        UPDATE backup_schema SET version=6;
-        CREATE TRIGGER reject_v8 BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=9 BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
-    assert!(repository::init(&db).is_err());
-    assert_eq!(version(&db), 6);
-    assert_eq!(db.query_row("SELECT count(*) FROM asset_hidden_history", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-    assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='asset_deletion_hidden_history'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    db.execute("DROP TRIGGER reject_v8", []).unwrap();
-    repository::init(&db).unwrap();
-    assert_eq!(version(&db), 9);
-    assert_eq!(db.query_row("SELECT asset_id FROM asset_hidden_history", [], |r| r.get::<_, String>(0)).unwrap(), "hidden");
-    assert_eq!(db.query_row("SELECT space_id,asset_id FROM asset_deletion_hidden_history", [], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?))).unwrap(), ("space".into(),"deleted".into()));
-    // Explicitly hiding a remaining membership after migration must survive
-    // every subsequent startup; migration evidence is consumed only once.
-    db.execute("INSERT INTO asset_hidden_history VALUES('deleted')", []).unwrap();
-    repository::init(&db).unwrap();
-    assert_eq!(db.query_row("SELECT count(*) FROM asset_hidden_history", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-}
-
-fn seed(db: &Connection) {
-    db.pragma_update(None, "foreign_keys", true).unwrap();
-    db.execute_batch(LEGACY).unwrap();
-    db.execute(
-        "INSERT INTO backup_device VALUES(1,'device-before-migration')",
-        [],
-    )
-    .unwrap();
-    db.execute("INSERT INTO backup_spaces VALUES('space','library','https://unit.invalid','test','test/','primary','writer',1,'vault-reference',1)", []).unwrap();
-    db.execute("INSERT INTO backup_current_space VALUES(1,'space')", [])
-        .unwrap();
-    db.execute("INSERT INTO backup_provider_config(space_id,provider_type,profile,capabilities_json,protocol) VALUES('space','s3','r2','{}',2)", []).unwrap();
-    db.execute("INSERT INTO backup_sync_preference VALUES(1,1)", [])
-        .unwrap();
-    db.execute(
-        "INSERT INTO media_assets VALUES('asset',NULL,'{}','video.mp4','hash',4,'active')",
-        [],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO asset_local_files VALUES('asset','video.mp4',4,'hash','{}',1,'present')",
-        [],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO asset_covers VALUES('asset',?1)",
-        [b"original-cover".as_slice()],
-    )
-    .unwrap();
-    db.execute("INSERT INTO asset_transcripts VALUES('asset','hash','保留文案','model',NULL,'pipeline',1,NULL)", []).unwrap();
-    db.execute("INSERT INTO asset_remote_objects VALUES('space','asset','record','etag',7,'video-key','cover-key','text-key','backed_up')", []).unwrap();
-    db.execute(
-        "INSERT INTO asset_remote_records VALUES('space','asset','{\"original\":true}')",
-        [],
-    )
-    .unwrap();
-    db.execute("INSERT INTO backup_space_assets(space_id,remote_asset_id,local_asset_id) VALUES('space','remote','asset')", []).unwrap();
-    db.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json,last_error) VALUES('blocked','space','asset','upload','blocked','uploading_media','{\"nonce\":123}','original-error')", []).unwrap();
-    db.execute("INSERT INTO telegram_media_sends VALUES('blocked','video','{\"random_id\":123,\"state\":\"sending\",\"original_reference\":true}')", []).unwrap();
-}
+const MASTER: &str = include_str!("../../tests/fixtures/master-schema.sql");
+const DEVELOPMENT: &str = include_str!("../../tests/fixtures/backup-v9.sql");
 
 fn version(db: &Connection) -> i64 {
-    db.query_row("SELECT version FROM backup_schema", [], |row| row.get(0))
+    db.query_row("SELECT version FROM backup_schema WHERE id=1", [], |r| {
+        r.get(0)
+    })
+    .unwrap()
+}
+
+fn rows(db: &Connection, sql: &str) -> Vec<Vec<Value>> {
+    let mut query = db.prepare(sql).unwrap();
+    let columns = query.column_count();
+    query
+        .query_map([], |r| (0..columns).map(|i| r.get(i)).collect())
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
         .unwrap()
 }
 
-fn columns(db: &Connection, table: &str) -> usize {
-    db.prepare(&format!("PRAGMA table_info({table})"))
-        .unwrap()
-        .query_map([], |_| Ok(()))
-        .unwrap()
-        .count()
+fn schema(db: &Connection) -> Vec<Vec<Value>> {
+    rows(db, "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")
 }
 
-fn backups(root: &Path) -> Vec<std::path::PathBuf> {
+fn backups(root: &Path) -> Vec<PathBuf> {
     fs::read_dir(root)
         .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.file_name()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
                 .unwrap()
                 .to_string_lossy()
                 .contains(".before-backup-v")
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension == "sqlite")
+                && p.extension().is_some_and(|e| e == "sqlite")
         })
         .collect()
 }
 
-#[test]
-fn v5_migration_preserves_wal_snapshot_receipts_and_blocks_automatic_work() {
-    let root = tempfile::tempdir().unwrap();
-    let db = Connection::open(root.path().join("user.sqlite")).unwrap();
-    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
-        .unwrap();
-    seed(&db);
-    db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES('active','space','probe','running','unknown','{\"nonce\":456}')", []).unwrap();
-    repository::init(&db).unwrap();
-    assert_eq!(version(&db), 9);
-    assert_eq!(columns(&db, "backup_spaces"), 7);
-    assert_eq!(columns(&db, "asset_remote_objects"), 4);
-    assert_eq!(columns(&db, "backup_provider_config"), 7);
-    assert_eq!(
-        repository::device_id(&db).unwrap(),
-        "device-before-migration"
-    );
-    let (credential, enabled): (String, bool) = db
-        .query_row(
-            "SELECT credential_ref,enabled FROM backup_spaces",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(credential, "vault-reference");
-    assert!(!enabled);
-    assert_eq!(
-        db.query_row("SELECT enabled FROM backup_sync_preference", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.query_row("SELECT enabled FROM backup_legacy_v5_spaces", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT media_key FROM backup_legacy_v5_remote_objects",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        "video-key"
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT state FROM backup_legacy_v5_operations WHERE operation_id='active'",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        "running"
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT state FROM backup_operations WHERE operation_id='active'",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        "blocked"
-    );
-    let blocked: (String,String,String) = db.query_row("SELECT state,payload_json,last_error FROM backup_operations WHERE operation_id='blocked'", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
-    assert_eq!(
-        blocked,
-        (
-            "blocked".into(),
-            "{\"nonce\":123}".into(),
-            "original-error".into()
-        )
-    );
-    assert_eq!(
-        db.query_row("SELECT body FROM asset_covers", [], |r| r
-            .get::<_, Vec<u8>>(0))
-            .unwrap(),
-        b"original-cover"
-    );
-    assert_eq!(
-        db.query_row("SELECT text FROM asset_transcripts", [], |r| r
-            .get::<_, String>(0))
-            .unwrap(),
-        "保留文案"
-    );
-    assert_eq!(
-        db.query_row("SELECT record_json FROM asset_remote_records", [], |r| {
-            r.get::<_, String>(0)
-        })
-        .unwrap(),
-        "{\"original\":true}"
-    );
-    let evidence: String = db
-        .query_row("SELECT entry_json FROM telegram_media_sends", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        evidence,
-        "{\"random_id\":123,\"state\":\"sending\",\"original_reference\":true}"
-    );
-    assert!(db
-        .prepare("PRAGMA foreign_key_check")
-        .unwrap()
-        .query([])
-        .unwrap()
-        .next()
-        .unwrap()
-        .is_none());
-    let files = backups(root.path());
-    assert_eq!(files.len(), 1);
-    let before = Connection::open(&files[0]).unwrap();
-    assert_eq!(version(&before), 5);
-    assert_eq!(columns(&before, "backup_spaces"), 10);
-    assert_eq!(
-        before
-            .query_row("SELECT entry_json FROM telegram_media_sends", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .unwrap(),
-        evidence
-    );
-    assert_eq!(
-        before
-            .query_row(
-                "SELECT state FROM backup_operations WHERE operation_id='active'",
-                [],
-                |r| r.get::<_, String>(0)
-            )
-            .unwrap(),
-        "running"
-    );
-    repository::init(&db).unwrap();
-    assert_eq!(backups(root.path()).len(), 1);
+fn seed_master(db: &Connection) {
+    db.execute_batch(MASTER).unwrap();
+    db.execute_batch("PRAGMA wal_autocheckpoint=0;
+        INSERT INTO app_settings VALUES(1,'saved-downloads',2,'custom/{link_id}');
+        INSERT INTO platform_settings VALUES('youtube','saved-agent',NULL,'fixture-cookie',NULL,10485760);
+        INSERT INTO tdl_settings VALUES(1,1,'legacy-tool','legacy-session');
+        INSERT INTO parse_cache VALUES('cached','youtube','fixture','yt-dlp','video','{}',1,'old',X'0102',X'0304');
+        INSERT INTO parse_cache_images VALUES('cached',0,X'010203');
+        INSERT INTO parse_cache_aliases VALUES('https://unit.invalid/video','youtube','fixture');").unwrap();
+    let task = json!({"id":"history","revision":3,"status":"failed","bytes":0,
+        "error":"original-error","created_at":1,"canceling":false});
+    db.execute(
+        "INSERT INTO download_tasks VALUES('history',?1)",
+        [task.to_string()],
+    )
+    .unwrap();
+    let transcript = json!({"task_id":"history","operation_id":"transcription","sequence":4,
+        "state":"completed","updated_at":2,"has_result":false,"source_changed":false});
+    db.execute(
+        "INSERT INTO video_transcripts VALUES('history',?1)",
+        [transcript.to_string()],
+    )
+    .unwrap();
+}
+
+fn open(path: &Path) -> std::sync::Arc<Core> {
+    Core::open(
+        path,
+        path.parent().unwrap().join("downloads"),
+        "unused-engine".into(),
+        vec![],
+        |_| {},
+    )
+    .unwrap()
 }
 
 #[test]
-fn failed_migration_rolls_back_every_table_and_keeps_a_complete_backup() {
+fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losing_data() {
     let root = tempfile::tempdir().unwrap();
-    let db = Connection::open(root.path().join("user.sqlite")).unwrap();
-    seed(&db);
-    db.execute_batch("CREATE TRIGGER reject_upgrade BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=9 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
-    assert!(repository::init(&db)
-        .unwrap_err()
-        .to_string()
-        .contains("injected migration failure"));
-    assert_eq!(version(&db), 5);
-    assert_eq!(columns(&db, "backup_spaces"), 10);
-    assert_eq!(columns(&db, "asset_remote_objects"), 9);
-    assert_eq!(columns(&db, "backup_provider_config"), 8);
-    assert_eq!(
-        db.query_row("SELECT enabled FROM backup_sync_preference", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'backup_legacy_v5_%'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
-    assert_eq!(
-        version(&Connection::open(&backups(root.path())[0]).unwrap()),
-        5
-    );
-    assert!(db.is_autocommit());
-}
-
-#[test]
-fn current_v1_upgrades_once_without_pausing_current_format_work() {
-    let root = tempfile::tempdir().unwrap();
-    let db = Connection::open(root.path().join("current.sqlite")).unwrap();
-    repository::init(&db).unwrap();
-    db.execute("INSERT INTO backup_sync_preference VALUES(1,1)", [])
-        .unwrap();
-    db.execute("UPDATE backup_schema SET version=1", [])
-        .unwrap();
-    let device = repository::device_id(&db).unwrap();
-    repository::init(&db).unwrap();
-    assert_eq!(version(&db), 9);
-    assert_eq!(repository::device_id(&db).unwrap(), device);
-    assert_eq!(
-        db.query_row("SELECT enabled FROM backup_sync_preference", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    assert_eq!(backups(root.path()).len(), 1);
-    repository::init(&db).unwrap();
-    assert_eq!(backups(root.path()).len(), 1);
-}
-
-#[test]
-fn incompatible_protocol_layout_and_pending_remote_upgrade_are_not_relabelled() {
-    for case in 0..7 {
-        let db = Connection::open_in_memory().unwrap();
-        seed(&db);
-        let expected = match case {
-            0 => {
-                db.execute("UPDATE backup_provider_config SET protocol=1", [])
-                    .unwrap();
-                "BACKUP_MIGRATION_UNSUPPORTED_PROTOCOL"
-            }
-            1 => {
-                db.execute("ALTER TABLE backup_spaces ADD COLUMN unrecognized TEXT", [])
-                    .unwrap();
-                "BACKUP_MIGRATION_INVALID_STRUCTURE"
-            }
-            2 => {
-                db.execute("UPDATE backup_schema SET version=1", [])
-                    .unwrap();
-                "BACKUP_MIGRATION_INVALID_STRUCTURE"
-            }
-            3 => {
-                db.execute("UPDATE backup_provider_config SET migration_json='{}'", [])
-                    .unwrap();
-                "BACKUP_MIGRATION_REMOTE_UPGRADE_PENDING"
-            }
-            4 => {
-                db.execute(
-                    "INSERT INTO backup_probe_cleanup VALUES('probe','{}','vault',NULL)",
-                    [],
-                )
-                .unwrap();
-                "BACKUP_MIGRATION_PROBE_CLEANUP_PENDING"
-            }
-            5 => {
-                db.execute(
-                    "CREATE INDEX custom_provider_index ON backup_provider_config(profile)",
-                    [],
-                )
-                .unwrap();
-                "BACKUP_MIGRATION_INVALID_STRUCTURE"
-            }
-            _ => {
-                db.execute("CREATE TABLE custom_child(space_id TEXT REFERENCES BACKUP_PROVIDER_CONFIG(space_id) ON DELETE CASCADE)", []).unwrap();
-                db.execute("INSERT INTO custom_child VALUES('space')", [])
-                    .unwrap();
-                "BACKUP_MIGRATION_INVALID_STRUCTURE"
-            }
-        };
-        assert_eq!(repository::init(&db).unwrap_err().to_string(), expected);
-        assert_eq!(columns(&db, "asset_remote_objects"), 9);
+    let path = root.path().join("app.sqlite");
+    let db = Connection::open(&path).unwrap();
+    seed_master(&db);
+    let original_schema = schema(&db);
+    let preserved = [
+        "app_settings",
+        "platform_settings",
+        "tdl_settings",
+        "parse_cache",
+        "parse_cache_images",
+        "parse_cache_aliases",
+        "video_transcripts",
+    ];
+    let before: Vec<_> = preserved
+        .iter()
+        .map(|t| rows(&db, &format!("SELECT * FROM {t}")))
+        .collect();
+    let original_task = rows(&db, "SELECT * FROM download_tasks");
+    // Keep this connection open: the migration's snapshot must include committed WAL pages.
+    let core = open(&path);
+    assert_eq!(version(&db), 1);
+    assert_eq!(core.list().len(), 1);
+    assert_eq!(core.list()[0].error.as_deref(), Some("original-error"));
+    for (table, expected) in preserved.iter().zip(&before) {
         assert_eq!(
-            db.query_row("SELECT enabled FROM backup_spaces", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            1
+            rows(&db, &format!("SELECT * FROM {table}")),
+            *expected,
+            "lost master data: {table}"
         );
-        if case == 6 {
-            assert_eq!(
-                db.query_row("SELECT COUNT(*) FROM custom_child", [], |row| row
-                    .get::<_, i64>(0))
-                    .unwrap(),
-                1
-            );
+    }
+    let snapshots = backups(root.path());
+    assert_eq!(snapshots.len(), 1);
+    let snapshot = Connection::open(&snapshots[0]).unwrap();
+    assert_eq!(schema(&snapshot), original_schema);
+    assert_eq!(
+        rows(&snapshot, "SELECT * FROM download_tasks"),
+        original_task
+    );
+    for (table, expected) in preserved.iter().zip(&before) {
+        assert_eq!(
+            rows(&snapshot, &format!("SELECT * FROM {table}")),
+            *expected
+        );
+    }
+    // Compare every branch table/index/trigger with the frozen pre-squash final schema,
+    // so accidentally omitting one of the intermediate changes cannot pass this test.
+    let expected = Connection::open_in_memory().unwrap();
+    expected.execute_batch(MASTER).unwrap();
+    expected.execute_batch(DEVELOPMENT).unwrap();
+    let objects: Vec<(String,String,String)> = expected.prepare(
+        "SELECT type,name,tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+    ).unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    for (kind, name, table) in objects {
+        if table == "app_settings" {
+            continue;
+        } // Only master constraint intentionally changes.
+        let found: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2)",
+                params![kind, name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(found, "missing {kind} {name}");
+        if kind == "table" {
+            for pragma in ["table_info", "foreign_key_list"] {
+                let query = format!("PRAGMA {pragma}({name})");
+                assert_eq!(
+                    rows(&db, &query),
+                    rows(&expected, &query),
+                    "{pragma} changed for {name}"
+                );
+            }
         }
     }
+    db.execute("UPDATE app_settings SET max_downloads=5", [])
+        .unwrap();
+    assert!(db
+        .execute("UPDATE app_settings SET max_downloads=6", [])
+        .is_err());
+    assert!(rows(&db, "PRAGMA foreign_key_check").is_empty());
+    let current_schema = schema(&db);
+    let device = repository::device_id(&db).unwrap();
+    drop(core);
+    let reopened = open(&path);
+    assert_eq!(schema(&db), current_schema);
+    assert_eq!(repository::device_id(&db).unwrap(), device);
+    assert_eq!(backups(root.path()).len(), 1);
+    assert_eq!(reopened.list().len(), 1);
 }
 
 #[test]
-fn fresh_schema_and_unknown_version_have_explicit_boundaries() {
+fn migration_failure_rolls_back_settings_all_new_objects_and_version_together() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("app.sqlite");
+    let db = Connection::open(&path).unwrap();
+    seed_master(&db);
+    // SQLite rejects creating a table with this existing index name, after the
+    // settings rebuild and initial backup DDL have run inside the transaction.
+    db.execute(
+        "CREATE INDEX backup_operation_captures ON download_tasks(id)",
+        [],
+    )
+    .unwrap();
+    let before = schema(&db);
+    let settings = rows(&db, "SELECT * FROM app_settings");
+    assert!(Core::open(&path, root.path().into(), "unused".into(), vec![], |_| {}).is_err());
+    assert_eq!(schema(&db), before);
+    assert_eq!(rows(&db, "SELECT * FROM app_settings"), settings);
+    assert!(db
+        .execute("UPDATE app_settings SET max_downloads=5", [])
+        .is_err());
+    assert_eq!(backups(root.path()).len(), 1);
+    assert_eq!(
+        schema(&Connection::open(&backups(root.path())[0]).unwrap()),
+        before
+    );
+    db.execute("DROP INDEX backup_operation_captures", [])
+        .unwrap();
+    let core = open(&path);
+    assert_eq!(version(&db), 1);
+    assert_eq!(core.list().len(), 1);
+    db.execute("UPDATE app_settings SET max_downloads=5", [])
+        .unwrap();
+}
+
+#[test]
+fn final_development_database_is_adopted_without_replaying_old_migrations() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("app.sqlite");
+    let db = Connection::open(&path).unwrap();
+    seed_master(&db);
+    db.execute_batch(DEVELOPMENT).unwrap();
+    let device = uuid::Uuid::new_v4().to_string();
+    db.execute("INSERT INTO backup_device VALUES(1,?1)", [&device])
+        .unwrap();
+    db.execute(
+        "INSERT INTO telegram_account_bindings VALUES('backup',?1)",
+        [&device],
+    )
+    .unwrap();
+    db.execute_batch("INSERT INTO backup_spaces VALUES('space','library','https://unit.invalid','bucket','prefix',NULL,1);
+        INSERT INTO backup_provider_config(space_id,provider_type,profile) VALUES('space','s3','r2');
+        INSERT INTO backup_sync_preference VALUES(1,1);
+        INSERT INTO media_assets VALUES('asset',NULL,'{}','video.mp4','hash',4,'active');
+        INSERT INTO asset_covers VALUES('asset',X'010203');
+        INSERT INTO asset_transcripts VALUES('asset','hash','saved transcript','model',NULL,'pipeline',1,NULL);
+        INSERT INTO asset_deletion_hidden_history VALUES('space','asset');
+        INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES('upload','space','asset','upload','blocked','sending','{\"nonce\":123}');
+        INSERT INTO backup_operation_captures VALUES('upload','{\"cover\":[1,2],\"transcript\":\"saved body\"}');
+        INSERT INTO telegram_media_sends VALUES('upload','video','{\"random_id\":123,\"state\":\"sending\"}');").unwrap();
+    let tables = [
+        "backup_spaces",
+        "backup_sync_preference",
+        "media_assets",
+        "asset_covers",
+        "asset_transcripts",
+        "asset_deletion_hidden_history",
+        "backup_operations",
+        "backup_operation_captures",
+        "telegram_media_sends",
+        "telegram_account_bindings",
+    ];
+    let before: Vec<_> = tables
+        .iter()
+        .map(|t| rows(&db, &format!("SELECT * FROM {t}")))
+        .collect();
+    let core = open(&path);
+    assert_eq!(version(&db), 1);
+    assert_eq!(repository::device_id(&db).unwrap(), device);
+    for (table, expected) in tables.iter().zip(before) {
+        assert_eq!(
+            rows(&db, &format!("SELECT * FROM {table}")),
+            expected,
+            "development data changed: {table}"
+        );
+    }
+    assert_eq!(
+        version(&Connection::open(&backups(root.path())[0]).unwrap()),
+        9
+    );
+    drop(core);
+    let _reopened = open(&path);
+    assert_eq!(backups(root.path()).len(), 1);
+}
+
+#[test]
+fn fresh_database_matches_upgraded_schema_except_preserved_obsolete_master_table() {
+    let root = tempfile::tempdir().unwrap();
+    let upgraded_path = root.path().join("upgraded.sqlite");
+    let upgraded = Connection::open(&upgraded_path).unwrap();
+    upgraded.execute_batch(MASTER).unwrap();
+    let _core = open(&upgraded_path);
+    let fresh_path = root.path().join("fresh.sqlite");
+    let _fresh = open(&fresh_path);
+    let fresh = Connection::open(&fresh_path).unwrap();
+    assert_eq!(version(&fresh), 1);
+    let objects = |db: &Connection| {
+        rows(db,"SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND tbl_name<>'tdl_settings' ORDER BY type,name")
+    };
+    assert_eq!(objects(&fresh), objects(&upgraded));
+    for table in [
+        "app_settings",
+        "platform_settings",
+        "backup_operations",
+        "backup_operation_captures",
+        "telegram_account_bindings",
+    ] {
+        assert_eq!(
+            rows(&fresh, &format!("PRAGMA table_info({table})")),
+            rows(&upgraded, &format!("PRAGMA table_info({table})"))
+        );
+    }
+    assert_eq!(
+        backups(root.path()).len(),
+        1,
+        "fresh database should not need a snapshot"
+    );
+}
+
+#[test]
+fn unsupported_intermediate_and_unknown_schemas_are_rejected_before_startup_writes() {
+    for old in [0, 2, 3, 4, 5, 6, 7, 8, 99] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("app.sqlite");
+        let db = Connection::open(&path).unwrap();
+        seed_master(&db);
+        db.execute_batch(DEVELOPMENT).unwrap();
+        db.execute("UPDATE backup_schema SET version=?1", [old])
+            .unwrap();
+        let before = schema(&db);
+        let error = Core::open(&path, root.path().into(), "unused".into(), vec![], |_| {})
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "BACKUP_UNSUPPORTED_SCHEMA");
+        assert_eq!(version(&db), old);
+        assert_eq!(schema(&db), before);
+        assert!(backups(root.path()).is_empty());
+    }
+    // Early development v1 has the same number but lacks the final capture schema.
     let db = Connection::open_in_memory().unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 9);
-    let device = repository::device_id(&db).unwrap();
-    db.execute("UPDATE backup_schema SET version=99", [])
+    db.execute("DROP TABLE backup_operation_captures", [])
         .unwrap();
+    let before = schema(&db);
     assert_eq!(
         repository::init(&db).unwrap_err().to_string(),
-        "BACKUP_UNSUPPORTED_SCHEMA"
+        "BACKUP_MIGRATION_INVALID_STRUCTURE"
     );
-    assert_eq!(version(&db), 99);
-    assert_eq!(repository::device_id(&db).unwrap(), device);
+    assert_eq!(schema(&db), before);
 }
 
 #[test]
-#[ignore = "explicit run-owned copy path required; SQLite only, never loads a session or uses network"]
-fn migrate_authorized_database_copy() {
-    let path = std::path::PathBuf::from(
-        std::env::var_os("YINGQU_MIGRATION_COPY_PATH").expect("explicit copy path required"),
+fn transcript_restart_recovery_still_runs_after_the_schema_transaction() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("app.sqlite");
+    let db = Connection::open(&path).unwrap();
+    seed_master(&db);
+    db.execute(
+        "UPDATE video_transcripts SET snapshot=json_set(snapshot,'$.state','running')",
+        [],
     )
-    .canonicalize()
     .unwrap();
-    let run = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(".local/backup-schema-migration")
-        .canonicalize()
-        .unwrap();
-    assert!(path.starts_with(run));
-    assert_eq!(path.file_name().unwrap(), "validation-copy.sqlite");
-    let db = Connection::open(path).unwrap();
-    db.pragma_update(None, "foreign_keys", true).unwrap();
-    repository::init(&db).unwrap();
-    assert_eq!(version(&db), 9);
-    assert_eq!(
-        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
-            .unwrap(),
-        "ok"
-    );
-    assert_eq!(
-        db.query_row("SELECT enabled FROM backup_sync_preference", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
+    let _core = open(&path);
     assert_eq!(
         db.query_row(
-            "SELECT COUNT(*) FROM backup_spaces WHERE enabled<>0",
+            "SELECT json_extract(snapshot,'$.state') FROM video_transcripts",
             [],
-            |r| r.get::<_, i64>(0)
+            |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        0
+        "interrupted"
     );
-    drop(db);
-}
-
-#[test]
-fn v8_capture_migration_preserves_uncertain_evidence_and_reclaims_completed_bodies_atomically() {
-    let db = Connection::open_in_memory().unwrap();
-    repository::init(&db).unwrap();
-    db.execute_batch("INSERT INTO backup_spaces VALUES('s','l','','','',NULL,0);
-        UPDATE backup_schema SET version=8;
-        DROP TABLE backup_operation_captures;
-        DROP TABLE backup_import_receipts;
-        DROP INDEX backup_space_assets_local;
-        DROP INDEX backup_operations_asset;").unwrap();
-    let payload = serde_json::json!({"capture":{"remote":"asset","cover":[1,2,3],"transcript":{"text":"immutable"}},"resume_video":{"status":"unknown","message_id":42},"change":{"operation_id":"original"}}).to_string();
-    for state in ["completed","pending","running","blocked","retry_wait","canceled"] {
-        db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES(?1,'s','upload',?1,'publishing',?2)", rusqlite::params![state,payload]).unwrap();
-    }
-    db.execute_batch("CREATE TRIGGER reject_v9 BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=9 BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
-    assert!(repository::init(&db).is_err());
-    assert_eq!(version(&db), 8);
-    assert_eq!(db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id='running'", [], |r| r.get::<_,String>(0)).unwrap(), payload);
-    db.execute_batch("DROP TRIGGER reject_v9;").unwrap();
-    repository::init(&db).unwrap();
-    assert_eq!(version(&db), 9);
-    for state in ["pending","running","blocked","retry_wait","canceled"] {
-        let raw: String = db.query_row("SELECT capture_json FROM backup_operation_captures WHERE operation_id=?", [state], |r| r.get(0)).unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&raw).unwrap()["transcript"]["text"], "immutable");
-        let raw: String = db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id=?", [state], |r| r.get(0)).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert!(value.get("capture").is_none());
-        assert_eq!(value["resume_video"]["message_id"],42);
-    }
-    let raw: String = db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id='completed'", [], |r| r.get(0)).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(value["capture"]["remote"],"asset");
-    assert!(value["capture"].get("cover").is_none());
-    assert!(value["capture"].get("transcript").is_none());
-    let before = db.query_row("SELECT COUNT(*) FROM backup_operation_captures", [], |r| r.get::<_,i64>(0)).unwrap();
-    repository::init(&db).unwrap();
-    assert_eq!(before,5);
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM backup_operation_captures", [], |r| r.get::<_,i64>(0)).unwrap(),before);
+    assert_eq!(version(&db), 1);
 }
