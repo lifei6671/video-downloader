@@ -477,6 +477,9 @@ impl GrammersTransport {
     }
 
     fn original_reader(&self, document: &tl::types::Document, expected: RemoteDocument) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+        self.original_reader_at(document, expected, 0)
+    }
+    fn original_reader_at(&self, document: &tl::types::Document, expected: RemoteDocument, offset: u64) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
         let transport = self.clone();
         let refresh: crate::telegram_transfer_engine::Refresh = std::sync::Arc::new(move || {
             let transport = transport.clone();
@@ -488,13 +491,14 @@ impl GrammersTransport {
             })
         });
         Ok(Box::new(crate::telegram_transfer_engine::Reader::new(crate::telegram_transfer_engine::download(
-            self.client.clone(), document.clone(), refresh, self.transfer_budget.clone(), self.authorization.clone(),
+            self.client.clone(), document.clone(), refresh, self.transfer_budget.clone(), self.authorization.clone(), offset,
         )?)))
     }
     pub(super) async fn media_reader(
         &self,
         target: &Target,
         reference: &super::provider::MediaRef,
+        offset: u64,
     ) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
         let doc = self.inspect_read_reference(target,reference).await?;
         let envelope: Envelope =
@@ -512,7 +516,9 @@ impl GrammersTransport {
         {
             bail!("TELEGRAM_MEDIA_CHANGED");
         }
-        self.download(doc).await
+        let (actual, document) = select_read_document(&self.message(doc.message_id).await?, doc.document_id)?;
+        if actual != doc { bail!("TELEGRAM_MEDIA_CHANGED"); }
+        self.original_reader_at(&document, doc, offset)
     }
     pub(super) async fn connect(
         client: Client,

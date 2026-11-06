@@ -13,7 +13,8 @@ type PlaybackSubject = {id: string; path: string | null; completed_at: number | 
 function PlaybackSession({ task, open, close, removedIds, onAspectRatio }: { task: PlaybackSubject; open: boolean; close: () => void; removedIds: ReadonlySet<string>; onAspectRatio: (ratio: number) => void }) {
   const video = useRef<HTMLVideoElement>(null);
   const session = useRef({ active: true, fallback: false, externalPending: false });
-  const sourceRequest = useRef<Promise<string> | null>(null);
+  const sourceRequest = useRef<Promise<{path: string | null; source: string}> | null>(null);
+  const identity = useRef(task);
   const progress = useRef({ metadataReady: false, lastSavedAt: 0, storageFailed: false });
   const [source, setSource] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -26,7 +27,7 @@ function PlaybackSession({ task, open, close, removedIds, onAspectRatio }: { tas
     const now = performance.now();
     if (!force && (element.seeking || now - progress.current.lastSavedAt < 5000)) return;
     try {
-      writePlaybackPosition(task, element.ended || element.currentTime >= element.duration ? 0 : element.currentTime);
+      writePlaybackPosition(identity.current, element.ended || element.currentTime >= element.duration ? 0 : element.currentTime);
       progress.current.lastSavedAt = now;
     } catch (reason) {
       progress.current.storageFailed = true;
@@ -94,9 +95,9 @@ function PlaybackSession({ task, open, close, removedIds, onAspectRatio }: { tas
   useEffect(() => {
     if (!open) return;
     let active = true;
-    sourceRequest.current ??= task.asset ? api.assetPlaybackSource(task.id) : api.playbackSource(task.id);
+    sourceRequest.current ??= task.asset ? api.assetPlaybackSource(task.id) : api.playbackSource(task.id).then(source => ({path: task.path, source}));
     sourceRequest.current.then(value => {
-      if (active && session.current.active && !session.current.fallback) setSource(value);
+      if (active && session.current.active && !session.current.fallback) { identity.current = {...task, path: value.path}; setSource(value.source); }
     }).catch(reason => { if (active) { if (task.asset) { setLoading(false); setFailure(errorText(reason)); } else void openExternal(); } });
     return () => { active = false; };
   }, [task.id, open]);
@@ -116,7 +117,7 @@ function PlaybackSession({ task, open, close, removedIds, onAspectRatio }: { tas
           const element = event.currentTarget;
           if (!element.videoWidth || !element.videoHeight) { void openExternal(); return; }
           onAspectRatio(element.videoWidth / element.videoHeight);
-          const position = readPlaybackPosition(task);
+          const position = readPlaybackPosition(identity.current);
           if (position > 0 && Number.isFinite(element.duration) && position < element.duration) element.currentTime = position;
           progress.current.metadataReady = true;
         }}

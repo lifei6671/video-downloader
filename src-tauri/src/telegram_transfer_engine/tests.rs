@@ -906,3 +906,19 @@ async fn only_valid_download_data_recovers_the_window() {
         assert_eq!(source.budget.window.lock().unwrap().weight, 1);
     }
 }
+
+#[tokio::test]
+async fn resumed_download_skips_confirmed_chunks_and_trims_partial_chunk() {
+    let bytes = DOWNLOAD_PART * 3 + 17;
+    for offset in [DOWNLOAD_PART, DOWNLOAD_PART + 13, bytes] {
+        let source = mock(None);
+        let plan = Plan::new(bytes, DOWNLOAD_PART, 4).unwrap();
+        let mut download = Download::from_offset(source.clone(), plan, offset).unwrap();
+        let mut actual = Vec::new();
+        while let Some(chunk) = download.next().await.unwrap() { actual.extend(chunk); }
+        let expected: Vec<u8> = (offset..bytes).map(|position| (position / DOWNLOAD_PART) as u8).collect();
+        assert_eq!(actual, expected);
+        let remaining_chunks = if offset == bytes { 0 } else { (bytes.div_ceil(DOWNLOAD_PART) - offset / DOWNLOAD_PART) as usize };
+        assert_eq!(source.calls.load(Ordering::Relaxed), remaining_chunks);
+    }
+}

@@ -45,7 +45,7 @@ export const api = {
     listen<string>('backup_asset_deleted', event => callback(event.payload)),
   ensureAsset: (assetId: string) => invoke<string>('ensure_local_video', { assetId }),
   cancelAssetRestore: (assetId: string) => invoke<void>('cancel_asset_restore', { assetId }),
-  assetPlaybackSource: async (assetId: string) => convertFileSrc(await invoke<string>('prepare_asset_playback', { assetId })),
+  assetPlaybackSource: async (assetId: string) => { const path = await invoke<string>('prepare_asset_playback', { assetId }); return { path, source: convertFileSrc(path) }; },
   playAsset: (assetId: string) => invoke<void>('play_asset', { assetId }),
   startAssetTranscription: (assetId: string, force = false) => invoke<VideoTranscript>('start_asset_transcription', { assetId, force }),
   copyAssetTranscript: (assetId: string) => invoke<void>('copy_asset_transcript', { assetId }),

@@ -31,6 +31,10 @@ pub(super) fn next_sync_operation(
     select_sync_operation(db, space, true)
 }
 
+pub(super) fn next_delete_operation(db: &rusqlite::Connection, space: &str) -> Result<Option<(String, bool)>> {
+    Ok(db.query_row("SELECT operation_id,COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0)<>1 FROM backup_operations WHERE space_id=?1 AND kind='delete' AND state IN ('pending','retry_wait') AND (next_retry_at IS NULL OR next_retry_at<=unixepoch()) ORDER BY COALESCE(json_extract(payload_json,'$.local_cleanup_done'),0), CASE WHEN EXISTS(SELECT 1 FROM backup_operations parked WHERE parked.space_id=?1 AND parked.phase='archive_ready' AND parked.state='pending' AND json_extract(parked.payload_json,'$.archive_next')=backup_operations.operation_id) THEN 0 ELSE 1 END,created_at,rowid LIMIT 1", [space], |r| Ok((r.get(0)?,r.get(1)?))).optional()?)
+}
+
 pub(super) fn next_upload_operation(
     db: &rusqlite::Connection,
     space: &str,
@@ -111,9 +115,13 @@ pub(super) fn transfer_progress(core: &Core, id: &str, bytes: Option<u64>, start
 }
 
 pub(super) fn operation(core: &Core, id: &str) -> Result<Operation> {
-    select_operations(core, "WHERE operation_id=?1", [id])?
-        .pop()
-        .ok_or_else(|| anyhow::anyhow!("BACKUP_INVALID_OPERATION"))
+    let mut operation = select_operations(core, "WHERE operation_id=?1", [id])?
+        .pop().ok_or_else(|| anyhow::anyhow!("BACKUP_INVALID_OPERATION"))?;
+    if operation.kind == "upload" {
+        let capture: Option<String> = core.backup_db(|db| Ok(db.query_row("SELECT capture_json FROM backup_operation_captures WHERE operation_id=?", [id], |r| r.get(0)).optional()?))?;
+        if let Some(raw) = capture { operation.payload["capture"] = serde_json::from_str(&raw)?; }
+    }
+    Ok(operation)
 }
 
 pub(super) fn uploads_to_clean(core: &Core, space: &str) -> Result<Vec<Operation>> {
@@ -307,7 +315,7 @@ mod display_tests {
                 INSERT INTO backup_spaces VALUES('a','a','','','','',0),('b','b','','','','',0);
                 INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES('a','a','upload','blocked','captured','{\"capture\":\"keep\",\"completed_bytes\":12}'),('b','b','delete','completed','completed','{}');")?;
             super::super::repository::init(db)?;
-            assert_eq!(db.query_row("SELECT version FROM backup_schema",[],|r|r.get::<_,i64>(0))?,8);
+            assert_eq!(db.query_row("SELECT version FROM backup_schema",[],|r|r.get::<_,i64>(0))?,9);
             Ok(())
         }).unwrap();
         let a = operations_for_display(&core,Some("a")).unwrap();

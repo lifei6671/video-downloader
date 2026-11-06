@@ -83,10 +83,9 @@ pub async fn delete(core: &Arc<Core>, space: &str, local: &str) -> Result<String
     Ok(operation)
 }
 
-// The caller owns backup_write_lock; the remote cleanup was confirmed before this phase.
+// The caller owns the asset file lease; remote cleanup was confirmed before this phase.
 async fn finish_local(core: &Arc<Core>, op: &scheduler::Operation) -> Result<()> {
     let local = op.asset_id.as_deref().context("BACKUP_INVALID_OPERATION")?;
-    let _restore = core.restore_file_guard(local).await;
     lifecycle::remove_local(core, local).await?;
     core.backup_db(|db| {
         db.execute("UPDATE backup_operations SET phase='finalizing',last_error=NULL WHERE operation_id=?", [&op.operation_id])?;
@@ -220,7 +219,9 @@ async fn execute_inner(
     };
     core.cancel_asset_restore(local)?;
     core.cancel_asset_transcription(local).await?;
-    let _writer = super::delete_timing::timed(core,operation,"wait_writer",async {Ok(core.backup_write_lock.write().await)}).await?;
+    let _writer = super::delete_timing::timed(core,operation,"wait_writer",async {Ok(core.backup_write_lock.read().await)}).await?;
+    let _file = core.restore_file_guard(local).await;
+    scope(core, &op.space_id)?.check(&owned)?;
     if matches!(op.phase.as_str(), "local_cleanup" | "finalizing") {
         super::delete_timing::timed(core,operation,"local_cleanup",finish_local(core,&op)).await?;
         return finish_pass(core, &op);
@@ -436,9 +437,7 @@ pub async fn release_with(
         bail!("BACKUP_ASSET_DELETED");
     }
     let asset = core
-        .backup_assets()?
-        .into_iter()
-        .find(|a| a.asset_id == local)
+        .backup_asset(local)?
         .context("BACKUP_ASSET_NOT_FOUND")?;
     let media = remote.snapshot.media.context("BACKUP_NOT_BACKED_UP")?;
     let mut shutdown = core.backup_cancellation();

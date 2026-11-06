@@ -386,7 +386,7 @@ async fn authorized_recover_three_r2_operations() -> Result<()> {
                 anyhow::ensure!(page.objects.is_empty()&&page.next.is_none(),"RECOVERY_REQUIRES_OBJECT_RECONCILIATION");
             }
             if let Some(key)=job["payload"]["media_key"].as_str() { anyhow::ensure!(store.head(key).await?.is_none(),"RECOVERY_REQUIRES_OBJECT_RECONCILIATION"); }
-            let source=core.backup_assets()?.into_iter().find(|a|a.asset_id==asset).context("BACKUP_ASSET_NOT_FOUND")?;
+            let source=core.backup_asset(asset)?.context("BACKUP_ASSET_NOT_FOUND")?;
             anyhow::ensure!(source.asset_state=="active","BACKUP_ASSET_DELETED");
             let (hash,_)=repository::fingerprint(source.path.as_deref().context("FILE_MISSING")?)?;
             anyhow::ensure!(job["source_sha256"]==hash && job["local_bytes"]==source.content_bytes,"BACKUP_SOURCE_CHANGED");
@@ -399,7 +399,7 @@ async fn authorized_recover_three_r2_operations() -> Result<()> {
             let operation=job["operation_id"].as_str().context("AUDIT_INVALID")?;
             core.backup_db(|db| {
                 let tx=db.unchecked_transaction()?;
-                let local=repository::list_assets(&tx)?.into_iter().find(|a|a.asset_id==asset).context("BACKUP_ASSET_NOT_FOUND")?;
+                let local=repository::asset(&tx, asset)?.context("BACKUP_ASSET_NOT_FOUND")?;
                 let (revision,baseline,deleted):(i64,Option<String>,bool)=tx.query_row("SELECT local_revision,baseline_json,remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![id,asset],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
                 anyhow::ensure!(baseline.is_none()&&!deleted,"RECOVERY_BASELINE_CHANGED");
                 let revision=u64::try_from(revision)?.checked_add(1).context("BACKUP_INVALID_OPERATION")?;

@@ -198,15 +198,8 @@ async fn delete_finishes_while_another_asset_owns_the_restore_slot() {
     let operation = sync_delete::delete(&f.core, &f.space.space_id, &f.id).await.unwrap();
     let pass = delete_pass(&f.core, provider.as_ref(), &operation);
     tokio::pin!(pass);
-    let reached_cleanup = async {
-        while scheduler::operation(&f.core, &operation).unwrap().phase != "local_cleanup" {
-            tokio::task::yield_now().await;
-        }
-    };
-    tokio::select! {
-        result = &mut pass => panic!("same-file guard must block local removal: {result:?}"),
-        result = tokio::time::timeout(std::time::Duration::from_secs(5), reached_cleanup) => result.unwrap()
-    }
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut pass).await.is_err(), "same-asset lease must delay remote and local deletion");
+    assert!(!provider.read_asset(&f.id).await.unwrap().unwrap().snapshot.deleted);
     assert!(f.root.path().join("video.mp4").is_file());
     drop(same_file);
     tokio::time::timeout(std::time::Duration::from_secs(5), pass).await.unwrap().unwrap();

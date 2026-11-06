@@ -345,7 +345,9 @@ pub struct TelegramSession {
     network_changing: AtomicBool,
     transfer: Mutex<Option<watch::Sender<bool>>>,
     downloads: Mutex<Option<DownloadAuthorization>>,
-    backup_read: tokio::sync::Mutex<()>,
+    backup_read: tokio::sync::RwLock<()>,
+    small_read_slots: tokio::sync::Semaphore,
+    media_read_slots: tokio::sync::Semaphore,
     backup_transaction: tokio::sync::RwLock<()>,
     backup_read_stop: watch::Sender<()>,
     network_stop: watch::Sender<()>,
@@ -368,6 +370,8 @@ impl Default for TelegramSession {
             transfer: Mutex::new(None),
             downloads: Mutex::new(None),
             backup_read: Default::default(),
+            small_read_slots: tokio::sync::Semaphore::new(2),
+            media_read_slots: tokio::sync::Semaphore::new(2),
             backup_transaction: Default::default(),
             backup_read_stop: watch::channel(()).0,
             network_stop: watch::channel(()).0,
@@ -861,20 +865,10 @@ impl TelegramSession {
         };
         let mut binding_stop = self.backup_read_stop.subscribe();
         let mut network_stop = self.network_stop.subscribe();
-        if matches!(kind, "download_media" | "restore_media" | "verify_media") {
+        if matches!(kind, "download_media" | "download_small_media" | "restore_media" | "verify_media") {
             return self.with_media_reader(core, id, &target, cancel, (kind, control, binding_stop), work).await;
         }
         if kind == "upload_media" {
-            let mut stop = self.operation(id)?;
-            // File transfers may overlap. Publication, deletion and lifecycle
-            // changes still take the exclusive side and drain every uploader.
-            let _transaction = tokio::select! { biased;
-                _ = binding_stop.changed() => bail!("TELEGRAM_TRANSFER_CANCELED"),
-                _ = stop.wait_for(|v| *v) => bail!("TELEGRAM_TRANSFER_CANCELED"),
-                _ = cancel.wait_for(|v| *v) => bail!("TELEGRAM_TRANSFER_CANCELED"),
-                _ = network_stop.changed() => bail!("TELEGRAM_NETWORK_CHANGED"),
-                guard = self.backup_transaction.read() => guard,
-            };
             return self.with_media_reader(core, id, &target, cancel, (kind, control, binding_stop), work).await;
         }
         let previous = DeleteConfig::take_for(kind);
@@ -986,16 +980,22 @@ impl TelegramSession {
         use super::telegram_transfer_journal::{CoreJournal, Journal};
         let mut network_stop = self.network_stop.subscribe();
         let mut login_stop = self.operation(id)?;
-        let _slot = if kind == "upload_media" {
-            None // The caller owns a shared transaction lease; readers keep their own slot.
-        } else {
-            Some(tokio::select! { biased;
+        let slots = if kind == "download_small_media" { &self.small_read_slots } else { &self.media_read_slots };
+        let _capacity = if kind == "upload_media" { None } else { Some(tokio::select! { biased;
+            _ = binding_stop.changed() => bail!("TELEGRAM_TRANSFER_CANCELED"),
+            _ = login_stop.wait_for(|v| *v) => bail!("TELEGRAM_TRANSFER_CANCELED"),
+            _ = cancel.wait_for(|v| *v) => bail!("TELEGRAM_TRANSFER_CANCELED"),
+            _ = network_stop.changed() => bail!("TELEGRAM_NETWORK_CHANGED"),
+            permit = slots.acquire() => permit.context("TELEGRAM_TRANSFER_CANCELED")?,
+        }) };
+        let _slot = {
+            tokio::select! { biased;
                 _ = binding_stop.changed() => bail!("TELEGRAM_TRANSFER_CANCELED"),
                 _ = login_stop.wait_for(|v| *v) => bail!("TELEGRAM_TRANSFER_CANCELED"),
                 _ = cancel.wait_for(|v| *v) => bail!("TELEGRAM_TRANSFER_CANCELED"),
                 _ = network_stop.changed() => bail!("TELEGRAM_NETWORK_CHANGED"),
-                slot = self.backup_read.lock() => slot,
-            })
+                slot = self.backup_read.read() => slot,
+            }
         };
         let (client, session, generation_stop) = {
             let mut state = tokio::select! { biased;
@@ -1113,7 +1113,7 @@ impl TelegramSession {
         }
         let _transaction = self.backup_transaction.write().await;
         // Backup reads have a separate slot. User download pools keep running.
-        let _drained = self.backup_read.lock().await;
+        let _drained = self.backup_read.write().await;
     }
     /// Signal first so an in-flight network request cannot hold cancellation behind the state lock.
     pub async fn cancel(&self, id: &str) -> Result<View> {
@@ -1126,6 +1126,7 @@ impl TelegramSession {
         }
         self.close_downloads().await;
         let _transaction = self.backup_transaction.write().await;
+        let _media = self.backup_read.write().await;
         let mut state = self.state.lock().await;
         let _holder = self.lock_usage.hold("cancel_session");
         if self.status().operation_id.as_deref() != Some(id) {
@@ -1148,6 +1149,7 @@ impl TelegramSession {
             .clone();
         if let Some(cancel) = &transfer { cancel.send_replace(true); }
         let _transaction = self.backup_transaction.write().await;
+        let _media = self.backup_read.write().await;
         let mut state = if let Some(cancel) = transfer {
             cancel.send_replace(true);
             self.state.lock().await
@@ -1276,7 +1278,7 @@ impl TelegramSession {
         for connection in &downloads { connection.stop(); }
         for connection in downloads { connection.close().await; }
         let _transaction = self.backup_transaction.write().await;
-        let _readers = self.backup_read.lock().await;
+        let _readers = self.backup_read.write().await;
         let state = self.state.lock().await;
         if let Some(connection) = &state.connection { connection.close().await; }
         change._state = Some(state);
@@ -1291,6 +1293,7 @@ impl TelegramSession {
             .cancel
             .send_replace(true);
         let _transaction = self.backup_transaction.write().await;
+        let _media = self.backup_read.write().await;
         let mut state = self.state.lock().await;
         let _holder = self.lock_usage.hold("shutdown");
         if let Some(connection) = state.connection.take() {
@@ -1298,7 +1301,6 @@ impl TelegramSession {
         }
         drop(_holder);
         drop(state);
-        let _drained = self.backup_read.lock().await;
     }
 }
 pub(crate) struct NetworkChange<'a> {
@@ -1951,8 +1953,9 @@ mod tests {
         }).await.unwrap();
         let control = session.state.try_lock().expect("control must be free during media I/O");
         if kind == "upload_media" {
-            assert!(session.backup_transaction.try_write().is_err(), "publication remains exclusive while uploads run");
-            assert!(session.backup_read.try_lock().is_ok(), "upload cannot occupy the reader slot");
+            assert!(session.backup_transaction.try_write().is_ok(), "file uploads leave publication available");
+            assert!(session.backup_read.try_write().is_err(), "lifecycle must drain uploads");
+            assert_eq!(session.small_read_slots.available_permits(), 2);
         }
         if proxy_change {
             let update = |proxy, user_agent: &str| crate::settings::ProfileUpdate {
@@ -1969,8 +1972,12 @@ mod tests {
                     "unchanged or invalid proxy cannot interrupt a transfer");
         }
         let (_waiting_cancel, waiting_rx) = watch::channel(false);
-        let mut waiting = Box::pin(run(if kind == "upload_media" { "upload_media" } else { "restore_media" }, waiting_rx));
+        let mut waiting = Box::pin(run(if kind == "upload_media" { "upload_media" } else { "download_small_media" }, waiting_rx));
         assert!(tokio::time::timeout(Duration::from_millis(20), &mut waiting).await.is_err());
+        if kind == "download_media" {
+            assert_eq!(session.media_read_slots.available_permits(), 1);
+            assert_eq!(session.small_read_slots.available_permits(), 1, "small reader entered while video lease is held");
+        }
         assert_eq!(session.downloads.lock().unwrap().as_ref().unwrap().connections.len(), 1,
                    "only the unrelated user download owns a separate pool");
         let first_finished = if kind == "upload_media" && !proxy_change {
@@ -1979,7 +1986,7 @@ mod tests {
             assert_eq!(result.as_ref().unwrap_err().to_string(), "TELEGRAM_TRANSFER_CANCELED");
             // The second future has not been polled again. Its shared lease must
             // already be held, rather than waiting behind the first upload.
-            assert!(session.backup_transaction.try_write().is_err(), "second uploader never acquired a concurrent lease");
+            assert!(session.backup_read.try_write().is_err(), "second uploader holds a concurrent lifecycle lease");
             Some(result)
         } else { None };
         drop(control);

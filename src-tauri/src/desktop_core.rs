@@ -243,7 +243,8 @@ pub struct Core {
     pub(crate) backup_config_lock: tokio::sync::Mutex<()>,
     pub(crate) backup_restore_lock: tokio::sync::Mutex<()>,
     restore_file_locks: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
-    // Uploads share this lease; destructive work waits for all active uploads.
+    backup_history_registered: Mutex<HashMap<String, (i64, Option<tokio::time::Instant>)>>,
+    // Transfers and per-asset deletion share this lease; global maintenance is exclusive.
     pub(crate) backup_write_lock: tokio::sync::RwLock<()>,
     pub(crate) telegram_map_refresh: tokio::sync::Mutex<()>,
     _instance_lock: std::fs::File,
@@ -637,6 +638,7 @@ impl Core {
             backup_config_lock: tokio::sync::Mutex::new(()),
             backup_restore_lock: tokio::sync::Mutex::new(()),
             restore_file_locks: Mutex::default(),
+            backup_history_registered: Default::default(),
             backup_write_lock: tokio::sync::RwLock::new(()),
             telegram_map_refresh: tokio::sync::Mutex::new(()),
             _instance_lock: instance_lock,
@@ -684,6 +686,10 @@ impl Core {
             .collect()
     }
 
+    pub fn backup_asset(&self, id: &str) -> Result<Option<crate::backup::model::Asset>> {
+        crate::backup::repository::asset(&self.inner.lock().unwrap().db, id)
+    }
+
     pub fn backup_assets(&self) -> Result<Vec<crate::backup::model::Asset>> {
         crate::backup::repository::list_assets(&self.inner.lock().unwrap().db)
     }
@@ -699,6 +705,9 @@ impl Core {
         if !enabled {
             return Ok(0);
         }
+        let generation: i64 = inner.db.query_row("SELECT generation FROM backup_history_generation WHERE id=1", [], |r| r.get(0))?;
+        let mut registered = self.backup_history_registered.lock().unwrap();
+        if registered.get(space).is_some_and(|(saved, retry)| *saved == generation && retry.is_none_or(|deadline| tokio::time::Instant::now() < deadline)) { return Ok(0); }
         let detached = {
             let mut q=inner.db.prepare("SELECT a.asset_id FROM media_assets a WHERE a.asset_state='active' AND NOT EXISTS(SELECT 1 FROM backup_space_assets m WHERE m.local_asset_id=a.asset_id) AND NOT EXISTS(SELECT 1 FROM backup_operations o WHERE o.asset_id=a.asset_id) AND NOT EXISTS(SELECT 1 FROM asset_hidden_history h WHERE h.asset_id=a.asset_id)")?;
             let rows = q
@@ -724,10 +733,12 @@ impl Core {
             .cloned()
             .collect::<Vec<_>>();
         if tasks.is_empty() {
+            registered.insert(space.to_owned(), (generation, None));
             return Ok(0);
         }
         let tx = inner.db.unchecked_transaction()?;
         let mut updated = vec![];
+        let mut missing_file = false;
         for mut task in tasks {
             let known:Option<(String,String,bool)>=tx.query_row("SELECT a.asset_id,a.asset_state,EXISTS(SELECT 1 FROM backup_space_assets m WHERE m.local_asset_id=a.asset_id) OR EXISTS(SELECT 1 FROM backup_operations o WHERE o.asset_id=a.asset_id) OR EXISTS(SELECT 1 FROM asset_hidden_history h WHERE h.asset_id=a.asset_id) FROM media_assets a WHERE (?1 IS NOT NULL AND a.asset_id=?1) OR (?1 IS NULL AND a.task_id=?2)",params![task.asset_id,task.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
             if let Some((id, state, protected)) = known {
@@ -744,6 +755,7 @@ impl Core {
                 continue;
             }
             let Some(path) = task.path.as_ref().filter(|p| p.is_file()) else {
+                missing_file = true;
                 continue;
             };
             let source = transcription::Source::read(path)?;
@@ -775,6 +787,9 @@ impl Core {
                 *old = task.clone();
             }
         }
+        let generation = inner.db.query_row("SELECT generation FROM backup_history_generation WHERE id=1", [], |r| r.get(0))?;
+        registered.insert(space.to_owned(), (generation, missing_file.then(|| tokio::time::Instant::now() + std::time::Duration::from_secs(30))));
+        drop(registered);
         drop(inner);
         for task in &updated {
             (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
@@ -807,7 +822,7 @@ impl Core {
     pub(crate) async fn verify_backup_asset_cancelable(&self, id: &str, extra:watch::Receiver<bool>) -> Result<()> {
         let (path, cancel) = {
             let inner = self.inner.lock().unwrap();
-            let asset = crate::backup::repository::list_assets(&inner.db)?.into_iter().find(|a| a.asset_id == id).context("BACKUP_ASSET_NOT_FOUND")?;
+            let asset = crate::backup::repository::asset(&inner.db, id)?.context("BACKUP_ASSET_NOT_FOUND")?;
             (asset.path.context("FILE_MISSING")?, inner.backup_cancel.subscribe())
         };
         let (hash, source) = tokio::task::spawn_blocking(move || crate::backup::repository::fingerprint_with_cancel(&path, || *cancel.borrow() || *extra.borrow() || extra.has_changed().is_err())).await??;

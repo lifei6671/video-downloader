@@ -332,6 +332,8 @@ pub trait BackupProvider: Send + Sync {
         resume: Option<ResumeState>,
     ) -> ProviderFuture<'_, UploadReceipt>;
     fn cancel_upload(&self, resume: ResumeState, operation_id: &str) -> ProviderFuture<'_, ()>;
+    /// Maximum wait for the next delivered bytes; providers may assemble/retry chunks internally.
+    fn media_read_timeout(&self) -> std::time::Duration { std::time::Duration::from_secs(30) }
     fn download_media(&self, reference: MediaRef, offset: u64) -> ProviderFuture<'_, MediaStream>;
     fn verify_media(&self, reference: MediaRef) -> ProviderFuture<'_, ()>;
     fn delete_media(&self, reference: MediaRef, operation_id: &str) -> ProviderFuture<'_, ()>;

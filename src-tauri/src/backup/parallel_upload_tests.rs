@@ -205,6 +205,12 @@ async fn two_uploads_overlap_third_waits_and_each_asset_is_written_once() {
     let a = entered(&mut rx).await;
     let b = entered(&mut rx).await;
     assert_ne!(a, b);
+    f.core.backup_db(|db| {
+        let captured: i64 = db.query_row("SELECT COUNT(*) FROM backup_operation_captures", [], |r| r.get(0))?;
+        let hot: i64 = db.query_row("SELECT COUNT(*) FROM backup_operations WHERE state='running' AND json_type(payload_json,'$.capture') IS NOT NULL", [], |r| r.get(0))?;
+        assert_eq!((captured, hot), (2, 0));
+        Ok(())
+    }).unwrap();
     let operations = scheduler::operations(&f.core).unwrap();
     assert_eq!(
         operations.iter().filter(|op| op.state == "running").count(),
@@ -225,6 +231,11 @@ async fn two_uploads_overlap_third_waits_and_each_asset_is_written_once() {
     assert_ne!(c, b);
     provider.release.add_permits(2);
     until(|| completed(&f.core, 3)).await;
+    f.core.backup_db(|db| {
+        let remaining: i64 = db.query_row("SELECT COUNT(*) FROM backup_operation_captures", [], |r| r.get(0))?;
+        assert_eq!(remaining, 0, "acknowledged operations reclaim immutable captures");
+        Ok(())
+    }).unwrap();
     stop(shutdown, worker).await;
     assert_eq!(provider.peak.load(Ordering::SeqCst), 2);
     assert_eq!(provider.active.load(Ordering::SeqCst), 0);
@@ -336,7 +347,7 @@ async fn shutdown_drains_both_uploads_without_claiming_or_canceling_the_third() 
 }
 
 #[tokio::test]
-async fn foreground_delete_drains_active_uploads_and_precedes_the_next_video() {
+async fn foreground_delete_completes_while_unrelated_uploads_are_held() {
     let (f, inner, engine) = sync_fixture().await;
     let initial = claim(&engine, &f.core);
     engine.execute_upload(&initial).await.unwrap();
@@ -351,18 +362,13 @@ async fn foreground_delete_drains_active_uploads_and_precedes_the_next_video() {
     let deletion = sync_delete::delete(&f.core, &f.space.space_id, &f.id)
         .await
         .unwrap();
-    provider.release.add_permits(1);
-    until(|| provider.active.load(Ordering::SeqCst) == 1).await;
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv())
-            .await
-            .is_err(),
-        "new upload overtook a foreground delete"
-    );
-    provider.release.add_permits(1);
+    until(|| {
+        let op = scheduler::operation(&f.core, &deletion).unwrap();
+        op.state == "completed" || op.payload["local_cleanup_done"] == true
+    }).await;
+    assert_eq!(provider.active.load(Ordering::SeqCst), 2, "deletion must not drain unrelated uploads");
+    provider.release.add_permits(2);
     entered(&mut rx).await;
-    let delete = scheduler::operation(&f.core, &deletion).unwrap();
-    assert!(delete.state == "completed" || delete.payload["local_cleanup_done"] == true);
     provider.release.add_permits(1);
     until(|| completed(&f.core, 4)).await;
     stop(shutdown, worker).await;

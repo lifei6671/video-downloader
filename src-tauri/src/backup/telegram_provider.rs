@@ -68,12 +68,12 @@ fn thumbnail_source(
     remote: &str,
     operation: &str,
 ) -> Result<Option<Vec<u8>>> {
-    let payload: Option<String> = db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id=?1 AND space_id=?2 AND kind='upload'",rusqlite::params![operation,space],|row|row.get(0)).optional()?;
+    let payload: Option<String> = db.query_row("SELECT COALESCE(c.capture_json,json_extract(o.payload_json,'$.capture')) FROM backup_operations o LEFT JOIN backup_operation_captures c USING(operation_id) WHERE o.operation_id=?1 AND o.space_id=?2 AND o.kind='upload'",rusqlite::params![operation,space],|row|row.get::<_,Option<String>>(0)).optional()?.flatten();
     if let Some(payload) = payload {
         let payload: serde_json::Value = serde_json::from_str(&payload)?;
-        if payload["capture"]["remote"] == remote && payload["capture"]["cover"].is_array() {
+        if payload["remote"] == remote && payload["cover"].is_array() {
             return Ok(Some(serde_json::from_value(
-                payload["capture"]["cover"].clone(),
+                payload["cover"].clone(),
             )?));
         }
     }
@@ -947,9 +947,11 @@ impl BackupProvider for TelegramProvider {
             .await
         })
     }
-    fn download_media(&self, reference: MediaRef, _offset: u64) -> ProviderFuture<'_, MediaStream> {
+    fn media_read_timeout(&self) -> std::time::Duration { crate::telegram_transfer_engine::FILE_IO_TIMEOUT }
+    fn download_media(&self, reference: MediaRef, offset: u64) -> ProviderFuture<'_, MediaStream> {
         Box::pin(async move {
             self.target.message_id(&reference)?;
+            anyhow::ensure!(offset <= reference.bytes, "BACKUP_INVALID_RANGE");
             let provider = Self {
                 core: self.core.clone(),
                 target: self.target.clone(),
@@ -962,11 +964,12 @@ impl BackupProvider for TelegramProvider {
             let (done, completion) = oneshot::channel();
             let task = tokio::spawn(async move {
                 let mut stop = rx;
-                let request = provider.request("download_media", None, move |_, transport, io| {
+                let kind = if bytes <= 16 * 1024 * 1024 { "download_small_media" } else { "download_media" };
+                let request = provider.request(kind, None, move |_, transport, io| {
                     Box::pin(async move {
-                        let mut source = io.run(transport.media_reader(&target, &reference)).await?;
+                        let mut source = io.run(transport.media_reader(&target, &reference, offset)).await?;
                         let mut buffer = vec![0; 65536];
-                        let mut remaining = bytes;
+                        let mut remaining = bytes - offset;
                         loop {
                             let count = io.run_file(async { Ok(source.read(&mut buffer).await?) }).await?;
                             if count == 0 { break; }
@@ -985,7 +988,7 @@ impl BackupProvider for TelegramProvider {
             });
             Ok(MediaStream {
                 bytes,
-                offset: 0,
+                offset,
                 reader: Box::new(StreamReader {
                     reader,
                     completion,
@@ -1151,7 +1154,8 @@ mod caption_tests {
     #[test]
     fn thumbnail_uses_captured_original_cover_and_keeps_space_isolation() {
         let db=rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT,space_id TEXT,kind TEXT,payload_json TEXT); CREATE TABLE asset_covers(asset_id TEXT,body BLOB); CREATE TABLE backup_space_assets(space_id TEXT,remote_asset_id TEXT,local_asset_id TEXT);").unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT,space_id TEXT,kind TEXT,payload_json TEXT);
+            CREATE TABLE backup_operation_captures(operation_id TEXT PRIMARY KEY,capture_json TEXT NOT NULL); CREATE TABLE asset_covers(asset_id TEXT,body BLOB); CREATE TABLE backup_space_assets(space_id TEXT,remote_asset_id TEXT,local_asset_id TEXT);").unwrap();
         let captured=vec![1u8,2,3];let current=vec![4u8,5,6];let other=vec![7u8,8,9];
         db.execute("INSERT INTO backup_operations VALUES('operation','a','upload',?1)",[serde_json::json!({"capture":{"remote":"remote","cover":captured}}).to_string()]).unwrap();
         for (space,local,body) in [("a","local-a",&current),("b","local-b",&other)] {
@@ -1159,11 +1163,14 @@ mod caption_tests {
             db.execute("INSERT INTO asset_covers VALUES(?1,?2)",rusqlite::params![local,body]).unwrap();
         }
         assert_eq!(thumbnail_source(&db,"a","remote","operation").unwrap(),Some(captured.clone()));
+        db.execute("INSERT INTO backup_operation_captures VALUES('operation',?1)",[serde_json::json!({"remote":"remote","cover":captured}).to_string()]).unwrap();
+        db.execute("UPDATE backup_operations SET payload_json=json_remove(payload_json,'$.capture')",[]).unwrap();
+        assert_eq!(thumbnail_source(&db,"a","remote","operation").unwrap(),Some(captured.clone()));
         assert_eq!(thumbnail_source(&db,"a","remote","unknown").unwrap(),Some(current));
         assert_eq!(thumbnail_source(&db,"b","remote","operation").unwrap(),Some(other));
         assert!(thumbnail_source(&db,"a","missing","operation").unwrap().is_none());
         let saved:String=db.query_row("SELECT payload_json FROM backup_operations",[],|row|row.get(0)).unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap()["capture"]["cover"],serde_json::json!(captured));
+        assert!(serde_json::from_str::<serde_json::Value>(&saved).unwrap().get("capture").is_none());
     }
     #[test]
     fn single_scan_library_validation_rejects_wrong_identity_and_protocol() {

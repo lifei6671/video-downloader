@@ -26,6 +26,10 @@ pub(crate) fn init_prepared(
     tx.execute_batch(include_str!("telegram-schema.sql"))?;
     tx.execute_batch(include_str!("operation-display.sql"))?;
     super::schema_migration::finish(&tx, &prepared)?;
+    // History tasks exist in the desktop database, but not in standalone backup stores.
+    if tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='download_tasks')", [], |r| r.get::<_,bool>(0))? {
+        tx.execute_batch(include_str!("history-generation.sql"))?;
+    }
     super::spaces::select_initial_default(&tx)?;
     tx.execute(
         "INSERT OR IGNORE INTO backup_device(id,device_id) VALUES(1,?)",
@@ -326,46 +330,24 @@ fn persist_transcript(db: &Connection, snapshot: &Snapshot, local_change: bool) 
     Ok(())
 }
 
+const ASSET_SELECT: &str = "SELECT a.asset_id,a.task_id,a.metadata_json,a.original_filename,a.content_sha256,a.content_bytes,a.asset_state,l.path,l.local_state FROM media_assets a JOIN asset_local_files l USING(asset_id)";
+
+fn asset_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
+    let raw: String = r.get(2)?;
+    let metadata = serde_json::from_str(&raw).map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e)))?;
+    Ok(Asset { asset_id: r.get(0)?, task_id: r.get(1)?, metadata,
+        original_filename: r.get(3)?, content_sha256: r.get(4)?, content_bytes: sql_u64(r, 5)?,
+        asset_state: r.get(6)?, path: r.get::<_, Option<String>>(7)?.map(Into::into), local_state: r.get(8)? })
+}
+
+pub fn asset(db: &Connection, id: &str) -> Result<Option<Asset>> {
+    Ok(db.query_row(&format!("{ASSET_SELECT} WHERE a.asset_id=?"), [id], asset_row).optional()?)
+}
+
 pub fn list_assets(db: &Connection) -> Result<Vec<Asset>> {
-    let mut q = db.prepare("SELECT a.asset_id,a.task_id,a.metadata_json,a.original_filename,a.content_sha256,a.content_bytes,a.asset_state,l.path,l.local_state FROM media_assets a JOIN asset_local_files l USING(asset_id) ORDER BY a.rowid DESC")?;
-    let rows = q.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, Option<String>>(4)?,
-            sql_u64(r, 5)?,
-            r.get::<_, String>(6)?,
-            r.get::<_, Option<String>>(7)?,
-            r.get::<_, String>(8)?,
-        ))
-    })?;
-    rows.map(|row| {
-        let (
-            asset_id,
-            task_id,
-            raw,
-            original_filename,
-            content_sha256,
-            content_bytes,
-            asset_state,
-            path,
-            local_state,
-        ) = row?;
-        Ok(Asset {
-            asset_id,
-            task_id,
-            metadata: serde_json::from_str(&raw)?,
-            original_filename,
-            content_sha256,
-            content_bytes,
-            asset_state,
-            path: path.map(Into::into),
-            local_state,
-        })
-    })
-    .collect()
+    let mut q = db.prepare(&format!("{ASSET_SELECT} ORDER BY a.rowid DESC"))?;
+    let rows = q.query_map([], asset_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 pub fn transcript(db: &Connection, id: &str) -> Result<Option<AssetTranscript>> {

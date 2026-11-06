@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Cloud, CircleCheck, CircleArrowUp, CircleArrowDown, Play, RotateCcw, FileText, ImageOff, ListX, Trash2, X } from 'lucide-react';
 import { TaskCardFeedback, TaskCardMessage, TaskCardNotice } from '@/components/task-row';
 import { bytes } from '@/lib/format-bytes';
@@ -39,6 +39,17 @@ function backupFailure(operation: BackupOperation | undefined, assets: BackupAss
   return operation.last_error;
 }
 
+export function indexBackup(assets: BackupAsset[], operations: BackupOperation[]) {
+  const assetsById = new Map(assets.map(asset => [asset.asset_id, asset]));
+  const operationsByAsset = new Map<string, BackupOperation[]>();
+  for (const op of operations) {
+    if (!op.asset_id) continue;
+    const group = operationsByAsset.get(op.asset_id);
+    if (group) group.push(op); else operationsByAsset.set(op.asset_id, [op]);
+  }
+  return {assetsById, operationsByAsset};
+}
+
 export function useBackupTasks() {
   const [settings, setSettings] = useState<BackupSettings | null>(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -77,18 +88,23 @@ export function useBackupTasks() {
     if (live.current && currentSpace.current === settings.space_id && sequence === reloadSequence.current) {
       if (active?.space_id === settings.space_id && (active.enabled !== settings.enabled || active.connection_pending !== settings.connection_pending)) setSettings(active);
       const scoped = ops.filter(o => o.space_id === settings.space_id);
-      setDeleteErrors(old => Object.fromEntries(Object.entries(old).filter(([id]) => !scoped.some(operation => operation.kind === 'delete' && operation.asset_id === id && (['pending','running'].includes(operation.state) || deletionFinished(operation))))));
+      const index = indexBackup(list, scoped);
+      const clearingErrors = new Set(scoped.filter(op => op.kind === 'delete' && (['pending','running'].includes(op.state) || deletionFinished(op))).map(op => op.asset_id));
+      setDeleteErrors(old => Object.fromEntries(Object.entries(old).filter(([id]) => !clearingErrors.has(id))));
       const finished = scoped.filter(deletionFinished);
-      const leaving = assetSnapshot.current.filter(asset => !asset.task_id && !list.some(value => value.asset_id === asset.asset_id) && finished.some(operation => operation.asset_id === asset.asset_id));
-      if (leaving.length) setExitingAssets(old => [...old.filter(asset => !leaving.some(value => value.asset_id === asset.asset_id)), ...leaving]);
+      const finishedAssets = new Set(finished.map(op => op.asset_id));
+      const previousOperations = new Map(operationSnapshot.current.map(op => [op.operation_id, op]));
+      const leaving = assetSnapshot.current.filter(asset => !asset.task_id && !index.assetsById.has(asset.asset_id) && finishedAssets.has(asset.asset_id));
+      const leavingIds = new Set(leaving.map(asset => asset.asset_id));
+      if (leaving.length) setExitingAssets(old => [...old.filter(asset => !leavingIds.has(asset.asset_id)), ...leaving]);
       for (const operation of finished) {
-        if (operationSnapshot.current.some(old => old.operation_id === operation.operation_id && !deletionFinished(old))) toast.success('视频已删除');
+        if (previousOperations.has(operation.operation_id) && !deletionFinished(previousOperations.get(operation.operation_id)!)) toast.success('视频已删除');
       }
       assetSnapshot.current = list; operationSnapshot.current = scoped;
       const previous = operationErrors.current?.spaceId === settings.space_id ? operationErrors.current.errors : null;
       const next = new Map<string, string>();
       for (const op of scoped) {
-        const failure = backupFailure(op, list, scoped);
+        const failure = backupFailure(op, op.asset_id && index.assetsById.has(op.asset_id) ? [index.assetsById.get(op.asset_id)!] : [], index.operationsByAsset.get(op.asset_id ?? '') ?? []);
         if (!failure) continue;
         const identity = `${failure}:${op.attempt}`;
         next.set(op.operation_id, identity);
@@ -153,17 +169,26 @@ export function useBackupTasks() {
     finally { if (live.current && currentSpace.current === space) setSubmittingDeletes(old => { const next = new Set(old); next.delete(assetId); return next; }); }
   }
   const finishAssetRemoval = useCallback((id: string) => setExitingAssets(old => old.filter(asset => asset.asset_id !== id)), []);
-  const operation = (id: string) => operations.find(o => o.asset_id === id && !['completed', 'canceled'].includes(o.state) && o.phase !== 'superseded' && !deletionFinished(o) && !(o.kind === 'upload' && assets.find(a => a.asset_id === id)?.asset_state === 'deleted'));
-  return { settings, setSettings, settingsLoaded, deleteActivity, backupEnabled, cancelingUploads, cancelUpload, revision, assets, exitingAssets, finishAssetRemoval, operations, operation, restoring, submittingDeletes, deleteErrors, deleteAsset, refreshing, refresh, reload, run, restore };
+  const {assetsById, operationsByAsset} = useMemo(() => indexBackup(assets, operations), [assets, operations]);
+  const activeByAsset = useMemo(() => {
+    const result = new Map<string, BackupOperation>();
+    for (const op of operations) {
+      if (op.asset_id && !result.has(op.asset_id) && !['completed', 'canceled'].includes(op.state) && op.phase !== 'superseded' && !deletionFinished(op) && !(op.kind === 'upload' && assetsById.get(op.asset_id)?.asset_state === 'deleted')) result.set(op.asset_id, op);
+    }
+    return result;
+  }, [operations, assetsById]);
+  const operation = (id: string) => activeByAsset.get(id);
+  const exitingIds = useMemo(() => new Set(exitingAssets.map(asset => asset.asset_id)), [exitingAssets]);
+  return { assetsById, operationsByAsset, exitingIds, settings, setSettings, settingsLoaded, deleteActivity, backupEnabled, cancelingUploads, cancelUpload, revision, assets, exitingAssets, finishAssetRemoval, operations, operation, restoring, submittingDeletes, deleteErrors, deleteAsset, refreshing, refresh, reload, run, restore };
 }
 export type BackupTasks = ReturnType<typeof useBackupTasks>;
 
 export function backupDeletion(backup: BackupTasks, assetId: string) {
-  const operation = backup.operations.find(value => value.asset_id === assetId && value.kind === 'delete' && !['completed','canceled'].includes(value.state) && value.phase !== 'superseded' && !deletionFinished(value));
+  const operation = (backup.operationsByAsset.get(assetId) ?? []).find(value => value.kind === 'delete' && !['completed','canceled'].includes(value.state) && value.phase !== 'superseded' && !deletionFinished(value));
   const submitting = backup.submittingDeletes.has(assetId), error = backup.deleteErrors[assetId];
-  const complete = backup.exitingAssets.some(asset => asset.asset_id === assetId) || !operation && !submitting && !error && backup.assets.some(asset => asset.asset_id === assetId && asset.remote_state === 'pending_delete') && backup.operations.some(operation => operation.asset_id === assetId && deletionFinished(operation));
+  const complete = backup.exitingIds.has(assetId) || !operation && !submitting && !error && backup.assetsById.get(assetId)?.remote_state === 'pending_delete' && (backup.operationsByAsset.get(assetId) ?? []).some(deletionFinished);
   if (!complete && !operation && !submitting && !error) return null;
-  const failed = !!error || !!backupFailure(operation, backup.assets, backup.operations);
+  const failed = !!error || !!backupFailure(operation, backup.assetsById.has(assetId) ? [backup.assetsById.get(assetId)!] : [], backup.operationsByAsset.get(assetId) ?? []);
   const phase = complete ? 'complete' : operation?.phase === 'finalizing' ? 'finalizing' : operation?.phase === 'local_cleanup' ? 'local' : 'remote';
   const reconnecting = operation?.state === 'retry_wait' && operation.last_error === 'TELEGRAM_RECONNECTING';
   const label = reconnecting ? '等待连接，恢复后继续删除' : complete ? '删除完成' : failed ? phase === 'local' ? '本地文件删除失败' : phase === 'finalizing' ? '记录移除失败' : '远端备份删除失败' : submitting && !operation ? '正在提交删除' : phase === 'local' ? '正在删除本地文件' : phase === 'finalizing' ? '正在移除记录' : operation && ['pending','retry_wait'].includes(operation.state) ? '等待删除远端备份' : '正在删除远端备份';
@@ -195,7 +220,7 @@ export function BackupRestoreProgress({ backup, assetId }: { backup: BackupTasks
   const operation = backup.operation(assetId);
   const { restoring, waiting } = restoreStatus(backup, assetId, operation);
   if (!restoring) return null;
-  const asset = backup.assets.find(value => value.asset_id === assetId);
+  const asset = backup.assetsById.get(assetId ?? '');
   const confirmed = operation?.payload.completed_bytes;
   const progress = asset && confirmed != null && asset.content_bytes > 0 ? Math.min(99, confirmed / asset.content_bytes * 100) : null;
   return <div className="task-feed-progress"><Progress variant="circular" updateIntervalMs={1000} aria-label="恢复下载进度" value={waiting ? null : progress}>{waiting ? '等待' : undefined}</Progress></div>;
@@ -215,16 +240,16 @@ export function BackupTaskError({ backup, assetId, overlay = false }: { backup: 
   if (overlay && deletionError) return <TaskCardNotice message={deletionError} />;
   const deletion = backupDeletion(backup, assetId);
   const operation = deletion ? deletion.operation : backup.operation(assetId);
-  const failure = backupFailure(operation, backup.assets, backup.operations);
+  const failure = backupFailure(operation, backup.assetsById.has(assetId) ? [backup.assetsById.get(assetId)!] : [], backup.operationsByAsset.get(assetId) ?? []);
   if (!failure) return null;
   if (overlay) return <TaskCardNotice message={errorText(failure)} />;
   return <p role="alert" className="flex items-start gap-1.5 text-xs text-destructive"><AlertCircle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" /><span className="min-w-0 break-words">{errorText(failure)}</span></p>;
 }
 
 export function backupCardStatus(backup: BackupTasks, assetId?: string | null, task?: Task, waiting = false) {
-  const asset = backup.assets.find(value => value.asset_id === assetId);
-  const operations = assetId ? backup.operations.filter(op => op.asset_id === assetId && (!backup.settings?.space_id || op.space_id === backup.settings.space_id)) : [];
-  return taskCardStatus({task, asset, assetId, operations: backup.operations, spaceId: backup.settings?.space_id,
+  const asset = backup.assetsById.get(assetId ?? '');
+  const operations = assetId ? (backup.operationsByAsset.get(assetId) ?? []).filter(op => (!backup.settings?.space_id || op.space_id === backup.settings.space_id)) : [];
+  return taskCardStatus({task, asset, assetId, operations, spaceId: backup.settings?.space_id,
     backupEnabled: backup.backupEnabled, waiting, restoring: !!assetId && backup.restoring.has(assetId),
     cancelingBackup: operations.some(op => backup.cancelingUploads?.has(op.operation_id))});
 }
@@ -237,7 +262,7 @@ export function UnifiedTaskBadge({backup, task, waiting = false}: {backup: Backu
 export function BackupAssetCoverBadge({ backup, assetId }: { backup: BackupTasks; assetId: string }) {
   const deletion = backupDeletion(backup, assetId);
   if (deletion) return <Badge variant={deletion.failed ? 'destructive' : deletion.phase === 'complete' ? 'success' : 'info'} className="task-feed-status">{deletion.failed ? '删除失败' : deletion.phase === 'complete' ? '删除完成' : '删除中'}</Badge>;
-  if (!backup.assets.some(asset => asset.asset_id === assetId)) return null;
+  if (!backup.assetsById.has(assetId)) return null;
   const state = backupCardStatus(backup, assetId);
   return <Badge variant={state.variant} className="task-feed-status">{state.label}</Badge>;
 }
@@ -281,14 +306,14 @@ export function SyncIcon({ uploading = false, indeterminate = false, restoring =
 }
 
 function backupTaskPresentation(backup: BackupTasks, assetId: string, busy = false) {
-  const asset = backup.assets.find(a => a.asset_id === assetId);
+  const asset = backup.assetsById.get(assetId ?? '');
   if (!backup.settings || !asset) return null;
   const uploadState = backupCardStatus(backup, assetId);
   const current = backup.operation(assetId);
   const op = current && current.kind !== 'upload' ? current : uploadState.operation;
   const { restoring, waiting: waitingRestore } = restoreStatus(backup, assetId, op);
   const uploading = uploadState.action === 'cancel-backup' && isActiveTransfer(op, 'upload');
-  const failure = backupFailure(op, backup.assets, backup.operations);
+  const failure = backupFailure(op, asset ? [asset] : [], backup.operationsByAsset.get(assetId) ?? []);
   const needsDownload = !!asset && !asset.path && !asset.remote_deleted && asset.remote_state === 'backed_up';
   const completeInCurrent = asset.remote_state === 'backed_up' && !!asset.path && !restoring && uploadState.label === '已完成' && (op?.kind !== 'upload' || op.state === 'completed');
   const locations = asset.backup_locations ?? [];
@@ -349,7 +374,7 @@ export function BackupTransferMenuItems({ backup, assetId, context = false }: { 
   const deletion = backupDeletion(backup, assetId);
   const Item = context ? ContextMenuItem : DropdownMenuItem;
   if (deletion) return <Item disabled={!deletion.failed || !backup.settings?.enabled || backup.submittingDeletes.has(assetId)} onSelect={() => void backup.deleteAsset(assetId)}><Trash2 />{deletion.failed ? '重试删除' : deletion.label}</Item>;
-  const asset = backup.assets.find(a => a.asset_id === assetId), op = backup.operation(assetId);
+  const asset = backup.assetsById.get(assetId ?? ''), op = backup.operation(assetId);
   if (!backup.settings?.enabled || !asset || asset.remote_state === 'pending_delete' && !asset.remote_deleted) return null;
   const uploading = isActiveTransfer(op, 'upload');
   const restoring = backup.restoring.has(assetId) || isActiveTransfer(op, 'restore');

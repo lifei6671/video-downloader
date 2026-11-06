@@ -295,9 +295,7 @@ pub fn register_download(db: &Connection, local: &str) -> Result<()> {
     if existing {
         return Ok(());
     }
-    let asset = repository::list_assets(db)?
-        .into_iter()
-        .find(|a| a.asset_id == local)
+    let asset = repository::asset(db, local)?
         .ok_or_else(|| anyhow::anyhow!("BACKUP_ASSET_NOT_FOUND"))?;
     join_asset(db, &space, &asset)
 }
@@ -356,10 +354,8 @@ pub fn mark_local(db: &Connection, local: &str, patch: FieldPatch, transcript: b
             .optional()?;
         let remote_snapshot =
             remote_raw.and_then(|v| serde_json::from_str::<AssetSnapshot>(&v).ok());
-        let operation:Option<String>=db.query_row("SELECT payload_json FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='upload' AND state NOT IN ('completed','canceled')",params![space,local],|r|r.get(0)).optional()?;
-        let captured = operation
-            .and_then(|v| serde_json::from_str::<Value>(&v).ok())
-            .and_then(|v| serde_json::from_value::<Capture>(v["capture"].clone()).ok());
+        let operation:Option<String>=db.query_row("SELECT COALESCE(c.capture_json,json_extract(o.payload_json,'$.capture')) FROM backup_operations o LEFT JOIN backup_operation_captures c USING(operation_id) WHERE o.space_id=?1 AND o.asset_id=?2 AND o.kind='upload' AND o.state NOT IN ('completed','canceled')",params![space,local],|r|r.get::<_,Option<String>>(0)).optional()?.flatten();
+        let captured = operation.and_then(|v| serde_json::from_str::<Capture>(&v).ok());
         for (field, value) in &patch {
             let existing = pending.fields.get(field);
             let in_flight = captured.as_ref().and_then(|c| c.pending.fields.get(field));
@@ -540,7 +536,11 @@ impl SyncEngine {
             for (key,value) in previous.as_object().into_iter().flatten() {
                 if key.starts_with("resume_") || key=="completed_bytes" || key=="transfer_started" { next[key]=value.clone(); }
             }
-            db.execute("UPDATE backup_operations SET phase=?2,payload_json=?3,updated_at=unixepoch() WHERE operation_id=?1",params![operation,phase,next.to_string()])?;Ok(())})
+            let tx = db.unchecked_transaction()?;
+            if let Some(capture) = next.as_object_mut().and_then(|p| p.remove("capture")) {
+                tx.execute("INSERT OR IGNORE INTO backup_operation_captures VALUES(?1,?2)", params![operation,capture.to_string()])?;
+            }
+            tx.execute("UPDATE backup_operations SET phase=?2,payload_json=?3,updated_at=unixepoch() WHERE operation_id=?1",params![operation,phase,next.to_string()])?;tx.commit()?;Ok(())})
     }
     pub async fn execute_upload(&self, operation: &str) -> Result<()> {
         use anyhow::Context;
@@ -549,7 +549,6 @@ impl SyncEngine {
         let op = scheduler::operation(&self.core, operation)?;
         let local = op.asset_id.as_deref().context("BACKUP_INVALID_OPERATION")?;
         // Different assets may transfer together; a retry of the same asset cannot.
-        // Keep global -> asset lock order consistent with destructive file work.
         let _file = self.core.restore_file_guard(local).await;
         self.check(operation)?;
         let scope = self.provider.scope();
@@ -566,7 +565,7 @@ impl SyncEngine {
             }
             let capture=self.core.backup_db(|db|{
                 let (remote,revision,pending,baseline):(String,u64,String,Option<String>)=db.query_row("SELECT remote_asset_id,local_revision,pending_json,baseline_json FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![scope.space_id,local],|r|Ok((r.get(0)?,r.get::<_,i64>(1)? as u64,r.get(2)?,r.get(3)?)))?;
-                let asset=repository::list_assets(db)?.into_iter().find(|a|a.asset_id==local).context("BACKUP_ASSET_NOT_FOUND")?;
+                let asset=repository::asset(db, local)?.context("BACKUP_ASSET_NOT_FOUND")?;
                 let pending:PendingChanges=serde_json::from_str(&pending)?;
                 let transcript=if pending.transcript.is_some() {repository::transcript(db,local)?} else {None};
                 let cover=if pending.cover.is_some() {db.query_row("SELECT body FROM asset_covers WHERE asset_id=?",[local],|r|r.get::<_,Vec<u8>>(0)).optional()?} else {None};
@@ -588,6 +587,11 @@ impl SyncEngine {
             self.save_payload(operation, "captured", &payload)?;
             capture
         };
+        // Keep immutable bodies out of subsequent in-memory and durable checkpoints.
+        if let Some(saved) = payload["capture"].as_object_mut() {
+            saved.remove("cover");
+            saved.remove("transcript");
+        }
         let mut change = AssetChange {
             recreate: capture.pending.recreate,
             resolved_conflicts: capture
@@ -673,9 +677,7 @@ impl SyncEngine {
             self.core.verify_backup_asset(local).await?;
             let actual = self
                 .core
-                .backup_assets()?
-                .into_iter()
-                .find(|a| a.asset_id == local)
+                .backup_asset(local)?
                 .context("BACKUP_ASSET_NOT_FOUND")?;
             if actual.content_sha256 != capture.asset.content_sha256
                 || actual.content_bytes != capture.asset.content_bytes
@@ -752,6 +754,12 @@ impl SyncEngine {
                             tx.execute("INSERT INTO backup_upload_proofs VALUES(?1,?2,?3,?4,?5) ON CONFLICT(space_id,remote_asset_id,device_id) DO UPDATE SET operation_id=excluded.operation_id,media_sha256=excluded.media_sha256",params![scope.space_id,capture.remote,receipt.device_id,receipt.operation_id,receipt.reference.sha256])?;
                         }
                     }
+                    // Completed receipts retain identity, but no captured attachment bodies.
+                    if let Some(capture) = payload["capture"].as_object_mut() {
+                        capture.remove("cover");
+                        capture.remove("transcript");
+                    }
+                    tx.execute("DELETE FROM backup_operation_captures WHERE operation_id=?", [operation])?;
                     tx.execute("UPDATE backup_operations SET state='completed',phase='completed',last_error=NULL,payload_json=?2 WHERE operation_id=?1",params![operation,payload.to_string()])?;
                     tx.commit()?;Ok(())
                 })
@@ -889,6 +897,10 @@ pub fn import_asset(db: &Connection, scope: &Scope, remote: &RemoteAsset) -> Res
     }
     let local = repository::bind_remote_asset(db, &scope.space_id, &snapshot.asset_id)?;
     let (previous,deleted,pending):(Option<String>,bool,String)=db.query_row("SELECT baseline_json,remote_deleted,pending_json FROM backup_space_assets WHERE space_id=?1 AND remote_asset_id=?2",params![scope.space_id,snapshot.asset_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    let remote_json = serde_json::to_string(snapshot)?;
+    let version_json = serde_json::to_string(&remote.version)?;
+    let unchanged: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM backup_import_receipts r JOIN backup_space_assets m USING(space_id,remote_asset_id) WHERE r.space_id=?1 AND r.remote_asset_id=?2 AND r.remote_json=?3 AND r.version_json=?4 AND r.local_revision=m.local_revision AND r.pending_json=m.pending_json)", params![scope.space_id,snapshot.asset_id,remote_json,version_json], |r| r.get(0))?;
+    if unchanged { return Ok(local); }
     let previous = previous
         .map(|v| serde_json::from_str::<AssetSnapshot>(&v))
         .transpose()?;
@@ -981,6 +993,7 @@ pub fn import_asset(db: &Connection, scope: &Scope, remote: &RemoteAsset) -> Res
             params![scope.space_id, snapshot.asset_id, id, raw],
         )?;
     }
+    db.execute("INSERT INTO backup_import_receipts SELECT space_id,remote_asset_id,?3,?4,local_revision,pending_json FROM backup_space_assets WHERE space_id=?1 AND remote_asset_id=?2 ON CONFLICT(space_id,remote_asset_id) DO UPDATE SET remote_json=excluded.remote_json,version_json=excluded.version_json,local_revision=excluded.local_revision,pending_json=excluded.pending_json", params![scope.space_id,snapshot.asset_id,remote_json,version_json])?;
     Ok(local)
 }
 
@@ -997,6 +1010,7 @@ pub async fn run_with(
     tokio::join!(
         discovery_loop(core.clone(), cancel.clone(), resolve.clone()),
         queue_loop(core.clone(), cancel.clone(), resolve.clone(), QueueLane::Primary),
+        queue_loop(core.clone(), cancel.clone(), resolve.clone(), QueueLane::Upload),
         queue_loop(core.clone(), cancel.clone(), resolve.clone(), QueueLane::Upload),
         maintenance_loop(core, cancel, resolve)
     );
@@ -1248,8 +1262,7 @@ enum QueueLane {
     Upload,
 }
 
-// One primary lane handles uploads, deletes and cleanup. The second lane only
-// uploads, so cleanup is never executed twice and no per-operation task escapes.
+// The control lane handles deletion and cleanup independently of two upload workers.
 async fn queue_loop(
     core: Arc<Core>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
@@ -1291,7 +1304,7 @@ async fn queue_loop(
             // or canceled-upload cleanup is running.
             let claim=core.backup_db(|db|{
                 let next = match lane {
-                    QueueLane::Primary => scheduler::next_sync_operation(db, &settings.space_id)?,
+                    QueueLane::Primary => scheduler::next_delete_operation(db, &settings.space_id)?,
                     QueueLane::Upload => scheduler::next_upload_operation(db, &settings.space_id)?,
                 };
                 let Some((operation,foreground_delete))=next else {return Ok(None);};
@@ -1463,7 +1476,7 @@ pub fn request_upload_with(
         let db=&tx;
         let member:Option<bool>=db.query_row("SELECT remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![space,local],|r|r.get(0)).optional()?;
         let deleted = if let Some(deleted) = member { deleted } else {
-            let asset=repository::list_assets(db)?.into_iter().find(|a|a.asset_id==local).context("BACKUP_ASSET_NOT_FOUND")?;
+            let asset=repository::asset(db, local)?.context("BACKUP_ASSET_NOT_FOUND")?;
             if asset.asset_state != "active" { bail!("BACKUP_ASSET_DELETED"); }
             if !asset.path.as_ref().is_some_and(|p|p.is_file()) { bail!("FILE_MISSING"); }
             // Only this explicit upload request joins an existing video to another target.
@@ -1472,7 +1485,7 @@ pub fn request_upload_with(
         };
         let deleting:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='delete' AND state NOT IN ('completed','canceled'))",params![space,local],|r|r.get(0))?;
         if deleted {
-            let asset=repository::list_assets(db)?.into_iter().find(|a|a.asset_id==local).context("BACKUP_ASSET_NOT_FOUND")?;
+            let asset=repository::asset(db, local)?.context("BACKUP_ASSET_NOT_FOUND")?;
             if asset.path.as_ref().is_none_or(|p|!p.is_file()) {bail!("FILE_MISSING");}
             let (revision,raw):(u64,String)=db.query_row("SELECT local_revision,pending_json FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![space,local],|r|Ok((r.get::<_,i64>(0)? as u64+1,r.get(1)?)))?;
             let mut pending:PendingChanges=serde_json::from_str(&raw)?;

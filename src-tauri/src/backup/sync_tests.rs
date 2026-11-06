@@ -1,3 +1,5 @@
+#[path = "review_followup_tests.rs"]
+mod review_followup_tests;
 #[path = "flat_upload_tests.rs"]
 mod flat_upload_tests;
 #[path = "retention_tests.rs"]
@@ -2263,7 +2265,7 @@ async fn p3_space_names_are_local_persistent_and_do_not_change_library_or_queue(
         db.query_row("SELECT version FROM backup_schema WHERE id=1", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        8
+        9
     );
     let after = scheduler::operations(&f.core)
         .unwrap()
@@ -3610,7 +3612,7 @@ fn current_sqlite_schema_is_idempotent_and_rejects_unknown_versions() {
         db.query_row("SELECT version FROM backup_schema", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        8
+        9
     );
     db.execute("UPDATE backup_schema SET version=99", [])
         .unwrap();
@@ -3698,11 +3700,15 @@ struct TelegramReadFixture {
     inner: Arc<S3Provider<Memory>>,
     scope: Scope,
     source: MediaRef,
+    delay: Option<std::time::Duration>,
     read_failures: std::sync::atomic::AtomicUsize,
     pull_failures: std::sync::atomic::AtomicUsize,
 }
 impl BackupProvider for TelegramReadFixture {
     fn scope(&self) -> &Scope { &self.scope }
+    fn media_read_timeout(&self) -> std::time::Duration {
+        if self.scope.provider_type == ProviderType::Telegram { crate::telegram_transfer_engine::FILE_IO_TIMEOUT } else { std::time::Duration::from_secs(30) }
+    }
     fn capabilities(&self) -> ProviderCapabilities { self.inner.capabilities() }
     fn open_library(&self, _: bool) -> ProviderFuture<'_, LibraryDescriptor> { panic!("unexpected write/setup") }
     fn pull_changes(&self, checkpoint: Option<Checkpoint>) -> ProviderFuture<'_, ChangeBatch> {
@@ -3742,7 +3748,11 @@ impl BackupProvider for TelegramReadFixture {
     fn download_media(&self, reference: MediaRef, offset: u64) -> ProviderFuture<'_, MediaStream> {
         reference.validate_scope(&self.scope).unwrap();
         assert_eq!(reference.sha256,self.source.sha256);
-        self.inner.download_media(self.source.clone(),offset)
+        Box::pin(async move {
+            let mut stream = self.inner.download_media(self.source.clone(),offset).await?;
+            if let Some(delay) = self.delay { stream.reader = Box::new(review_followup_tests::SlowReader::new(stream.reader, delay)); }
+            Ok(stream)
+        })
     }
     fn verify_media(&self, _: MediaRef) -> ProviderFuture<'_, ()> { panic!("unexpected verify") }
     fn delete_media(&self, _: MediaRef, _: &str) -> ProviderFuture<'_, ()> { panic!("unexpected delete") }
@@ -3764,7 +3774,7 @@ async fn telegram_restore_recovers_midstream_disconnect_with_same_operation_and_
         Ok(())
     }).unwrap();
     *core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.reconnect_probe.lock().unwrap() = Some(||Ok(()));
-    let provider = TelegramReadFixture { inner,scope,source:source.clone(),read_failures:std::sync::atomic::AtomicUsize::new(1),pull_failures:std::sync::atomic::AtomicUsize::new(0) };
+    let provider = TelegramReadFixture { delay:None,inner,scope,source:source.clone(),read_failures:std::sync::atomic::AtomicUsize::new(1),pull_failures:std::sync::atomic::AtomicUsize::new(0) };
     f.store.0.lock().unwrap().break_stream = Some(8);
     let work = sync_read::ensure(&core,&provider,&id);
     tokio::pin!(work);
@@ -3796,7 +3806,7 @@ async fn telegram_discovery_timeout_reconnects_and_clears_settings_error() {
         let session = f.core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session;
         session.set_test_view(crate::backup::telegram_session::Phase::Ready,"fixture");
         *session.reconnect_probe.lock().unwrap() = Some(if terminal_auth { ||Err(anyhow::anyhow!("TELEGRAM_AUTH_REQUIRED")) } else { ||Ok(()) });
-        let provider = Arc::new(TelegramReadFixture {inner,scope,source,read_failures:std::sync::atomic::AtomicUsize::new(0),pull_failures:std::sync::atomic::AtomicUsize::new(2)});
+        let provider = Arc::new(TelegramReadFixture {delay:None,inner,scope,source,read_failures:std::sync::atomic::AtomicUsize::new(0),pull_failures:std::sync::atomic::AtomicUsize::new(2)});
         let (stop,cancel) = tokio::sync::watch::channel(false);
         let worker = tokio::spawn(sync_engine::run_with(f.core.clone(),cancel,Arc::new(move |_,_|Ok(provider.clone()))));
         tokio::time::timeout(std::time::Duration::from_secs(2),async {

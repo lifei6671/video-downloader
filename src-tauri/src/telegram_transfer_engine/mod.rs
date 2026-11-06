@@ -637,6 +637,7 @@ pub(crate) struct Download {
     plan: Plan,
     scheduled: u64,
     emitted: u64,
+    skip: usize,
     pending: FuturesUnordered<PendingChunk>,
     ready: BTreeMap<u64, Vec<u8>>,
     failed: bool,
@@ -648,10 +649,20 @@ impl Download {
             plan,
             scheduled: 0,
             emitted: 0,
+            skip: 0,
             pending: FuturesUnordered::new(),
             ready: BTreeMap::new(),
             failed: false,
         }
+    }
+    pub fn from_offset(source: Arc<dyn ChunkSource>, plan: Plan, offset: u64) -> Result<Self> {
+        ensure!(offset <= plan.bytes, "BACKUP_INVALID_RANGE");
+        let mut download = Self::new(source, plan);
+        let first = if offset == plan.bytes { plan.parts } else { offset / plan.part };
+        download.scheduled = first;
+        download.emitted = first;
+        download.skip = if offset == plan.bytes { 0 } else { (offset % plan.part) as usize };
+        Ok(download)
     }
     async fn next_inner(&mut self) -> Result<Option<Vec<u8>>> {
         loop {
@@ -668,8 +679,9 @@ impl Download {
                 }));
                 self.scheduled += 1;
             }
-            if let Some(bytes) = self.ready.remove(&self.emitted) {
+            if let Some(mut bytes) = self.ready.remove(&self.emitted) {
                 self.emitted += 1;
+                if self.skip != 0 { bytes.drain(..self.skip); self.skip = 0; }
                 return Ok(Some(bytes));
             }
             let Some(result) = self.pending.next().await else {
@@ -790,9 +802,10 @@ pub(crate) fn download(
     refresh: Refresh,
     budget: Arc<Budget>,
     authorization: Arc<Authorization>,
+    offset: u64,
 ) -> Result<Download> {
     let (source, plan) = document_download(client, document, refresh, budget, authorization)?;
-    Ok(Download::new(source, plan))
+    Download::from_offset(source, plan, offset)
 }
 pub(crate) fn download_file(
     client: Client,

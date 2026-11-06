@@ -38,7 +38,7 @@ pub fn local_data(core: &Core, space: &str, local: &str) -> Result<LocalData> {
     core.backup_db(|db|{
         let (raw,deleted):(String,bool)=db.query_row("SELECT pending_json,remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![space,local],|r|Ok((r.get(0)?,r.get(1)?)))?;
         let pending:PendingChanges=serde_json::from_str(&raw)?;
-        let asset=repository::list_assets(db)?.into_iter().find(|a|a.asset_id==local).context("BACKUP_ASSET_NOT_FOUND")?;
+        let asset=repository::asset(db, local)?.context("BACKUP_ASSET_NOT_FOUND")?;
         let mut q=db.prepare("SELECT c.conflict_id,c.value_json FROM backup_conflicts c JOIN backup_space_assets m USING(space_id,remote_asset_id) WHERE c.space_id=?1 AND m.local_asset_id=?2 ORDER BY c.conflict_id")?;
         let rows=q.query_map(params![space,local],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let conflicts=rows.into_iter().map(|(id,raw)|->Result<_>{let c:ConflictVersion=serde_json::from_str(&raw)?;Ok(view(id,&c,deleted))}).collect::<Result<_>>()?;
@@ -52,7 +52,7 @@ pub fn export_data(core: &Core, space: &str, local: &str) -> Result<serde_json::
         let mut q=db.prepare("SELECT value_json FROM backup_conflicts WHERE space_id=?1 AND remote_asset_id=?2")?;
         let raw=q.query_map(params![space,remote],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let conflicts=raw.iter().map(|v|serde_json::from_str::<ConflictVersion>(v)).collect::<std::result::Result<Vec<_>,_>>()?;
-        let asset=repository::list_assets(db)?.into_iter().find(|a|a.asset_id==local).context("BACKUP_ASSET_NOT_FOUND")?;
+        let asset=repository::asset(db, local)?.context("BACKUP_ASSET_NOT_FOUND")?;
         Ok(serde_json::json!({"schema_version":1,"space_id":space,"library_id":library,"local_asset_id":local,"remote_asset_id":remote,"local_revision":revision,"remote_deleted":deleted,"metadata":asset.metadata,"pending":serde_json::from_str::<PendingChanges>(&pending)?,"transcript":repository::transcript(db,local)?,"conflicts":conflicts}))
     })
 }

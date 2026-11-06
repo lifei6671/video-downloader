@@ -44,3 +44,24 @@ CREATE TABLE IF NOT EXISTS backup_record_retention(
  enabled INTEGER NOT NULL DEFAULT 0,
  days INTEGER NOT NULL DEFAULT 30 CHECK(days BETWEEN 1 AND 3650),
  next_check_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,delete_verified INTEGER NOT NULL DEFAULT 0);
+
+-- Reverse lookups used by history registration and local asset operations.
+CREATE INDEX IF NOT EXISTS backup_space_assets_local ON backup_space_assets(local_asset_id);
+CREATE INDEX IF NOT EXISTS backup_operations_asset ON backup_operations(asset_id);
+CREATE TABLE IF NOT EXISTS backup_operation_captures (
+ operation_id TEXT PRIMARY KEY REFERENCES backup_operations(operation_id) ON DELETE CASCADE,
+ capture_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backup_import_receipts (
+ space_id TEXT NOT NULL,remote_asset_id TEXT NOT NULL,
+ remote_json TEXT NOT NULL,version_json TEXT NOT NULL,local_revision INTEGER NOT NULL,pending_json TEXT NOT NULL,
+ PRIMARY KEY(space_id,remote_asset_id),
+ FOREIGN KEY(space_id,remote_asset_id) REFERENCES backup_space_assets(space_id,remote_asset_id) ON DELETE CASCADE
+);
+
+-- A local projection is shared by memberships, so another space can invalidate it.
+CREATE TRIGGER IF NOT EXISTS backup_import_projection_changed AFTER UPDATE ON media_assets BEGIN
+ DELETE FROM backup_import_receipts WHERE (space_id,remote_asset_id) IN
+ (SELECT space_id,remote_asset_id FROM backup_space_assets WHERE local_asset_id=NEW.asset_id);
+END;

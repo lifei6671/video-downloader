@@ -72,7 +72,15 @@ async fn small_once(
     let stream = tokio::select! {_=shutdown.changed()=>bail!("CANCELED"),result=provider.download_media(reference.clone(),0)=>result?};
     let mut body = Vec::new();
     let mut limited = stream.reader.take(reference.bytes + 1);
-    tokio::select! {_=shutdown.changed()=>bail!("CANCELED"),result=tokio::time::timeout(Duration::from_secs(30),limited.read_to_end(&mut body))=>{result.context("BACKUP_NETWORK_ERROR")??;}}
+    let mut buffer = vec![0u8; 65536];
+    loop {
+        let count = tokio::select! {
+            _ = shutdown.changed() => bail!("CANCELED"),
+            result = tokio::time::timeout(provider.media_read_timeout(), limited.read(&mut buffer)) => result.context("BACKUP_NETWORK_ERROR")??,
+        };
+        if count == 0 { break; }
+        body.extend_from_slice(&buffer[..count]);
+    }
     if body.len() as u64 != reference.bytes
         || format!("{:x}", Sha256::digest(&body)) != reference.sha256
     {
@@ -85,22 +93,16 @@ pub async fn transcript(
     provider: &dyn BackupProvider,
     local: &str,
 ) -> Result<Option<AssetTranscript>> {
-    let pending: String = core.backup_db(|db| {
-        Ok(db.query_row(
-            "SELECT pending_json FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",
-            params![provider.scope().space_id, local],
-            |r| r.get(0),
-        )?)
+    let space = &provider.scope().space_id;
+    let (previous, raw, deleted) = core.backup_db(|db| {
+        let state = local_transcript(db, local)?;
+        let raw: String = db.query_row("SELECT record_json FROM asset_remote_records WHERE space_id=?1 AND asset_id=?2", params![space,local], |r| r.get(0))?;
+        let deleted: bool = db.query_row("SELECT remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2", params![space,local], |r| r.get(0))?;
+        Ok((state, raw, deleted))
     })?;
-    let existing = core.asset_transcript(local)?;
-    let deleted:bool=core.backup_db(|db|Ok(db.query_row("SELECT remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![provider.scope().space_id,local],|r|r.get(0))?))?;
-    if deleted {
-        return Ok(existing);
-    }
-    if serde_json::from_str::<PendingChanges>(&pending)?.transcript_dirty() {
-        return Ok(existing);
-    }
-    let record = cached(core, &provider.scope().space_id, local)?;
+    let existing = previous.body.clone();
+    if deleted || previous.dirty { return Ok(existing); }
+    let record: AssetSnapshot = serde_json::from_str(&raw)?;
     if record.deleted {
         return Ok(existing);
     }
@@ -122,8 +124,39 @@ pub async fn transcript(
         bail!("BACKUP_INVALID_TRANSCRIPT");
     }
     value.asset_id = local.into();
-    core.backup_db(|db|{db.execute("INSERT INTO asset_transcripts(asset_id,content_sha256,text,model_revision,model_name,pipeline_revision,completed_at,source_json) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL) ON CONFLICT(asset_id) DO UPDATE SET content_sha256=excluded.content_sha256,text=excluded.text,model_revision=excluded.model_revision,model_name=excluded.model_name,pipeline_revision=excluded.pipeline_revision,completed_at=excluded.completed_at,source_json=NULL WHERE NOT EXISTS(SELECT 1 FROM backup_space_assets m WHERE m.local_asset_id=?1 AND (json_extract(m.pending_json,'$.transcript') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(m.pending_json,'$.choices') c WHERE json_extract(c.value,'$.adopt')=1 AND json_extract(c.value,'$.conflict.field')='transcript')))",params![local,value.content_sha256,value.text,value.model_revision,value.model_name,value.pipeline_revision,i64::try_from(value.completed_at)?])?;Ok(())})?;
-    core.asset_transcript(local)
+    core.backup_db(|db| {
+        let tx = db.unchecked_transaction()?;
+        let current = local_transcript(&tx, local)?;
+        let current_remote: Option<(String,bool)> = tx.query_row(
+            "SELECT r.record_json,m.remote_deleted FROM asset_remote_records r JOIN backup_space_assets m ON m.space_id=r.space_id AND m.local_asset_id=r.asset_id WHERE r.space_id=?1 AND r.asset_id=?2",
+            params![space,local], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).optional()?;
+        if current.dirty || current.revisions != previous.revisions || current.body != previous.body
+            || current_remote.as_ref().is_none_or(|(record,deleted)| *deleted || record != &raw) {
+            return Ok(current.body);
+        }
+        tx.execute("INSERT INTO asset_transcripts(asset_id,content_sha256,text,model_revision,model_name,pipeline_revision,completed_at,source_json) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL) ON CONFLICT(asset_id) DO UPDATE SET content_sha256=excluded.content_sha256,text=excluded.text,model_revision=excluded.model_revision,model_name=excluded.model_name,pipeline_revision=excluded.pipeline_revision,completed_at=excluded.completed_at,source_json=NULL",params![local,value.content_sha256,value.text,value.model_revision,value.model_name,value.pipeline_revision,i64::try_from(value.completed_at)?])?;
+        tx.commit()?;
+        Ok(Some(value))
+    })
+
+}
+struct TranscriptState {
+    body: Option<AssetTranscript>,
+    dirty: bool,
+    revisions: Vec<(String, i64)>,
+}
+fn local_transcript(db: &rusqlite::Connection, local: &str) -> Result<TranscriptState> {
+    let body = super::repository::transcript(db, local)?;
+    let mut dirty = false;
+    let mut revisions = Vec::new();
+    let mut query = db.prepare("SELECT space_id,local_revision,pending_json FROM backup_space_assets WHERE local_asset_id=? ORDER BY space_id")?;
+    for row in query.query_map([local], |r| Ok((r.get(0)?,r.get(1)?,r.get::<_,String>(2)?)))? {
+        let (space, revision, pending) = row?;
+        dirty |= serde_json::from_str::<PendingChanges>(&pending)?.transcript_dirty();
+        revisions.push((space, revision));
+    }
+    Ok(TranscriptState {body,dirty,revisions})
 }
 // Covers are shared by all memberships of a local asset. A lazy read from one
 // space must not replace a choice or local edit waiting to publish in another.
@@ -288,8 +321,7 @@ async fn transfer(core:&Arc<Core>,provider:&dyn BackupProvider,local:&str,record
     loop {
         match transfer_once(core,provider,local,record,reference,operation,payload,cancel.clone()).await {
             Err(error) if !refreshed && provider.scope().provider_type==ProviderType::Telegram && error.to_string()=="TELEGRAM_FILE_REFERENCE_EXPIRED"=>{
-                // A newly fetched source message supplies a new file reference. Restart the owned part at zero.
-                payload["reference"]=Value::Null;
+                // Refresh the request token while preserving the validated content prefix.
                 refreshed = true;
                 checkpoint(core,provider.scope(),operation,"refreshing_reference",payload)?;
             },
@@ -361,6 +393,7 @@ async fn transfer_once(
     checkpoint(core, scope, operation, "downloading", payload)?;
     if offset < reference.bytes {
         let mut stream = provider.download_media(reference.clone(), offset).await?;
+        anyhow::ensure!(stream.offset <= offset, "BACKUP_INVALID_RANGE");
         offset = stream.offset;
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -368,13 +401,14 @@ async fn transfer_once(
             .truncate(offset == 0)
             .open(&part)
             .await?;
+        file.set_len(offset).await?;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
         let mut buffer = vec![0; 256 * 1024];
         let mut last = offset;
         loop {
             active(core, scope, operation)?;
             let n = match tokio::time::timeout(
-                Duration::from_secs(30),
+                provider.media_read_timeout(),
                 stream.reader.read(&mut buffer),
             )
             .await

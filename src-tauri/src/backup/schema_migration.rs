@@ -3,7 +3,7 @@ use anyhow::{bail, ensure, Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use std::{fs::OpenOptions, path::Path};
 
-const VERSION: i64 = 8;
+const VERSION: i64 = 9;
 const SPACES: &[&str] = &[
     "space_id",
     "library_id",
@@ -30,7 +30,7 @@ pub(crate) struct Prepared {
 
 impl Prepared {
     pub(crate) fn is_upgrade(&self) -> bool {
-        matches!(self.version, Some(1 | 5 | 6 | 7))
+        matches!(self.version, Some(1 | 5 | 6 | 7 | 8))
     }
 }
 
@@ -72,7 +72,7 @@ pub(crate) fn prepare(db: &Connection) -> Result<Prepared> {
     let old = version(db)?;
     match old {
         None => return Ok(Prepared { version: old }),
-        Some(1 | 6 | 7 | VERSION) => {
+        Some(1 | 6 | 7 | 8 | VERSION) => {
             // v1 was reused by the current-format rewrite. Do not mistake an older
             // unrelated v1 layout for that format merely because its number matches.
             columns(db, "backup_spaces", SPACES)?;
@@ -230,6 +230,10 @@ pub(crate) fn finish(db: &Connection, prepared: &Prepared) -> Result<()> {
         // merely from a missing file or a remote tombstone.
         db.execute("INSERT OR IGNORE INTO asset_deletion_hidden_history(space_id,asset_id) SELECT o.space_id,o.asset_id FROM backup_operations o JOIN asset_hidden_history h ON h.asset_id=o.asset_id WHERE o.kind='delete' AND json_extract(o.payload_json,'$.local_cleanup_done')=1", [])?;
         db.execute("DELETE FROM asset_hidden_history WHERE asset_id IN (SELECT asset_id FROM asset_deletion_hidden_history)", [])?;
+    }
+    if prepared.version != Some(VERSION) {
+        db.execute("INSERT OR IGNORE INTO backup_operation_captures SELECT operation_id,json_extract(payload_json,'$.capture') FROM backup_operations WHERE kind='upload' AND json_type(payload_json,'$.capture')='object' AND state<>'completed'", [])?;
+        db.execute("UPDATE backup_operations SET payload_json=CASE WHEN state='completed' THEN json_remove(payload_json,'$.capture.cover','$.capture.transcript') ELSE json_remove(payload_json,'$.capture') END WHERE kind='upload' AND json_type(payload_json,'$.capture')='object'", [])?;
     }
     if prepared.version.is_some_and(|version| version < VERSION) {
         db.execute("UPDATE backup_schema SET version=? WHERE id=1", [VERSION])?;

@@ -228,3 +228,26 @@ async fn authorized_history_copy_registration() -> Result<()> {
     }.await;
     core.shutdown().await;result
 }
+
+#[tokio::test(start_paused = true)]
+async fn missing_history_file_is_rechecked_without_task_snapshot_changes() {
+    let (f, _, _) = sync_fixture().await;
+    let task = historical(f.root.path(), "video");
+    let path = task.path.clone().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    f.core.backup_db(|db| {
+        db.execute("INSERT INTO download_tasks(id,snapshot) VALUES(?1,?2)",params![task.id,serde_json::to_string(&task)?])?;
+        Ok(())
+    }).unwrap();
+    f.core.shutdown().await;
+    drop(f.core);
+    let core = Core::open(&f.root.path().join("app.sqlite"),f.root.path().join("downloads"),"unused".into(),vec![], |_| {}).unwrap();
+    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(),0);
+    std::fs::write(&path,bytes).unwrap();
+    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(),0);
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(),1);
+    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(),0);
+    core.shutdown().await;
+}

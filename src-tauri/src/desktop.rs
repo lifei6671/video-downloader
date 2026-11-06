@@ -90,7 +90,7 @@ fn copy_asset_transcript(app:tauri::AppHandle,core:State<AppCore>,asset_id:Strin
 #[tauri::command]
 async fn export_asset_transcript(app:tauri::AppHandle,core:State<'_,AppCore>,asset_id:String)->Result<Option<String>,String>{
     let text=core.asset_transcript(&asset_id).map_err(error)?.ok_or("TRANSCRIPTION_NOT_FOUND")?;
-    let source=core.backup_assets().map_err(error)?.into_iter().find(|a|a.asset_id==asset_id).and_then(|a|a.path);
+    let source=core.backup_asset(&asset_id).map_err(error)?.and_then(|a|a.path);
     let (tx,rx)=tokio::sync::oneshot::channel();
     app.dialog().file().set_title("导出视频文案").set_file_name("video-transcript.txt").add_filter("文本文件",&["txt"]).save_file(move |file|{let _=tx.send(file);});
     let Some(file)=rx.await.map_err(|_|"IO_ERROR")? else {return Ok(None);};let path=file.into_path().map_err(|_|"IO_ERROR")?;

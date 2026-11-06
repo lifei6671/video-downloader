@@ -16,14 +16,14 @@ fn v6_deletion_hides_are_scoped_atomically_without_losing_explicit_hides() {
         INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES('delete','space','deleted','delete','completed','completed','{\"local_cleanup_done\":true}');
         DROP TABLE asset_deletion_hidden_history;
         UPDATE backup_schema SET version=6;
-        CREATE TRIGGER reject_v8 BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=8 BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+        CREATE TRIGGER reject_v8 BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=9 BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
     assert!(repository::init(&db).is_err());
     assert_eq!(version(&db), 6);
     assert_eq!(db.query_row("SELECT count(*) FROM asset_hidden_history", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
     assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='asset_deletion_hidden_history'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     db.execute("DROP TRIGGER reject_v8", []).unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 8);
+    assert_eq!(version(&db), 9);
     assert_eq!(db.query_row("SELECT asset_id FROM asset_hidden_history", [], |r| r.get::<_, String>(0)).unwrap(), "hidden");
     assert_eq!(db.query_row("SELECT space_id,asset_id FROM asset_deletion_hidden_history", [], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?))).unwrap(), ("space".into(),"deleted".into()));
     // Explicitly hiding a remaining membership after migration must survive
@@ -112,7 +112,7 @@ fn v5_migration_preserves_wal_snapshot_receipts_and_blocks_automatic_work() {
     seed(&db);
     db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES('active','space','probe','running','unknown','{\"nonce\":456}')", []).unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 8);
+    assert_eq!(version(&db), 9);
     assert_eq!(columns(&db, "backup_spaces"), 7);
     assert_eq!(columns(&db, "asset_remote_objects"), 4);
     assert_eq!(columns(&db, "backup_provider_config"), 7);
@@ -245,7 +245,7 @@ fn failed_migration_rolls_back_every_table_and_keeps_a_complete_backup() {
     let root = tempfile::tempdir().unwrap();
     let db = Connection::open(root.path().join("user.sqlite")).unwrap();
     seed(&db);
-    db.execute_batch("CREATE TRIGGER reject_upgrade BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=8 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
+    db.execute_batch("CREATE TRIGGER reject_upgrade BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=9 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
     assert!(repository::init(&db)
         .unwrap_err()
         .to_string()
@@ -287,7 +287,7 @@ fn current_v1_upgrades_once_without_pausing_current_format_work() {
         .unwrap();
     let device = repository::device_id(&db).unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 8);
+    assert_eq!(version(&db), 9);
     assert_eq!(repository::device_id(&db).unwrap(), device);
     assert_eq!(
         db.query_row("SELECT enabled FROM backup_sync_preference", [], |r| r
@@ -372,7 +372,7 @@ fn incompatible_protocol_layout_and_pending_remote_upgrade_are_not_relabelled() 
 fn fresh_schema_and_unknown_version_have_explicit_boundaries() {
     let db = Connection::open_in_memory().unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 8);
+    assert_eq!(version(&db), 9);
     let device = repository::device_id(&db).unwrap();
     db.execute("UPDATE backup_schema SET version=99", [])
         .unwrap();
@@ -403,7 +403,7 @@ fn migrate_authorized_database_copy() {
     let db = Connection::open(path).unwrap();
     db.pragma_update(None, "foreign_keys", true).unwrap();
     repository::init(&db).unwrap();
-    assert_eq!(version(&db), 8);
+    assert_eq!(version(&db), 9);
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),
@@ -425,4 +425,44 @@ fn migrate_authorized_database_copy() {
         0
     );
     drop(db);
+}
+
+#[test]
+fn v8_capture_migration_preserves_uncertain_evidence_and_reclaims_completed_bodies_atomically() {
+    let db = Connection::open_in_memory().unwrap();
+    repository::init(&db).unwrap();
+    db.execute_batch("INSERT INTO backup_spaces VALUES('s','l','','','',NULL,0);
+        UPDATE backup_schema SET version=8;
+        DROP TABLE backup_operation_captures;
+        DROP TABLE backup_import_receipts;
+        DROP INDEX backup_space_assets_local;
+        DROP INDEX backup_operations_asset;").unwrap();
+    let payload = serde_json::json!({"capture":{"remote":"asset","cover":[1,2,3],"transcript":{"text":"immutable"}},"resume_video":{"status":"unknown","message_id":42},"change":{"operation_id":"original"}}).to_string();
+    for state in ["completed","pending","running","blocked","retry_wait","canceled"] {
+        db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES(?1,'s','upload',?1,'publishing',?2)", rusqlite::params![state,payload]).unwrap();
+    }
+    db.execute_batch("CREATE TRIGGER reject_v9 BEFORE UPDATE OF version ON backup_schema WHEN NEW.version=9 BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(repository::init(&db).is_err());
+    assert_eq!(version(&db), 8);
+    assert_eq!(db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id='running'", [], |r| r.get::<_,String>(0)).unwrap(), payload);
+    db.execute_batch("DROP TRIGGER reject_v9;").unwrap();
+    repository::init(&db).unwrap();
+    assert_eq!(version(&db), 9);
+    for state in ["pending","running","blocked","retry_wait","canceled"] {
+        let raw: String = db.query_row("SELECT capture_json FROM backup_operation_captures WHERE operation_id=?", [state], |r| r.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&raw).unwrap()["transcript"]["text"], "immutable");
+        let raw: String = db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id=?", [state], |r| r.get(0)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value.get("capture").is_none());
+        assert_eq!(value["resume_video"]["message_id"],42);
+    }
+    let raw: String = db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id='completed'", [], |r| r.get(0)).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["capture"]["remote"],"asset");
+    assert!(value["capture"].get("cover").is_none());
+    assert!(value["capture"].get("transcript").is_none());
+    let before = db.query_row("SELECT COUNT(*) FROM backup_operation_captures", [], |r| r.get::<_,i64>(0)).unwrap();
+    repository::init(&db).unwrap();
+    assert_eq!(before,5);
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM backup_operation_captures", [], |r| r.get::<_,i64>(0)).unwrap(),before);
 }

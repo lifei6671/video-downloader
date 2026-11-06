@@ -199,7 +199,7 @@ impl Core {
     }
     pub fn start_transcription(self: &Arc<Self>, id: &str, force: bool) -> Result<Snapshot> {
         let path = if self.list().iter().any(|t|t.id==id) {self.playback_path(id)?} else {
-            self.backup_assets()?.into_iter().find(|a|a.asset_id==id).and_then(|a|a.path).context("FILE_MISSING")?
+            self.backup_asset(id)?.and_then(|a|a.path).context("FILE_MISSING")?
         };
         let source = Source::read(&path)?;
         let mut inner = self.inner.lock().unwrap();

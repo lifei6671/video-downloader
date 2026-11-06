@@ -79,9 +79,7 @@ async fn cleanup_restore_files(core: &Core, id: &str) -> Result<()> {
                     })
                     .await??;
                     let asset = core
-                        .backup_assets()?
-                        .into_iter()
-                        .find(|a| a.asset_id == id)
+                        .backup_asset(id)?
                         .context("BACKUP_ASSET_NOT_FOUND")?;
                     if asset.content_sha256.as_deref() != Some(&hash)
                         || source["size"].as_u64() != Some(asset.content_bytes)

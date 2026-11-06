@@ -27,7 +27,7 @@ pub struct Asset {
     pub local_state: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetTranscript {
     pub asset_id: String,
     // Unverified local transcripts are never eligible for remote publication or hash reuse.
