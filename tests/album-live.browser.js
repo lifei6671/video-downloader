@@ -1,0 +1,60 @@
+// Real browser playback; task identity and native file-scope preparation are mocked.
+async page => {
+  page.setDefaultTimeout(8000);
+  const base = page.url().split('/').slice(0, 3).join('/');
+  const check = (ok, message) => { if (!ok) throw Error(message); };
+  const results = [];
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto(base + '/tests/fixtures/background-download.html?scenario=visual-album-live');
+  await page.getByRole('button', { name: '下载任务', exact: true }).click();
+  const trigger = page.locator('[data-task-id="visual-0"]').getByRole('button', { name: '查看图集', exact: true });
+  const dialog = page.locator('.album-dialog');
+  const open = async () => { await trigger.click(); await dialog.waitFor(); };
+  const close = async () => { await page.keyboard.press('Escape'); await dialog.waitFor({ state: 'detached' }); };
+  const playing = () => page.waitForFunction(() => {
+    const video = document.querySelector('.album-dialog video');
+    return video?.videoWidth > 0 && video.currentTime > 0.1 && !video.paused;
+  });
+  const override = code => page.evaluate(async code => {
+    const { api } = await import(performance.getEntriesByType('resource').find(entry => entry.name.includes('/src/api.ts')).name);
+    if (code === 'error') api.albumVideoSource = async () => { throw 'FILE_MISSING'; };
+    if (code === 'hold') api.albumVideoSource = () => new Promise(resolve => { window.releaseAlbumVideo = resolve; });
+    if (code === 'audio') api.albumVideoSource = async () => '/tests/fixtures/media/audio-only.webm';
+  }, code);
+  await open(); await playing();
+  check(await dialog.locator('video').evaluate(video => video.muted && video.loop && video.controls && video.videoHeight > video.videoWidth), 'live portrait does not play with controls');
+  check(await dialog.locator('.album-thumbnail img').count() === 3, 'static thumbnails changed');
+  results.push('portrait live photo plays original clip, muted and looping');
+  await dialog.locator('video').evaluate(video => { window.firstAlbumVideo = video; });
+  await dialog.getByRole('button', { name: '查看第 2 张图片', exact: true }).click();
+  await playing();
+  check(await dialog.locator('video').evaluate(video => video.videoWidth > video.videoHeight), 'second live clip did not load');
+  check(await page.evaluate(() => window.firstAlbumVideo.paused && !window.firstAlbumVideo.hasAttribute('src')), 'previous clip retained its source');
+  results.push('switching live photos changes clip and releases previous playback');
+  await dialog.locator('video').evaluate(video => { window.secondAlbumVideo = video; });
+  await dialog.getByRole('button', { name: '查看第 3 张图片', exact: true }).click();
+  await dialog.locator('.album-stage > img:last-child').evaluate(image => image.decode());
+  check(await dialog.locator('video').count() === 0 && await page.evaluate(() => window.secondAlbumVideo.paused && !window.secondAlbumVideo.hasAttribute('src')), 'still selection did not release video');
+  results.push('mixed album keeps ordinary images static');
+  await close(); await open(); await playing();
+  await dialog.locator('video').evaluate(video => { window.closedAlbumVideo = video; });
+  await close();
+  check(await page.evaluate(() => window.closedAlbumVideo.paused && !window.closedAlbumVideo.hasAttribute('src')), 'closing did not release video');
+  const calls = await page.evaluate(() => window.backgroundTest.calls.filter(call => call.type === 'album-video'));
+  check(calls.every(call => call.id === 'visual-0' && call.index < 2), 'wrong task/slide used for native playback');
+  results.push('closing stops playback; requests contain only task identity and slide index');
+  await override('error'); await open(); await dialog.getByRole('alert').waitFor();
+  check((await dialog.getByRole('alert').innerText()).includes('无法读取实况视频'), 'source failure became a silent still');
+  await close(); results.push('native source failure stays visible');
+  await override('audio'); await open(); await dialog.getByRole('alert').waitFor();
+  check((await dialog.getByRole('alert').innerText()).includes('实况视频无法播放'), 'audio-only resource appeared successful');
+  await close(); results.push('unplayable video stays visible as an error');
+  await override('hold'); await open();
+  await page.waitForFunction(() => typeof window.releaseAlbumVideo === 'function');
+  await dialog.locator('video').evaluate(video => { window.pendingAlbumVideo = video; });
+  await close();
+  await page.evaluate(() => window.releaseAlbumVideo('/tests/fixtures/media/player.webm'));
+  check(await page.evaluate(() => !window.pendingAlbumVideo.hasAttribute('src')) && await dialog.count() === 0, 'late source restarted closed playback');
+  results.push('late preparation result after close cannot restart playback');
+  return { passed: results.length, results };
+}

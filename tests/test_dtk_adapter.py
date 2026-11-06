@@ -139,3 +139,77 @@ def test_dtk_video_uses_same_guarded_single_file_downloader(monkeypatch, tmp_pat
         staging_dir=str(tmp_path)),lambda event_type,**value:events.append((event_type,value)))
     assert (tmp_path/'video.mp4').read_bytes()==BODY
     assert events[-1][0]=='download_finished' and events[-1][1]['bytes']==len(BODY)
+
+
+def live_album():
+    from datetime import UTC, datetime
+    # Real vendored parser, with a mixed live/still album. Post-level video is
+    # intentionally unrelated; only the per-slide clip may be downloaded.
+    return dtk_adapter.DOUYIN.parse_content({'aweme_detail': {
+        'aweme_id': '123', 'desc': 'live fixture', 'status': {}, 'statistics': {},
+        'author': {'sec_uid': 'fixture-author', 'nickname': 'fixture'},
+        'video': {'play_addr': {'url_list': ['http://v.fixture.douyinvod.com/music.mp4']}},
+        'images': [
+            {'url_list': ['http://v.fixture.douyinvod.com/image.webp'], 'width': 1080, 'height': 1920,
+             'live_photo_type': 1, 'video': {'width': 720, 'height': 1280,
+                 'play_addr': {'url_list': ['http://v.fixture.douyinvod.com/live.mp4']}}},
+            {'url_list': ['http://v.fixture.douyinvod.com/image.webp'], 'width': 1080, 'height': 1920}]}},
+        fetched_at=datetime.now(UTC))
+
+
+def test_live_album_preserves_stills_and_original_clips(monkeypatch, tmp_path, media_proxy, media_bodies):
+    import copy
+    from conftest import BODY
+    proxy, requests, _, _ = media_proxy
+    media_bodies['live'] = BODY
+    item = live_album()
+    original = copy.deepcopy(item)
+    monkeypatch.setattr(dtk_adapter, 'extract', lambda *args: item)
+    preview = tmp_path / 'preview'
+    preview.mkdir()
+    params = dict(input=item.web_url, resolver='dtk', profiles={'douyin': {'proxy': proxy}})
+    events = []
+    emit = lambda event, **value: events.append((event, value))
+    engine.operate('resolve_video', {**params, 'preview_dir': str(preview)}, emit)
+    metadata = events[-1][1]['result']
+    assert len(metadata['images']) == 2
+    assert len(list(preview.glob('preview-*.webp'))) == 2
+    stage = tmp_path / 'stage'
+    stage.mkdir()
+    events.clear()
+    engine.operate('download_video', {**params, 'expected': {
+        'platform': 'douyin', 'video_id': '123', 'kind': 'image_album', 'image_count': 2},
+        'staging_dir': str(stage)}, emit)
+    assert events[-1][0] == 'download_finished'
+    result = events[-1][1]
+    assert {p.name for p in (stage / 'album').iterdir()} == {'001.webp', '001.mp4', '002.webp'}
+    assert (stage / 'album/001.mp4').read_bytes() == BODY
+    assert result['files'][0]['video'] == dict(filename='001.mp4', bytes=len(BODY), sha256=hashlib.sha256(BODY).hexdigest())
+    assert 'video' not in result['files'][1]
+    assert result['bytes'] == sum(p.stat().st_size for p in (stage / 'album').iterdir())
+    progress = [value for kind, value in events if kind == 'progress']
+    assert [p['downloaded_bytes'] for p in progress] == sorted(p['downloaded_bytes'] for p in progress)
+    assert progress[-1]['completed_items'] == 2
+    assert not any('/music.mp4' in url for url, _ in requests)
+    assert 'url' not in str(result) and item == original
+
+
+@pytest.mark.parametrize('mode', ['html', 'status404', 'truncated', 'avif'])
+def test_live_clip_failure_never_finishes_album(mode, tmp_path, media_proxy, media_bodies):
+    import functools
+    from network import GuardedRH
+    from yt_dlp.networking.exceptions import HTTPError
+    from yt_dlp.utils import DownloadError
+    proxy, _, _, _ = media_proxy
+    media_bodies['avif'] = b'\x00\x00\x00\x18ftypavif' + b'fixture'
+    item = live_album()
+    clip = item.media.images[0].video.model_copy(update={'url': f'http://v.fixture.douyinvod.com/{mode}.mp4'})
+    item.media.images[0] = item.media.images[0].model_copy(update={'video': clip})
+    events = []
+    with YoutubeDL(dict(proxy=proxy, quiet=True, noprogress=True, retries=0, continuedl=False,
+                        logger=engine.SafeLogger(), http_headers={'User-Agent': engine.DEFAULT_UA})) as ydl:
+        ydl._request_director = ydl.build_request_director([functools.partial(GuardedRH, platform='douyin')])
+        with pytest.raises((engine.EngineError, HTTPError, DownloadError)):
+            dtk_adapter.download_images(ydl, item, tmp_path, lambda kind, **value: events.append((kind, value)))
+    assert not any(kind == 'download_finished' for kind, _ in events)
+    assert not any(value.get('completed_items') for _, value in events)

@@ -10,7 +10,7 @@ export interface RuntimeTool { id: 'ffmpeg' | 'javascript' | 'fun-asr-nano'; ava
 export interface VideoTranscript { task_id: string; operation_id: string; sequence: number; state: 'running' | 'completed' | 'no_speech' | 'failed' | 'canceled' | 'interrupted'; phase: string | null; backend?: 'cpu' | 'cuda' | null; completed_segments?: number | null; total_segments?: number | null; error_code: string | null; updated_at: number; has_result: boolean; source_changed: boolean; result: {text: string; source: {path: string; size: number; mtime_ns: string}; model_revision: string; model_name?: string | null; pipeline_revision: string; backend?: 'cpu' | 'cuda' | null; completed_at: number} | null }
 export interface RuntimeStatus { platform: string; directory: string; tools: RuntimeTool[] }
 export interface RuntimeProgress { tool: RuntimeTool['id']; phase: 'downloading' | 'verifying' | 'installing'; downloaded_bytes: number; total_bytes: number }
-export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string }
+export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string; video?: { filename: string; bytes: number; sha256: string } }
 export interface VideoFormat { requires_merge?: boolean; format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
 export interface AuthorProfile { id?: string | null; nickname?: string | null; handle?: string | null; kind: 'user' | 'channel'; avatar_cached?: boolean }
 export interface Video { author_profile?: AuthorProfile; cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
@@ -123,6 +123,7 @@ export const api = {
   reveal: (taskId: string) => invoke<void>('reveal_download', { taskId }),
   play: (taskId: string) => invoke<void>('play_download', { taskId }),
   playbackSource: async (taskId: string) => convertFileSrc(await invoke<string>('prepare_video_playback', { taskId })),
+  albumVideoSource: async (taskId: string, imageIndex: number) => convertFileSrc(await invoke<string>('prepare_video_playback', { taskId, imageIndex })),
   save: (update: { http_chunk_size?: number | null; platform: string; user_agent: string; cookie: string | null; proxy: string | null }) => invoke<Settings>('save_profile', { update }),
   subscribe: async (callback: (task: Task) => void, removed: (id: string, spaceId?: string) => void) => {
     const stopUpdates = await listen<Task>('task_updated', event => callback(event.payload));

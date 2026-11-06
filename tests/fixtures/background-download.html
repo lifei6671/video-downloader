@@ -234,6 +234,27 @@ if (scenario.startsWith('visual')) {
     Object.assign(tasks[0].video,{kind:'image_album',resolver:'dtk',formats:[],images:[{quality_source:'original',width:768,height:1376},{quality_source:'high_definition',width:768,height:1376}]});
     api.image=async()=>Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));
   }
+  if (scenario==='visual-album-sizing') {
+    const sizes=[[900,1600],[1600,900],[900,900],[300,2400],[2400,300],[1200,800]];
+    const images=sizes.map(([width,height],index)=>({quality_source:'high_definition',width:index===5?null:width,height:index===5?null:height,preview_filename:`preview-${index}.png`}));
+    Object.assign(tasks[0],{status:'completed',download_requested:true,path:'C:\\TestVideos\\album',completed_at:20,files:images.map((image,index)=>({...image,filename:`${index}.png`}))});
+    Object.assign(tasks[0].video,{platform:'douyin',title:'图集尺寸回归测试，横竖图片切换后按比例适应窗口，较长的作品标题限制为两行以保留图片空间',kind:'image_album',resolver:'dtk',formats:[],images});
+    api.image=async(_id,index)=>{
+      const [width,height]=sizes[index];
+      const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;
+      const context=canvas.getContext('2d');context.fillStyle='#e6f4fe';context.fillRect(0,0,width,height);
+      context.fillStyle='#113264';context.fillRect(width/4,height/4,width/2,height/2);
+      const blob=await new Promise(resolve=>canvas.toBlob(resolve));
+      return Array.from(new Uint8Array(await blob.arrayBuffer()));
+    };
+  }
+  if (scenario==='visual-album-live') {
+    const images=[{quality_source:'high_definition',width:90,height:160},{quality_source:'high_definition',width:160,height:90},{quality_source:'original',width:900,height:900}];
+    Object.assign(tasks[0],{status:'completed',download_requested:true,path:'C:\\TestVideos\\live-album',completed_at:20,files:images.map((image,index)=>({...image,filename:`${index}.png`,...(index<2?{video:{filename:`${index}.mp4`,bytes:10,sha256:'fixture'}}:{})}))});
+    Object.assign(tasks[0].video,{platform:'douyin',title:'实况图集',kind:'image_album',resolver:'dtk',formats:[],images});
+    api.albumVideoSource=async(id,index)=>{control.calls.push({type:'album-video',id,index});return index===0?'/tests/fixtures/media/player-portrait.webm':'/tests/fixtures/media/player.webm'};
+    api.image=async()=>Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));
+  }
   api.cookie=async()=>''; api.proxy=async()=>null;
   api.cover=async()=>Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));
   api.saveCover=async id=>{control.calls.push({type:'save-cover',id});return true};

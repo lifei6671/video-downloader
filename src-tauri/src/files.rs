@@ -226,6 +226,15 @@ pub struct AlbumFile {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub quality_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<AlbumVideoFile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlbumVideoFile {
+    pub filename: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 pub(crate) fn image_extension(bytes: &[u8]) -> Option<&'static str> {
@@ -254,6 +263,14 @@ pub(crate) fn image_extension(bytes: &[u8]) -> Option<&'static str> {
 }
 
 pub fn read_image(path: &Path) -> Result<Vec<u8>> {
+    let bytes = read_album_media(path)?;
+    if image_extension(&bytes).is_none() {
+        bail!("INVALID_MEDIA_CONTENT");
+    }
+    Ok(bytes)
+}
+
+fn read_album_media(path: &Path) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path).context("FILE_MISSING")?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 32 * 1024 * 1024
     {
@@ -266,11 +283,7 @@ pub fn read_image(path: &Path) -> Result<Vec<u8>> {
             bail!("INVALID_MEDIA_CONTENT");
         }
     }
-    let bytes = fs::read(path).context("IO_ERROR")?;
-    if image_extension(&bytes).is_none() {
-        bail!("INVALID_MEDIA_CONTENT");
-    }
-    Ok(bytes)
+    fs::read(path).context("IO_ERROR")
 }
 
 pub fn validate_album(directory: &Path, files: &[AlbumFile]) -> Result<u64> {
@@ -312,6 +325,23 @@ pub fn validate_album(directory: &Path, files: &[AlbumFile]) -> Result<u64> {
         total = total
             .checked_add(file.bytes)
             .context("INVALID_ENGINE_RESULT")?;
+        if let Some(video) = &file.video {
+            if video.filename != format!("{:03}.mp4", index + 1) {
+                bail!("INVALID_ENGINE_RESULT");
+            }
+            let body = read_album_media(&directory.join(&video.filename))?;
+            if body.len() < 12
+                || !video_header_valid("mp4", &body)
+                || image_extension(&body).is_some()
+                || body.len() as u64 != video.bytes
+                || format!("{:x}", Sha256::digest(&body)) != video.sha256
+            {
+                bail!("INCOMPLETE_MEDIA");
+            }
+            total = total
+                .checked_add(video.bytes)
+                .context("INVALID_ENGINE_RESULT")?;
+        }
     }
     Ok(total)
 }
@@ -379,7 +409,9 @@ pub fn finalize_album(
     let files: Vec<AlbumFile> =
         serde_json::from_value(result["files"].clone()).context("INVALID_ENGINE_RESULT")?;
     let source = staging.join("album");
-    if fs::read_dir(&source)?.count() != files.len() {
+    if fs::read_dir(&source)?.count()
+        != files.len() + files.iter().filter(|f| f.video.is_some()).count()
+    {
         bail!("INCOMPLETE_MEDIA");
     }
     let size = validate_album(&source, &files)?;
@@ -392,6 +424,12 @@ pub fn finalize_album(
             .write(true)
             .open(source.join(&file.filename))?
             .sync_all()?;
+        if let Some(video) = &file.video {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(source.join(&video.filename))?
+                .sync_all()?;
+        }
     }
     before_move(&source, size, &files)?;
     move_album(&source, target)?;
@@ -503,6 +541,51 @@ mod tests {
             body.len() as u64
         );
         fs::write(saved.path.join("001.jpeg"), b"\xff\xd8\xffchanged").unwrap();
+        assert!(validate_album(&saved.path, &files).is_err());
+    }
+
+    #[test]
+    fn live_album_requires_verified_clip_before_commit_and_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let stage = root.path().join("stage");
+        let album = stage.join("album");
+        fs::create_dir_all(&album).unwrap();
+        let still = b"\xff\xd8\xfffixture";
+        let clip = b"\0\0\0\x18ftypmp42live-fixture";
+        fs::write(album.join("001.jpeg"), still).unwrap();
+        let total = (still.len() + clip.len()) as u64;
+        let mut identity = video();
+        identity.kind = "image_album".into();
+        identity.resolver = "dtk".into();
+        let result = json!({"platform":"tiktok","video_id":"123","kind":"image_album","bytes":total,
+            "files":[{"filename":"001.jpeg","bytes":still.len(),"sha256":format!("{:x}",Sha256::digest(still)),
+                "quality_source":"high_definition","video":{"filename":"001.mp4","bytes":clip.len(),
+                    "sha256":format!("{:x}",Sha256::digest(clip))}}]});
+        let files: Vec<AlbumFile> = serde_json::from_value(result["files"].clone()).unwrap();
+        let target = root.path().join("saved");
+        assert!(finalize_album(&identity, &result, &stage, &target, |_, _, _| panic!("must not commit missing clip")).is_err());
+        assert!(!target.exists());
+        fs::write(album.join("001.mp4"), b"\0\0\0\x18ftypmp42bad!-fixture").unwrap();
+        assert!(finalize_album(&identity, &result, &stage, &target, |_, _, _| panic!("must not commit corrupt clip")).is_err());
+        fs::write(album.join("001.mp4"), clip).unwrap();
+        let mut invalid = files.clone();
+        invalid[0].video.as_mut().unwrap().filename = "../outside.mp4".into();
+        assert!(validate_album(&album, &invalid).is_err());
+        let mut image_clip = files.clone();
+        let image = b"\0\0\0\x18ftypavifimage-fixture";
+        fs::write(album.join("001.mp4"), image).unwrap();
+        let video = image_clip[0].video.as_mut().unwrap();
+        video.bytes = image.len() as u64;
+        video.sha256 = format!("{:x}", Sha256::digest(image));
+        assert!(validate_album(&album, &image_clip).is_err());
+        fs::write(album.join("001.mp4"), clip).unwrap();
+        let saved = finalize_album(&identity, &result, &stage, &target, |_, bytes, manifest| {
+            assert_eq!(bytes, total);
+            assert!(manifest[0].video.is_some());
+            Ok(())
+        }).unwrap();
+        assert_eq!(validate_album(&saved.path, &files).unwrap(), total);
+        fs::remove_file(saved.path.join("001.mp4")).unwrap();
         assert!(validate_album(&saved.path, &files).is_err());
     }
 }

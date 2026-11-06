@@ -138,6 +138,7 @@
   --video-player-viewport-inset: 48px;
   --video-player-frame-width: 42px;
   --video-player-max-stage-height: calc(100dvh - 196px);
+  --album-max-stage-height: calc(100dvh - 264px);
   --progress-circle-size: 64px;
   --progress-circle-width: 4px;
   --media-stage-height: 360px;
@@ -345,7 +346,7 @@
 .transcript-dialog[data-slot="dialog-content"] { width: min(720px, calc(100vw - 32px)); }
 .transcript-dialog[data-slot="dialog-content"] [data-slot="textarea"]:focus-visible { outline-offset: -2px; }
 .update-dialog[data-slot="dialog-content"] { width: min(640px, calc(100vw - 32px)); }
-.album-dialog[data-slot="dialog-content"] { width: min(680px, calc(100vw - 32px)); max-height: 90dvh; }
+.album-dialog[data-slot="dialog-content"] { display: flex; flex-direction: column; width: min(var(--video-player-max-width), max(var(--video-player-min-width), calc(var(--album-max-stage-height) * var(--album-image-ratio) + var(--video-player-frame-width)))); max-width: calc(100vw - var(--video-player-viewport-inset)); max-height: calc(100dvh - var(--video-player-viewport-inset)); overflow-y: auto; transition: none; }
 .cover-preview-dialog[data-slot="dialog-content"] { width: fit-content; max-width: 90vw; max-height: 90dvh; }
 [data-slot="dialog-close"] { top: 12px; right: 12px; }
 [data-slot="dialog-header"]:has(~ [data-slot="dialog-close"]) { padding-right: 32px; }
@@ -408,7 +409,7 @@
 .album-gallery .album-thumbnail[data-variant][data-size] { position: relative; width: 40px; height: 48px; padding: 0; border-color: var(--border-input); }
 .album-gallery .album-thumbnail[data-variant][data-size][aria-pressed="true"] { background: var(--accent); border-color: var(--primary); }
 .album-selection { position: absolute; right: 2px; bottom: 2px; width: 16px; height: 16px; color: var(--primary); background: var(--on-primary); border-radius: 9999px; }
-.album-stage.is-expanded { height: min(380px, 50dvh); }
+.album-stage.is-expanded { width: min(100%, calc(var(--album-max-stage-height) * var(--album-image-ratio))); height: auto; aspect-ratio: var(--album-image-ratio); max-height: var(--album-max-stage-height); align-self: center; }
 [data-media-formats] { padding: 2px 12px 2px 2px; }
 [data-media-formats] [data-slot="toggle-group-item"][data-size] { min-height: 56px; border: 0.5px solid var(--border-input); border-radius: 8px; font-size: 14px; box-shadow: none; }
 [data-media-formats] [data-slot="toggle-group-item"][data-state="on"] { background: var(--accent); color: var(--accent-foreground); border-color: var(--primary); }

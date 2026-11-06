@@ -201,7 +201,7 @@ components:
   dialog: { width: 480px, maxHeight: 85dvh, viewportGap: 16px, padding: "{spacing.lg}", rounded: "{rounded.xl}" }
   transcript-dialog: { width: 720px, maxHeight: 85dvh }
   update-dialog: { width: 640px, maxHeight: 85dvh }
-  album-dialog: { width: 680px, maxHeight: 90dvh }
+  album-dialog: { maxWidth: "{components.video-player.maxWidth}", minWidth: "{components.video-player.minWidth}", viewportInset: "{components.video-player.viewportInset}", frameWidth: "{components.video-player.frameWidth}", maxStageHeight: "calc(100dvh - 264px)" }
   cover-dialog: { maxWidth: 90vw, maxHeight: 90dvh }
   avatar: { size: 32px, compactSize: 24px }
   album-thumbnail: { width: 40px, height: 48px }
@@ -420,7 +420,7 @@ YAML `palette` 记录本版使用的 Radix Colors light sRGB 色值，`colors` �
 
 - 视频规格复用 `api.chooseFormat()` 和现有单选 ToggleGroup，默认最高分辨率；两栏预览中规格区按空间使用两列，窄窗改一列，最大高 196px 后内部滚动。选项最小高 56px，14px 尺寸，12px 容器/编码/帧率/码率与大小；不使用 11px。选择通过标记、浅蓝底和边界共同表达。
 - 只显示真实可下载规格及稳定 ID。显示实际尺寸、容器、编码、已知大小；估算明确标“约”，未知为“大小未知”。YouTube 需合并时注明 FFmpeg，无损合并不转码。下载重新提取同一规格，规格失效明确失败，不自动降级。重启和重试保留选择。
-- 图集复用 `AlbumGallery`，使用同一舞台尺寸、可操作缩略图条、当前序号和每张“原图/高清”来源、已知尺寸；不将整套图集都标原图。图片原图优先、高清次选，仅在原图候选缺失或原图 HTTP 404/410 时使用高清；网络/身份/风控错误不静默降级，保留原格式，不转码或截图。
+- 图集复用 `AlbumGallery`，首页使用同一舞台尺寸、可操作缩略图条、当前序号和每张“原图/高清”来源、已知尺寸；不将整套图集都标原图。“查看图集”弹窗按当前图片比例自适应宽高，复用视频播放器的最大/最小宽度及视口留白，为标题、缩略图与尺寸信息预留高度。首次打开和切换时使用已知尺寸，解码后以图片实际宽高修正；横图、竖图、方图和长图完整显示，不拉伸或裁切。标题最多两行，缩略图条内部横向滚动，关闭后焦点回到打开按钮。已完成图集的实况项在主舞台播放清单中的原始视频，默认静音循环，保留原生播放控件，缩略图使用静态图片，当前项信息显示“实况”类型；普通图片仍完整显示。切换或关闭立即暂停并解除媒体源，文件读取或播放失败保持可见错误，不用静态图伪装播放成功。图片原图优先、高清次选，仅在原图候选缺失或原图 HTTP 404/410 时使用高清；网络/身份/风控错误不静默降级，保留原格式，不转码或截图。
 - `cache_hit` 只显示低权重“解析缓存”，不代表已下载或地址仍有效。缓存来自现有 SQLite 白名单元数据/预览；下载仍重新提取并校验作品身份。正常重启可恢复完整 ready 预览，退出清理和重启后的遗留 `parsing` / `queued` / `downloading` 标为 `failed` / `INTERRUPTED`，不自动续传；只有用户明确取消才写入 `canceled`，已校验并提交的完成文件保留完成状态。`failed` / `INTERRUPTED` 在任务卡片和列表显示“已中断”，保留原因和重试入口，不新增持久状态。
 - 作者头像、昵称、ID 和频道语义见第 7 节；Cookie 自动读取警告与封面错误不能覆盖真正的任务状态。
 

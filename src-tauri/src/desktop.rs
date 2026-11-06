@@ -512,8 +512,12 @@ fn prepare_video_playback(
     app: tauri::AppHandle,
     core: State<AppCore>,
     task_id: String,
+    image_index: Option<usize>,
 ) -> Result<String, String> {
-    let path = core.playback_path(&task_id).map_err(error)?;
+    let path = match image_index {
+        Some(index) => core.album_video_path(&task_id, index),
+        None => core.playback_path(&task_id),
+    }.map_err(error)?;
     app.asset_protocol_scope()
         .allow_file(&path)
         .map_err(|_| "PLAYBACK_SOURCE_FAILED".to_string())?;

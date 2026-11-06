@@ -149,6 +149,11 @@ fn file_missing(task: &Task) -> bool {
                     !std::fs::symlink_metadata(path.join(&file.filename)).is_ok_and(|m| {
                         m.is_file() && !m.file_type().is_symlink() && m.len() == file.bytes
                     })
+                        || file.video.as_ref().is_some_and(|video| {
+                            !std::fs::symlink_metadata(path.join(&video.filename)).is_ok_and(|m| {
+                                m.is_file() && !m.file_type().is_symlink() && m.len() == video.bytes
+                            })
+                        })
                 })
         }
     })
@@ -1542,6 +1547,31 @@ impl Core {
         Ok(path.clone())
     }
 
+    pub fn album_video_path(&self, id: &str, index: usize) -> Result<PathBuf> {
+        let inner = self.inner.lock().unwrap();
+        let task = inner.tasks.iter().find(|t| t.id == id).context("TASK_NOT_FOUND")?;
+        if task.status != Status::Completed
+            || task.video.as_ref().is_none_or(|video| video["kind"] != "image_album")
+        {
+            bail!("INVALID_STATE");
+        }
+        let video = task.files.get(index).and_then(|file| file.video.as_ref()).context("FILE_MISSING")?;
+        if video.filename != format!("{:03}.mp4", index + 1) {
+            bail!("INVALID_ENGINE_RESULT");
+        }
+        let directory = task.path.as_ref().context("FILE_MISSING")?;
+        let metadata = std::fs::symlink_metadata(directory).context("FILE_MISSING")?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            bail!("FILE_MISSING");
+        }
+        let path = directory.join(&video.filename);
+        let metadata = std::fs::symlink_metadata(&path).context("FILE_MISSING")?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != video.bytes {
+            bail!("FILE_MISSING");
+        }
+        Ok(path)
+    }
+
     pub fn delete_local_file(&self, id: &str) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.active.contains_key(id)
@@ -1571,7 +1601,10 @@ impl Core {
                     let owned = task
                         .files
                         .iter()
-                        .map(|f| path.join(&f.filename))
+                        .flat_map(|f| {
+                            std::iter::once(path.join(&f.filename))
+                                .chain(f.video.iter().map(|v| path.join(&v.filename)))
+                        })
                         .collect::<Vec<_>>();
                     for file in &owned {
                         match std::fs::symlink_metadata(file) {
@@ -3155,6 +3188,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn album_playback_only_exposes_committed_companions() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let task = app.resolve("album".into()).unwrap();
+        wait(&app, &task.id, Status::Ready).await;
+        assert_eq!(app.album_video_path(&task.id, 0).unwrap_err().to_string(), "INVALID_STATE");
+        app.download(&task.id, false).unwrap();
+        let completed = wait(&app, &task.id, Status::Completed).await;
+        let path = completed.path.unwrap().join("001.mp4");
+        let body = std::fs::read(&path).unwrap();
+        assert_eq!(app.album_video_path(&task.id, 0).unwrap(), path);
+        assert_eq!(app.album_video_path(&task.id, 1).unwrap_err().to_string(), "FILE_MISSING");
+        assert_eq!(app.album_video_path(&task.id, usize::MAX).unwrap_err().to_string(), "FILE_MISSING");
+        assert_eq!(app.album_video_path("missing", 0).unwrap_err().to_string(), "TASK_NOT_FOUND");
+        app.shutdown().await;
+        drop(app);
+        let app = core(root.path());
+        assert_eq!(app.album_video_path(&task.id, 0).unwrap(), path);
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        std::fs::write(&path, []).unwrap();
+        assert_eq!(app.album_video_path(&task.id, 0).unwrap_err().to_string(), "FILE_MISSING");
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(app.album_video_path(&task.id, 0).unwrap_err().to_string(), "FILE_MISSING");
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(app.album_video_path(&task.id, 0).unwrap_err().to_string(), "FILE_MISSING");
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn bulk_history_clear_is_atomic_and_preserves_live_tasks_previews_and_files() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
@@ -3721,6 +3783,8 @@ mod tests {
         assert_eq!(completed.files.len(), 2);
         assert_eq!(completed.completed_items, Some(2));
         let path = completed.path.clone().unwrap();
+        assert_eq!(std::fs::read(path.join("001.mp4")).unwrap(), b"\0\0\0\x18ftypmp42live-fixture");
+        assert!(completed.files[0].video.is_some());
         assert_eq!(
             validate_album(&path, &completed.files).unwrap(),
             completed.bytes
@@ -3748,6 +3812,10 @@ mod tests {
         assert_eq!(recovered.files.len(), 2);
         assert_eq!(recovered.bytes, completed.bytes);
         assert_eq!(recovered.completed_items, Some(2));
+        assert_eq!(recovered.files[0].video.as_ref().unwrap().filename, "001.mp4");
+        std::fs::rename(path.join("001.mp4"), path.join("missing.mp4")).unwrap();
+        assert!(restored.list()[0].file_missing);
+        std::fs::rename(path.join("missing.mp4"), path.join("001.mp4")).unwrap();
         assert!(restored.image(&task.id, 1).unwrap().starts_with(b"RIFF"));
         std::fs::write(path.join("user-note.txt"), "preserve").unwrap();
         restored.delete_local_file(&task.id).unwrap();
@@ -3757,6 +3825,9 @@ mod tests {
         );
         for file in &completed.files {
             assert!(!path.join(&file.filename).exists());
+            if let Some(video) = &file.video {
+                assert!(!path.join(&video.filename).exists());
+            }
         }
         assert!(restored.list().is_empty());
         drop(restored);

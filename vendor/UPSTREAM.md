@@ -20,7 +20,7 @@ grammers 使用 MIT OR Apache-2.0。新增解析依赖（含 Tokio 必要升级�
 
 两个直接依赖均关闭默认 features，`grammers-client` 开启原生 `proxy`，`grammers-session` 只开启 `serde`；不引入默认 `libsql` SQLite 存储，与应用现有 `rusqlite` 保持独立。SDK 要求 Tokio 至少 1.53.3，当前锁定 1.54.1。会话适配器仅把非持久缓存留在内存，授权数据通过独立系统凭据服务保存；不读取 tdl 或 Telegram Desktop 的会话。真实传输、文件限制、扫码和跨平台验收见实施记录，依赖编译成功不代表这些能力通过。
 
-当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.10.26` 的运行时版本为 `2026.10.26`；协议 v3，引擎版本 `0.14.2`。
+当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.10.26` 的运行时版本为 `2026.10.26`；协议 v3，引擎版本 `0.14.3`。
 
 - 来源：https://github.com/yt-dlp/yt-dlp/tree/2026.10.26
 - PyPI：https://pypi.org/project/yt-dlp/2026.10.26/
@@ -45,6 +45,7 @@ PyInstaller 使用官方 yt-dlp hook，收集 DTK 的具体平台模块、完整
 - [manifest](dtk/manifest.json) 保存 33 个 Python 文件及 LICENSE / NOTICE 的原始、安装后 SHA-256，补丁 SHA-256 和允许的运行依赖。
 - [desktop-imports.patch](dtk/patches/desktop-imports.patch) 仅隔离 signing 包初始化的 registry / RPC 聚合导入；签名算法、参数构造和 parser 保留上游原文。自有业务编排位于 `python-engine/dtk_adapter.py`。
 - `vendor/dtk/upstream/` 由 [同步脚本](../scripts/update_dtk_vendor.py) 生成，不手改。`_desktop_revision.py` 是脚本生成的版本文件。
+- 实况照片复用该版本已有的 `AlbumImage.video`，由自有适配层同时下载静态图及每张图附带的原始 MP4，按同一编号保存，不转码、不使用作品级背景音乐地址。MP4 纳入图集文件清单、大小和 SHA-256 校验、提交恢复及本地删除；片段失败时整个图集失败。解析预览使用静态图，已下载实况在图集查看器中播放本地 MP4。没有修改 vendored parser 或增加依赖。
 - 更新先校验已安装源文件，再从指定完整 commit 读取白名单、校验原始 hash、执行补丁 apply --check、审计导入与语法；全部通过才替换源码和 manifest。冲突、未审核依赖或本地修改不会被覆盖。
 - 更新命令、补丁升级及门禁见 [开发文档](../docs/development.md#解析模块同步与补丁升级)。CI 和 Release 构建均离线执行 `--check`，不在用户运行时拉取模块。
 

@@ -76,6 +76,13 @@ def image_choices(content):
                            width=original.get('width', image.width) if urls else image.width,
                            height=original.get('height', image.height) if urls else image.height,
                            quality_source='original' if urls else 'high_definition', hd_width=image.width, hd_height=image.height))
+        # DTK already parses the clip attached to each Douyin live-photo slide.
+        # The post-level video can be background music, so never use it here.
+        clip = getattr(image, 'video', None) if str(content.platform) == 'douyin' else None
+        if clip is not None:
+            if clip.watermark:
+                raise EngineError('UNSUPPORTED_CONTENT', 'live_photo')
+            result[-1]['video_url'] = clip.url
         for field in ('width', 'height', 'hd_width', 'hd_height'):
             value = result[-1][field]
             result[-1][field] = value if type(value) is int and 0 < value <= 4294967295 else None
@@ -173,7 +180,7 @@ def download_images(ydl, content, stage, emit):
             speed = data.get('speed')
             emit('progress', downloaded_bytes=downloaded + count, total_bytes=None,
                  speed_bps=speed if speed and math.isfinite(speed) else None,
-                 completed_items=index if data['status'] == 'finished' else index - 1,
+                 completed_items=index - 1,
                  total_items=len(choices))
 
         # HTTP 404/410 can prove an original resource is unavailable; timeouts,
@@ -208,6 +215,27 @@ def download_images(ydl, content, stage, emit):
         downloaded += len(body)
         files.append(dict(filename=final.name, bytes=len(body), sha256=hashlib.sha256(body).hexdigest(),
                           **{k: choice[k] for k in ('width', 'height', 'quality_source')}))
+        if choice.get('video_url'):
+            # Keep both originals. A clip failure must fail the album rather
+            # than publish an apparently complete set of stills.
+            clip = album / f'{index:03d}.mp4'
+            clip_downloader = HttpFD(ydl, dict(ydl.params, max_filesize=MAX_IMAGE_BYTES))
+            clip_downloader.add_progress_hook(progress)
+            success, _ = clip_downloader.download(str(clip), dict(url=choice['video_url'],
+                http_headers={'User-Agent': ydl.params['http_headers']['User-Agent'],
+                              'Referer': 'https://www.douyin.com/'}))
+            if not success or not clip.is_file():
+                raise EngineError('IO_ERROR', 'live_photo_download')
+            clip_body = clip.read_bytes()
+            if (not 12 <= len(clip_body) <= MAX_IMAGE_BYTES
+                    or clip_body[4:8] != b'ftyp'
+                    or clip_body[8:12] in (b'avif', b'avis', b'heic', b'heix', b'hevc', b'hevx')):
+                raise EngineError('INVALID_MEDIA_CONTENT', 'live_photo')
+            files[-1]['video'] = dict(filename=clip.name, bytes=len(clip_body),
+                                     sha256=hashlib.sha256(clip_body).hexdigest())
+            downloaded += len(clip_body)
+        emit('progress', downloaded_bytes=downloaded, total_bytes=None, speed_bps=None,
+             completed_items=index, total_items=len(choices))
     emit('progress', downloaded_bytes=downloaded, total_bytes=downloaded, speed_bps=None,
          completed_items=len(files), total_items=len(files))
     emit('download_finished', platform=str(content.platform), video_id=content.content_id,
