@@ -392,7 +392,7 @@ impl Transport for Fake {
         Box::pin(async move {
             if self.fixture.auth_denied.load(Ordering::SeqCst) { bail!("TELEGRAM_AUTH_REQUIRED"); }
             self.fixture.inspected.lock().unwrap().push(link.message);
-            if self.fixture.inspect_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+            if self.fixture.inspect_failures.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
                 bail!(self.fixture.inspect_error.lock().unwrap().clone().unwrap_or_else(|| "TELEGRAM_CONNECTION_ERROR".into()));
             }
             if self.fixture.public_only.load(Ordering::SeqCst) && link.channel.is_some() {
@@ -431,7 +431,7 @@ impl Transport for Fake {
             if let Some(gate) = gate {
                 let _permit = gate.acquire().await.unwrap();
             }
-            if self.fixture.next_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() { bail!("TELEGRAM_CONNECTION_ERROR"); }
+            if self.fixture.next_failures.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() { bail!("TELEGRAM_CONNECTION_ERROR"); }
             self.delivered = true;
             Ok(Some(ReceivedPart {offset, bytes: body()}))
         })

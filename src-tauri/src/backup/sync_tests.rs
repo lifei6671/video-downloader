@@ -3713,7 +3713,7 @@ impl BackupProvider for TelegramReadFixture {
     fn open_library(&self, _: bool) -> ProviderFuture<'_, LibraryDescriptor> { panic!("unexpected write/setup") }
     fn pull_changes(&self, checkpoint: Option<Checkpoint>) -> ProviderFuture<'_, ChangeBatch> {
         Box::pin(async move {
-            if self.pull_failures.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|n.checked_sub(1)).is_ok() { bail!("TELEGRAM_TRANSFER_TIMEOUT"); }
+            if self.pull_failures.try_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|n.checked_sub(1)).is_ok() { bail!("TELEGRAM_TRANSFER_TIMEOUT"); }
             let checkpoint = checkpoint.map(|mut value| { value.scope = self.inner.scope().clone(); value });
             let mut batch = self.inner.pull_changes(checkpoint).await?;
             batch.checkpoint.scope = self.scope.clone();
@@ -3730,7 +3730,7 @@ impl BackupProvider for TelegramReadFixture {
     fn read_asset(&self, id: &str) -> ProviderFuture<'_, Option<RemoteAsset>> {
         let id = id.to_owned();
         Box::pin(async move {
-            if self.read_failures.fetch_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|n.checked_sub(1)).is_ok() { bail!("TELEGRAM_CONNECTION_ERROR"); }
+            if self.read_failures.try_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|n.checked_sub(1)).is_ok() { bail!("TELEGRAM_CONNECTION_ERROR"); }
             let mut remote = self.inner.read_asset(&id).await?;
             if let Some(remote) = &mut remote {
                 remote.version.scope = self.scope.clone();

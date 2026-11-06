@@ -326,7 +326,7 @@ impl BackupProvider for Provider {
             }
             let bytes = self.remote.data.lock().unwrap().media[&id].clone();
             let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> =
-                if r.container == "mp4" && self.remote.network_changes.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1)).is_ok() {
+                if r.container == "mp4" && self.remote.network_changes.try_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1)).is_ok() {
                     Box::new(Expired { prefix: false, error: "TELEGRAM_NETWORK_CHANGED" })
                 } else if self.remote.expired.swap(false, Ordering::SeqCst) {
                     Box::new(Expired { prefix: false, error: "TELEGRAM_FILE_REFERENCE_EXPIRED" })
