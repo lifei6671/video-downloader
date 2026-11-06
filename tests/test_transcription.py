@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -136,18 +137,36 @@ def test_cpu_progress_observes_only_complete_native_records_and_rejects_regressi
     with pytest.raises(asr.TranscriptionError, match='TRANSCRIPTION_FAILED'): progress()
 
 
-def test_process_reports_native_segment_completions_before_exit_and_keeps_text_private(tmp_path):
+@pytest.mark.parametrize('poll_delay', [0, 0.35])
+def test_process_reports_native_segment_completions_before_exit_and_keeps_text_private(tmp_path, poll_delay):
+    acknowledgments = tmp_path / 'observed'
+    acknowledgments.mkdir()
     script = '''import sys,time
+from pathlib import Path
+observed = Path(sys.argv[1])
 for line in ['segmenting 0 0', 'recognizing 0 2', 'recognizing 1 2', 'recognizing 2 2']:
  print('YINGQU_ASR_PROGRESS ' + line, file=sys.stderr, flush=True)
- time.sleep(.2)
+ while not (observed / line.replace(' ', '-')).exists():
+  time.sleep(.01)
 print('private transcript')
 '''
     events = []
+
+    def emit(kind, **fields):
+        events.append(fields)
+        if fields['phase'] in ('segmenting', 'recognizing'):
+            marker = f"{fields['phase']}-{fields.get('completed_segments', 0)}-{fields.get('total_segments', 0)}"
+            (acknowledgments / marker).touch()
+
     log = tmp_path / 'native.log'
-    code = asr.run_process([sys.executable, '-c', script], tmp_path / 'out', log, 5,
-        lambda kind, **fields: events.append(fields), 'loading_model', 1,
-        observe=asr.RecognitionProgress(log))
+    progress = asr.RecognitionProgress(log)
+
+    def observe():
+        time.sleep(poll_delay)
+        return progress()
+
+    code = asr.run_process([sys.executable, '-c', script, str(acknowledgments)], tmp_path / 'out', log, 10,
+        emit, 'loading_model', 1, observe=observe)
     assert code == 0
     assert events[0]['phase'] == 'loading_model'
     assert [e['completed_segments'] for e in events if e['phase'] == 'recognizing'] == [0, 1, 2]
