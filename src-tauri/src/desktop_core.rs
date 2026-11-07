@@ -1237,24 +1237,30 @@ impl Core {
     }
     pub async fn save_profile_with_network(&self, update: settings::ProfileUpdate) -> Result<Settings> {
         settings::validate_profile_update(&self.settings(), &update)?;
-        let network = if update.platform == "telegram" && update.proxy.is_some() {
+        let network = if update.platform == "telegram" && (update.proxy.is_some() || update.bypass_proxy.is_some()) {
             Some(self.telegram_accounts.network_sessions()?)
         } else { None };
-        let changed = if update.platform == "telegram" {
-            if let Some(requested) = &update.proxy {
-                let normalized = |value: &str| -> Result<Option<url::Url>> {
-                    if value.is_empty() { return Ok(None); }
-                    let (mut proxy, _) = settings::parse_proxy("telegram", value)?;
-                    proxy.set_path("/");
-                    Ok(Some(proxy))
-                };
-                let requested = normalized(requested)?;
-                // An unreadable old credential must not prevent replacing or clearing it.
-                match self.proxy("telegram").and_then(|current| normalized(current.as_deref().unwrap_or(""))) {
-                    Ok(current) => requested != current,
-                    Err(_) => true,
-                }
-            } else { false }
+        let changed = if network.is_some() {
+            let settings = self.settings();
+            let current = settings.profiles.iter().find(|p| p.platform == "telegram").context("CONFIG_INVALID")?;
+            let normalized = |value: &str| -> Result<Option<url::Url>> {
+                if value.is_empty() { return Ok(None); }
+                let (mut proxy, _) = settings::parse_proxy("telegram", value)?;
+                proxy.set_path("/");
+                Ok(Some(proxy))
+            };
+            let requested = if update.bypass_proxy.unwrap_or(current.bypass_proxy) {
+                None
+            } else if let Some(proxy) = &update.proxy {
+                normalized(proxy)?
+            } else {
+                normalized(settings::profile_proxy(current)?.as_deref().unwrap_or(""))?
+            };
+            // An unreadable old credential must not prevent replacing or clearing it.
+            match settings::effective_proxy(current).and_then(|current| normalized(current.as_deref().unwrap_or(""))) {
+                Ok(current) => requested != current,
+                Err(_) => true,
+            }
         } else { false };
         if !changed { return self.save_profile(update); }
         let network = network.as_ref().expect("changed Telegram proxy owns its snapshot");
@@ -2593,7 +2599,7 @@ mod tests {
             assert!(app.proxy("telegram").is_err());
             let result = app.save_profile_with_network(settings::ProfileUpdate {
                 platform: "telegram".into(), user_agent: "test".into(), cookie: None,
-                proxy: Some(replacement.into()), http_chunk_size: None,
+                proxy: Some(replacement.into()), bypass_proxy: None, http_chunk_size: None,
             }).await;
             if let Err(error) = result {
                 // The existing writer reports old-secret cleanup failures after persistence.
@@ -2612,7 +2618,7 @@ mod tests {
         let app = core(root.path());
         let update = |proxy: &str| settings::ProfileUpdate {
             platform: "telegram".into(), user_agent: "test".into(), cookie: None,
-            proxy: Some(proxy.into()), http_chunk_size: None,
+            proxy: Some(proxy.into()), bypass_proxy: None, http_chunk_size: None,
         };
         app.save_profile(update("socks5://127.0.0.1:9")).unwrap();
         let session = app.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session;
@@ -4502,14 +4508,14 @@ mod tests {
             user_agent: "youtube-fixture".into(),
             cookie: None,
             proxy: None,
-            http_chunk_size: Some(Some(10_485_760)),
+            bypass_proxy: None, http_chunk_size: Some(Some(10_485_760)),
         })
         .unwrap();
         let a = enqueue(&app, "8201").await;
         let old = app.settings().profiles[0].user_agent.clone();
         let b = enqueue(&app, "8202").await;
         app.save_profile(settings::ProfileUpdate {
-            http_chunk_size: None,
+            bypass_proxy: None, http_chunk_size: None,
             platform: "douyin".into(),
             user_agent: "new-agent".into(),
             cookie: None,
@@ -4521,7 +4527,7 @@ mod tests {
             user_agent: "youtube-fixture".into(),
             cookie: None,
             proxy: None,
-            http_chunk_size: Some(Some(0)),
+            bypass_proxy: None, http_chunk_size: Some(Some(0)),
         })
         .unwrap();
         app.cancel(&a.id).await.unwrap();
@@ -4645,7 +4651,7 @@ mod tests {
         let canceled = app.list().into_iter().find(|t| t.id == old.id).unwrap();
         std::fs::remove_file(root.path().join("started-8301")).unwrap();
         app.save_profile(settings::ProfileUpdate {
-            http_chunk_size: None,
+            bypass_proxy: None, http_chunk_size: None,
             platform: "douyin".into(),
             user_agent: "retry-agent".into(),
             cookie: None,

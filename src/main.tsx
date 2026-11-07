@@ -18,7 +18,7 @@ import { Progress } from '@/components/ui/progress';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from '@/components/ui/alert-dialog';
 import { Empty, EmptyHeader, EmptyMedia, EmptyTitle, EmptyDescription, EmptyContent } from '@/components/ui/empty';
-import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError, FieldSet } from '@/components/ui/field';
+import { Field, FieldContent, FieldGroup, FieldLabel, FieldDescription, FieldError, FieldSet } from '@/components/ui/field';
 import { Checkbox } from '@/components/ui/checkbox';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tabs, TabsList, TabsTrigger, TabsContent, settingsTabsListClassName, settingsTabsTriggerClassName } from '@/components/ui/tabs';
@@ -475,18 +475,19 @@ function ProfileForm({ profile, saved }: { profile: Profile; saved: (settings: S
   const [proxyLoaded, setProxyLoaded] = useState(false);
   const [proxyError, setProxyError] = useState('');
   const [direct, setDirect] = useState(!profile.proxy);
+  const [bypassProxy, setBypassProxy] = useState(!!profile.bypass_proxy);
   const [ua, setUa] = useState(profile.user_agent);
   const [chunkMode, setChunkMode] = useState(profile.http_chunk_size == null ? 'inherit' : profile.http_chunk_size === 0 ? 'disabled' : 'custom');
   const [chunkSize, setChunkSize] = useState(String(profile.http_chunk_size ? profile.http_chunk_size / 1048576 : 10));
   const [show, setShow] = useState(true);
   const [busy, setBusy] = useState(false);
   const [cookieError, setCookieError] = useState('');
-  const proxyChanged = proxyLoaded && (direct !== (savedProxy === '') || (!direct && proxy !== savedProxy));
+  const proxyChanged = !bypassProxy && proxyLoaded && (direct !== (savedProxy === '') || (!direct && proxy !== savedProxy));
   const chunkInvalid = profile.platform === 'youtube' && chunkMode === 'custom' &&
     (!Number.isInteger(Number(chunkSize)) || Number(chunkSize) < 1 || Number(chunkSize) > 1024);
   const chunkBytes = chunkMode === 'inherit' ? null : chunkMode === 'disabled' ? 0 : Number(chunkSize) * 1048576;
   const chunkChanged = profile.platform === 'youtube' && chunkBytes !== (profile.http_chunk_size ?? null);
-  const changed = (cookieLoaded && (useBrowserCookies ? '' : cookie) !== savedCookie) || proxyChanged || ua !== profile.user_agent || chunkChanged;
+  const changed = (cookieLoaded && (useBrowserCookies ? '' : cookie) !== savedCookie) || proxyChanged || bypassProxy !== !!profile.bypass_proxy || ua !== profile.user_agent || chunkChanged;
   useEffect(() => {
     let disposed = false;
     api.cookie(profile.platform).then(value => { if (!disposed) { setCookie(value); setSavedCookie(value); setUseBrowserCookies(value === ''); setCookieLoaded(true); } })
@@ -503,6 +504,7 @@ function ProfileForm({ profile, saved }: { profile: Profile; saved: (settings: S
       if (proxyChanged && !direct && !proxy.trim()) throw 'CONFIG_INVALID';
       const nextCookie = useBrowserCookies ? '' : cookie.trim();
       saved(await api.save({ platform: profile.platform,
+        bypass_proxy: bypassProxy,
         ...(profile.platform === 'youtube' ? { http_chunk_size: chunkBytes } : {}),
         user_agent: ua,
         cookie: cookieLoaded ? nextCookie : null,
@@ -526,8 +528,9 @@ function ProfileForm({ profile, saved }: { profile: Profile; saved: (settings: S
       <Field orientation="horizontal"><Checkbox id={profile.platform + '-clear'} disabled={!cookieLoaded} checked={useBrowserCookies} onCheckedChange={value => setUseBrowserCookies(value === true)} /><FieldLabel htmlFor={profile.platform + '-clear'}>使用系统默认浏览器 Cookie（保存后生效，将清除手动 Cookie）</FieldLabel></Field>
       {cookieError && <Alert variant="destructive" className="border-0 bg-transparent p-0"><AlertCircle aria-hidden="true" /><AlertDescription className="text-xs text-inherit">{cookieError}；保存其他设置将保留已有 Cookie。</AlertDescription></Alert>}
       <Separator />
-      <Field><FieldLabel id={profile.platform + '-mode'}>网络代理</FieldLabel><ToggleGroup size="sm" type="single" variant="outline" aria-labelledby={profile.platform + '-mode'} value={direct ? 'direct' : 'proxy'} disabled={!proxyLoaded} onValueChange={value => { if (value) setDirect(value === 'direct'); }}><ToggleGroupItem value="direct">直连</ToggleGroupItem><ToggleGroupItem value="proxy">自定义代理</ToggleGroupItem></ToggleGroup></Field>
-      {!direct && <Field><FieldLabel htmlFor={profile.platform + '-proxy'}>HTTP / SOCKS5 地址</FieldLabel><Input id={profile.platform + '-proxy'} className="min-h-8" type="text" autoComplete="off" spellCheck={false} value={proxy} disabled={!proxyLoaded} onChange={e => setProxy(e.target.value)} placeholder={proxyLoaded ? 'socks5://127.0.0.1:7890' : proxyError ? '代理读取失败' : '正在读取代理…'} /><FieldDescription>请输入完整地址，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890；含密码的代理保存在系统凭据存储中。系统 TUN 已接管网络时可选择直连。</FieldDescription></Field>}
+      <Field orientation="horizontal"><Checkbox id={profile.platform + '-bypass-proxy'} checked={bypassProxy} onCheckedChange={value => setBypassProxy(value === true)} /><FieldContent><FieldLabel htmlFor={profile.platform + '-bypass-proxy'}>解析与下载不走代理</FieldLabel><FieldDescription>开启 TUN／透明代理时启用，保留已保存的代理地址。</FieldDescription></FieldContent></Field>
+      <Field><FieldLabel id={profile.platform + '-mode'}>网络代理</FieldLabel><ToggleGroup size="sm" type="single" variant="outline" aria-labelledby={profile.platform + '-mode'} value={direct ? 'direct' : 'proxy'} disabled={!proxyLoaded || bypassProxy} onValueChange={value => { if (value) setDirect(value === 'direct'); }}><ToggleGroupItem value="direct">直连</ToggleGroupItem><ToggleGroupItem value="proxy">自定义代理</ToggleGroupItem></ToggleGroup></Field>
+      {!direct && <Field><FieldLabel htmlFor={profile.platform + '-proxy'}>HTTP / SOCKS5 地址</FieldLabel><Input id={profile.platform + '-proxy'} className="min-h-8" type="text" autoComplete="off" spellCheck={false} value={proxy} disabled={!proxyLoaded || bypassProxy} onChange={e => setProxy(e.target.value)} placeholder={proxyLoaded ? 'socks5://127.0.0.1:7890' : proxyError ? '代理读取失败' : '正在读取代理…'} /><FieldDescription>请输入完整地址，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890；含密码的代理保存在系统凭据存储中。</FieldDescription></Field>}
       {proxyError && <Alert variant="destructive" className="border-0 bg-transparent p-0"><AlertCircle aria-hidden="true" /><AlertDescription className="text-xs text-inherit">{proxyError}；保存其他设置将保留已有代理。</AlertDescription></Alert>}
       <Separator />
       {profile.platform === 'youtube' && <>

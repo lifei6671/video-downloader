@@ -100,8 +100,9 @@ async page => {
   await proxy().fill('http://127.0.0.1:7890');await save().click();await saved();
   cases.push('invalid proxy save preserves Cookie; corrected address saves browser mode');
   await fresh();
+  await page.reload();
   await page.evaluate(()=>window.platformSettingsTest.failCookie=true);
-  await page.getByRole('button',{name:'下载任务',exact:true}).click();await accounts(false);
+  await accounts(false);
   await page.getByRole('alert').filter({hasText:'Cookie'}).waitFor();
   await page.getByRole('textbox',{name:'User-Agent',exact:true}).fill('updated-fixture-agent');
   await save().click();await saved();
@@ -111,7 +112,7 @@ async page => {
   await page.getByRole('button',{name:'下载作品',exact:true}).click();
   await page.getByRole('textbox').first().fill('https://www.youtube.com/watch?v=a6cnYFcd7JQ');
   await page.getByRole('button',{name:'解析链接',exact:true}).click();
-  await page.getByRole('alert').filter({hasText:'切换 TUN/代理出口'}).waitFor();
+  await notice('error','切换 TUN/代理出口');
   cases.push('risk-control error gives verification and TUN exit guidance');
   return {passed:cases.length,cases};
 }

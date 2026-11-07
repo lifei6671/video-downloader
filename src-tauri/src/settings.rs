@@ -10,6 +10,8 @@ pub struct Profile {
     pub platform: String,
     pub user_agent: String,
     pub proxy: Option<String>,
+    #[serde(default)]
+    pub bypass_proxy: bool,
     pub cookie_configured: bool,
     #[serde(default)]
     pub http_chunk_size: Option<u64>,
@@ -34,6 +36,7 @@ pub struct ProfileUpdate {
     // None keeps saved data; empty string explicitly clears it.
     pub cookie: Option<String>,
     pub proxy: Option<String>,
+    pub bypass_proxy: Option<bool>,
     // Missing keeps the setting; explicit null inherits; 0 disables chunking.
     #[serde(default, deserialize_with = "deserialize_chunk_setting")]
     pub http_chunk_size: Option<Option<u64>>,
@@ -70,6 +73,16 @@ pub(crate) fn init(db: &Connection) -> Result<()> {
         .any(|name| name == "http_chunk_size");
     if !has_chunk_size {
         db.execute_batch("ALTER TABLE platform_settings ADD COLUMN http_chunk_size INTEGER")
+            .context("DATABASE_ERROR")?;
+    }
+    let has_bypass_proxy = db
+        .prepare("PRAGMA table_info(platform_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "bypass_proxy");
+    if !has_bypass_proxy {
+        db.execute_batch("ALTER TABLE platform_settings ADD COLUMN bypass_proxy INTEGER NOT NULL DEFAULT 0 CHECK(bypass_proxy IN (0,1))")
             .context("DATABASE_ERROR")?;
     }
     let has_limit = db
@@ -140,13 +153,14 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
     let mut profiles = Vec::new();
     for platform in ["douyin", "tiktok", "youtube", "telegram"] {
         let row = db.query_row(
-            "SELECT user_agent,proxy,cookie,credential_ref,http_chunk_size FROM platform_settings WHERE platform=?",
+            "SELECT user_agent,proxy,cookie,credential_ref,http_chunk_size,bypass_proxy FROM platform_settings WHERE platform=?",
             [platform],
             |r| {
                 Ok(Profile {
                     platform: platform.into(),
                     user_agent: r.get(0)?,
                     proxy: r.get(1)?,
+                    bypass_proxy: r.get(5)?,
                     cookie_configured: !r.get::<_, String>(2)?.is_empty(),
                     cookie: r.get(2)?,
                     credential_ref: r.get(3)?,
@@ -159,7 +173,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
             Err(rusqlite::Error::QueryReturnedNoRows) => Profile {
                 platform: platform.into(),
                 user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0".into(),
-                proxy: None, cookie_configured: false, cookie: String::new(), credential_ref: None, http_chunk_size: None,
+                proxy: None, bypass_proxy: false, cookie_configured: false, cookie: String::new(), credential_ref: None, http_chunk_size: None,
             },
             Err(_) => bail!("DATABASE_ERROR"),
         });
@@ -201,10 +215,14 @@ pub(crate) fn profile_proxy(profile: &Profile) -> Result<Option<String>> {
     }
 }
 
+pub(crate) fn effective_proxy(profile: &Profile) -> Result<Option<String>> {
+    if profile.bypass_proxy { Ok(None) } else { profile_proxy(profile) }
+}
+
 pub fn snapshot(settings: &Settings) -> Result<Value> {
     let mut profiles = serde_json::Map::new();
     for profile in settings.profiles.iter().filter(|p| p.platform != "telegram") {
-        let proxy = proxy(settings, &profile.platform)?;
+        let proxy = effective_proxy(profile)?;
         let mut value = json!({"user_agent": profile.user_agent, "proxy": proxy, "cookie": profile.cookie});
         if profile.platform == "youtube" {
             value["http_chunk_size"] = json!(profile.http_chunk_size);
@@ -258,6 +276,7 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
         .find(|p| p.platform == update.platform)
         .context("CONFIG_INVALID")?;
     let http_chunk_size = update.http_chunk_size.unwrap_or(profile.http_chunk_size);
+    let bypass_proxy = update.bypass_proxy.unwrap_or(profile.bypass_proxy);
     let cookie = update
         .cookie
         .map(|cookie| cookie.trim().to_owned())
@@ -295,16 +314,17 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
     // User decision: Cookies reside in SQLite. Only authenticated proxy URLs
     // use OS credential storage. Failed writes preserve the previous reference.
     let saved = db.execute(
-        "INSERT INTO platform_settings(platform,user_agent,proxy,cookie,credential_ref,http_chunk_size) VALUES (?1,?2,?3,?4,?5,?6)
+        "INSERT INTO platform_settings(platform,user_agent,proxy,cookie,credential_ref,http_chunk_size,bypass_proxy) VALUES (?1,?2,?3,?4,?5,?6,?7)
          ON CONFLICT(platform) DO UPDATE SET user_agent=excluded.user_agent,proxy=excluded.proxy,
-         cookie=excluded.cookie,credential_ref=excluded.credential_ref,http_chunk_size=excluded.http_chunk_size",
+         cookie=excluded.cookie,credential_ref=excluded.credential_ref,http_chunk_size=excluded.http_chunk_size,bypass_proxy=excluded.bypass_proxy",
         rusqlite::params![
             update.platform,
             update.user_agent,
             public_proxy,
             cookie,
             reference,
-            http_chunk_size.map(|n| n as i64)
+            http_chunk_size.map(|n| n as i64),
+            bypass_proxy
         ],
     );
     if saved.is_err() {
@@ -318,6 +338,7 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
         platform: update.platform,
         user_agent: update.user_agent,
         proxy: public_proxy,
+        bypass_proxy,
         cookie_configured: !cookie.is_empty(),
         cookie,
         credential_ref: reference.clone(),
@@ -334,6 +355,49 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bypass_proxy_migrates_preserves_addresses_and_freezes_task_routes() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE platform_settings (platform TEXT PRIMARY KEY, user_agent TEXT NOT NULL,
+            proxy TEXT, cookie TEXT NOT NULL, credential_ref TEXT);
+            INSERT INTO platform_settings VALUES ('youtube','fixture','http://127.0.0.1:7890/','session=fixture',NULL);")
+            .unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        assert!(settings.profiles.iter().all(|p| !p.bypass_proxy));
+        let captured = snapshot(&settings).unwrap();
+        for enabled in [true, false] {
+            let update = serde_json::from_value(json!({"platform":"youtube","user_agent":"fixture","bypass_proxy":enabled})).unwrap();
+            save_profile(&db, &mut settings, update).unwrap();
+            let restored = load(&db, PathBuf::new()).unwrap();
+            assert_eq!(restored.profiles[2].bypass_proxy, enabled);
+            assert_eq!(proxy(&restored, "youtube").unwrap().as_deref(), Some("http://127.0.0.1:7890/"));
+            let current = snapshot(&restored).unwrap();
+            assert_eq!(current["youtube"]["proxy"], if enabled { Value::Null } else { json!("http://127.0.0.1:7890/") });
+            assert_eq!(current["youtube"]["cookie"], "session=fixture");
+            assert_eq!(captured["youtube"]["proxy"], "http://127.0.0.1:7890/");
+            assert!(restored.profiles.iter().filter(|p| p.platform != "youtube").all(|p| !p.bypass_proxy));
+            // Older callers omit the flag and must preserve the stored choice.
+            save_profile(&db, &mut settings, serde_json::from_value(json!({"platform":"youtube","user_agent":"fixture"})).unwrap()).unwrap();
+            assert_eq!(load(&db, PathBuf::new()).unwrap().profiles[2].bypass_proxy, enabled);
+        }
+        settings.profiles[2].credential_ref = Some(format!("bypass-fixture-{}", Uuid::new_v4()));
+        settings.profiles[2].bypass_proxy = true;
+        assert!(snapshot(&settings).unwrap()["youtube"]["proxy"].is_null(), "bypassed proxy must not read its credential");
+        settings.profiles[2].bypass_proxy = false;
+        assert!(snapshot(&settings).is_err(), "active proxy must preserve credential error semantics");
+    }
+
+    #[test]
+    fn bypass_proxy_database_failure_preserves_previous_route() {
+        let db = Connection::open_in_memory().unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        db.execute_batch("CREATE TEMP TRIGGER reject_bypass BEFORE INSERT ON platform_settings BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
+        let update = serde_json::from_value(json!({"platform":"tiktok","user_agent":"fixture","bypass_proxy":true})).unwrap();
+        assert_eq!(save_profile(&db, &mut settings, update).unwrap_err().to_string(), "DATABASE_ERROR");
+        assert!(!settings.profiles[1].bypass_proxy);
+        assert!(!load(&db, PathBuf::new()).unwrap().profiles[1].bypass_proxy);
+    }
+
     #[test]
     fn obsolete_external_tool_settings_are_ignored_and_preserved() {
         let db = Connection::open_in_memory().unwrap();
@@ -353,7 +417,7 @@ mod tests {
         for value in ["http://127.0.0.1:80", "socks5://127.0.0.1:7890"] {
             save_profile(&db, &mut settings, ProfileUpdate {
                 platform: "youtube".into(), user_agent: "fixture".into(), cookie: None,
-                proxy: Some(value.into()), http_chunk_size: None,
+                proxy: Some(value.into()), bypass_proxy: None, http_chunk_size: None,
             }).unwrap();
             let restored = load(&db, PathBuf::new()).unwrap();
             assert_eq!(proxy(&restored, "youtube").unwrap(), Some(format!("{value}/")));
@@ -404,7 +468,7 @@ mod tests {
             ("douyin", None), ("tiktok", Some(0))] {
             let error = save_profile(&db, &mut settings, ProfileUpdate {
                 platform: platform.into(), user_agent: "test".into(), cookie: Some("secret=changed".into()),
-                proxy: None, http_chunk_size: Some(value),
+                proxy: None, bypass_proxy: None, http_chunk_size: Some(value),
             }).unwrap_err();
             assert_eq!(error.to_string(), "CONFIG_INVALID");
             assert_eq!(snapshot(&settings).unwrap()[platform]["cookie"], "");
@@ -445,7 +509,7 @@ mod tests {
                     &db,
                     &mut settings,
                     ProfileUpdate {
-                        http_chunk_size: None,
+                        bypass_proxy: None, http_chunk_size: None,
                         platform: platform.into(),
                         user_agent: "test-agent".into(),
                         cookie: Some(input.into()),
@@ -477,7 +541,7 @@ mod tests {
                 &db,
                 &mut settings,
                 ProfileUpdate {
-                    http_chunk_size: None,
+                    bypass_proxy: None, http_chunk_size: None,
                     platform: platform.into(),
                     user_agent: "test-agent".into(),
                     cookie: Some("session=fixture".into()),
@@ -490,7 +554,7 @@ mod tests {
                     &db,
                     &mut settings,
                     ProfileUpdate {
-                        http_chunk_size: None,
+                        bypass_proxy: None, http_chunk_size: None,
                         platform: platform.into(),
                         user_agent: "test-agent".into(),
                         cookie: Some(input.into()),
@@ -519,7 +583,7 @@ mod tests {
             &db,
             &mut settings,
             ProfileUpdate {
-                http_chunk_size: None,
+                bypass_proxy: None, http_chunk_size: None,
                 platform: "douyin".into(),
                 user_agent: "test-agent".into(),
                 cookie: Some(cookie.clone()),
@@ -547,7 +611,7 @@ mod tests {
             &db,
             &mut settings,
             ProfileUpdate {
-                http_chunk_size: None,
+                bypass_proxy: None, http_chunk_size: None,
                 platform: "douyin".into(),
                 user_agent: "next".into(),
                 cookie: None,
@@ -560,7 +624,7 @@ mod tests {
             &db,
             &mut settings,
             ProfileUpdate {
-                http_chunk_size: None,
+                bypass_proxy: None, http_chunk_size: None,
                 platform: "douyin".into(),
                 user_agent: "next".into(),
                 cookie: Some(String::new()),
@@ -585,7 +649,7 @@ mod tests {
                 &db,
                 &mut settings,
                 ProfileUpdate {
-                    http_chunk_size: None,
+                    bypass_proxy: None, http_chunk_size: None,
                     platform: "douyin".into(),
                     user_agent: "agent".into(),
                     cookie: Some("session=x".into()),
@@ -605,7 +669,7 @@ mod tests {
             &db,
             &mut settings,
             ProfileUpdate {
-                http_chunk_size: None,
+                bypass_proxy: None, http_chunk_size: None,
                 platform: "douyin".into(),
                 user_agent: "agent".into(),
                 cookie: None,
@@ -627,7 +691,7 @@ mod tests {
             &db,
             &mut settings,
             ProfileUpdate {
-                http_chunk_size: None,
+                bypass_proxy: None, http_chunk_size: None,
                 platform: "youtube".into(),
                 user_agent: "fixture".into(),
                 cookie: Some("session=fixture".into()),
@@ -700,7 +764,7 @@ mod tests {
     fn telegram_proxy_is_persisted_separately_and_excluded_from_engine_snapshot() {
         let db = Connection::open_in_memory().unwrap();
         let mut settings = load(&db, PathBuf::new()).unwrap();
-        let edit = |proxy: &str| ProfileUpdate { platform:"telegram".into(), user_agent:"Telegram".into(), cookie:None, proxy:Some(proxy.into()), http_chunk_size:None };
+        let edit = |proxy: &str| ProfileUpdate { platform:"telegram".into(), user_agent:"Telegram".into(), cookie:None, proxy:Some(proxy.into()), bypass_proxy: None, http_chunk_size:None };
         save_profile(&db, &mut settings, edit("socks5://127.0.0.1:1080")).unwrap();
         let restored = load(&db, PathBuf::new()).unwrap();
         assert_eq!(proxy(&restored,"telegram").unwrap().as_deref(), Some("socks5://127.0.0.1:1080/"));

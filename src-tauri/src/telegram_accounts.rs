@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(accounts.logout(&core, Purpose::Download, &login).await.err().unwrap().to_string(), "TELEGRAM_BUSY");
         let update = |proxy| crate::settings::ProfileUpdate {
             platform: "telegram".into(), user_agent: "test".into(), cookie: None,
-            proxy, http_chunk_size: None,
+            proxy, bypass_proxy: None, http_chunk_size: None,
         };
         assert_eq!(core.save_profile_with_network(update(Some(String::new()))).await.err().unwrap().to_string(), "TELEGRAM_BUSY",
                    "even an unchanged proxy must serialize comparison with persistence");
@@ -924,7 +924,7 @@ mod tests {
         let download = app.telegram_accounts.binding(Purpose::Download);
         let backup = app.telegram_accounts.binding(Purpose::Backup);
         backup.session.set_test_view(Phase::Ready,"account-a");
-        app.save_profile(crate::settings::ProfileUpdate { platform:"telegram".into(),user_agent:"test".into(),cookie:None,proxy:Some("socks5://127.0.0.1:1080".into()),http_chunk_size:None }).unwrap();
+        app.save_profile(crate::settings::ProfileUpdate { platform:"telegram".into(),user_agent:"test".into(),cookie:None,proxy:Some("socks5://127.0.0.1:1080".into()),bypass_proxy: None, http_chunk_size:None }).unwrap();
         app.backup_db(|db| {
             db.execute_batch("INSERT INTO backup_spaces VALUES('telegram-qa','library-qa','','','',NULL,0);
                 INSERT INTO backup_provider_config(space_id,provider_type,profile) VALUES('telegram-qa','telegram','telegram');

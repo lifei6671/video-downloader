@@ -387,7 +387,7 @@ impl TelegramSession {
         Self { proxy, ..Self::default() }
     }
     fn proxy_url(&self) -> Result<Option<String>> {
-        self.proxy.lock().unwrap().as_ref().map(crate::settings::profile_proxy).transpose().map(Option::flatten)
+        self.proxy.lock().unwrap().as_ref().map(crate::settings::effective_proxy).transpose().map(Option::flatten)
     }
     #[cfg(test)]
     pub(crate) fn set_test_view(&self, phase: Phase, account_id: &str) {
@@ -1859,15 +1859,19 @@ mod tests {
 
     #[tokio::test]
     async fn backup_reads_multiplex_the_owned_sender_and_switch_drains_only_readers() {
-        media_lease_releases_control_and_binding_switch_drains("download_media", false).await;
+        media_lease_releases_control_and_binding_switch_drains("download_media", false, false).await;
     }
     #[tokio::test]
     async fn parallel_backup_uploads_cancel_independently_and_drain_before_binding_switch() {
-        media_lease_releases_control_and_binding_switch_drains("upload_media", false).await;
+        media_lease_releases_control_and_binding_switch_drains("upload_media", false, false).await;
     }
     #[tokio::test]
     async fn proxy_save_closes_upload_and_download_pools_without_revoking_authorization() {
-        media_lease_releases_control_and_binding_switch_drains("upload_media", true).await;
+        media_lease_releases_control_and_binding_switch_drains("upload_media", true, false).await;
+    }
+    #[tokio::test]
+    async fn bypass_proxy_save_drains_old_pools_and_preserves_saved_route() {
+        media_lease_releases_control_and_binding_switch_drains("upload_media", true, true).await;
     }
     #[tokio::test]
     async fn abandoned_proxy_pause_clears_canceled_pending_login_and_releases_admission() {
@@ -1891,7 +1895,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let core = Core::open(&root.path().join("qa.sqlite"),root.path().join("downloads"),"unused-engine".into(),vec![], |_| {}).unwrap();
         let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        core.save_profile(crate::settings::ProfileUpdate {platform:"telegram".into(),user_agent:"test".into(),cookie:None,proxy:Some(format!("socks5://{}",proxy.local_addr().unwrap())),http_chunk_size:None}).unwrap();
+        core.save_profile(crate::settings::ProfileUpdate {platform:"telegram".into(),user_agent:"test".into(),cookie:None,proxy:Some(format!("socks5://{}",proxy.local_addr().unwrap())),bypass_proxy: None, http_chunk_size:None}).unwrap();
         let session = core.telegram_accounts.binding(Purpose::Backup).session;
         let keys = VaultSession::load("offline-metadata-cancel".into(),Arc::new(DownloadVault)).await.unwrap();
         let connection = fixture_control(&session,keys).await;
@@ -1932,7 +1936,7 @@ mod tests {
         core.shutdown().await;
     }
 
-    async fn media_lease_releases_control_and_binding_switch_drains(kind: &'static str, proxy_change: bool) {
+    async fn media_lease_releases_control_and_binding_switch_drains(kind: &'static str, proxy_change: bool, bypass_change: bool) {
         use super::super::{provider::{ProviderType, Scope}, telegram_transfer::Target};
         use crate::{desktop_core::Core, telegram_accounts::Purpose};
 
@@ -1943,7 +1947,7 @@ mod tests {
         let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         core.save_profile(crate::settings::ProfileUpdate {
             platform: "telegram".into(), user_agent: "test".into(), cookie: None,
-            proxy: Some(format!("socks5://{}", proxy.local_addr().unwrap())), http_chunk_size: None,
+            proxy: Some(format!("socks5://{}", proxy.local_addr().unwrap())), bypass_proxy: None, http_chunk_size: None,
         }).unwrap();
         let session = core.telegram_accounts.binding(Purpose::Backup).session;
         let keys = VaultSession::load("offline-media-read".into(), Arc::new(DownloadVault)).await.unwrap();
@@ -1971,7 +1975,7 @@ mod tests {
         if proxy_change {
             let update = |proxy, user_agent: &str| crate::settings::ProfileUpdate {
                 platform: "telegram".into(), user_agent: user_agent.into(), cookie: None,
-                proxy: Some(proxy), http_chunk_size: None,
+                proxy: Some(proxy), bypass_proxy: None, http_chunk_size: None,
             };
             tokio::time::timeout(Duration::from_secs(1), core.save_profile_with_network(
                 update(format!("socks5://{}", proxy.local_addr().unwrap()), "same proxy"),
@@ -2005,7 +2009,7 @@ mod tests {
             if proxy_change {
                 core.save_profile_with_network(crate::settings::ProfileUpdate {
                     platform: "telegram".into(), user_agent: "test".into(), cookie: None,
-                    proxy: Some("socks5://127.0.0.1:9".into()), http_chunk_size: None,
+                    proxy: (!bypass_change).then(|| "socks5://127.0.0.1:9".into()), bypass_proxy: bypass_change.then_some(true), http_chunk_size: None,
                 }).await.unwrap();
             } else { session.cancel_backup_transfer().await; }
         };
@@ -2029,7 +2033,14 @@ mod tests {
             drop(pause);
             session.resume("unused".into()).await.unwrap();
             let replacement = session.register_download(12).unwrap();
-            assert_eq!(replacement.connection.proxy_url.as_deref(), Some("socks5://127.0.0.1:9/"));
+            assert_eq!(replacement.connection.proxy_url.as_deref(), if bypass_change { None } else { Some("socks5://127.0.0.1:9/") });
+            if bypass_change {
+                assert_eq!(core.proxy("telegram").unwrap().unwrap(), format!("socks5://{}/", proxy.local_addr().unwrap()));
+                core.save_profile_with_network(serde_json::from_value(serde_json::json!({
+                    "platform":"telegram", "user_agent":"test", "bypass_proxy":false
+                })).unwrap()).await.unwrap();
+                assert_eq!(session.proxy_url().unwrap().unwrap(), format!("socks5://{}/", proxy.local_addr().unwrap()));
+            }
             assert!(!*replacement.cancellation().borrow());
             replacement.close().await;
         }

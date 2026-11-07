@@ -76,8 +76,8 @@ async page => {
   await page.evaluate(()=>{window.platformSettingsTest.holdSave=false;window.platformSettingsTest.release()});
   await saved();check(await stored()===0,'pending save changed submitted value');
   cases.push('pending save freezes mode and size');
-  await fresh();await page.evaluate(()=>window.platformSettingsTest.failCookie=true);
-  await page.getByRole('button',{name:'下载任务',exact:true}).click();await accounts(false);
+  await fresh();await page.reload();await page.evaluate(()=>window.platformSettingsTest.failCookie=true);
+  await accounts(false);
   await page.getByRole('alert').filter({hasText:'Cookie'}).waitFor();
   await mode('自定义').click();await size().fill('1024');await save().click();await saved();
   check(await stored()===1073741824 && (await snapshot()).cookies.youtube==='session=fixture','Cookie read failure prevents safe chunk save');

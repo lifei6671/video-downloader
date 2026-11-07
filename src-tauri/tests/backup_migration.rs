@@ -88,17 +88,20 @@ fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losi
     seed_master(&db);
     let original_schema = schema(&db);
     let preserved = [
-        "app_settings",
-        "platform_settings",
-        "tdl_settings",
-        "parse_cache",
-        "parse_cache_images",
-        "parse_cache_aliases",
-        "video_transcripts",
+        ("app_settings", "*"),
+        (
+            "platform_settings",
+            "platform,user_agent,proxy,cookie,credential_ref,http_chunk_size",
+        ),
+        ("tdl_settings", "*"),
+        ("parse_cache", "*"),
+        ("parse_cache_images", "*"),
+        ("parse_cache_aliases", "*"),
+        ("video_transcripts", "*"),
     ];
     let before: Vec<_> = preserved
         .iter()
-        .map(|t| rows(&db, &format!("SELECT * FROM {t}")))
+        .map(|(table, columns)| rows(&db, &format!("SELECT {columns} FROM {table}")))
         .collect();
     let original_task = rows(&db, "SELECT * FROM download_tasks");
     // Keep this connection open: the migration's snapshot must include committed WAL pages.
@@ -106,13 +109,17 @@ fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losi
     assert_eq!(version(&db), 1);
     assert_eq!(core.list().len(), 1);
     assert_eq!(core.list()[0].error.as_deref(), Some("original-error"));
-    for (table, expected) in preserved.iter().zip(&before) {
+    for ((table, columns), expected) in preserved.iter().zip(&before) {
         assert_eq!(
-            rows(&db, &format!("SELECT * FROM {table}")),
+            rows(&db, &format!("SELECT {columns} FROM {table}")),
             *expected,
             "lost master data: {table}"
         );
     }
+    assert_eq!(
+        rows(&db, "SELECT bypass_proxy FROM platform_settings"),
+        vec![vec![Value::Integer(0)]]
+    );
     let snapshots = backups(root.path());
     assert_eq!(snapshots.len(), 1);
     let snapshot = Connection::open(&snapshots[0]).unwrap();
@@ -121,9 +128,9 @@ fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losi
         rows(&snapshot, "SELECT * FROM download_tasks"),
         original_task
     );
-    for (table, expected) in preserved.iter().zip(&before) {
+    for ((table, columns), expected) in preserved.iter().zip(&before) {
         assert_eq!(
-            rows(&snapshot, &format!("SELECT * FROM {table}")),
+            rows(&snapshot, &format!("SELECT {columns} FROM {table}")),
             *expected
         );
     }
@@ -132,6 +139,9 @@ fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losi
     let expected = Connection::open_in_memory().unwrap();
     expected.execute_batch(MASTER).unwrap();
     expected.execute_batch(DEVELOPMENT).unwrap();
+    expected
+        .execute_batch("ALTER TABLE platform_settings ADD COLUMN bypass_proxy INTEGER NOT NULL DEFAULT 0 CHECK(bypass_proxy IN (0,1))")
+        .unwrap();
     let objects: Vec<(String,String,String)> = expected.prepare(
         "SELECT type,name,tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
     ).unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();

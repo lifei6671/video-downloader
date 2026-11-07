@@ -15,7 +15,7 @@ export interface VideoFormat { requires_merge?: boolean; format_id: string; cont
 export interface AuthorProfile { id?: string | null; nickname?: string | null; handle?: string | null; kind: 'user' | 'channel'; avatar_cached?: boolean }
 export interface Video { author_profile?: AuthorProfile; cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
 export interface Task { insertion_id?: number; asset_id?: string | null; total_bytes_estimate?: number | null; telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; download_requested_at?: number | null; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; duplicate_confirmed?: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
-export interface Profile { http_chunk_size?: number | null; platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
+export interface Profile { http_chunk_size?: number | null; bypass_proxy?: boolean; platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
 export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[] }
 export interface FilenamePreview { path: string; segments: { text: string; variable: string | null }[] }
 export type TelegramPurpose = 'download' | 'backup';
@@ -124,7 +124,7 @@ export const api = {
   play: (taskId: string) => invoke<void>('play_download', { taskId }),
   playbackSource: async (taskId: string) => convertFileSrc(await invoke<string>('prepare_video_playback', { taskId })),
   albumVideoSource: async (taskId: string, imageIndex: number) => convertFileSrc(await invoke<string>('prepare_video_playback', { taskId, imageIndex })),
-  save: (update: { http_chunk_size?: number | null; platform: string; user_agent: string; cookie: string | null; proxy: string | null }) => invoke<Settings>('save_profile', { update }),
+  save: (update: { http_chunk_size?: number | null; bypass_proxy?: boolean; platform: string; user_agent: string; cookie: string | null; proxy: string | null }) => invoke<Settings>('save_profile', { update }),
   subscribe: async (callback: (task: Task) => void, removed: (id: string, spaceId?: string) => void) => {
     const stopUpdates = await listen<Task>('task_updated', event => callback(event.payload));
     try {

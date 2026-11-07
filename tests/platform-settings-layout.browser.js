@@ -70,16 +70,18 @@ async page => {
     cases.push(width+': authenticated proxy echo/save/reload/preserve/clear; fixed header/tabs/navigation; scroll/keyboard/layout');
   }
   await fresh();await mode('自定义代理').click();await address().fill(credential);await save().click();await saved();
+  await page.reload();
   await page.evaluate(()=>window.platformSettingsTest.failProxy=true);
-  await page.getByRole('button',{name:'下载任务',exact:true}).click();await accounts(false);
+  await accounts(false);
   await page.getByRole('alert').filter({hasText:'保存其他设置将保留已有代理'}).waitFor();
   check(await address().isDisabled() && await mode('直连').isDisabled(),'read failure permits proxy overwrite');
   await page.getByRole('textbox',{name:'User-Agent',exact:true}).fill('after-read-error');
   await save().click();await saved();
   check((await page.evaluate(()=>window.platformSettingsTest.calls.at(-1))).proxy===null && (await snapshot()).proxies.youtube===credential,'read failure changed saved proxy');
   cases.push('proxy read failure preserves credentials while allowing other settings');
-  await page.evaluate(()=>{window.platformSettingsTest.failProxy=false;window.platformSettingsTest.holdProxy=true});
-  await page.getByRole('button',{name:'下载任务',exact:true}).click();await accounts(false);
+  await page.reload();
+  await page.evaluate(()=>{window.platformSettingsTest.holdProxy=true});
+  await accounts(false);
   check(await address().isDisabled(),'pending read permits draft edits');
   await page.getByRole('textbox',{name:'User-Agent',exact:true}).fill('during-proxy-read');
   await save().click();await saved();
