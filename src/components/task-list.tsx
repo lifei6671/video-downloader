@@ -24,6 +24,10 @@ export function RetainedTaskPage({ active, children }: { active: boolean; childr
   </div> : null;
 }
 
+export function taskListRows(tasks: Task[], assets: BackupAsset[]) {
+  return [...tasks.map(task => ({ kind: 'task' as const, task })), ...assets.map(asset => ({ kind: 'asset' as const, asset }))];
+}
+
 export function TaskList({ tasks, paginationKey, platform, onPlatformChange, view, onViewChange, listRef, removingIds, onExited, renderRow, assets = [], renderAsset, removingAssetIds, onAssetExited, toolbar, empty }: {
   tasks: Task[];
   assets?: BackupAsset[];
@@ -46,7 +50,7 @@ export function TaskList({ tasks, paginationKey, platform, onPlatformChange, vie
   const [loading, setLoading] = useState(false);
   const sentinel = useRef<HTMLDivElement>(null);
   const limit = page.key === paginationKey ? page.limit : 30;
-  const rows = [...tasks.map(task => ({ kind: 'task' as const, task })), ...assets.map(asset => ({ kind: 'asset' as const, asset }))];
+  const rows = taskListRows(tasks, assets);
   const hasMore = rows.length > limit;
   useLayoutEffect(() => {
     setPage({ key: paginationKey, limit: 30 });

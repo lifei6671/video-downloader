@@ -1,5 +1,5 @@
 import { useRef, type ReactNode } from 'react';
-import { Copy, Download, FileText, FolderOpen, ListX, MoreHorizontal, Play, Trash2, X } from 'lucide-react';
+import { Copy, Download, FileText, FolderOpen, ListVideo, ListX, MoreHorizontal, Play, Trash2, X } from 'lucide-react';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import type { Task } from '@/api';
 import { Button } from '@/components/ui/button';
@@ -13,7 +13,7 @@ export type CoverMenuActions = {
   copy: () => void;
 };
 
-export function TaskMoreMenu({ task, busy, play, reveal, copy, copyPath, remove, deleteFile, deleteBackup, release, cancel, waitingCancel, transcript, backupActions, coverActions, children, onOpenChange }: {
+export function TaskMoreMenu({ task, busy, play, stream, reveal, copy, copyPath, remove, deleteFile, deleteBackup, release, cancel, waitingCancel, transcript, backupActions, coverActions, children, onOpenChange }: {
   task: Task;
   children?: ReactNode;
   onOpenChange?: (open: boolean) => void;
@@ -24,6 +24,7 @@ export function TaskMoreMenu({ task, busy, play, reveal, copy, copyPath, remove,
   coverActions?: CoverMenuActions;
   busy: boolean;
   play?: () => void;
+  stream?: (returnFocus: HTMLElement | null) => void;
   reveal: () => void;
   copy: () => void;
   copyPath: () => void;
@@ -45,6 +46,7 @@ export function TaskMoreMenu({ task, busy, play, reveal, copy, copyPath, remove,
   const available = hasFile || hasLink || removable || !!cancel || !!coverActions;
   const items = <>
       {play && <Item disabled={busy} onSelect={play}><Play />播放视频</Item>}
+      {context && stream && <Item disabled={busy} onSelect={() => stream(row.current)}><ListVideo />流式播放</Item>}
       {hasFile && <Item disabled={busy} onSelect={reveal}><FolderOpen />打开文件夹</Item>}
       {transcript && <Item disabled={busy} onSelect={() => transcript.open(context ? row.current : trigger.current)}><FileText />{transcript.label}</Item>}
       {backupActions}

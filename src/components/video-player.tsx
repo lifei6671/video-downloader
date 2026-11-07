@@ -1,42 +1,45 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ExternalLink, AlertCircle, Play } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, errorText, type Task, type BackupAsset } from '@/api';
+import { api, errorText } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { readPlaybackPosition, writePlaybackPosition } from '@/lib/playback-position';
 
 export type PlaybackSubject = {id: string; path: string | null; completed_at: number | null; video: {title?: string; width?: number | null; height?: number | null} | null; asset?: boolean};
 export type MediaSize = { width: number; height: number };
 
 function VideoStartButton({ onClick }: { onClick: () => void }) {
-  return <div className="pointer-events-none absolute inset-0 grid place-items-center">
+  return <div className="pointer-events-none absolute inset-0 z-[4] grid place-items-center">
     <Button size="icon-lg" className="pointer-events-auto" aria-label="播放视频" onClick={onClick}>
       <Play aria-hidden="true" />
     </Button>
   </div>;
 }
 
-export function PlaybackSession({ task, open, close, removedIds, onMediaSize, renderLayout }: {
+export function PlaybackSession({ task, open, close, removedIds, onMediaSize, onMediaReady, renderLayout, loop = false, preloading = false }: {
   task: PlaybackSubject;
   open: boolean;
   close: () => void;
   removedIds: ReadonlySet<string>;
   onMediaSize?: (size: MediaSize) => void;
+  onMediaReady?: (ready: boolean) => void;
   renderLayout?: (media: ReactNode, tools: ReactNode) => ReactNode;
+  loop?: boolean;
+  preloading?: boolean;
 }) {
   const video = useRef<HTMLVideoElement>(null);
-  const session = useRef({ active: true, fallback: false, externalPending: false });
+  const session = useRef({ active: false, fallback: false, externalPending: false, mediaReady: false });
   const sourceRequest = useRef<Promise<{path: string | null; source: string}> | null>(null);
   const identity = useRef(task);
-  const progress = useRef({ metadataReady: false, lastSavedAt: 0, storageFailed: false });
+  const progress = useRef({ metadataReady: false, positioned: false, lastSavedAt: 0, storageFailed: false });
   const [source, setSource] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [paused, setPaused] = useState(true);
   const [externalPending, setExternalPending] = useState(false);
   const [failure, setFailure] = useState('');
+  useLayoutEffect(() => { if (failure) onMediaReady?.(false); }, [failure, onMediaReady]);
 
   function remember(element: HTMLVideoElement | null, force = true) {
     if (!element || !progress.current.metadataReady || progress.current.storageFailed || removedIds.has(task.id)
@@ -100,11 +103,34 @@ export function PlaybackSession({ task, open, close, removedIds, onMediaSize, re
     });
   }
 
+  function prepareMetadata(element: HTMLVideoElement) {
+    if (progress.current.metadataReady || session.current.fallback) return;
+    if (!element.videoWidth || !element.videoHeight) {
+      if (session.current.active) void openExternal();
+      return;
+    }
+    if (!progress.current.positioned) {
+      const position = readPlaybackPosition(identity.current);
+      if (position > 0 && Number.isFinite(element.duration) && position < element.duration) element.currentTime = position;
+      progress.current.positioned = true;
+    }
+    if (!session.current.active) return;
+    onMediaSize?.({ width: element.videoWidth, height: element.videoHeight });
+    progress.current.metadataReady = true;
+  }
+
+  function reportPlaying() {
+    if (!session.current.active || session.current.fallback) return;
+    setLoading(false);
+    if (session.current.mediaReady) return;
+    session.current.mediaReady = true;
+    onMediaReady?.(true);
+  }
+
   useLayoutEffect(() => {
     const element = video.current;
     const flush = () => remember(element);
     const hidden = () => { if (document.visibilityState === 'hidden') flush(); };
-    session.current.active = open;
     if (!open) releaseVideo();
     else {
       window.addEventListener('pagehide', flush);
@@ -121,40 +147,60 @@ export function PlaybackSession({ task, open, close, removedIds, onMediaSize, re
     };
   }, [open]);
 
+  useLayoutEffect(() => {
+    session.current.active = open && !preloading;
+    if (session.current.active) session.current.mediaReady = false;
+    const element = video.current;
+    // Promote the same buffered element without reassigning its source.
+    if (!session.current.active || !loop || !element?.hasAttribute('src')) return;
+    if (element.error) { void openExternal(); return; }
+    if (element.readyState >= HTMLMediaElement.HAVE_METADATA) prepareMetadata(element);
+    if (session.current.fallback) return;
+    setPaused(false);
+    void element.play().catch(reason => {
+      if (!session.current.active || session.current.fallback || reason?.name === 'AbortError') return;
+      setPaused(true);
+      setLoading(false);
+      // The existing play control can start playback when autoplay is denied.
+      if (reason?.name !== 'NotAllowedError') setFailure('无法开始播放视频');
+    });
+  }, [open, preloading, loop]);
+
   useEffect(() => {
     if (!open) return;
     let active = true;
-    sourceRequest.current ??= task.asset ? api.assetPlaybackSource(task.id) : api.playbackSource(task.id).then(source => ({path: task.path, source}));
-    sourceRequest.current.then(value => {
-      if (active && session.current.active && !session.current.fallback) { identity.current = {...task, path: value.path}; setSource(value.source); }
+    const request = sourceRequest.current ??= task.asset ? api.assetPlaybackSource(task.id) : api.playbackSource(task.id).then(source => ({path: task.path, source}));
+    request.then(value => {
+      if (active && !session.current.fallback) { identity.current = {...task, path: value.path}; setSource(value.source); }
     }).catch(reason => {
       if (!active) return;
+      if (preloading) {
+        if (sourceRequest.current === request) sourceRequest.current = null;
+        return;
+      }
       if (task.asset) { setLoading(false); setFailure(errorText(reason)); }
       else void openExternal();
     });
     return () => { active = false; };
-  }, [task.id, open]);
+  }, [task.id, open, preloading]);
 
   const media = <>
     <div className="video-player-stage" aria-busy={loading || externalPending}>
-      <video ref={video} src={source} controls autoPlay playsInline preload="metadata" aria-label="本地视频播放器"
-        onCanPlay={() => { if (session.current.active && !session.current.fallback) setLoading(false); }}
+      <video ref={video} src={source} controls={!preloading} autoPlay={open && !preloading} loop={loop} playsInline preload={loop ? 'auto' : 'metadata'} aria-label="本地视频播放器"
+        onCanPlay={() => { if (open && !session.current.fallback) setLoading(false); }}
         onWaiting={() => { if (session.current.active && !session.current.fallback) setLoading(true); }}
         onPlay={() => { if (session.current.active && !session.current.fallback) { setPaused(false); setFailure(''); } }}
-        onPlaying={() => { if (session.current.active) setLoading(false); }}
+        onPlaying={reportPlaying}
         onPause={event => { if (session.current.active) { setPaused(true); setLoading(false); remember(event.currentTarget); } }}
         onSeeked={event => { if (session.current.active && !session.current.fallback) remember(event.currentTarget); }}
-        onTimeUpdate={event => { if (session.current.active && !session.current.fallback) remember(event.currentTarget, false); }}
-        onEnded={event => { if (session.current.active) { setPaused(true); setLoading(false); remember(event.currentTarget); } }}
-        onLoadedMetadata={event => {
-          if (!session.current.active || session.current.fallback) return;
+        onTimeUpdate={event => {
           const element = event.currentTarget;
-          if (!element.videoWidth || !element.videoHeight) { void openExternal(); return; }
-          onMediaSize?.({ width: element.videoWidth, height: element.videoHeight });
-          const position = readPlaybackPosition(identity.current);
-          if (position > 0 && Number.isFinite(element.duration) && position < element.duration) element.currentTime = position;
-          progress.current.metadataReady = true;
+          if (!session.current.mediaReady && !element.paused && !element.seeking && element.currentTime > 0
+            && element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) reportPlaying();
+          if (session.current.active && !session.current.fallback) remember(element, false);
         }}
+        onEnded={event => { if (session.current.active) { setPaused(true); setLoading(false); remember(event.currentTarget); } }}
+        onLoadedMetadata={event => { if (open) prepareMetadata(event.currentTarget); }}
         onError={() => { if (source && session.current.active) void openExternal(); }} />
       {open && source && paused && !loading && !externalPending && !failure && <VideoStartButton onClick={playInPlace} />}
       {open && (loading || externalPending) && !failure && <div className="video-player-loading" role="status"><Spinner aria-hidden="true" /><span>{externalPending ? '正在打开系统播放器…' : '正在加载视频…'}</span></div>}
@@ -163,26 +209,4 @@ export function PlaybackSession({ task, open, close, removedIds, onMediaSize, re
   </>;
   const tools = <div className="video-player-tools flex justify-end"><Button variant="outline" disabled={externalPending} onClick={() => void openExternal(true)}><ExternalLink />{externalPending ? '打开中…' : '使用系统播放器'}</Button></div>;
   return renderLayout ? renderLayout(media, tools) : <>{media}{tools}</>;
-}
-
-export function VideoPlayer({ task, asset, close, returnFocus, fallbackFocus, removedIds }: { task: Task | null; asset?: BackupAsset | null; close: () => void; returnFocus: HTMLElement | null; fallbackFocus: () => HTMLElement | null; removedIds: ReadonlySet<string> }) {
-  const focus = useRef<HTMLElement | null>(null);
-  const lastTask = useRef<PlaybackSubject | null>(null);
-  const [measured, setMeasured] = useState<{ id: string; ratio: number } | null>(null);
-  const subject: PlaybackSubject | null = task ?? (asset ? { id: asset.asset_id, path: asset.path, completed_at: null, video: asset.metadata, asset: true } : null);
-  if (subject) { focus.current = returnFocus; lastTask.current = subject; }
-  const current = lastTask.current;
-  const initialRatio = current?.video?.width && current.video.height ? current.video.width / current.video.height : 16 / 9;
-  const ratio = measured?.id === current?.id ? measured?.ratio : initialRatio;
-  const playerStyle = { '--video-player-ratio': ratio && Number.isFinite(ratio) && ratio > 0 ? ratio : 16 / 9 } as CSSProperties;
-  return <Dialog open={!!subject} onOpenChange={open => { if (!open) close(); }}>
-    <DialogContent className="video-player-dialog" style={playerStyle} onCloseAutoFocus={event => {
-      event.preventDefault();
-      const target = focus.current;
-      (target?.isConnected && !target.closest('[inert]') ? target : fallbackFocus())?.focus({ preventScroll: true });
-    }}>
-      <DialogHeader className="pr-8"><DialogTitle className="line-clamp-2">{lastTask.current?.video?.title?.trim() || '视频播放'}</DialogTitle><DialogDescription className="sr-only">本地视频播放器</DialogDescription></DialogHeader>
-      {current && <PlaybackSession key={current.id} task={current} open={!!subject} close={close} removedIds={removedIds} onMediaSize={({ width, height }) => setMeasured({ id: current.id, ratio: width / height })} />}
-    </DialogContent>
-  </Dialog>;
 }

@@ -2,12 +2,12 @@ import '@/lib/style-nonce';
 import { RefreshCw } from 'lucide-react';
 import { bytes } from '@/lib/format-bytes';
 import { BackupSettingsForm } from '@/components/backup-settings';
-import { backupAssetStatus, backupDeletion, BackupDeleteProgress, BackupRestoreProgress, BackupAssetCoverBadge, UnifiedTaskBadge, BackupCardAction, backupCardStatus, BackupTaskStatus, BackupTaskFeedback, BackupTransferMenuItems, BackupAssetRow, BackupDialogs, useBackupTasks, useBackupDialogs } from '@/components/backup-tasks';
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { backupAssetStatus, backupDeletion, BackupDeleteProgress, BackupRestoreProgress, BackupAssetCoverBadge, UnifiedTaskBadge, BackupCardAction, backupCardStatus, BackupTaskStatus, BackupTaskFeedback, BackupTransferMenuItems, BackupAssetRow, canPlayBackupAsset, useBackupTasks } from '@/components/backup-tasks';
+import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Download, Play, ListVideo, ListX, CircleCheck, CircleX, Settings as SettingsIcon, Link, FolderOpen, Film, Eye, EyeOff, Copy, ClipboardPaste, AlertCircle, HardDrive, Search, RotateCcw, Trash2, Info, KeyRound, PackageCheck, Monitor, CalendarClock, Images, MoreHorizontal, X } from 'lucide-react';
+import { Download, Play, ListVideo, ListX, CircleCheck, CircleX, Settings as SettingsIcon, Link, FolderOpen, Film, Eye, EyeOff, Copy, ClipboardPaste, AlertCircle, HardDrive, Search, RotateCcw, Trash2, Info, KeyRound, PackageCheck, Monitor, CalendarClock, Images, Maximize2, Minimize2, MoreHorizontal, X } from 'lucide-react';
 import { cn } from 'cn';
-import { api, errorText, mergeTasks, compareTaskInsertion, type Task, type Settings, type Profile, type Resolver } from './api';
+import { api, errorText, mergeTasks, compareTaskInsertion, type BackupAsset, type Task, type Settings, type Profile, type Resolver } from './api';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter, CardAction } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -25,7 +25,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent, settingsTabsListClassName, se
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { Spinner } from '@/components/ui/spinner';
 import { Separator } from '@/components/ui/separator';
-import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogClose } from '@/components/ui/dialog';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { SidebarProvider, Sidebar, SidebarHeader, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarMenu, SidebarMenuItem, SidebarMenuButton, SidebarMenuBadge, SidebarSeparator, SidebarInset } from '@/components/ui/sidebar';
 import { Toaster } from '@/components/ui/sonner';
@@ -37,7 +37,7 @@ import { TelegramStorageSettings } from '@/components/telegram-storage-settings'
 import { ShareLinkInput } from '@/components/share-link-input';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuGroup, ContextMenuItem } from '@/components/ui/context-menu';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu';
-import { RetainedTaskPage, TaskList, type TaskView } from '@/components/task-list';
+import { RetainedTaskPage, TaskList, taskListRows, type TaskView } from '@/components/task-list';
 import { TaskRow, labels, statusVariant } from '@/components/task-row';
 import { TaskStatusFilters, type TaskStatusFilter } from '@/components/task-filters';
 import { VideoTranscriptDialog, useVideoTranscripts } from '@/components/video-transcript';
@@ -133,12 +133,14 @@ function GalleryImage({ task, index, onReadyChange }: { task: Task; index: numbe
   useEffect(() => { if (readFailed) onReadyChange?.(undefined); }, [readFailed, onReadyChange]);
   return source && !failed && !readFailed ? <img src={source} className="size-full object-contain" alt={`第 ${index + 1} 张图片`} onLoad={() => onReadyChange?.({ source })} onError={() => { setFailed(true); onReadyChange?.(undefined); }} /> : failed || readFailed ? <Film className="m-auto size-6 text-muted-foreground" aria-label="图片预览不可用" /> : <Spinner className="m-auto" aria-label="正在加载图片" />;
 }
-function GalleryVideo({ task, index, open }: { task: Task; index: number; open: boolean }) {
+function GalleryVideo({ task, index, open, fadeIn, onMediaReady }: { task: Task; index: number; open: boolean; fadeIn?: boolean; onMediaReady?: (ready: boolean) => void }) {
   const video = useRef<HTMLVideoElement>(null);
+  const mediaReady = useRef(false);
   const [source, setSource] = useState<string>();
   const [failure, setFailure] = useState('');
   useLayoutEffect(() => {
     if (!open) return;
+    mediaReady.current = false;
     let active = true;
     const element = video.current;
     api.albumVideoSource(task.id, index).then(source => {
@@ -149,8 +151,19 @@ function GalleryVideo({ task, index, open }: { task: Task; index: number; open: 
       if (element) { element.pause(); element.removeAttribute('src'); element.load(); }
     };
   }, [task.id, index, open]);
+  useLayoutEffect(() => { if (failure) onMediaReady?.(false); }, [failure, onMediaReady]);
+  const reportPlaying = () => {
+    if (!open || mediaReady.current) return;
+    mediaReady.current = true;
+    onMediaReady?.(true);
+  };
   return <>
-    <video ref={video} src={source} autoPlay muted loop playsInline controls className="relative size-full object-contain" aria-label={`第 ${index + 1} 张实况视频`}
+    <video ref={video} src={source} autoPlay muted loop playsInline controls className={cn('relative size-full object-contain', fadeIn && 'album-slide-fade-in')} aria-label={`第 ${index + 1} 张实况视频`}
+      onPlaying={reportPlaying}
+      onTimeUpdate={event => {
+        const element = event.currentTarget;
+        if (!element.paused && !element.seeking && element.currentTime > 0) reportPlaying();
+      }}
       onLoadedMetadata={event => {
         const { videoWidth, videoHeight } = event.currentTarget;
         if (!videoWidth || !videoHeight) setFailure('实况视频无法播放');
@@ -161,43 +174,72 @@ function GalleryVideo({ task, index, open }: { task: Task; index: number; open: 
   </>;
 }
 type AlbumStill = { index: number; image: AlbumImage };
-type AlbumSelection = { index: number; image?: AlbumImage; previous?: AlbumStill; nextIndex?: number };
-function AlbumGallery({ task, expanded = false, open = true }: { task: Task; expanded?: boolean; open?: boolean }) {
-  const [{ index, image, previous }, setSelection] = useState<AlbumSelection>({ index: 0 });
-  const gallery = useRef<HTMLDivElement>(null);
-  const lastWheel = useRef(-Infinity);
-  const activeDot = useRef<HTMLButtonElement>(null);
+type AlbumSelection = { index: number; image?: AlbumImage; previous?: AlbumStill; frame?: HTMLCanvasElement; nextIndex?: number; settled?: boolean; fadeIn?: boolean };
+type MediaDirection = -1 | 1;
+type AlbumNavigation = { step: (direction: MediaDirection) => boolean };
+function albumMedia(task: Task) {
+  if (task.video?.kind !== 'image_album' || task.file_missing) return;
+  return task.video.images?.length ? task.video.images : task.files;
+}
+function AlbumGallery({ task, expanded = false, open = true, slideshow = false, startAtLast, navigation, onMediaReady }: {
+  task: Task; expanded?: boolean; open?: boolean; slideshow?: boolean; startAtLast?: boolean; navigation?: React.Ref<AlbumNavigation>; onMediaReady?: (ready: boolean) => void;
+}) {
   const images = task.video?.images?.length ? task.video.images : task.files;
+  const [{ index, image, previous, frame, nextIndex, settled, fadeIn }, setSelection] = useState<AlbumSelection>(() => ({
+    index: startAtLast ? images.length - 1 : 0,
+  }));
+  const activeDot = useRef<HTMLButtonElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
   const selected = images[index];
   const isLive = useCallback((index: number) => task.status === 'completed' && !!task.files[index]?.video, [task.status, task.files]);
   const live = isLive(index);
   const imageReady = useCallback((image: AlbumImage | undefined) => {
+    onMediaReady?.(!!image);
     setSelection(current => current.index === index
-      ? { ...current, image, previous: image ? current.previous : undefined }
+      ? { ...current, image, settled: true, previous: image ? current.previous : undefined }
       : current);
-  }, [index]);
+  }, [index, onMediaReady]);
+  const liveReady = useCallback((ready: boolean) => {
+    onMediaReady?.(ready);
+    setSelection(current => current.index === index && !current.settled ? { ...current, settled: true } : current);
+  }, [index, onMediaReady]);
   const transitionTo = useCallback((current: AlbumSelection, next: number, animate: boolean): AlbumSelection => {
     if (next === (current.nextIndex ?? current.index)) return current;
     // Let the current fade finish before showing another slide.
     if (animate && current.previous && current.image) return { ...current, nextIndex: next };
-    if (current.previous?.index === next) return { index: next, image: current.previous.image };
+    if (current.previous?.index === next) return { index: next, image: current.previous.image, settled: true };
     const visible = current.image && !isLive(current.index)
       ? { index: current.index, image: current.image }
       : current.previous;
-    return { index: next, previous: animate && !isLive(next) ? visible : undefined };
+    const outgoing = animate && !isLive(next) ? visible : undefined;
+    return { index: next, previous: outgoing, fadeIn: animate && !outgoing };
   }, [isLive]);
-  const selectImage = (next: number) => {
+  const selectImage = useCallback((next: number) => {
     const animate = expanded && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (slideshow && animate && next !== (nextIndex ?? index) && (frame || live || isLive(next))) {
+      const retained = frame ?? captureWorkFrame(stage.current);
+      if (retained) {
+        setSelection({ index: next, frame: retained });
+        return;
+      }
+    }
     setSelection(current => transitionTo(current, next, animate));
-  };
+  }, [expanded, slideshow, nextIndex, index, frame, live, isLive, transitionTo]);
+  useEffect(() => {
+    if (!slideshow || !open || images.length < 2 || !settled || previous || frame) return;
+    const timer = window.setTimeout(() => selectImage((index + 1) % images.length), 3000);
+    return () => window.clearTimeout(timer);
+  }, [slideshow, open, images.length, settled, previous, frame, index, selectImage]);
   const finishFade = () => {
     setSelection(current => {
       if (current.index !== index || current.previous !== previous) return current;
       const next = current.nextIndex;
-      if (next === undefined || next === index) return { index, image: current.image };
+      if (next === undefined || next === index) return { index, image: current.image, settled: current.settled };
       return {
         index: next,
         image: previous?.index === next ? previous.image : undefined,
+        settled: previous?.index === next,
+        fadeIn: isLive(next) || !current.image,
         previous: current.image && !isLive(next) ? { index, image: current.image } : undefined,
       };
     });
@@ -211,40 +253,34 @@ function AlbumGallery({ task, expanded = false, open = true }: { task: Task; exp
     if (item.left < bounds.left) strip.scrollLeft += item.left - bounds.left;
     if (item.right > bounds.right) strip.scrollLeft += item.right - bounds.right;
   }, [index]);
-  useEffect(() => {
-    const element = gallery.current;
-    if (!expanded || !open || !element || images.length < 2) return;
-    const wheel = (event: WheelEvent) => {
-      if (event.ctrlKey || event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-      event.preventDefault();
-      const now = event.timeStamp;
-      const elapsed = now - lastWheel.current;
-      lastWheel.current = now;
-      // Treat a wheel/trackpad burst as one gesture, including its inertia.
-      if (elapsed < 180) return;
-      const animate = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      setSelection(current => {
-        const target = current.nextIndex ?? current.index;
-        const next = Math.max(0, Math.min(images.length - 1, target + Math.sign(event.deltaY)));
-        return transitionTo(current, next, animate);
-      });
-    };
-    // React's passive wheel listener cannot stop the dialog from scrolling.
-    element.addEventListener('wheel', wheel, { passive: false });
-    return () => element.removeEventListener('wheel', wheel);
-  }, [expanded, open, images.length, transitionTo]);
+  useImperativeHandle(navigation, () => ({
+    step(direction) {
+      const next = (nextIndex ?? index) + direction;
+      if (next >= 0 && next < images.length) {
+        selectImage(next);
+        return true;
+      }
+      // Let a queued boundary slide become active before leaving the album.
+      return nextIndex !== undefined;
+    },
+  }));
   const stills = previous ? [previous, { index, image }] : [{ index, image }];
-  return <div ref={gallery} className={cn('album-gallery', expanded && 'is-expanded')}>
-    <div className="album-stage flex items-center justify-center">
-      {expanded && live ? <GalleryVideo key={index} task={task} index={index} open={open} /> : stills.map(still => {
+  return <div className={cn('album-gallery', expanded && 'is-expanded')}>
+    <div ref={stage} className="album-stage flex items-center justify-center">
+      {expanded && live ? <GalleryVideo key={index} task={task} index={index} open={open} fadeIn={slideshow && fadeIn && settled} onMediaReady={liveReady} /> : stills.map(still => {
         const outgoing = still.index !== index;
         return <div key={still.index} aria-hidden={outgoing || undefined}
-          className={cn('album-still', outgoing && 'album-still-outgoing', outgoing && image && 'is-fading')}
+          className={cn('album-still', outgoing && 'album-still-outgoing', outgoing && image && 'is-fading', !outgoing && slideshow && fadeIn && image && 'album-slide-fade-in')}
           onAnimationEnd={outgoing ? event => { if (event.target === event.currentTarget) finishFade(); } : undefined}>
           {still.image && !live && <img className="media-atmosphere" src={still.image.source} alt="" aria-hidden="true" />}
           <GalleryImage task={task} index={still.index} onReadyChange={outgoing ? undefined : imageReady} />
         </div>;
       })}
+      {frame && <div className={cn('album-still album-still-outgoing', settled && 'is-fading')} aria-hidden="true"
+        ref={node => { if (node && frame.parentElement !== node) node.append(frame); }}
+        onAnimationEnd={event => {
+          if (event.target === event.currentTarget) setSelection(current => current.frame === frame ? { ...current, frame: undefined } : current);
+        }} />}
       {expanded && images.length > 1 && <div className={cn('album-dot-overlay', live && 'is-live')}>
         <div className="album-dots" role="group" aria-label="切换图集媒体">
           {images.map((_, i) => <Button key={i} ref={i === index ? activeDot : undefined} size="icon-sm" variant="ghost" className="album-dot" aria-label={`查看第 ${i + 1} 张图片`} aria-pressed={i === index} onClick={() => selectImage(i)}><span aria-hidden="true" /></Button>)}
@@ -279,13 +315,14 @@ function useCoverOperations(): CoverOperations {
   return { pending, run };
 }
 
-function VideoCover({ task, mode = 'preview', feed = false, operations, onOpen, renderTask }: {
+function VideoCover({ task, mode = 'preview', feed = false, operations, onOpen, renderTask, actionTooltipSide }: {
   task: Task;
   mode?: 'preview' | 'thumbnail' | 'details' | 'actions';
   feed?: boolean;
   operations: CoverOperations;
   onOpen?: (trigger: HTMLElement) => void;
   renderTask?: (cover: React.ReactNode, actions: CoverMenuActions) => React.ReactNode;
+  actionTooltipSide?: 'bottom';
 }) {
   const small = mode === 'thumbnail';
   const inDetails = mode === 'details';
@@ -338,7 +375,7 @@ function VideoCover({ task, mode = 'preview', feed = false, operations, onOpen, 
     });
   }
   if (mode === 'actions') return available ? <DropdownMenu>
-    <Tooltip><TooltipTrigger asChild><DropdownMenuTrigger asChild><Button size="icon-sm" variant="ghost" aria-label="封面操作"><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger></TooltipTrigger><TooltipContent>封面操作</TooltipContent></Tooltip>
+    <Tooltip><TooltipTrigger asChild><DropdownMenuTrigger asChild><Button size="icon-sm" variant="ghost" aria-label="封面操作"><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger></TooltipTrigger><TooltipContent side={actionTooltipSide}>封面操作</TooltipContent></Tooltip>
     <DropdownMenuContent align="end" aria-label="封面操作">
       <DropdownMenuItem disabled={!!pending} onSelect={() => void saveCover()}><Download />{saving ? '保存中…' : '另存为…'}</DropdownMenuItem>
       <DropdownMenuItem disabled={!!pending} onSelect={() => void copyCover()}><Copy />{copying ? '复制中…' : '复制封面'}</DropdownMenuItem>
@@ -375,33 +412,219 @@ function VideoCover({ task, mode = 'preview', feed = false, operations, onOpen, 
 type TaskMediaEntry = {
   id: string;
   returnFocus: HTMLElement | null;
-  playVideo?: true;
-  asset?: PlaybackSubject;
+  streamStep?: number;
+} & ({ kind: 'task'; playVideo?: true; asset?: PlaybackSubject; startAtLast?: boolean }
+  | { kind: 'asset'; asset: PlaybackSubject });
+
+function playbackKey(entry: TaskMediaEntry) {
+  return `${entry.kind}:${entry.id}:${entry.streamStep ?? 'details'}`;
+}
+
+const wheelIdleMs = 420;
+const workSwitchPauseMs = 700;
+const wheelPixelThreshold = 80;
+const streamWheelPixelThreshold = 48;
+const workSlideDurationMs = 420;
+const workStageSelector = '.album-stage, .video-player-stage:not(.stream-video-slot[hidden] *)';
+const workImageSelector = '.album-still:not([aria-hidden]) img:not(.media-atmosphere)';
+const streamWorkSelector = '.stream-playback-work:not(.stream-playback-outgoing)';
+
+type WorkSwitch = {
+  next: TaskMediaEntry;
+  direction: MediaDirection;
+  frame?: HTMLCanvasElement;
+  page?: { element: HTMLDivElement; detailsScrollTop: number; coveredSidebar?: HTMLElement; coveredControls?: HTMLElement };
+  animations?: Animation[];
+  finishTimer?: number;
 };
 
-function TaskMediaDialog({ task, entry, playable, coverOperations, removedIds, close, fallbackFocus }: {
+function captureWorkFrame(stage: Element | null): HTMLCanvasElement | undefined {
+  const video = stage?.querySelector('video');
+  const currentImage = stage?.querySelector<HTMLImageElement>(workImageSelector);
+  const image = currentImage?.naturalWidth ? currentImage
+    : stage?.querySelector<HTMLImageElement>('.album-still-outgoing img:not(.media-atmosphere)');
+  const media = video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA ? video
+    : image?.naturalWidth ? image : stage?.querySelector<HTMLCanvasElement>('canvas.media-work-frame');
+  if (!media) return;
+  const width = media instanceof HTMLVideoElement ? media.videoWidth : media instanceof HTMLImageElement ? media.naturalWidth : media.width;
+  const height = media instanceof HTMLVideoElement ? media.videoHeight : media instanceof HTMLImageElement ? media.naturalHeight : media.height;
+  if (!width || !height) return;
+  const frame = document.createElement('canvas');
+  const scale = Math.min(1, 1280 / Math.max(width, height));
+  frame.width = Math.max(1, Math.round(width * scale));
+  frame.height = Math.max(1, Math.round(height * scale));
+  const context = frame.getContext('2d');
+  if (!context) return;
+  try {
+    context.drawImage(media, 0, 0, frame.width, frame.height);
+  } catch {
+    return;
+  }
+  frame.className = 'media-work-frame';
+  frame.style.objectFit = getComputedStyle(media).objectFit;
+  frame.setAttribute('aria-hidden', 'true');
+  return frame;
+}
+
+function clearWorkFrame(switching: WorkSwitch) {
+  window.clearTimeout(switching.finishTimer);
+  switching.animations?.forEach(animation => animation.cancel());
+  if (switching.page?.coveredSidebar) switching.page.coveredSidebar.inert = false;
+  if (switching.page?.coveredControls) switching.page.coveredControls.inert = false;
+  switching.page?.element.remove();
+  switching.frame?.remove();
+}
+
+function captureStreamWork(dialog: Element, frame?: HTMLCanvasElement): WorkSwitch['page'] {
+  const sidebar = dialog.querySelector(`${streamWorkSelector} > .task-media-sidebar`);
+  if (!sidebar) return;
+  const element = document.createElement('div');
+  element.className = 'stream-playback-work stream-playback-outgoing';
+  element.inert = true;
+  element.setAttribute('aria-hidden', 'true');
+  const media = document.createElement('div');
+  media.className = 'task-media-panel';
+  if (frame) media.append(frame);
+  const details = sidebar.cloneNode(true) as HTMLElement;
+  details.querySelectorAll('[id]').forEach(node => node.removeAttribute('id'));
+  element.append(media, details);
+  return { element, detailsScrollTop: sidebar.querySelector('.task-details-content')?.scrollTop ?? 0 };
+}
+
+function TaskMediaDialog({ task, entry, playable, preload, coverOperations, removedIds, adjacent, navigate, close, fallbackFocus }: {
   task?: Task;
   entry: TaskMediaEntry | null;
   playable: boolean;
+  preload?: { entry: TaskMediaEntry; subject: PlaybackSubject };
   coverOperations: CoverOperations;
   removedIds: ReadonlySet<string>;
+  adjacent: (direction: MediaDirection) => TaskMediaEntry | undefined;
+  navigate: (previous: TaskMediaEntry, next: TaskMediaEntry) => void;
   close: () => void;
   fallbackFocus: () => HTMLElement | null;
 }) {
-  const last = useRef<{ task: Task; entry: TaskMediaEntry; playable: boolean } | null>(null);
+  const last = useRef<{ task?: Task; entry: TaskMediaEntry; playable: boolean } | null>(null);
+  const [dialog, setDialog] = useState<HTMLDivElement | null>(null);
+  const [streamMaximized, setStreamMaximized] = useState(false);
+  const streamCoverControls = useRef<HTMLSpanElement>(null);
   const details = useRef<HTMLDivElement>(null);
+  const albumNavigation = useRef<AlbumNavigation>(null);
+  const wheelGesture = useRef({ lastAt: -Infinity, lockedUntil: -Infinity, delta: 0, consumed: false });
+  const workSwitch = useRef<WorkSwitch | null>(null);
+  const focusedEntry = useRef<TaskMediaEntry | null>(null);
   const [measured, setMeasured] = useState<{ entry: TaskMediaEntry; size: MediaSize }>();
-  const open = !!task && !!entry;
-  if (task && entry) last.current = { task, entry, playable };
+  const open = !!entry && (entry.kind === 'asset' || !!task);
+  if (open) last.current = { task, entry, playable };
   const current = last.current;
-  const album = current?.task.video?.kind === 'image_album' && !current.task.file_missing
-    && !!(current.task.video.images?.length || current.task.files.length);
-  const video = current?.playable ? current.entry.asset ?? current.task : null;
+  const currentTask = current?.task;
+  const streaming = current?.entry.streamStep !== undefined;
+  const albumImages = currentTask && albumMedia(currentTask);
+  const album = !!albumImages?.length;
+  const standalone = current?.entry.kind === 'asset';
+  const video = standalone ? current.entry.asset : current?.playable ? current.entry.asset ?? currentTask : undefined;
   const mediaEntry = video || album ? current?.entry : undefined;
-  const taskId = current?.task.id;
-  const albumImages = album ? (current.task.video?.images?.length ? current.task.video.images : current.task.files) : undefined;
+  const taskId = currentTask?.id;
+  const onMediaReady = useCallback((ready: boolean) => {
+    const switching = workSwitch.current;
+    if (!switching || switching.next !== entry || switching.animations) return;
+    const finish = () => {
+      if (workSwitch.current !== switching) return;
+      workSwitch.current = null;
+      clearWorkFrame(switching);
+      wheelGesture.current.lockedUntil = performance.now() + workSwitchPauseMs;
+      if (switching.page && document.activeElement === dialog) details.current?.focus({ preventScroll: true });
+    };
+    const stage = dialog?.querySelector(workStageSelector);
+    const outgoing = switching.page?.element ?? switching.frame;
+    const incoming = switching.page ? dialog?.querySelector(streamWorkSelector)
+      : stage?.querySelector('video') ?? stage?.querySelector(workImageSelector)?.closest('.album-still');
+    if (!ready || !outgoing?.isConnected || !incoming || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      finish();
+      return;
+    }
+    if (!switching.page) stage?.append(outgoing);
+    const offset = switching.direction * 100;
+    const timing = { duration: workSlideDurationMs, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'both' } as const;
+    const leaving = outgoing.animate([{ transform: 'translateY(0)' }, { transform: `translateY(${-offset}%)` }], timing);
+    const entering = incoming.animate([{ transform: `translateY(${offset}%)` }, { transform: 'translateY(0)' }], timing);
+    switching.animations = [leaving, entering];
+    entering.onfinish = finish;
+    entering.oncancel = finish;
+    switching.finishTimer = window.setTimeout(finish, workSlideDurationMs + 480);
+  }, [dialog, entry]);
+  useLayoutEffect(() => {
+    const previous = focusedEntry.current;
+    focusedEntry.current = open ? entry : null;
+    if (open && !previous) setStreamMaximized(false);
+    const switching = workSwitch.current;
+    if (switching) {
+      if (!open || switching.next !== mediaEntry) {
+        workSwitch.current = null;
+        clearWorkFrame(switching);
+      } else if (switching.page && dialog && !switching.page.element.isConnected) {
+        const sidebar = dialog.querySelector<HTMLElement>(`${streamWorkSelector} > .task-media-sidebar`);
+        if (sidebar) {
+          sidebar.inert = true;
+          switching.page.coveredSidebar = sidebar;
+        }
+        if (streamCoverControls.current) {
+          streamCoverControls.current.inert = true;
+          switching.page.coveredControls = streamCoverControls.current;
+        }
+        dialog.append(switching.page.element);
+        const oldDetails = switching.page.element.querySelector('.task-details-content');
+        if (oldDetails) oldDetails.scrollTop = switching.page.detailsScrollTop;
+      } else if (!switching.page && switching.frame && !switching.frame.isConnected) {
+        const stage = dialog?.querySelector(workStageSelector) ?? dialog?.querySelector('.task-media-panel');
+        stage?.append(switching.frame);
+      }
+    }
+    if (open && previous && previous !== entry) {
+      const focus = workSwitch.current?.page?.coveredSidebar ? dialog : details.current ?? dialog;
+      focus?.focus({ preventScroll: true });
+    }
+  }, [dialog, entry, mediaEntry, open]);
+  useEffect(() => () => {
+    const switching = workSwitch.current;
+    workSwitch.current = null;
+    if (switching) clearWorkFrame(switching);
+  }, []);
+  useEffect(() => {
+    const gesture = wheelGesture.current;
+    if (!open) Object.assign(gesture, { lastAt: -Infinity, lockedUntil: -Infinity, delta: 0, consumed: false });
+    if (!open || !mediaEntry || !dialog) return;
+    const wheel = (event: WheelEvent) => {
+      const mode = event.deltaMode;
+      if (!(event.target instanceof Element) || !event.target.closest('.task-media-panel, .video-player-stage')
+        || event.ctrlKey || event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      event.preventDefault();
+      if (streaming && mode === WheelEvent.DOM_DELTA_PIXEL && Math.abs(event.deltaY) < 4) return;
+      if (event.timeStamp - gesture.lastAt >= wheelIdleMs) {
+        gesture.delta = 0;
+        gesture.consumed = false;
+      }
+      gesture.lastAt = event.timeStamp;
+      if (event.timeStamp < gesture.lockedUntil || workSwitch.current) gesture.consumed = true;
+      if (gesture.consumed) return;
+      const direction: MediaDirection = event.deltaY > 0 ? 1 : -1;
+      if (mode === WheelEvent.DOM_DELTA_PIXEL) {
+        if (gesture.delta * direction < 0) gesture.delta = 0;
+        gesture.delta += event.deltaY;
+        if (Math.abs(gesture.delta) < (streaming ? streamWheelPixelThreshold : wheelPixelThreshold)) return;
+      }
+      gesture.consumed = true;
+      if (album && (albumNavigation.current?.step(direction) ?? true)) return;
+      const next = adjacent(direction);
+      if (!next) return;
+      const frame = captureWorkFrame(dialog.querySelector(workStageSelector));
+      workSwitch.current = { next, direction, frame, page: streaming ? captureStreamWork(dialog, frame) : undefined };
+      navigate(mediaEntry, next);
+    };
+    dialog.addEventListener('wheel', wheel, { passive: false });
+    return () => dialog.removeEventListener('wheel', wheel);
+  }, [dialog, open, mediaEntry, album, adjacent, navigate, streaming]);
   const albumBounds = useMemo(() => {
-    if (!albumImages) return;
+    if (streaming || !albumImages) return;
     const size = { width: 0, height: 0 };
     const missing: number[] = [];
     albumImages.forEach(({ width, height }, index) => {
@@ -413,7 +636,7 @@ function TaskMediaDialog({ task, entry, playable, coverOperations, removedIds, c
       }
     });
     return { size, missing };
-  }, [albumImages]);
+  }, [albumImages, streaming]);
   const waitingForAlbumSize = !!(albumBounds?.missing.length && measured?.entry !== mediaEntry);
   useEffect(() => {
     if (!open || !waitingForAlbumSize || !mediaEntry || !taskId || !albumBounds) return;
@@ -437,24 +660,37 @@ function TaskMediaDialog({ task, entry, playable, coverOperations, removedIds, c
   }, [open, waitingForAlbumSize, mediaEntry, taskId, albumBounds]);
   const mediaSize = measured?.entry === mediaEntry ? measured?.size : albumBounds?.size;
   const onMediaSize = useCallback((size: MediaSize) => {
-    if (mediaEntry && size.width > 0 && size.height > 0) {
+    if (!streaming && mediaEntry && size.width > 0 && size.height > 0) {
       setMeasured({ entry: mediaEntry, size });
     }
-  }, [mediaEntry]);
+  }, [mediaEntry, streaming]);
   const mediaStyle = mediaSize?.width && mediaSize.height ? {
     '--task-media-intrinsic-width': `${mediaSize.width}px`,
     '--task-media-aspect': mediaSize.width / mediaSize.height,
   } as React.CSSProperties : undefined;
-  const renderLayout = (media: React.ReactNode, tools?: React.ReactNode) => current && <>
+  const size = mediaSize ?? video?.video;
+  const ratio = size?.width && size.height ? size.width / size.height : 0;
+  const playerStyle = { '--video-player-ratio': Number.isFinite(ratio) && ratio > 0 ? ratio : 16 / 9 } as React.CSSProperties;
+  const albumGallery = currentTask && current?.entry.kind === 'task' && album && (waitingForAlbumSize
+    ? <Spinner className="m-auto" aria-label="正在加载图集" />
+    : <AlbumGallery key={currentTask.id} task={currentTask} expanded open={open} slideshow={streaming} startAtLast={current.entry.startAtLast} navigation={albumNavigation} onMediaReady={onMediaReady} />);
+  const taskDetails = currentTask && <TaskDetails key={currentTask.id} task={currentTask} regionRef={details}
+    coverTools={!streaming && (video || album) && <VideoCover task={currentTask} mode="actions" operations={coverOperations} />} />;
+  const renderLayout = (media: React.ReactNode, tools?: React.ReactNode) => <>
     <div className="task-media-panel">{media}</div>
-    <div className="task-media-sidebar">
-      <TaskDetails task={current.task} regionRef={details} coverTools={(video || album) && <VideoCover key={current.task.id} task={current.task} mode="actions" operations={coverOperations} />} />
+    {currentTask && <div className="task-media-sidebar">
+      {taskDetails}
       {tools}
-    </div>
+    </div>}
   </>;
+  const streamVideos = [
+    ...(video && mediaEntry ? [{ entry: mediaEntry, subject: video, preloading: false }] : []),
+    ...(open && preload ? [{ ...preload, preloading: true }] : []),
+  ];
+  const streamSizeAction = streamMaximized ? '还原大小' : '最大化';
 
   return <Dialog open={open} onOpenChange={next => { if (!next) close(); }}>
-    <DialogContent className={cn('task-media-dialog', album && 'album-dialog', video && 'video-player-dialog', mediaStyle && 'has-media-size')} style={mediaStyle} onOpenAutoFocus={event => {
+    <DialogContent ref={setDialog} showCloseButton={!streaming} className={cn(streaming ? 'stream-playback-dialog' : !standalone && 'task-media-dialog', streaming && streamMaximized && 'is-maximized', album && 'album-dialog', !streaming && video && 'video-player-dialog', !streaming && !standalone && mediaStyle && 'has-media-size')} style={streaming ? undefined : standalone ? playerStyle : mediaStyle} onOpenAutoFocus={event => {
       if (!details.current) return;
       event.preventDefault();
       details.current.focus({ preventScroll: true });
@@ -464,12 +700,38 @@ function TaskMediaDialog({ task, entry, playable, coverOperations, removedIds, c
       const available = target?.isConnected && !target.matches(':disabled') && !target.closest('[inert], [hidden]');
       (available ? target : fallbackFocus())?.focus({ preventScroll: true });
     }}>
-      <DialogTitle className="sr-only">任务详情</DialogTitle>
-      <DialogDescription className="sr-only">作品媒体与任务信息</DialogDescription>
-      {current && (video ? <PlaybackSession key={video.id} task={video} open={open} close={close} removedIds={removedIds} onMediaSize={onMediaSize} renderLayout={renderLayout} />
-        : renderLayout(album ? (waitingForAlbumSize ? <Spinner className="m-auto" aria-label="正在加载图集" />
-          : <AlbumGallery key={current.task.id} task={current.task} expanded open={open} />)
-          : <VideoCover key={current.task.id} task={current.task} mode="details" operations={coverOperations} />))}
+      {streaming ? <><DialogTitle className="sr-only">{currentTask ? taskTitle(currentTask) : video?.video?.title?.trim() || '流式播放'}</DialogTitle><DialogDescription className="sr-only">流式播放</DialogDescription></>
+        : standalone ? <DialogHeader className="pr-8"><DialogTitle className="line-clamp-2">{video?.video?.title?.trim() || '视频播放'}</DialogTitle><DialogDescription className="sr-only">本地视频播放器</DialogDescription></DialogHeader>
+        : <><DialogTitle className="sr-only">任务详情</DialogTitle><DialogDescription className="sr-only">作品媒体与任务信息</DialogDescription></>}
+      {streaming && <div className="stream-playback-controls">
+        <span ref={streamCoverControls} className="inline-flex empty:hidden">
+          {currentTask && (video || album) && <VideoCover key={currentTask.id} task={currentTask} mode="actions" operations={coverOperations} actionTooltipSide="bottom" />}
+        </span>
+        <Tooltip><TooltipTrigger asChild>
+          <Button size="icon-sm" variant="ghost" aria-label={streamSizeAction} onClick={() => setStreamMaximized(value => !value)}>
+            {streamMaximized ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
+          </Button>
+        </TooltipTrigger><TooltipContent side="bottom">{streamSizeAction}</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger asChild><DialogClose asChild>
+          <Button size="icon-sm" variant="ghost" aria-label="关闭"><X aria-hidden="true" /></Button>
+        </DialogClose></TooltipTrigger><TooltipContent side="bottom">关闭</TooltipContent></Tooltip>
+      </div>}
+      {streaming ? <div className="stream-playback-work">
+        <div className="task-media-panel">
+          {streamVideos.map(slot => <div key={playbackKey(slot.entry)} className="stream-video-slot" hidden={slot.preloading}>
+            <PlaybackSession task={slot.subject} open={open} close={close} removedIds={removedIds} loop preloading={slot.preloading}
+              onMediaReady={slot.preloading ? undefined : onMediaReady} renderLayout={media => media} />
+          </div>)}
+          {albumGallery}
+        </div>
+        <div className="task-media-sidebar">
+          {taskDetails ?? <div ref={details} className="task-details-content" role="region" aria-label="任务详细信息" tabIndex={0}>
+            <h2 className="task-details-title text-sm font-semibold">{video?.video?.title?.trim() || '视频播放'}</h2>
+            {video?.video?.width && video.video.height && <dl className="task-details-fields"><dt>分辨率</dt><dd>{video.video.width} × {video.video.height}</dd></dl>}
+          </div>}
+        </div>
+      </div> : video && mediaEntry ? <PlaybackSession key={playbackKey(mediaEntry)} task={video} open={open} close={close} removedIds={removedIds} onMediaSize={onMediaSize} onMediaReady={onMediaReady} renderLayout={standalone ? undefined : renderLayout} />
+        : currentTask && renderLayout(albumGallery || <VideoCover key={currentTask.id} task={currentTask} mode="details" operations={coverOperations} />)}
     </DialogContent>
   </Dialog>;
 }
@@ -593,7 +855,6 @@ function App() {
   useLayoutEffect(() => { pageContentRef.current?.scrollTo(0, 0); }, [page]);
   const backup = useBackupTasks();
   const backupSettings = backup.settings;
-  const backupDialogs = useBackupDialogs();
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('download');
   const settingsActive = page === 'settings';
   const backupSettingsActive = settingsActive && settingsSection === 'backup';
@@ -642,8 +903,8 @@ function App() {
   const [taskView, setTaskView] = useState<TaskView>(() => localStorage.getItem(taskViewStorageKey) === 'feed' ? 'feed' : 'list');
   const coverOperations = useCoverOperations();
   const [mediaEntry, setMediaEntry] = useState<TaskMediaEntry | null>(null);
-  const viewedTask = tasks.find(task => task.id === mediaEntry?.id);
-  const viewPlaysVideo = !!mediaEntry?.playVideo && !!viewedTask && !waitingTaskActions.has(viewedTask.id) && canPlayTask(viewedTask);
+  const viewedTask = mediaEntry?.kind === 'task' ? tasks.find(task => task.id === mediaEntry.id) : undefined;
+  const viewPlaysVideo = mediaEntry?.kind === 'task' && !!mediaEntry.playVideo && !!viewedTask && !waitingTaskActions.has(viewedTask.id) && canPlayTask(viewedTask);
   const [taskStatus, setTaskStatus] = useState('all');
   const [selectedRow, setSelectedRow] = useState<string | null>(null);
   const [clearHistoryPlatform, setClearHistoryPlatform] = useState<string | null>(null);
@@ -815,21 +1076,22 @@ function App() {
     const message = errorText(error);
     toast.error('操作失败', { id: 'action-error', description: message, duration: 8000 });
   }
+  function assetPlayback(asset: BackupAsset): PlaybackSubject {
+    return { id: asset.asset_id, path: asset.path, completed_at: null, video: asset.metadata, asset: true };
+  }
+  function playTaskEntry(task: Task, returnFocus: HTMLElement | null, streamStep?: number): TaskMediaEntry {
+    const asset = task.file_missing ? backup.assetsById.get(task.asset_id ?? '') : undefined;
+    return { kind: 'task', id: task.id, returnFocus, streamStep, playVideo: true, asset: asset && assetPlayback(asset) };
+  }
   function playTask(task: Task, trigger?: HTMLElement) {
     if (busy || waitingTaskActions.has(task.id) || !canPlayTask(task)) return false;
-    if (mediaEntry?.id === task.id && mediaEntry.playVideo) return true;
-    const asset = task.file_missing ? backup.assetsById.get(task.asset_id ?? '') : undefined;
+    if (mediaEntry?.kind === 'task' && mediaEntry.id === task.id && mediaEntry.playVideo) return true;
     const row = Array.from(taskListRef.current?.querySelectorAll<HTMLElement>('[data-task-row]') ?? []).find(node => node.dataset.taskRow === task.id);
-    setMediaEntry({
-      id: task.id,
-      returnFocus: trigger ?? row?.querySelector<HTMLElement>('.task-context-target') ?? null,
-      playVideo: true,
-      asset: asset ? { id: asset.asset_id, path: asset.path, completed_at: null, video: asset.metadata, asset: true } : undefined,
-    });
+    setMediaEntry(playTaskEntry(task, trigger ?? row?.querySelector<HTMLElement>('.task-context-target') ?? null));
     return true;
   }
   function openTaskCover(task: Task, returnFocus: HTMLElement) {
-    if (!playTask(task, returnFocus)) setMediaEntry({ id: task.id, returnFocus });
+    if (!playTask(task, returnFocus)) setMediaEntry({ kind: 'task', id: task.id, returnFocus });
   }
   async function pasteLink() {
     const field = inputRef.current;
@@ -870,7 +1132,7 @@ function App() {
     }
     setTasks(old => old.filter(task => !fresh.has(task.id)));
     setSelected(old => old && fresh.has(old) ? null : old);
-    setMediaEntry(old => old && fresh.has(old.id) ? null : old);
+    setMediaEntry(old => old?.kind === 'task' && fresh.has(old.id) ? null : old);
     if (focusedRow) requestAnimationFrame(() => {
       if (list && taskListRef.current === list && (document.activeElement === document.body || focusedRow.contains(document.activeElement))) {
         (nextFocus?.isConnected ? nextFocus : list).focus({preventScroll:true});
@@ -936,6 +1198,39 @@ function App() {
     if (status) statusCounts[status]++;
   }
   const visibleAssets = filteredAssets.filter(a => page !== 'tasks' || taskStatus === 'all' || backupAssetStatus(backup, a) === taskStatus);
+  function adjacentMedia(direction: MediaDirection): TaskMediaEntry | undefined {
+    if (!taskListPage || !mediaEntry || busy) return;
+    const rows = taskListRows(visible, visibleAssets);
+    const current = rows.findIndex(row => row.kind === mediaEntry.kind && (row.kind === 'task' ? row.task.id : row.asset.asset_id) === mediaEntry.id);
+    if (current < 0) return;
+    const { returnFocus } = mediaEntry;
+    const streamStep = mediaEntry.streamStep === undefined ? undefined : mediaEntry.streamStep + 1;
+    for (let i = current + direction; i >= 0 && i < rows.length; i += direction) {
+      const row = rows[i];
+      if (row.kind === 'task') {
+        const { task } = row;
+        if (removedIds.current.has(task.id) || waitingTaskActions.has(task.id)) continue;
+        if (canPlayTask(task)) {
+          return playTaskEntry(task, returnFocus, streamStep);
+        }
+        if (albumMedia(task)?.length && !(task.asset_id && backupDeletion(backup, task.asset_id))) {
+          return { kind: 'task', id: task.id, returnFocus, streamStep, startAtLast: direction === -1 };
+        }
+      } else {
+        const { asset } = row;
+        if (backup.exitingAssets.some(item => item.asset_id === asset.asset_id)) continue;
+        const status = backupAssetStatus(backup, asset);
+        if (canPlayBackupAsset(asset, !!backupDeletion(backup, asset.asset_id), taskView === 'feed' && (status === 'queued' || status === 'downloading'))) {
+          return { kind: 'asset', id: asset.asset_id, returnFocus, streamStep, asset: assetPlayback(asset) };
+        }
+      }
+    }
+  }
+  const nextStreamEntry = mediaEntry?.streamStep !== undefined ? adjacentMedia(1) : undefined;
+  // Preparing a backup asset can restore it from the remote library. Warm local videos only.
+  const preloadSubject = nextStreamEntry?.kind === 'task' && nextStreamEntry.playVideo && !nextStreamEntry.asset
+    ? tasks.find(task => task.id === nextStreamEntry.id) : undefined;
+  const preload = nextStreamEntry && preloadSubject ? { entry: nextStreamEntry, subject: preloadSubject } : undefined;
   function showAuthorWorks(task: Task) {
     const query = authorSearch(task.video);
     if (!query) return;
@@ -953,7 +1248,13 @@ function App() {
     const deleting = task.asset_id ? backupDeletion(backup, task.asset_id) : null;
     const deleteFromBackup = !!task.asset_id && !!backupSettings?.enabled && (backupSettings.provider_type !== 'telegram' || backupSettings.can_delete_owned_media) && !!member && !member.remote_deleted;
     const deleteUnavailable = !!member && backupSettings?.enabled && backupSettings.provider_type === 'telegram' && !backupSettings.can_delete_owned_media;
-    return <TaskMoreMenu children={children} backupActions={task.asset_id ? <BackupTransferMenuItems backup={backup} assetId={task.asset_id} context={children !== undefined} /> : undefined} coverActions={coverActions} onOpenChange={open => { if (open) React.startTransition(() => setSelectedRow(task.id)); }} task={task} play={canPlayTask(task) ? () => playTask(task) : undefined} deleteBackup={deleteFromBackup} release={member?.remote_state === 'backed_up' && !member.remote_deleted ? () => { void run(async () => { await api.releaseAsset(task.asset_id!); setTasks(await api.tasks()); toast.success('本机副本已释放'); }); } : undefined} busy={busy || !!deleting || waitingTaskActions.has(task.id)} waitingCancel={waitingTaskActions.has(task.id) ? () => { void api.cancel(task.id).catch(reportActionError); } : undefined} cancel={taskListPage && ['parsing','ready','queued','downloading'].includes(task.status) ? returnFocus => requestCancel(task, returnFocus) : undefined} transcript={task.status === 'completed' && task.video?.kind !== 'image_album' && (!task.file_missing || videoTranscripts.values[task.id]?.has_result || !!asset && (asset.has_transcript || asset.in_current_space !== false && !asset.remote_deleted)) ? { label: videoTranscripts.values[task.id]?.state === 'running' ? '正在提取文案' : videoTranscripts.values[task.id]?.has_result || asset?.has_transcript ? '查看文案' : '提取文案', open: returnFocus => videoTranscripts.open(task.id, returnFocus) } : undefined} reveal={() => { void run(() => api.reveal(task.id)); }} copy={() => { void run(() => navigator.clipboard.writeText(task.video?.canonical_url ?? task.telegram_link!)); }} copyPath={() => { void run(async () => { await navigator.clipboard.writeText(displayPath(task.path)); toast.success('本地地址已复制'); }); }} remove={() => { void runTaskAction(task.id, () => removeTask(task.id)); }} deleteFile={deleteUnavailable ? undefined : deleteFromBackup ? () => { void backup.deleteAsset(task.asset_id!); } : () => { void runTaskAction(task.id, () => removeTask(task.id, true)); }} />;
+    const stream = taskListPage && children !== undefined && !removedIds.current.has(task.id)
+      && (canPlayTask(task) || !!albumMedia(task)?.length)
+      ? (returnFocus: HTMLElement | null) => setMediaEntry(canPlayTask(task)
+        ? playTaskEntry(task, returnFocus, 0)
+        : { kind: 'task', id: task.id, returnFocus, streamStep: 0 })
+      : undefined;
+    return <TaskMoreMenu stream={stream} children={children} backupActions={task.asset_id ? <BackupTransferMenuItems backup={backup} assetId={task.asset_id} context={children !== undefined} /> : undefined} coverActions={coverActions} onOpenChange={open => { if (open) React.startTransition(() => setSelectedRow(task.id)); }} task={task} play={canPlayTask(task) ? () => playTask(task) : undefined} deleteBackup={deleteFromBackup} release={member?.remote_state === 'backed_up' && !member.remote_deleted ? () => { void run(async () => { await api.releaseAsset(task.asset_id!); setTasks(await api.tasks()); toast.success('本机副本已释放'); }); } : undefined} busy={busy || !!deleting || waitingTaskActions.has(task.id)} waitingCancel={waitingTaskActions.has(task.id) ? () => { void api.cancel(task.id).catch(reportActionError); } : undefined} cancel={taskListPage && ['parsing','ready','queued','downloading'].includes(task.status) ? returnFocus => requestCancel(task, returnFocus) : undefined} transcript={task.status === 'completed' && task.video?.kind !== 'image_album' && (!task.file_missing || videoTranscripts.values[task.id]?.has_result || !!asset && (asset.has_transcript || asset.in_current_space !== false && !asset.remote_deleted)) ? { label: videoTranscripts.values[task.id]?.state === 'running' ? '正在提取文案' : videoTranscripts.values[task.id]?.has_result || asset?.has_transcript ? '查看文案' : '提取文案', open: returnFocus => videoTranscripts.open(task.id, returnFocus) } : undefined} reveal={() => { void run(() => api.reveal(task.id)); }} copy={() => { void run(() => navigator.clipboard.writeText(task.video?.canonical_url ?? task.telegram_link!)); }} copyPath={() => { void run(async () => { await navigator.clipboard.writeText(displayPath(task.path)); toast.success('本地地址已复制'); }); }} remove={() => { void runTaskAction(task.id, () => removeTask(task.id)); }} deleteFile={deleteUnavailable ? undefined : deleteFromBackup ? () => { void backup.deleteAsset(task.asset_id!); } : () => { void runTaskAction(task.id, () => removeTask(task.id, true)); }} />;
   }
   function canPlayTask(task: Task) {
     if (task.status !== 'completed' || !task.video || task.video.kind === 'image_album') return false;
@@ -963,7 +1264,7 @@ function App() {
     return !!backupSettings?.enabled && !!asset && !asset.remote_deleted && asset.remote_state === 'backed_up';
   }
   function playAction(task: Task, overlay = false) {
-    return <Tooltip><TooltipTrigger asChild><Button size={taskListPage ? 'icon' : 'sm'} variant={taskListPage ? 'ghost' : 'outline'} className={cn('task-play', overlay && 'task-feed-play cursor-pointer')} aria-label="播放视频" disabled={busy || mediaEntry?.id === task.id} onClick={event => playTask(task, event.currentTarget)}><Play aria-hidden="true" />{!taskListPage && '播放'}</Button></TooltipTrigger><TooltipContent>在应用内播放</TooltipContent></Tooltip>;
+    return <Tooltip><TooltipTrigger asChild><Button size={taskListPage ? 'icon' : 'sm'} variant={taskListPage ? 'ghost' : 'outline'} className={cn('task-play', overlay && 'task-feed-play cursor-pointer')} aria-label="播放视频" disabled={busy || mediaEntry?.kind === 'task' && mediaEntry.id === task.id} onClick={event => playTask(task, event.currentTarget)}><Play aria-hidden="true" />{!taskListPage && '播放'}</Button></TooltipTrigger><TooltipContent>在应用内播放</TooltipContent></Tooltip>;
   }
   function cancelAction(task: Task, overlay = false) {
     return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className={overlay ? 'task-feed-play' : undefined} aria-label={task.canceling ? '正在取消…' : task.status === 'parsing' ? '取消解析' : '取消'} disabled={busy || task.canceling} onClick={event => requestCancel(task, event.currentTarget)}>{task.canceling ? <Spinner aria-hidden="true" /> : <X aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent>{task.canceling ? '正在取消…' : task.status === 'parsing' ? '取消解析' : '取消下载'}</TooltipContent></Tooltip>;
@@ -992,7 +1293,7 @@ function App() {
     return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="task-feed-progress-cancel" aria-label={task.canceling ? '正在取消…' : '取消下载'} disabled={busy || task.canceling} onClick={event => requestCancel(task, event.currentTarget)}><Progress variant="circular" updateIntervalMs={1000} aria-label={queued ? '等待下载' : task.merging ? '合并进度' : '下载进度'} aria-valuetext={task.canceling ? '正在取消' : queued ? '等待下载' : task.merging ? '正在合并音视频' : downloadPercent(task) == null ? '正在下载，大小未知' : undefined} value={queued || task.merging ? null : downloadPercent(task)}>{task.canceling ? <Spinner aria-hidden="true" /> : queued ? '等待' : task.merging ? '合并' : undefined}</Progress></Button></TooltipTrigger><TooltipContent>{task.canceling ? '正在取消…' : '点击取消下载'}</TooltipContent></Tooltip>;
   }
   function albumAction(task: Task, overlay = false) {
-    return <Tooltip><TooltipTrigger asChild><Button size={taskListPage ? 'icon' : 'sm'} variant={taskListPage ? 'ghost' : 'outline'} className={overlay ? 'task-feed-play cursor-pointer' : undefined} aria-label="查看图集" onClick={event => setMediaEntry({ id: task.id, returnFocus: event.currentTarget })}>{taskListPage ? <Images aria-hidden="true" /> : <Eye aria-hidden="true" />}{!taskListPage && '查看图集'}</Button></TooltipTrigger><TooltipContent>查看图集</TooltipContent></Tooltip>;
+    return <Tooltip><TooltipTrigger asChild><Button size={taskListPage ? 'icon' : 'sm'} variant={taskListPage ? 'ghost' : 'outline'} className={overlay ? 'task-feed-play cursor-pointer' : undefined} aria-label="查看图集" onClick={event => setMediaEntry({ kind: 'task', id: task.id, returnFocus: event.currentTarget })}>{taskListPage ? <Images aria-hidden="true" /> : <Eye aria-hidden="true" />}{!taskListPage && '查看图集'}</Button></TooltipTrigger><TooltipContent>查看图集</TooltipContent></Tooltip>;
   }
   function retryTask(task: Task) {
     if (task.video || (task.telegram_link && task.download_requested)) {
@@ -1043,7 +1344,7 @@ function App() {
     <footer className="flex items-center gap-2 text-xs text-muted-foreground"><FolderOpen className="size-4 shrink-0" /><span className="min-w-0 truncate" title={displayPath(settings?.download_directory)}>下载目录：{displayPath(settings?.download_directory) || '—'}</span><Button variant="link" onClick={() => setPage('settings')}>修改设置</Button></footer></div>}
     <RetainedTaskPage active={taskListPage}>
     {page === 'tasks' && <TaskStatusFilters value={taskStatus} counts={statusCounts} onChange={value => { setTaskStatus(value); taskListRef.current?.scrollTo(0, 0); }} />}
-    <TaskList tasks={visible} assets={visibleAssets} removingAssetIds={new Set(backup.exitingAssets.map(asset => asset.asset_id))} onAssetExited={backup.finishAssetRemoval} renderAsset={asset => <BackupAssetRow asset={asset} backup={backup} dialogs={backupDialogs} feed={taskView === 'feed'} />} toolbar={backupSettings?.enabled && <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" aria-label="刷新备份" disabled={backup.refreshing} onClick={() => void backup.refresh()}><RefreshCw aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>刷新备份</TooltipContent></Tooltip>} paginationKey={JSON.stringify([page, taskPlatform, taskStatus, search, authorQuery])} platform={taskPlatform} onPlatformChange={setTaskPlatform} view={taskView} onViewChange={value => { try { localStorage.setItem(taskViewStorageKey, value); setTaskView(value); taskListRef.current?.scrollTo(0, 0); } catch (error) { reportActionError(error); } }} listRef={taskListRef} removingIds={removedIds.current} onExited={finishRemoval} empty={emptyState(true)} renderRow={task => <VideoCover task={task} mode="thumbnail" operations={coverOperations} feed={taskView === 'feed'} onOpen={returnFocus => openTaskCover(task, returnFocus)} renderTask={(cover, coverActions) => taskMenu(task, <TaskRow
+    <TaskList tasks={visible} assets={visibleAssets} removingAssetIds={new Set(backup.exitingAssets.map(asset => asset.asset_id))} onAssetExited={backup.finishAssetRemoval} renderAsset={asset => <BackupAssetRow asset={asset} backup={backup} play={(returnFocus, streaming) => setMediaEntry({ kind: 'asset', id: asset.asset_id, returnFocus, streamStep: streaming ? 0 : undefined, asset: assetPlayback(asset) })} openTranscript={returnFocus => videoTranscripts.open(asset.asset_id, returnFocus)} feed={taskView === 'feed'} />} toolbar={backupSettings?.enabled && <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" aria-label="刷新备份" disabled={backup.refreshing} onClick={() => void backup.refresh()}><RefreshCw aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>刷新备份</TooltipContent></Tooltip>} paginationKey={JSON.stringify([page, taskPlatform, taskStatus, search, authorQuery])} platform={taskPlatform} onPlatformChange={setTaskPlatform} view={taskView} onViewChange={value => { try { localStorage.setItem(taskViewStorageKey, value); setTaskView(value); taskListRef.current?.scrollTo(0, 0); } catch (error) { reportActionError(error); } }} listRef={taskListRef} removingIds={removedIds.current} onExited={finishRemoval} empty={emptyState(true)} renderRow={task => <VideoCover task={task} mode="thumbnail" operations={coverOperations} feed={taskView === 'feed'} onOpen={returnFocus => openTaskCover(task, returnFocus)} renderTask={(cover, coverActions) => taskMenu(task, <TaskRow
       task={task} hidePreviousError={task.revision <= (dismissedTaskErrorRevisions.get(task.id) ?? -1)} waitingForResources={waitingTaskActions.has(task.id)} feed={taskView === 'feed'} selected={selectedRow === task.id} onSelect={() => setSelectedRow(task.id)}
       onPlay={!busy && canPlayTask(task) ? () => { void playTask(task); } : undefined}
       cover={cover} title={<>{task.asset_id && <span className="task-title-backup"><BackupTaskStatus backup={backup} assetId={task.asset_id} /></span>}<Tooltip><TooltipTrigger asChild><span className="task-row-title" tabIndex={0}>{taskTitle(task)}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{taskTitle(task)}</TooltipContent></Tooltip></>}
@@ -1056,7 +1357,6 @@ function App() {
       queuePosition={queued.findIndex(t => t.id === task.id) + 1} actions={taskView === 'list' ? taskActions(task) : null}
     />, coverActions)} />} />
     </RetainedTaskPage>
-    <BackupDialogs dialogs={backupDialogs} backup={backup} tasks={tasks} runtime={runtimeDependencies} />
     {(settingsActive || settingsVisited) && settings && <div hidden={!settingsActive} className={`${settingsActive ? 'grid' : 'hidden'} min-h-0 min-w-0 flex-1 grid-cols-[184px_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] gap-6 max-[1100px]:grid-cols-[160px_minmax(0,1fr)]`}>
       <nav aria-label="设置分类" className="settings-navigation self-stretch border-r pr-4"><SidebarMenu className="gap-2">{settingsSections.map(({ id, label, Icon }) => <SidebarMenuItem key={id}><SidebarMenuButton type="button" className="h-10 gap-3 px-3" isActive={settingsSection === id} aria-label={label} aria-current={settingsSection === id ? 'true' : undefined} aria-controls="settings-operation-area" onClick={() => setSettingsSection(id)}><Icon aria-hidden="true" /><span className="text-sm font-medium">{label}</span></SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></nav>
       <section id="settings-operation-area" aria-label={settingsSectionInfo?.label} className="flex min-h-0 min-w-0 flex-col gap-4">{settingsSection !== 'backup' && <header className="flex shrink-0 flex-col gap-1"><h2 className="text-sm font-semibold">{settingsSectionInfo?.label}</h2><p className="text-xs text-muted-foreground">{settingsSectionInfo?.description}</p>{settingsSection === 'dependencies' && <RuntimeDependenciesToolbar runtime={runtimeDependencies} />}</header>}
@@ -1069,7 +1369,7 @@ function App() {
     {page === 'about' && <About busy={busy} openPage={(page, releaseTag) => { void run(() => api.openProjectPage(page, releaseTag)); }} copyVersion={() => { void run(async () => { await navigator.clipboard.writeText(aboutVersionInfo); toast.success('版本信息已复制'); }); }} />}
     </div></div></SidebarInset>
     <VideoTranscriptDialog client={videoTranscripts} tasks={tasks} assets={backup.assets} runtime={runtimeDependencies} />
-    <TaskMediaDialog task={viewedTask} entry={mediaEntry} playable={viewPlaysVideo} coverOperations={coverOperations} removedIds={removedIds.current} close={() => setMediaEntry(null)} fallbackFocus={() => taskListPage ? taskListRef.current : inputRef.current} />
+    <TaskMediaDialog task={viewedTask} entry={mediaEntry} playable={viewPlaysVideo} preload={preload} coverOperations={coverOperations} removedIds={removedIds.current} adjacent={adjacentMedia} navigate={(previous, next) => setMediaEntry(current => current === previous ? next : current)} close={() => setMediaEntry(null)} fallbackFocus={() => taskListPage ? taskListRef.current : inputRef.current} />
     <AlertDialog open={!!duplicate} onOpenChange={open => { if (!open) setDuplicate(null); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); requestAnimationFrame(() => { const button = document.querySelector<HTMLButtonElement>('[' + (duplicateTrigger.current?.background ? 'data-background-download-task' : 'data-download-task') + '="' + duplicateTrigger.current?.id + '"]'); ((button && !button.disabled ? button : null) ?? inputRef.current ?? document.querySelector<HTMLButtonElement>('[aria-current="page"]'))?.focus(); }); }}><AlertDialogHeader><AlertDialogTitle>{duplicateCompleted ? '该规格已下载过' : '该规格已有下载任务'}</AlertDialogTitle><AlertDialogDescription>{duplicateCanReplace ? '新文件校验通过后会替换原下载，沿用原任务。' : duplicateCompleted ? '历史记录的规格未知，继续下载会另存一份。' : '已有同规格的下载任务，再次下载会创建另一条任务。'}{duplicate?.previous.path && <span className="mt-2 block break-all">{displayPath(duplicate.previous.path)}</span>}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel size="sm">暂不下载</AlertDialogCancel><AlertDialogAction size="sm" disabled={busy} onClick={() => { const pending = duplicate; setDuplicate(null); if (pending) void run(() => download(pending.task, pending.background, pending.previous)); }}>{duplicateCompleted && !duplicateCanReplace ? '另存一份' : '重新下载'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     <AlertDialog open={clearHistoryPlatform !== null} onOpenChange={open => { if (!open && !busy) setClearHistoryPlatform(null); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); requestAnimationFrame(() => { (clearHistoryTrigger.current && !clearHistoryTrigger.current.disabled ? clearHistoryTrigger.current : taskListRef.current)?.focus({preventScroll: true}); }); }}><AlertDialogHeader><AlertDialogTitle>清理下载历史？</AlertDialogTitle><AlertDialogDescription>移除{(clearHistoryPlatform ?? taskPlatform) === 'all' ? '全部平台' : platformName(clearHistoryPlatform ?? taskPlatform)}中已完成、失败和已取消的下载记录，不受当前搜索条件影响。进行中、排队任务和未提交的预览会保留，不会删除任何本地文件。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel size="sm" disabled={busy}>返回</AlertDialogCancel><AlertDialogAction size="sm" disabled={busy || clearHistoryPlatform === null} onClick={event => { event.preventDefault(); void run(async () => {
       const ids = await api.clearHistory(clearHistoryPlatform === 'all' ? null : clearHistoryPlatform);

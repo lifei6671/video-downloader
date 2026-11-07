@@ -245,7 +245,7 @@ if (scenario.startsWith('visual')) {
     Object.assign(tasks[0].video,{kind:'image_album',resolver:'dtk',formats:[],images:[{quality_source:'original',width:768,height:1376},{quality_source:'high_definition',width:768,height:1376}]});
     api.image=async()=>Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));
   }
-  if (scenario==='visual-album-sizing') {
+  if (scenario==='visual-album-sizing' || scenario==='visual-media-wheel') {
     const sizes=new URLSearchParams(location.search).has('tiny') ? [[16,16],[16,16]] : [[900,1600],[1600,900],[900,900],[300,2400],[2400,300],[2600,800]];
     const images=sizes.map(([width,height],index)=>({quality_source:'high_definition',width:index===5?null:width,height:index===5?null:height,preview_filename:`preview-${index}.png`}));
     Object.assign(tasks[0],{status:'completed',download_requested:true,path:'C:\\TestVideos\\album',completed_at:20,files:images.map((image,index)=>({...image,filename:`${index}.png`}))});
@@ -259,6 +259,30 @@ if (scenario.startsWith('visual')) {
       const blob=await new Promise(resolve=>canvas.toBlob(resolve));
       return Array.from(new Uint8Array(await blob.arrayBuffer()));
     };
+    if (scenario==='visual-media-wheel') {
+      const [album, downloading, , first, failed, , , single, filtered, last] = tasks;
+      const makeAlbum = (task, count) => {
+        task.video = {...album.video, video_id:task.id, title:task.video.title, images:images.slice(0,count)};
+        task.files = album.files.slice(0,count);
+      };
+      makeAlbum(single, 1);
+      makeAlbum(album, 3);
+      const ordered = [first, downloading, album, failed, single, filtered, last];
+      const titles = ['连播视频 A', '连播下载中', '连播图集 B', '连播下载失败', '连播单张图集 C', '搜索排除的视频', '连播视频 D'];
+      ordered.forEach((task,index) => Object.assign(task, {insertion_id:ordered.length-index, video:{...task.video, title:titles[index]}}));
+      tasks = ordered.reverse();
+      const cloud = {asset_id:'wheel-cloud', task_id:null, space_id:'wheel-space', metadata:{...last.video,title:'连播远端视频 E'}, original_filename:'E.mp4', content_bytes:100,
+        path:null, local_state:'missing', asset_state:'active', remote_state:'backed_up', remote_deleted:false, in_current_space:true, backup_locations:[]};
+      api.backupSettings = async () => ({space_id:'wheel-space', provider_type:'telegram', enabled:true});
+      api.backupSyncEnabled = async () => true;
+      api.backupAssets = async () => [cloud];
+      api.backupOperations = async () => [];
+      api.onBackupAssetDeleted = async () => () => {};
+      api.assetPlaybackSource = async id => {
+        control.calls.push({type:'prepare-playback',id});
+        return {path:'C:\\TestVideos\\E.mp4',source:'/tests/fixtures/media/player.webm'};
+      };
+    }
   }
   if (scenario==='visual-album-live') {
     const images=[{quality_source:'high_definition',width:90,height:160},{quality_source:'high_definition',width:160,height:90},{quality_source:'original',width:900,height:900}];

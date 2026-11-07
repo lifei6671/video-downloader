@@ -152,6 +152,10 @@
   --task-media-details-width: clamp(260px, 26vw, 320px);
   --task-media-min-video-width: 280px;
   --task-media-min-video-height: 160px;
+  --stream-playback-viewport-width: 90vw;
+  --stream-playback-viewport-height: 90dvh;
+  --stream-playback-aspect: calc(16 / 9);
+  --stream-playback-details-width: clamp(296px, 40%, 460px);
   --album-dot-hit-size: 24px;
   --album-wheel-transition-duration: 180ms;
   --album-dot-size: 6px;
@@ -453,6 +457,8 @@
 .album-still-outgoing { z-index: 1; pointer-events: none; }
 .album-still-outgoing.is-fading { animation: album-wheel-fade var(--album-wheel-transition-duration) ease-out both; }
 @keyframes album-wheel-fade { to { opacity: 0; } }
+.album-slide-fade-in { animation: album-slide-in var(--album-wheel-transition-duration) ease-out both; }
+@keyframes album-slide-in { from { opacity: 0; } }
 .album-dot-overlay { position: absolute; z-index: 2; inset-inline: 12px; bottom: 8px; display: flex; justify-content: center; pointer-events: none; }
 .album-dot-overlay.is-live { bottom: 48px; }
 .album-dots { display: flex; min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: none; border-radius: 9999px; padding-inline: 4px; background: var(--foreground); color: var(--on-primary); pointer-events: auto; }
@@ -627,7 +633,8 @@ button.task-feed-progress-cancel[data-variant][data-size]:disabled { pointer-eve
   --task-media-stage-width: max(var(--task-media-min-pane-width), var(--task-media-fit-width));
   --task-media-stage-height: max(var(--task-media-min-height), var(--task-media-fit-height));
 }
-.task-media-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--media-placeholder); }
+.task-media-panel { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--media-placeholder); }
+.media-work-frame { position: absolute; inset: 0; z-index: 3; width: 100%; height: 100%; object-fit: contain; background: var(--media-placeholder); pointer-events: none; }
 .task-media-dialog.has-media-size :is(.task-media-panel, .album-gallery.is-expanded) { justify-content: center; }
 .task-media-dialog.has-media-size :is(.video-player-stage, .album-gallery.is-expanded .album-stage) {
   align-self: center;
@@ -701,9 +708,57 @@ button.task-feed-progress-cancel[data-variant][data-size]:disabled { pointer-eve
 .video-player-dialog:not(.task-media-dialog)[data-slot="dialog-content"] { display: flex; flex-direction: column; width: min(var(--video-player-max-width), max(var(--video-player-min-width), calc(var(--video-player-max-stage-height) * var(--video-player-ratio) + var(--video-player-frame-width)))); max-width: calc(100vw - var(--video-player-viewport-inset)); max-height: calc(100dvh - var(--video-player-viewport-inset)); overflow-y: auto; transition: none; }
 .video-player-stage { position: relative; display: flex; flex: none; align-items: center; justify-content: center; aspect-ratio: var(--video-player-ratio); max-height: var(--video-player-max-stage-height); overflow: hidden; border-radius: 8px; background: var(--foreground); color: var(--on-primary); }
 .video-player-stage video { width: 100%; height: 100%; object-fit: contain; }
-.video-player-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; pointer-events: none; font-size: 12px; }
+.video-player-loading { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; gap: 8px; pointer-events: none; font-size: 12px; }
 .task-media-panel .video-player-stage { flex: 1; min-height: 0; max-height: none; aspect-ratio: auto; border-radius: 0; }
 .task-media-panel .video-player-stage video,
 .task-media-panel .album-stage video,
 .task-media-panel .album-still > img:not(.media-atmosphere) { object-fit: scale-down; }
 .task-media-panel [role="alert"] { flex: none; }
+.stream-playback-dialog[data-slot="dialog-content"] {
+  --media-placeholder: var(--foreground);
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  width: min(var(--stream-playback-viewport-width), calc(var(--stream-playback-viewport-height) * var(--stream-playback-aspect)));
+  max-width: none;
+  max-height: var(--stream-playback-viewport-height);
+  aspect-ratio: var(--stream-playback-aspect);
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+  background: linear-gradient(to left,
+    var(--surface-raised) var(--stream-playback-details-width),
+    var(--media-placeholder) var(--stream-playback-details-width));
+  color: var(--on-primary);
+}
+.stream-playback-dialog.is-maximized[data-slot="dialog-content"] {
+  width: 100vw;
+  height: 100dvh;
+  max-height: none;
+  aspect-ratio: auto;
+  border-radius: 0;
+  box-shadow: none;
+}
+.stream-playback-work {
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr) var(--stream-playback-details-width);
+  min-width: 0;
+  min-height: 0;
+}
+.stream-playback-outgoing { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+.stream-video-slot:not([hidden]) { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.stream-playback-dialog .task-media-sidebar { padding-top: 44px; background: var(--surface-raised); color: var(--foreground); }
+.stream-playback-dialog .task-details-content { gap: 12px; padding: 12px 16px 16px; }
+.stream-playback-dialog .task-media-panel :is(video, .album-still > img:not(.media-atmosphere)) { object-fit: contain; }
+.stream-playback-controls {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.stream-playback-controls button {
+  background: var(--surface-control);
+  color: var(--foreground);
+}
+.stream-playback-controls button:hover { background: var(--surface-hover); }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, Cloud, CircleCheck, CircleArrowUp, CircleArrowDown, Play, RotateCcw, FileText, ImageOff, ListX, Trash2, X } from 'lucide-react';
+import { AlertCircle, Cloud, CircleCheck, CircleArrowUp, CircleArrowDown, Play, RotateCcw, FileText, ImageOff, ListVideo, ListX, Trash2, X } from 'lucide-react';
 import { TaskCardFeedback, TaskCardMessage, TaskCardNotice } from '@/components/task-row';
 import { bytes } from '@/lib/format-bytes';
 import { taskCardStatus } from '@/lib/task-card-status';
@@ -13,9 +13,6 @@ import { Card, CardContent, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
-import { VideoPlayer } from '@/components/video-player';
-import { VideoTranscriptDialog, useVideoTranscripts } from '@/components/video-transcript';
-import type { useRuntimeDependencies } from '@/components/runtime-dependencies';
 import { BackupDataDialog } from '@/components/backup-conflicts';
 import { toast } from 'sonner';
 
@@ -400,13 +397,14 @@ export function BackupTransferMenuItems({ backup, assetId, context = false }: { 
   </>;
 }
 
-function BackupAssetMenuItems({ asset, backup, transcript, context = false, play }: { asset: BackupAsset; backup: BackupTasks; transcript: () => void; context?: boolean; play?: () => void }) {
+function BackupAssetMenuItems({ asset, backup, transcript, context = false, play, stream }: { asset: BackupAsset; backup: BackupTasks; transcript: () => void; context?: boolean; play?: () => void; stream?: () => void }) {
   const Item = context ? ContextMenuItem : DropdownMenuItem;
   const Separator = context ? ContextMenuSeparator : DropdownMenuSeparator;
   if (backupDeletion(backup, asset.asset_id)) return <BackupTransferMenuItems backup={backup} assetId={asset.asset_id} context={context} />;
   const hasTransfers = backup.settings?.enabled && !(asset.remote_state === 'pending_delete' && !asset.remote_deleted);
   return <>
     {play && <Item onSelect={play}><Play />播放视频</Item>}
+    {stream && <Item onSelect={stream}><ListVideo />流式播放</Item>}
     <Item onSelect={transcript}><FileText />查看文案</Item>
     <Separator />
     <BackupTransferMenuItems backup={backup} assetId={asset.asset_id} context={context} />
@@ -429,15 +427,16 @@ function Cover({ asset, revision }: { asset: BackupAsset; revision: number }) {
   return <div ref={ref} className="media-thumbnail text-xs text-muted-foreground">{url ? <img src={url} alt="" className="size-full object-contain" /> : failed ? <ImageOff role="img" aria-label="封面暂不可用" className="size-4" /> : '无封面'}</div>;
 }
 
-export function useBackupDialogs() {
-  const [playing, setPlaying] = useState<BackupAsset | null>(null), playTrigger = useRef<HTMLElement | null>(null);
-  const transcript = useVideoTranscripts();
-  return { playing, setPlaying, playTrigger, transcript, play: (asset: BackupAsset, target?: HTMLElement | null) => { playTrigger.current = target ?? null; setPlaying(asset); } };
+export function canPlayBackupAsset(asset: BackupAsset, deleting: boolean, restoreInProgress: boolean) {
+  return !deleting && !restoreInProgress && (!!asset.path || asset.in_current_space !== false && !asset.remote_deleted);
 }
-export function BackupDialogs({ dialogs, backup, tasks, runtime }: { dialogs: ReturnType<typeof useBackupDialogs>; backup: BackupTasks; tasks: Task[]; runtime: ReturnType<typeof useRuntimeDependencies> }) {
-  return <><VideoPlayer task={null} asset={dialogs.playing} close={() => dialogs.setPlaying(null)} returnFocus={dialogs.playTrigger.current} fallbackFocus={() => document.querySelector('[aria-current="page"]')} removedIds={new Set()} /><VideoTranscriptDialog client={dialogs.transcript} tasks={tasks} assets={backup.assets} runtime={runtime} /></>;
-}
-export function BackupAssetRow({ asset, backup, dialogs, feed = false }: { asset: BackupAsset; backup: BackupTasks; dialogs: ReturnType<typeof useBackupDialogs>; feed?: boolean }) {
+export function BackupAssetRow({ asset, backup, play, openTranscript, feed = false }: {
+  asset: BackupAsset;
+  backup: BackupTasks;
+  play: (target: HTMLElement | null, streaming?: true) => void;
+  openTranscript: (target: HTMLElement | null) => void;
+  feed?: boolean;
+}) {
   const row = useRef<HTMLDivElement>(null);
   const title = asset.metadata.title?.trim() || asset.original_filename || '已删除视频';
   const author = asset.metadata.author?.trim();
@@ -449,8 +448,8 @@ export function BackupAssetRow({ asset, backup, dialogs, feed = false }: { asset
   const width = Number(asset.metadata.width), height = Number(asset.metadata.height);
   const resolution = width > 0 && height > 0 ? `${Math.min(width, height)}P` : '清晰度未知';
   const location = deletion ? deletion.failed ? '删除失败' : deletion.phase === 'complete' ? '删除完成' : '删除中' : status === 'queued' ? '待下载' : status === 'downloading' ? '下载中' : status === 'failed' ? '下载失败' : asset.local_state === 'present' ? '本机有副本' : asset.remote_state === 'pending_delete' ? '远端待删除' : asset.remote_deleted ? '本机待处理' : '仅云端';
-  const playDisabled = !!deletion || feed && restoring || !asset.path && (asset.in_current_space === false || asset.remote_deleted);
-  const playAction = <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className={feed ? 'task-feed-play cursor-pointer' : undefined} aria-label={feed && restoring ? '正在下载' : feed && status === 'failed' ? '重试下载' : '播放视频'} disabled={playDisabled} onClick={e => dialogs.play(asset,e.currentTarget)}>{feed && restoring ? <Spinner aria-hidden="true" /> : feed && status === 'failed' ? <RotateCcw aria-hidden="true" /> : <Play aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent>{feed && restoring ? '正在下载' : feed && status === 'failed' ? '下载失败，点击重试下载' : '在应用内播放'}</TooltipContent></Tooltip>;
+  const playDisabled = !canPlayBackupAsset(asset, !!deletion, feed && restoring);
+  const playAction = <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className={feed ? 'task-feed-play cursor-pointer' : undefined} aria-label={feed && restoring ? '正在下载' : feed && status === 'failed' ? '重试下载' : '播放视频'} disabled={playDisabled} onClick={e => play(e.currentTarget)}>{feed && restoring ? <Spinner aria-hidden="true" /> : feed && status === 'failed' ? <RotateCcw aria-hidden="true" /> : <Play aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent>{feed && restoring ? '正在下载' : feed && status === 'failed' ? '下载失败，点击重试下载' : '在应用内播放'}</TooltipContent></Tooltip>;
   return <ContextMenu><ContextMenuTrigger asChild><Card ref={row} size="sm" className="task-row task-context-target task-row-asset" data-asset-id={asset.asset_id} tabIndex={0} aria-label="远端视频操作" onKeyDown={event => {
     if (event.target !== event.currentTarget || !(event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey)) return;
     event.preventDefault();
@@ -465,7 +464,7 @@ export function BackupAssetRow({ asset, backup, dialogs, feed = false }: { asset
     </div>
     {!feed && <div className="task-row-footer"><div className="task-row-controls">
       {playAction}
-      <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="查看文案" disabled={!!deletion} onClick={e => dialogs.transcript.open(asset.asset_id,e.currentTarget)}><FileText aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>查看文案</TooltipContent></Tooltip>
+      <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="查看文案" disabled={!!deletion} onClick={e => openTranscript(e.currentTarget)}><FileText aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>查看文案</TooltipContent></Tooltip>
     </div></div>}
-  </CardContent></Card></ContextMenuTrigger><ContextMenuContent collisionPadding={8} className="task-action-menu task-context-menu" aria-label="远端视频操作"><BackupAssetMenuItems asset={asset} backup={backup} transcript={() => dialogs.transcript.open(asset.asset_id,row.current)} play={playDisabled ? undefined : () => dialogs.play(asset, row.current)} context /></ContextMenuContent></ContextMenu>;
+  </CardContent></Card></ContextMenuTrigger><ContextMenuContent collisionPadding={8} className="task-action-menu task-context-menu" aria-label="远端视频操作"><BackupAssetMenuItems asset={asset} backup={backup} transcript={() => openTranscript(row.current)} play={playDisabled ? undefined : () => play(row.current)} stream={playDisabled ? undefined : () => play(row.current, true)} context /></ContextMenuContent></ContextMenu>;
 }
