@@ -2,6 +2,7 @@ use crate::{
     files::{finalize_album, finalize_to, validate_album, AlbumFile, Video},
     parse_cache,
     python_bridge::PythonBridge,
+    resolve_progress::{ResolvePhase, ResolveProgress},
     settings::{self, Settings},
     telegram_download,
 };
@@ -43,6 +44,8 @@ pub struct Task {
     pub asset_id: Option<String>,
     pub revision: u64,
     pub status: Status,
+    #[serde(default)]
+    pub resolve_progress: Option<ResolveProgress>,
     pub video: Option<Value>,
     pub bytes: u64,
     pub total_bytes: Option<u64>,
@@ -1307,6 +1310,23 @@ impl Core {
         self.resolve_task(input, None, "auto".into(), None, false, None)
     }
 
+    pub(crate) fn resolve_progress(&self, id: &str, phase: ResolvePhase) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closing { return; }
+        let Some(task) = inner.tasks.iter_mut().find(|task| task.id == id) else { return; };
+        if task.status != Status::Parsing || task.canceling { return; }
+        if task.resolve_progress.as_ref().is_some_and(|progress| progress.phase == phase) { return; }
+        task.resolve_progress.get_or_insert_with(|| ResolveProgress::new(phase)).advance(phase);
+        task.revision += 1;
+        (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+    }
+
+    fn resolve_event(&self, id: &str, event: &Value) {
+        if let Ok(phase) = serde_json::from_value(event["resolve_phase"].clone()) {
+            self.resolve_progress(id, phase);
+        }
+    }
+
     pub fn resolve_with_resolver(
         self: &Arc<Self>,
         input: String,
@@ -1715,6 +1735,11 @@ impl Core {
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
             revision: previous.as_ref().map_or(1, |t| t.revision + 1),
             status: Status::Parsing,
+            resolve_progress: Some({
+                let mut progress = ResolveProgress::new(ResolvePhase::CheckingLink);
+                if !telegram { progress.advance(ResolvePhase::CheckingCache); }
+                progress
+            }),
             video: previous.as_ref().and_then(|t| t.video.clone()),
             bytes: 0,
             total_bytes: None,
@@ -1782,6 +1807,9 @@ impl Core {
             },
         );
         if let Some(cached) = cached {
+            let progress = task.resolve_progress.as_mut().unwrap();
+            progress.advance(ResolvePhase::CacheHit);
+            progress.advance(ResolvePhase::Completed);
             task.video = Some(cached.video);
             task.cache_hit = true;
             task.cached_at = Some(cached.saved_at);
@@ -1808,15 +1836,18 @@ impl Core {
                         "SELECT EXISTS(SELECT 1 FROM parse_cache)", [], |r| r.get(0),
                     ).context("DATABASE_ERROR")?;
                     if has_cache {
+                        core.resolve_progress(&id, ResolvePhase::StartingEngine);
                         let identified = PythonBridge::operation_cancellable(
                             &core.program, &core.args, &id, "identify_input",
-                            json!({"input":input,"profiles":profiles,"resolver":resolver,"runtime_directory":core.runtime_directory}),
-                            |_| {}, async { let _ = cancellation.wait_for(|v| *v).await; },
+                            json!({"input":input,"profiles":profiles,"resolver":resolver,"runtime_directory":core.runtime_directory,"report_resolve_progress":true}),
+                            |event| core.resolve_event(&id, &event), async { let _ = cancellation.wait_for(|v| *v).await; },
                         ).await?;
                         let identity: Video = serde_json::from_value(identified["result"].clone())
                             .context("INVALID_ENGINE_RESULT")?;
                         identity.validate()?;
+                        core.resolve_progress(&id, ResolvePhase::CheckingCache);
                         let mut inner = core.inner.lock().unwrap();
+                        if inner.closing || *cancellation.borrow() { bail!("CANCELED"); }
                         if let Some(cached) = parse_cache::get(
                             &inner.db, &identity.platform, &identity.video_id, &identity.resolver,
                         )? {
@@ -1826,6 +1857,7 @@ impl Core {
                             task.cache_hit = true;
                             task.cached_at = Some(cached.saved_at);
                             task.cover_cached = cached.has_cover;
+                            task.resolve_progress.as_mut().unwrap().advance(ResolvePhase::CacheHit);
                             return Ok(cached.video);
                         }
                     }
@@ -1837,11 +1869,13 @@ impl Core {
                     "INSERT INTO task_staging VALUES(?1,?2)",
                     params![id, stage.path().to_string_lossy()],
                 ).context("DATABASE_ERROR")?;
+                core.resolve_progress(&id, ResolvePhase::StartingEngine);
                 let result = PythonBridge::operation_cancellable(
                     &core.program, &core.args, &id, "resolve_video",
-                    json!({"input":input,"profiles":profiles,"resolver":resolver,"preview_dir":stage.path(),"runtime_directory":core.runtime_directory}),
-                    |_| {}, async { let _ = cancellation.wait_for(|v| *v).await; },
+                    json!({"input":input,"profiles":profiles,"resolver":resolver,"preview_dir":stage.path(),"runtime_directory":core.runtime_directory,"report_resolve_progress":true}),
+                    |event| core.resolve_event(&id, &event), async { let _ = cancellation.wait_for(|v| *v).await; },
                 ).await.and_then(|result| {
+                    core.resolve_progress(&id, ResolvePhase::Finalizing);
                     let video: Video = serde_json::from_value(result["result"].clone())
                         .context("INVALID_ENGINE_RESULT")?;
                     video.validate()?;
@@ -1921,6 +1955,7 @@ impl Core {
         } else {
             match result {
                 Ok(video) if !downloading => {
+                    if let Some(progress) = &mut task.resolve_progress { progress.advance(ResolvePhase::Completed); }
                     task.error = None;
                     task.video = Some(video);
                     task.status = Status::Ready;
@@ -1967,7 +2002,9 @@ impl Core {
         if publish(&mut inner, task.clone(), &*self.emit).is_err() {
             task.status = Status::Failed;
             task.error = Some("DATABASE_ERROR".into());
-            *inner.tasks.iter_mut().find(|t| t.id == id).unwrap() = task.clone();
+            let previous = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
+            task.resolve_progress = previous.resolve_progress.clone();
+            *previous = task.clone();
             (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
         }
         if !matches!(task.status, Status::Ready | Status::Queued) {
@@ -2211,7 +2248,11 @@ impl Core {
         cancel: watch::Receiver<bool>,
     ) -> Result<Value> {
         let previous = self.inner.lock().unwrap().tasks.iter().find(|task| task.id == id).and_then(|task|task.video.clone());
-        let outcome = telegram_download::operation(self, id, input, None, None, |event| self.telegram_connection_progress(id, &event), cancel).await?;
+        let outcome = telegram_download::operation(self, id, input, None, None, |event| {
+            if event["resolve_phase"].is_string() { self.resolve_event(id, &event); }
+            else { self.telegram_connection_progress(id, &event); }
+        }, cancel).await?;
+        self.resolve_progress(id, ResolvePhase::Finalizing);
         let video = outcome.value;
         if let Some(previous) = &previous {
             if previous["platform"] == "telegram" && previous["video_id"] != video["video_id"] {
@@ -3537,6 +3578,80 @@ mod tests {
         .unwrap()
     }
     #[tokio::test]
+    async fn resolve_progress_tracks_real_phases_cache_and_cancellation() {
+        use ResolvePhase::*;
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let first = app.resolve("valid".into()).unwrap();
+        let ready = wait(&app, &first.id, Status::Ready).await;
+        let progress = ready.resolve_progress.as_ref().unwrap();
+        assert_eq!(progress.phase, Completed);
+        assert_eq!(progress.steps, [CheckingLink, CheckingCache, StartingEngine, LoadingConfiguration,
+            FetchingMetadata, SelectingFormats, LoadingPreview, LoadingAuthor, Finalizing, Completed]);
+        assert!(ready.revision > first.revision + 1);
+        app.resolve_progress(&first.id, LoadingAuthor);
+        assert_eq!(app.list().iter().find(|task| task.id == first.id).unwrap().revision, ready.revision);
+
+        let cached = app.resolve("https://www.douyin.com/video/123".into()).unwrap();
+        assert_eq!(cached.status, Status::Ready);
+        assert!(cached.cache_hit);
+        assert_eq!(cached.resolve_progress.unwrap().steps, [CheckingLink, CheckingCache, CacheHit, Completed]);
+
+        let blocked = app.resolve("progress-block".into()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let task = app.list().into_iter().find(|task| task.id == blocked.id).unwrap();
+                assert_eq!(task.status, Status::Parsing);
+                if task.resolve_progress.is_some_and(|progress| progress.phase == FetchingMetadata) { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        app.cancel(&blocked.id).await.unwrap();
+        let canceled = wait(&app, &blocked.id, Status::Canceled).await;
+        app.resolve_progress(&blocked.id, LoadingPreview);
+        let current = app.list().into_iter().find(|task| task.id == blocked.id).unwrap();
+        assert_eq!(current.revision, canceled.revision);
+        assert_eq!(current.resolve_progress.unwrap().phase, FetchingMetadata);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn resolve_progress_does_not_complete_when_task_publication_fails() {
+        use ResolvePhase::*;
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        app.inner.lock().unwrap().db.execute_batch(
+            "CREATE TRIGGER reject_ready BEFORE UPDATE ON download_tasks
+             WHEN json_extract(NEW.snapshot,'$.status') = 'ready'
+             BEGIN SELECT RAISE(ABORT, 'test'); END;"
+        ).unwrap();
+        let task = app.resolve("valid".into()).unwrap();
+        let failed = wait(&app, &task.id, Status::Failed).await;
+        assert_eq!(failed.error.as_deref(), Some("DATABASE_ERROR"));
+        let progress = failed.resolve_progress.unwrap();
+        assert_eq!(progress.phase, Finalizing);
+        assert!(!progress.steps.contains(&Completed));
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn resolve_progress_protocol_rejects_unknown_and_regressing_phases() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let mut phases = Vec::new();
+        let result = PythonBridge::operation(&app.program, &app.args, "phase-probe", "resolve_video",
+            json!({"input":"valid","report_resolve_progress":true}),
+            |event| phases.push(event["resolve_phase"].clone())).await.unwrap();
+        assert_eq!(result["type"], "resolved");
+        assert_eq!(phases, [json!("loading_configuration"), json!("fetching_metadata"), json!("selecting_formats")]);
+        for input in ["progress-unknown", "progress-core-phase", "progress-duplicate", "progress-backwards"] {
+            let result = PythonBridge::operation(&app.program, &app.args, "phase-probe", "resolve_video",
+                json!({"input":input,"report_resolve_progress":true}), |_| {}).await;
+            assert_eq!(result.unwrap_err().to_string(), "ENGINE_PROTOCOL_ERROR", "{input}");
+        }
+        app.shutdown().await;
+    }
+    #[tokio::test]
     async fn runtime_dependencies_check_install_and_cancel_share_worker_lifecycle() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
@@ -4044,6 +4159,7 @@ mod tests {
             asset_id: None,
             revision: 1,
             status: Status::Downloading,
+            resolve_progress: None,
             video: None,
             bytes: 0,
             total_bytes: None,

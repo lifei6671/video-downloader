@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+// Browser-only IPC fixture. No platform requests or saved accounts are used.
+import { api } from '/src/api';
+const mode = new URLSearchParams(location.search).get('mode');
+const video = {
+  platform:'douyin', video_id:'123', canonical_url:'https://www.douyin.com/video/123',
+  title:'解析完成的测试作品', resolver:'dtk', kind:'video', selected_format_id:'original',
+  formats:[{format_id:'original',container:'mp4',filesize:65536}],
+};
+let task, initial, respond, finishCancel;
+let listener = () => {};
+const emit = () => listener(structuredClone(task));
+const update = fields => { Object.assign(task, fields, {revision:task.revision+1}); emit(); };
+api.backupSettings = async () => null;
+api.settings = async () => ({download_directory:'C:\\TestVideos',max_downloads:5,profiles:[]});
+api.tasks = async () => task ? [structuredClone(task)] : [];
+api.subscribe = async callback => { listener = callback; return () => {}; };
+api.resolve = async () => {
+  if (mode === 'preflight') throw 'INVALID_INPUT';
+  const telegram = mode === 'telegram';
+  const steps = telegram ? ['checking_link'] : ['checking_link','checking_cache'];
+  if (mode === 'cache') steps.push('cache_hit','completed');
+  task = {
+    id:'resolve-test', revision:1, status:mode === 'cache' ? 'ready' : 'parsing',
+    video:mode === 'cache' ? video : null, cache_hit:mode === 'cache',
+    telegram_link:telegram ? 'https://t.me/c/100/9' : null,
+    bytes:0, error:null, created_at:10, canceling:false, download_requested:false,
+    cover_cached:false, files:[], resolve_progress:{phase:steps.at(-1),steps},
+  };
+  initial = structuredClone(task);
+  if (mode === 'cache') return initial;
+  return new Promise(resolve => { respond = resolve; });
+};
+api.cancel = async () => {
+  update({canceling:true});
+  await new Promise(resolve => { finishCancel = resolve; });
+  update({status:'canceled',canceling:false});
+};
+window.resolveTest = {
+  submitted:() => !!respond,
+  admit:emit,
+  release:() => respond(initial),
+  advance(phase) {
+    const steps = task.resolve_progress.steps;
+    update({resolve_progress:{phase,steps:steps.includes(phase) ? steps : [...steps,phase]}});
+  },
+  reconnect:() => update({error:'TELEGRAM_RECONNECTING'}),
+  fail:() => update({status:'failed',error:'NETWORK_ERROR'}),
+  finish:() => update({status:'ready',video,error:null,resolve_progress:{phase:'completed',steps:[...task.resolve_progress.steps,'completed']}}),
+  finishCancel:() => finishCancel(),
+  replay:() => listener(initial),
+};
+await import('/src/main');
+</script></body></html>

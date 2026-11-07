@@ -26,7 +26,7 @@ async page => {
       check(await input.inputValue()===link,'late clipboard overwrote parsing input');
       check(await page.evaluate(()=>window.backgroundTest.calls.filter(c=>c.type==='resolve').length)===1,'duplicate resolve request');
       await page.evaluate(()=>window.backgroundTest.releaseResolve());
-      await page.getByText('正在获取作品信息',{exact:true}).waitFor();
+      await page.locator('[data-slot=resolve-progress]').getByText('读取作品信息',{exact:true}).waitFor();
       check(await input.isDisabled(),'input unlocked while work is parsing');
       check(await form.getByRole('button',{name:/正在解析…/}).isDisabled(),'parse action enabled');
       check(await form.getByRole('button',{name:'粘贴链接',exact:true}).isDisabled(),'paste action enabled');

@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.14.3";
+pub const ENGINE_VERSION: &str = "0.14.4";
 pub const YTDLP_VERSION: &str = "2026.10.26";
 
 async fn cancellation() -> Result<()> {
@@ -238,6 +238,7 @@ impl PythonBridge {
         let mut merging = false;
         let mut recognizing = false;
         let mut transcription_segments: Option<(u64, u64)> = None;
+        let mut resolve_order = None;
         let mut phase_deadline = tokio::time::Instant::now() + Duration::from_secs(1800);
         loop {
             let wait = if method == "transcribe_video" {
@@ -253,6 +254,20 @@ impl PythonBridge {
                 .context("ENGINE_PROTOCOL_ERROR")?;
             if value["id"] != id || value["protocol_version"] != 3 {
                 bail!("ENGINE_PROTOCOL_ERROR");
+            }
+            if value["type"] == "resolve_progress" {
+                if !matches!(method, "identify_input" | "resolve_video") || params["report_resolve_progress"] != true {
+                    bail!("ENGINE_PROTOCOL_ERROR");
+                }
+                let phase: crate::resolve_progress::ResolvePhase = serde_json::from_value(value["phase"].clone())
+                    .context("ENGINE_PROTOCOL_ERROR")?;
+                let order = phase.engine_order().context("ENGINE_PROTOCOL_ERROR")?;
+                if resolve_order.is_some_and(|previous| order <= previous) || method == "identify_input" && order > 1 {
+                    bail!("ENGINE_PROTOCOL_ERROR");
+                }
+                resolve_order = Some(order);
+                progress(json!({"id":id,"resolve_phase":phase}));
+                continue;
             }
             if method == "transcribe_video" && value["type"] == "transcription_progress" {
                 match value["phase"].as_str() {

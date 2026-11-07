@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.3", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.4", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.buffer.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
@@ -95,11 +95,22 @@ if request["method"] == "identify_input":
     emit("identified",result=dict(platform=platform,video_id=video_id,canonical_url=canonical,kind="image_album" if album or video_id=='601' else "video",resolver="dtk" if album or video_id=='601' or params.get("resolver")=="dtk" else "yt-dlp"))
     sys.exit(0)
 if request["method"] == "resolve_video":
+    if params.get('report_resolve_progress'):
+        emit('resolve_progress', phase='loading_configuration')
+        mode = params['input']
+        if mode == 'progress-unknown': emit('resolve_progress', phase='invented_phase')
+        if mode == 'progress-core-phase': emit('resolve_progress', phase='completed')
+        if mode == 'progress-duplicate': emit('resolve_progress', phase='loading_configuration')
+        emit('resolve_progress', phase='fetching_metadata')
+        if mode == 'progress-backwards': emit('resolve_progress', phase='loading_configuration')
     if params["input"] == "invalid":
         emit("error", error={"code": "INVALID_INPUT"})
-    elif params["input"] == "block":
+    elif params["input"] in ("block", "progress-block"):
         time.sleep(120)
     elif params["input"] == "album" or "/note/601" in params["input"]:
+        if params.get('report_resolve_progress'):
+            emit('resolve_progress', phase='selecting_formats')
+            if params.get('preview_dir'): emit('resolve_progress', phase='loading_preview')
         images=[]
         for index, ext in enumerate(("jpeg", "webp"), 1):
             body=b"\xff\xd8\xfffixture" if ext=="jpeg" else b"RIFF\x10\x00\x00\x00WEBPfixture"
@@ -108,6 +119,7 @@ if request["method"] == "resolve_video":
             images.append(dict(width=100,height=200,quality_source="high_definition",preview_filename=name))
         emit("resolved", result=dict(platform="douyin",video_id="601",canonical_url="https://www.douyin.com/note/601",kind="image_album",resolver="dtk",title="离线图集",images=images))
     else:
+        if params.get('report_resolve_progress'): emit('resolve_progress', phase='selecting_formats')
         video_id = params["input"].split(":", 1)[1] if params["input"].startswith("hold:") else "999" if params["input"] == "slow" else "123"
         if params["input"].startswith("https://www.douyin.com/video/"):
             video_id = params["input"].rsplit("/", 1)[1]
@@ -115,9 +127,11 @@ if request["method"] == "resolve_video":
         elif platform == 'youtube': video_id=parse_qs(source.query)['v'][0]
         cover={}
         if params.get("preview_dir"):
+            if params.get('report_resolve_progress'): emit('resolve_progress', phase='loading_preview')
             image=b"\x89PNG\r\n\x1a\nfixture"
             (Path(params["preview_dir"])/"cover").write_bytes(image)
             cover=dict(cover_filename="cover",cover_bytes=len(image))
+            if params.get('report_resolve_progress'): emit('resolve_progress', phase='loading_author')
             (Path(params['preview_dir'])/'author-avatar').write_bytes(image)
             cover.update(author_avatar_filename='author-avatar',author_avatar_bytes=len(image))
         if params["input"] == "cookie-warning":

@@ -12,7 +12,7 @@ async page => {
     await page.waitForFunction(()=>document.querySelector('#video-input')?.value.length>0);
   };
   const cancel=async()=>{
-    await page.getByRole('button',{name:'取消',exact:true}).click();
+    await page.getByRole('button',{name:/^(取消|取消解析)$/}).click();
     await dialog.getByRole('button',{name:'确认取消',exact:true}).click();
     await page.locator('[data-slot="alert-dialog-content"]').waitFor({state:'detached'});
   };
@@ -66,11 +66,11 @@ async page => {
     cases.push('pending acknowledgement locks input and preserves original state until success');
   }
   await load('cancel-preview-error');const before=await input.inputValue();await cancel();
-  await page.getByRole('alert').filter({hasText:'网络连接失败'}).waitFor();
+  await page.locator('[data-sonner-toast]').filter({hasText:'网络连接失败'}).waitFor();
   check(await input.inputValue()===before && await page.getByRole('button',{name:'后台下载',exact:true}).isEnabled(),'cancel failure discarded preview/input');
   cases.push('cancel failure retains preview and error');
   await load('cancel-preview-parsing');await input.fill(next);await input.press('Enter');
-  await page.getByText('正在获取作品信息',{exact:true}).waitFor();await cancel();await empty();
+  await page.locator('[data-slot=resolve-progress]').getByText('读取作品信息',{exact:true}).waitFor();await cancel();await empty();
   cases.push('unsubmitted parsing cancellation resets');
   await load('queued');const home=await input.inputValue();
   await page.getByRole('button',{name:'下载任务',exact:true}).click();await cancel();

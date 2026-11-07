@@ -32,7 +32,7 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.14.3'
+ENGINE_VERSION = '0.14.4'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.10.26'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -375,6 +375,13 @@ def operate(method, params, emit):
     except runtime_dependencies.DependencyError as error:
         raise EngineError(str(error), 'dependencies') from None
     platform, url, short = parse_input(params.get('input'))
+    report_progress = params.get('report_resolve_progress', False)
+    if type(report_progress) is not bool:
+        raise EngineError('CONFIG_INVALID', 'resolve_progress')
+
+    def phase(value):
+        if report_progress and method in ('identify_input', 'resolve_video'):
+            emit('resolve_progress', phase=value)
     source_url = url
     resolver = params.get('resolver', 'auto')
     identity = None if short else input_identity(platform, url, resolver, source_url)
@@ -384,6 +391,7 @@ def operate(method, params, emit):
     profiles = params.get('profiles', {})
     if not isinstance(profiles, dict):
         raise EngineError('CONFIG_INVALID', 'config')
+    phase('loading_configuration')
     ua, cookies, proxy = profile_config(profiles.get(platform, {}))
     chunk_size = http_chunk_size(profiles.get(platform, {}), platform)
     chunk_configured = 'http_chunk_size' in profiles.get(platform, {})
@@ -458,6 +466,7 @@ def operate(method, params, emit):
             ydl._request_director = ydl.build_request_director(
                 [functools.partial(GuardedRH, platform=platform)])
             if short:
+                phase('resolving_link')
                 with ydl.urlopen(url) as response:
                     resolved_platform, url, still_short = parse_input(response.url)
                 if resolved_platform != platform or still_short:
@@ -468,10 +477,12 @@ def operate(method, params, emit):
                 emit('identified', result=identity)
                 return
             content = None
+            phase('fetching_metadata')
             if actual_resolver == 'dtk':
                 video_id = url.rstrip('/').split('/')[-1]
                 content = dtk_adapter.extract(ydl, platform, video_id, ua, cookies, proxy)
                 if str(content.kind) == 'image_album':
+                    phase('selecting_formats')
                     result = dtk_adapter.metadata(content)
                     result['source_url'] = source_url
                     if cookie_warning:
@@ -486,9 +497,11 @@ def operate(method, params, emit):
                         dtk_adapter.download_images(ydl, content, stage, emit)
                     else:
                         if preview:
+                            phase('loading_preview')
                             names = dtk_adapter.preview_images(ydl, content, preview)
                             for image, name in zip(result['images'], names):
                                 image['preview_filename'] = name
+                            phase('loading_author')
                             result.update(author_profile.download_avatar(ydl,
                                 content.author.avatar.url if content.author.avatar else None, preview))
                         emit('resolved', result=result)
@@ -500,6 +513,7 @@ def operate(method, params, emit):
                 raise EngineError('UPSTREAM_CHANGED', 'detail')
             # Selected stream fields can overwrite top-level language with None.
             # Keep the same captured preference for the public choices and selector.
+            phase('selecting_formats')
             result = metadata({**info, **audio_context}, platform)
             result['resolver'] = actual_resolver
             result['source_url'] = source_url
@@ -509,7 +523,9 @@ def operate(method, params, emit):
                 result['music'] = dict(title=content.music.title, author=content.music.author)
             if not downloading:
                 if preview:
+                    phase('loading_preview')
                     result.update(download_cover(ydl, info, preview))
+                    phase('loading_author')
                     result.update(author_profile.download_avatar(ydl,
                         author_profile.avatar_url(ydl, info, platform), preview))
                 emit('resolved', result=result)

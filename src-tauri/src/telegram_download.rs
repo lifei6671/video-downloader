@@ -449,7 +449,7 @@ async fn operation_once(
     input: &str,
     expected: Option<&Value>,
     directory: Option<&Path>,
-    progress: impl FnMut(Value),
+    mut progress: impl FnMut(Value),
     mut cancel: watch::Receiver<bool>,
 ) -> Result<TransferResult> {
     let link = message_link(input)?;
@@ -461,6 +461,7 @@ async fn operation_once(
         .clone();
     #[cfg(not(test))]
     let factory: Option<fn() -> Box<dyn Transport>> = None;
+    if expected.is_none() { progress(json!({"resolve_phase":"connecting_account"})); }
     let binding = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download);
     let mut network_stop = binding.session.network_cancellation();
     let connection = if factory.is_some() {
@@ -555,16 +556,19 @@ async fn transfer(
     directory: Option<&Path>,
     mut progress: impl FnMut(Value),
 ) -> Result<TransferResult> {
+    if expected.is_none() { progress(json!({"resolve_phase":"fetching_metadata"})); }
     let mut media = timeout(IDLE_TIMEOUT, source.inspect(link))
         .await
         .context("TELEGRAM_TIMEOUT")??;
     if let Some(expected) = expected { check_expected(&media, expected)?; }
+    if expected.is_none() { progress(json!({"resolve_phase":"loading_preview"})); }
     let cover = match timeout(Duration::from_secs(20), source.cover()).await {
         Ok(Ok(cover)) => cover,
         Ok(Err(error)) if matches!(error.to_string().as_str(), "TELEGRAM_AUTH_REQUIRED" | "CANCELED") => return Err(error),
         _ => None,
     };
     if expected.is_none() {
+        progress(json!({"resolve_phase":"loading_author"}));
         let avatar = match timeout(Duration::from_secs(5), source.avatar()).await {
             Ok(Ok(avatar)) => avatar,
             Ok(Err(error)) if matches!(error.to_string().as_str(), "TELEGRAM_AUTH_REQUIRED" | "CANCELED") => return Err(error),

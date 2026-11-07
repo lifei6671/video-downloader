@@ -4,6 +4,7 @@ pub mod files;
 pub mod naming;
 pub mod parse_cache;
 pub mod python_bridge;
+pub mod resolve_progress;
 pub mod runtime_dependencies;
 pub mod settings;
 pub mod telegram_accounts;
