@@ -117,6 +117,8 @@
   --sidebar-width: 192px;
   --sidebar-width-icon: 56px;
   --content-padding: 24px;
+  --page-header-min-height: 56px;
+  --page-header-padding-block: 8px;
   --task-row-min-height: 80px;
   --task-row-gap: 4px;
   --task-row-active-min-height: 120px;
@@ -409,7 +411,7 @@
 .app-navigation-item { min-height: 40px; }
 [data-slot="sidebar-menu-badge"] { top: 50%; transform: translateY(-50%); font-size: 12px; background: var(--accent); color: var(--primary-text); }
 [data-slot="sidebar"][data-state="collapsed"] [data-slot="sidebar-menu-badge"] { display: block; right: 0; top: 0; transform: none; width: auto; min-width: 14px; height: 14px; line-height: 14px; }
-.app-page-header { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; min-height: 56px; padding: 12px var(--content-padding); border-bottom: 0.5px solid var(--border); background: var(--background); z-index: 10; }
+.app-page-header { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; min-height: var(--page-header-min-height); padding: var(--page-header-padding-block) var(--content-padding); border-bottom: 0.5px solid var(--border); background: var(--background); z-index: 10; }
 .page-body { padding: var(--content-padding); }
 .app-page-header h1 { font-size: 20px; line-height: 28px; font-weight: 600; }
 .app-page-header [data-slot="input-group"] { min-height: 28px; height: 28px; }
@@ -449,7 +451,7 @@
 
 /* Desktop download toolbar: state first, platform second, one list surface. */
 .task-workspace { background: var(--surface); }
-.task-page-header { min-height: 64px; padding-block: 16px; border-bottom: 0; background: var(--surface); }
+.task-page-header { border-bottom-color: transparent; background: var(--surface); }
 .task-status-tabs { width: 100%; border-radius: 0; flex: none; justify-content: flex-start; gap: 8px; height: 40px; border-bottom: 0.5px solid var(--border); }
 .task-filter-count { min-width: 18px; padding: 0 4px; border-radius: 6px; background: var(--surface-control); color: var(--muted-foreground); font-size: 12px; font-weight: 400; line-height: 18px; font-variant-numeric: tabular-nums; }
 [data-state="on"] > .task-filter-count { background: var(--surface-selected); color: var(--primary); }

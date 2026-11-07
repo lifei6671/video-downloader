@@ -138,7 +138,7 @@ motion:
   easing: ease-out
   removal-duration: 220ms
 components:
-  app-shell: { brandHeight: 64px, brandIconSize: 32px, headerMinHeight: 56px }
+  app-shell: { brandHeight: 64px, brandIconSize: 32px, headerMinHeight: 56px, headerPaddingBlock: 8px }
   button-primary:
     backgroundColor: "{colors.primary}"
     textColor: "{colors.on-primary}"
@@ -369,7 +369,7 @@ YAML `palette` 记录本版使用的 Radix Colors light sRGB 色值，`colors` �
 
 侧栏底部“本地运行 / 连接不可用”来自真实连接状态；不是新操作入口，不展示端口、守护进程或虚构在线指标。保留原生窗口边框与控制按钮，不绘制假标题栏、浏览器地址栏或重复的红黄绿按钮。关闭窗口、托盘恢复、退出与单实例行为沿用现有实现；隐藏窗口可继续任务，退出回收当前操作。
 
-右侧标题区最小高 56px，包含 20px 页标题和必要的上下文操作；不要求每页都有副标题。任务页标题区最小高 64px，显示“下载任务”，右侧保留搜索和清理历史；状态筛选位于标题下方独立一行。
+右侧标题区统一最小高 56px、上下内边距 8px，包含 20px 页标题和必要的上下文操作；各主菜单的标题垂直对齐，不要求每页都有副标题。任务页显示“下载任务”，右侧保留搜索和清理历史，并保留与其他页面等宽的透明底部边界；状态筛选位于标题下方独立一行。
 
 ### 3.2 三个设计视口
 
