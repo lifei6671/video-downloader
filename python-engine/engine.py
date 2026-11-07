@@ -26,13 +26,15 @@ import local_cover
 import transcription
 import author_profile
 import douyin_cover
+import media_album
+import xiaohongshu
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/dtk/upstream/src'))
 import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.14.4'
+ENGINE_VERSION = '0.14.5'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.10.26'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -204,6 +206,8 @@ def parse_input(text):
         if parts.username or parts.password or parts.port not in (None, 80 if parts.scheme == 'http' else 443):
             raise ValueError()
         host = parts.hostname
+        if host in (*xiaohongshu.NOTE_HOSTS, *xiaohongshu.SHORT_HOSTS):
+            return xiaohongshu.parse_link(parts)
         platform = ('douyin' if host in ('douyin.com', 'www.douyin.com', 'v.douyin.com')
                     else 'tiktok' if host in ('www.tiktok.com', 'tiktok.com', 'vt.tiktok.com', 'vm.tiktok.com')
                     else None)
@@ -308,9 +312,10 @@ def download_cover(ydl, info, stage):
 
 def metadata(info, platform):
     video_id = info.get('id')
+    id_pattern = {'youtube': r'[A-Za-z0-9_-]{11}', 'xiaohongshu': r'[0-9a-f]{24}'}
     if (info.get('_type', 'video') != 'video' or info.get('is_live') or info.get('live_status') == 'is_live'
             or not isinstance(video_id, str) or not re.fullmatch(
-                r'[A-Za-z0-9_-]{11}' if platform == 'youtube' else r'\d{1,30}', video_id)):
+                id_pattern.get(platform, r'\d{1,30}'), video_id)):
         raise EngineError('UNSUPPORTED_CONTENT', 'detail')
     canonical = info.get('webpage_url')
     actual, canonical, short = parse_input(canonical)
@@ -319,7 +324,7 @@ def metadata(info, platform):
     duration = info.get('duration')
     duration_ms = (round(duration * 1000) if isinstance(duration, (float, int))
                    and math.isfinite(duration) and duration >= 0 else None)
-    cover = cover_url(info)
+    cover = cover_url(info) if platform != 'xiaohongshu' else None
     selected = {}
     for field in ('width', 'height', 'filesize', 'filesize_approx'):
         value = info.get(field)
@@ -338,11 +343,12 @@ def input_identity(platform, url, resolver, source_url):
         raise EngineError('CONFIG_INVALID', 'resolver')
     album = '/note/' in url or '/photo/' in url
     actual = 'dtk' if resolver == 'dtk' or (resolver == 'auto' and album) else 'yt-dlp'
-    if platform == 'youtube' and actual != 'yt-dlp':
+    if platform in ('youtube', 'xiaohongshu') and actual != 'yt-dlp':
         raise EngineError('UNSUPPORTED_CONTENT', 'resolver')
     if actual == 'yt-dlp' and album:
         raise EngineError('UNSUPPORTED_CONTENT', 'resolver')
-    video_id = parse_qs(urlsplit(url).query)['v'][0] if platform == 'youtube' else url.rstrip('/').split('/')[-1]
+    parts = urlsplit(url)
+    video_id = parse_qs(parts.query)['v'][0] if platform == 'youtube' else parts.path.rstrip('/').rsplit('/', 1)[-1]
     return dict(platform=platform, video_id=video_id, canonical_url=url,
                 kind='image_album' if album else 'video', resolver=actual, source_url=source_url)
 
@@ -385,7 +391,7 @@ def operate(method, params, emit):
     source_url = url
     resolver = params.get('resolver', 'auto')
     identity = None if short else input_identity(platform, url, resolver, source_url)
-    if method == 'identify_input' and identity:
+    if method == 'identify_input' and identity and platform != 'xiaohongshu':
         emit('identified', result=identity)
         return
     profiles = params.get('profiles', {})
@@ -393,6 +399,8 @@ def operate(method, params, emit):
         raise EngineError('CONFIG_INVALID', 'config')
     phase('loading_configuration')
     ua, cookies, proxy = profile_config(profiles.get(platform, {}))
+    if platform == 'xiaohongshu':
+        ua = xiaohongshu.user_agent(url, short, ua, DEFAULT_UA)
     chunk_size = http_chunk_size(profiles.get(platform, {}), platform)
     chunk_configured = 'http_chunk_size' in profiles.get(platform, {})
     downloading = method == 'download_video'
@@ -436,8 +444,8 @@ def operate(method, params, emit):
     logger = SafeLogger()
     options = dict(proxy=proxy or '', http_headers={'User-Agent': ua},
         logger=logger, quiet=True, noprogress=True, cachedir=False, noplaylist=True,
-        allowed_extractors=(['Douyin$'] if platform == 'douyin' else ['Youtube$'] if platform == 'youtube'
-                            else ['TikTok$', r'vm\.tiktok$']),
+        allowed_extractors={'douyin': ['Douyin$'], 'youtube': ['Youtube$'],
+                            'xiaohongshu': ['XiaoHongShu$'], 'tiktok': ['TikTok$', r'vm\.tiktok$']}[platform],
         format=lambda context: select_format({**context, **audio_context}, params.get('format_id') if downloading else None, platform == 'youtube'), match_filter=match_filter, progress_hooks=[progress] if downloading else [],
         postprocessor_hooks=[progress.postprocess],
         outtmpl=str(stage / 'video.%(ext)s') if stage else 'unused.%(ext)s',
@@ -456,7 +464,7 @@ def operate(method, params, emit):
             cookie_warning = None
             if cookies:
                 add_cookies(ydl.cookiejar, cookies, platform)
-            else:
+            elif platform != 'xiaohongshu':
                 cookie_warning = load_default_cookies(ydl.cookiejar, platform, logger)
                 cookies = {c.name: c.value for c in ydl.cookiejar if not c.is_expired()}
             if platform == 'douyin':
@@ -465,7 +473,20 @@ def operate(method, params, emit):
                 ydl.add_info_extractor(author_profile.TikTokIE())
             ydl._request_director = ydl.build_request_director(
                 [functools.partial(GuardedRH, platform=platform)])
-            if short:
+            note = None
+            if platform == 'xiaohongshu':
+                if short:
+                    phase('resolving_link')
+                phase('fetching_metadata')
+                try:
+                    url, note = xiaohongshu.fetch_note(ydl, url, short)
+                except (EngineError, HTTPError) as error:
+                    if cookies or error_code(error) != 'ACCESS_DENIED':
+                        raise
+                    if warning := load_default_cookies(ydl.cookiejar, platform, logger):
+                        raise EngineError(warning, 'detail') from None
+                    url, note = xiaohongshu.fetch_note(ydl, url, short)
+            elif short:
                 phase('resolving_link')
                 with ydl.urlopen(url) as response:
                     resolved_platform, url, still_short = parse_input(response.url)
@@ -473,42 +494,60 @@ def operate(method, params, emit):
                     raise EngineError('UNSUPPORTED_CONTENT', 'short_link')
             identity = identity or input_identity(platform, url, resolver, source_url)
             actual_resolver = identity['resolver']
+            xhs_album = note is not None and xiaohongshu.is_album(note)
             if method == 'identify_input':
+                if note is not None:
+                    identity.update(canonical_url=url, kind='image_album' if xhs_album else 'video')
                 emit('identified', result=identity)
                 return
             content = None
-            phase('fetching_metadata')
+            album = None
+            avatar = None
+            if note is None:
+                phase('fetching_metadata')
             if actual_resolver == 'dtk':
                 video_id = url.rstrip('/').split('/')[-1]
                 content = dtk_adapter.extract(ydl, platform, video_id, ua, cookies, proxy)
                 if str(content.kind) == 'image_album':
-                    phase('selecting_formats')
                     result = dtk_adapter.metadata(content)
-                    result['source_url'] = source_url
-                    if cookie_warning:
-                        result['cookie_warning'] = cookie_warning
-                    if downloading:
-                        if (result['video_id'] != expected['video_id']
-                                or expected.get('kind', 'video') != 'image_album'
-                                or len(result['images']) != expected.get('image_count')):
-                            raise EngineError('UPSTREAM_CHANGED', 'identity')
-                        # Album counters keep their existing conservative retry policy.
-                        ydl.params['retries'] = 0
-                        dtk_adapter.download_images(ydl, content, stage, emit)
-                    else:
-                        if preview:
-                            phase('loading_preview')
-                            names = dtk_adapter.preview_images(ydl, content, preview)
-                            for image, name in zip(result['images'], names):
-                                image['preview_filename'] = name
-                            phase('loading_author')
-                            result.update(author_profile.download_avatar(ydl,
-                                content.author.avatar.url if content.author.avatar else None, preview))
-                        emit('resolved', result=result)
-                    return
-                info = ydl.process_ie_result(dtk_adapter.video_info(content), download=False)
+                    album = dtk_adapter.image_choices(content)
+                    avatar = content.author.avatar.url if preview and content.author.avatar else None
+                else:
+                    info = ydl.process_ie_result(dtk_adapter.video_info(content), download=False)
+            elif note is not None:
+                if xhs_album:
+                    album = xiaohongshu.image_choices(note, media_album.MAX_IMAGES)
+                    avatar = xiaohongshu.avatar_url(note) if preview else None
+                    result = dict(xiaohongshu.metadata(note, url), kind='image_album',
+                                  images=[dict(width=c['width'], height=c['height'], quality_source=c['quality_source']) for c in album])
+                else:
+                    info = ydl.process_ie_result(xiaohongshu.video_info(ydl, note, url, params.get('format_id')), download=False)
             else:
                 info = ydl.extract_info(url, download=False)
+            if album is not None:
+                phase('selecting_formats')
+                result['source_url'] = source_url
+                if cookie_warning:
+                    result['cookie_warning'] = cookie_warning
+                if downloading:
+                    if (result['video_id'] != expected['video_id']
+                            or expected.get('kind', 'video') != 'image_album'
+                            or len(album) != expected.get('image_count')):
+                        raise EngineError('UPSTREAM_CHANGED', 'identity')
+                    # Album counters keep their existing conservative retry policy.
+                    ydl.params['retries'] = 0
+                    media_album.download_images(ydl, album, platform, result['video_id'], actual_resolver, stage, emit)
+                else:
+                    if preview:
+                        phase('loading_preview')
+                        names = media_album.preview_images(ydl, album, preview)
+                        for image, choice, name in zip(result['images'], album, names):
+                            image['preview_filename'] = name
+                            image.update(width=choice['width'], height=choice['height'])
+                        phase('loading_author')
+                        result.update(author_profile.download_avatar(ydl, avatar, preview))
+                    emit('resolved', result=result)
+                return
             if not isinstance(info, dict):
                 raise EngineError('UPSTREAM_CHANGED', 'detail')
             # Selected stream fields can overwrite top-level language with None.

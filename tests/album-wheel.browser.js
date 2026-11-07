@@ -54,6 +54,7 @@ async page => {
     check(handled, 'vertical wheel default scrolling was not prevented');
     results.push(`${width}: horizontal/modified wheel preserved; vertical scrolling contained`);
     await dialog().getByRole('button', { name: '查看第 6 张图片', exact: true }).click();
+    check(await dialog().locator('.album-still-outgoing').count() === 0, 'reduced motion animated a dot click');
     stamp += 500; await input(120, stamp);
     check(await current() === '查看第 6 张图片', 'last image wrapped forwards');
     stamp += 500; await input(-120, stamp); await selected(5);
@@ -127,5 +128,22 @@ async page => {
   check(await dialog().getByRole('img', { name: '第 1 张图片' }).evaluate(image => image.naturalWidth === 900), 'reversing during a fade did not restore the previously loaded image');
   check(await page.evaluate(() => window.albumFadeEvents.join(',') === 'animationstart,animationend,animationstart,animationend'), 'reverse gesture interrupted an unfinished fade');
   results.push('reversing an in-progress fade restores the previous image');
+  await openWithSlowImage(false);
+  const fixedSize = await dialog().boundingBox();
+  await dialog().getByRole('button', { name: '查看第 2 张图片', exact: true }).click();
+  await selected(2);
+  check(await outgoing.evaluate(layer => getComputedStyle(layer).opacity === '1' && layer.lastElementChild.naturalWidth === 900), 'dot click hid the current slide before the next image decoded');
+  await page.evaluate(() => window.releaseAlbumImage());
+  await outgoing.waitFor({ state: 'detached' });
+  check(await page.evaluate(() => window.albumFadeEvents.join(',') === 'animationstart,animationend'), 'dot click did not run a complete fade');
+  await page.evaluate(() => { window.albumFadeEvents = []; });
+  const nextDot = dialog().getByRole('button', { name: '查看第 3 张图片', exact: true });
+  await nextDot.focus();
+  await page.keyboard.press('Enter');
+  await selected(3);
+  await page.waitForFunction(() => window.albumFadeEvents.join(',') === 'animationstart,animationend');
+  const afterSwitch = await dialog().boundingBox();
+  check(fixedSize.width === afterSwitch.width && fixedSize.height === afterSwitch.height, 'dot activation changed the dialog size');
+  results.push('click and keyboard dot activation share the fade and keep the dialog size fixed');
   return { passed: results.length, results };
 }

@@ -20,7 +20,9 @@ grammers 使用 MIT OR Apache-2.0。新增解析依赖（含 Tokio 必要升级�
 
 两个直接依赖均关闭默认 features，`grammers-client` 开启原生 `proxy`，`grammers-session` 只开启 `serde`；不引入默认 `libsql` SQLite 存储，与应用现有 `rusqlite` 保持独立。SDK 要求 Tokio 至少 1.53.3，当前锁定 1.54.1。会话适配器仅把非持久缓存留在内存，授权数据通过独立系统凭据服务保存；不读取 tdl 或 Telegram Desktop 的会话。真实传输、文件限制、扫码和跨平台验收见实施记录，依赖编译成功不代表这些能力通过。
 
-当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。默认视频由 yt-dlp 解析、图集由 DTK 解析，用户也可明确选择引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.10.26` 的运行时版本为 `2026.10.26`；协议 v3，引擎版本 `0.14.4`。
+当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。抖音与 TikTok 默认由 yt-dlp 解析视频、DTK 解析图集，小红书视频与图集使用 yt-dlp 适配，用户也可明确选择适用引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.10.26` 的运行时版本为 `2026.10.26`；协议 v3，引擎版本 `0.14.5`。
+
+小红书网页及 App 分享页适配沿用 [yt-dlp 小红书提取器](https://github.com/yt-dlp/yt-dlp/blob/2026.10.26/yt_dlp/extractor/xiaohongshu.py) 的页面数据与视频原档入口，图文采用 [media-parser 记录的 CDN 地址形式](https://github.com/ucmao/media-parser/blob/main/docs/parsers/xiaohongshu.md#32-图文原图去水印与-livephoto-提取) 请求高清 JPEG。未增加第三方依赖。
 
 - 来源：https://github.com/yt-dlp/yt-dlp/tree/2026.10.26
 - PyPI：https://pypi.org/project/yt-dlp/2026.10.26/

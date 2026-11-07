@@ -14,13 +14,14 @@ from yt_dlp.utils.networking import select_proxy
 from yt_dlp.networking.common import Response
 from yt_dlp.networking.exceptions import TransportError, IncompleteRead
 
-# Platform web/API and video CDN suffixes used by the two pinned extractors.
+# Platform web/API and media CDN suffixes used by the supported extractors.
 # This is application policy, not a generated dtk asset or a general-site downloader.
 DOMAINS = {
     'youtube': ('youtube.com', 'youtu.be', 'youtube-nocookie.com', 'googlevideo.com',
                 'ytimg.com', 'youtubei.googleapis.com', 'yt3.ggpht.com', 'yt3.googleusercontent.com'),
     'douyin': ('douyin.com', 'iesdouyin.com', 'amemv.com', 'douyinvod.com',
                'bytecdn.cn', 'byteimg.com', 'douyinstatic.com', 'zjcdn.com', '365yg.com', 'douyinpic.com'),
+    'xiaohongshu': ('xiaohongshu.com', 'xhslink.cn', 'xhslink.com', 'xhscdn.com'),
     'tiktok': ('tiktok.com', 'tiktokv.com', 'tiktokcdn.com', 'tiktokcdn-us.com',
                'tiktokcdn-eu.com', 'tiktokv.us', 'ibytedtos.com', 'isnssdk.com',
                'musical.ly', 'muscdn.com'),

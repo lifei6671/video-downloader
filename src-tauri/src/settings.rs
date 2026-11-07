@@ -151,7 +151,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         Err(_) => bail!("DATABASE_ERROR"),
     };
     let mut profiles = Vec::new();
-    for platform in ["douyin", "tiktok", "youtube", "telegram"] {
+    for platform in ["douyin", "xiaohongshu", "tiktok", "youtube", "telegram"] {
         let row = db.query_row(
             "SELECT user_agent,proxy,cookie,credential_ref,http_chunk_size,bypass_proxy FROM platform_settings WHERE platform=?",
             [platform],
@@ -355,6 +355,14 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn profile_for<'a>(settings: &'a Settings, platform: &str) -> &'a Profile {
+        settings.profiles.iter().find(|profile| profile.platform == platform).unwrap()
+    }
+
+    fn profile_for_mut<'a>(settings: &'a mut Settings, platform: &str) -> &'a mut Profile {
+        settings.profiles.iter_mut().find(|profile| profile.platform == platform).unwrap()
+    }
     #[test]
     fn bypass_proxy_migrates_preserves_addresses_and_freezes_task_routes() {
         let db = Connection::open_in_memory().unwrap();
@@ -369,7 +377,7 @@ mod tests {
             let update = serde_json::from_value(json!({"platform":"youtube","user_agent":"fixture","bypass_proxy":enabled})).unwrap();
             save_profile(&db, &mut settings, update).unwrap();
             let restored = load(&db, PathBuf::new()).unwrap();
-            assert_eq!(restored.profiles[2].bypass_proxy, enabled);
+            assert_eq!(profile_for(&restored, "youtube").bypass_proxy, enabled);
             assert_eq!(proxy(&restored, "youtube").unwrap().as_deref(), Some("http://127.0.0.1:7890/"));
             let current = snapshot(&restored).unwrap();
             assert_eq!(current["youtube"]["proxy"], if enabled { Value::Null } else { json!("http://127.0.0.1:7890/") });
@@ -378,12 +386,12 @@ mod tests {
             assert!(restored.profiles.iter().filter(|p| p.platform != "youtube").all(|p| !p.bypass_proxy));
             // Older callers omit the flag and must preserve the stored choice.
             save_profile(&db, &mut settings, serde_json::from_value(json!({"platform":"youtube","user_agent":"fixture"})).unwrap()).unwrap();
-            assert_eq!(load(&db, PathBuf::new()).unwrap().profiles[2].bypass_proxy, enabled);
+            assert_eq!(profile_for(&load(&db, PathBuf::new()).unwrap(), "youtube").bypass_proxy, enabled);
         }
-        settings.profiles[2].credential_ref = Some(format!("bypass-fixture-{}", Uuid::new_v4()));
-        settings.profiles[2].bypass_proxy = true;
+        profile_for_mut(&mut settings, "youtube").credential_ref = Some(format!("bypass-fixture-{}", Uuid::new_v4()));
+        profile_for_mut(&mut settings, "youtube").bypass_proxy = true;
         assert!(snapshot(&settings).unwrap()["youtube"]["proxy"].is_null(), "bypassed proxy must not read its credential");
-        settings.profiles[2].bypass_proxy = false;
+        profile_for_mut(&mut settings, "youtube").bypass_proxy = false;
         assert!(snapshot(&settings).is_err(), "active proxy must preserve credential error semantics");
     }
 
@@ -394,8 +402,8 @@ mod tests {
         db.execute_batch("CREATE TEMP TRIGGER reject_bypass BEFORE INSERT ON platform_settings BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
         let update = serde_json::from_value(json!({"platform":"tiktok","user_agent":"fixture","bypass_proxy":true})).unwrap();
         assert_eq!(save_profile(&db, &mut settings, update).unwrap_err().to_string(), "DATABASE_ERROR");
-        assert!(!settings.profiles[1].bypass_proxy);
-        assert!(!load(&db, PathBuf::new()).unwrap().profiles[1].bypass_proxy);
+        assert!(!profile_for(&settings, "tiktok").bypass_proxy);
+        assert!(!profile_for(&load(&db, PathBuf::new()).unwrap(), "tiktok").bypass_proxy);
     }
 
     #[test]
@@ -426,7 +434,7 @@ mod tests {
         }
         // A new, nonexistent reference never queries an existing user's credential.
         let reference = Uuid::new_v4().to_string();
-        settings.profiles[2].credential_ref = Some(reference.clone());
+        profile_for_mut(&mut settings, "youtube").credential_ref = Some(reference.clone());
         assert_eq!(proxy(&settings, "youtube").unwrap_err().to_string(), "CREDENTIAL_ERROR");
         assert!(!serde_json::to_string(&settings).unwrap().contains(&reference));
     }
@@ -446,7 +454,7 @@ mod tests {
                 "http_chunk_size":value})).unwrap();
             save_profile(&db, &mut settings, update).unwrap();
             let restored = load(&db, PathBuf::new()).unwrap();
-            assert_eq!(restored.profiles[2].http_chunk_size, value);
+            assert_eq!(profile_for(&restored, "youtube").http_chunk_size, value);
             let captured = snapshot(&restored).unwrap();
             assert_eq!(captured["youtube"]["http_chunk_size"], json!(value));
             assert_eq!(captured["youtube"]["cookie"], "session=fixture");
@@ -455,7 +463,7 @@ mod tests {
             // Old callers that omit the new field must preserve the saved mode.
             save_profile(&db, &mut settings, serde_json::from_value(json!({"platform":"youtube",
                 "user_agent":"old-agent"})).unwrap()).unwrap();
-            assert_eq!(load(&db, PathBuf::new()).unwrap().profiles[2].http_chunk_size, value);
+            assert_eq!(profile_for(&load(&db, PathBuf::new()).unwrap(), "youtube").http_chunk_size, value);
         }
     }
 
@@ -472,7 +480,7 @@ mod tests {
             }).unwrap_err();
             assert_eq!(error.to_string(), "CONFIG_INVALID");
             assert_eq!(snapshot(&settings).unwrap()[platform]["cookie"], "");
-            assert!(load(&db, PathBuf::new()).unwrap().profiles[2].http_chunk_size.is_none());
+            assert!(profile_for(&load(&db, PathBuf::new()).unwrap(), "youtube").http_chunk_size.is_none());
         }
         for value in [json!(-1), json!(true), json!(1.5), json!("10485760")] {
             assert!(serde_json::from_value::<ProfileUpdate>(json!({"platform":"youtube",
@@ -497,7 +505,7 @@ mod tests {
     fn cookie_boundary_whitespace_is_trimmed_for_all_platforms() {
         let db = Connection::open_in_memory().unwrap();
         let mut settings = load(&db, PathBuf::new()).unwrap();
-        for platform in ["douyin", "tiktok", "youtube"] {
+        for platform in ["douyin", "xiaohongshu", "tiktok", "youtube"] {
             for (input, expected) in [
                 (
                     "\r\n \t session=fixture; preference=a b \r\n\t",
@@ -536,7 +544,7 @@ mod tests {
     fn cookie_internal_newlines_are_rejected_without_changing_saved_values() {
         let db = Connection::open_in_memory().unwrap();
         let mut settings = load(&db, PathBuf::new()).unwrap();
-        for platform in ["douyin", "tiktok", "youtube"] {
+        for platform in ["douyin", "xiaohongshu", "tiktok", "youtube"] {
             save_profile(
                 &db,
                 &mut settings,
@@ -700,13 +708,17 @@ mod tests {
         )
         .unwrap();
         let restored = load(&db, PathBuf::new()).unwrap();
-        assert_eq!(restored.profiles.len(), 4);
+        assert_eq!(
+            restored.profiles.iter().map(|profile| profile.platform.as_str()).collect::<Vec<_>>(),
+            ["douyin", "xiaohongshu", "tiktok", "youtube", "telegram"]
+        );
         assert_eq!(
             super::cookie(&restored, "youtube").unwrap(),
             "session=fixture"
         );
         assert_eq!(super::cookie(&restored, "douyin").unwrap(), "");
         assert_eq!(super::cookie(&restored, "tiktok").unwrap(), "");
+        assert_eq!(super::cookie(&restored, "xiaohongshu").unwrap(), "");
         assert!(!serde_json::to_string(&restored)
             .unwrap()
             .contains("session=fixture"));

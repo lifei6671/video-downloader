@@ -37,10 +37,15 @@ async fn run(program: &str, args: &[String], config: Probe) -> Result<()> {
             let video: Video = serde_json::from_value(resolved["result"].clone())
                 .context("INVALID_ENGINE_RESULT")?;
             video.validate()?;
+            let public_url = if video.platform == "xiaohongshu" {
+                video.canonical_url.split('?').next().unwrap_or_default()
+            } else {
+                &video.canonical_url
+            };
             println!(
                 "{}",
                 json!({"id":id,"event":"resolved","platform":video.platform,
-                              "video_id":video.video_id,"canonical_url":video.canonical_url})
+                              "video_id":video.video_id,"canonical_url":public_url})
             );
             let staging = tempfile::Builder::new()
                 .prefix("yingqu-")
@@ -53,6 +58,7 @@ async fn run(program: &str, args: &[String], config: Probe) -> Result<()> {
                 "download_video",
                 json!({"input":video.canonical_url,"profiles":config.profiles,
                        "resolver":video.resolver,
+                       "format_id":resolved["result"]["selected_format_id"],
                        "expected":{"platform":video.platform,"video_id":video.video_id,"kind":video.kind,
                           "image_count":resolved["result"]["images"].as_array().map(Vec::len)},
                        "staging_dir":staging.path()}),

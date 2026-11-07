@@ -18,6 +18,7 @@ let tasks = [structuredClone(original), ...(scenario === 'duplicate' ? [complete
 let listener = () => {}; let removedListener = () => {}; let next = 0; const pendingUpdates = [], pendingSnapshots = [];
 const control = {loaded:false,calls:[],holdEvents:scenario === 'delayed',holdRefresh:scenario === 'delayed',race:scenario === 'race',release:()=>{},snapshot:()=>structuredClone(tasks),flush:()=>{control.holdEvents=false;control.holdRefresh=false;for(const task of pendingUpdates.splice(0))listener(task);for(const [resolve,snapshot] of pendingSnapshots.splice(0))resolve(snapshot)},complete:id=>{const task=tasks.find(t=>t.id===id);Object.assign(task,{revision:task.revision+1,status:'completed',bytes:65536,path:'C:\\TestVideos\\'+id+'.mp4',completed_at:20});listener(structuredClone(task))},stale:()=>listener(structuredClone(original))};
 window.backgroundTest = control;
+control.emit = task => listener(structuredClone(task));
 if (scenario === 'parse-controls') {
   api.readClipboardText = () => new Promise(resolve => control.releaseClipboard = resolve);
   control.finishParsing = status => {
@@ -125,13 +126,22 @@ api.remove = async id => {
   tasks=tasks.filter(task=>task.id!==id);
   if(scenario!=='actions-no-event')removedListener(id);
 };
-api.download = async (id,confirm=false) => {
-  control.calls.push({type:'download',id,confirm,format:tasks.find(t=>t.id===id).video.selected_format_id});
+api.download = async (id,confirm=false,replaceTaskId) => {
+  control.calls.push({type:'download',id,confirm,replaceTaskId,format:tasks.find(t=>t.id===id).video.selected_format_id});
   if(scenario==='pending')await new Promise(resolve=>control.release=resolve);
   if(scenario==='failure')throw 'NETWORK_ERROR';
   if(control.race && !confirm){control.race=false;tasks.push(structuredClone(completed));throw 'ALREADY_DOWNLOADED'}
-  const task=tasks.find(t=>t.id===id);Object.assign(task,{status:scenario==='queued'?'queued':'downloading',revision:task.revision+1,download_requested:true,queue_order:scenario==='queued'?1:null});
+  const preview=tasks.find(t=>t.id===id);
+  const task=replaceTaskId ? tasks.find(t=>t.id===replaceTaskId) : preview;
+  if (replaceTaskId) {
+    task.video=preview.video;
+    task.download_requested_at=(task.download_requested_at ?? 0)+1;
+    tasks=tasks.filter(t=>t.id!==id);
+    removedListener(id);
+  }
+  Object.assign(task,{status:scenario==='queued'?'queued':'downloading',revision:task.revision+1,download_requested:true,queue_order:scenario==='queued'?1:null});
   if(control.holdEvents)pendingUpdates.push(structuredClone(task));else listener(structuredClone(task));
+  return task.id;
 };
 api.image = async () => Array.from(Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ0kAAAAASUVORK5CYII='),c=>c.charCodeAt(0)));
 api.cover = async () => api.image();
@@ -236,10 +246,10 @@ if (scenario.startsWith('visual')) {
     api.image=async()=>Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));
   }
   if (scenario==='visual-album-sizing') {
-    const sizes=[[900,1600],[1600,900],[900,900],[300,2400],[2400,300],[1200,800]];
+    const sizes=new URLSearchParams(location.search).has('tiny') ? [[16,16],[16,16]] : [[900,1600],[1600,900],[900,900],[300,2400],[2400,300],[2600,800]];
     const images=sizes.map(([width,height],index)=>({quality_source:'high_definition',width:index===5?null:width,height:index===5?null:height,preview_filename:`preview-${index}.png`}));
     Object.assign(tasks[0],{status:'completed',download_requested:true,path:'C:\\TestVideos\\album',completed_at:20,files:images.map((image,index)=>({...image,filename:`${index}.png`}))});
-    Object.assign(tasks[0].video,{platform:'douyin',title:'图集尺寸回归测试，横竖图片切换后按比例适应窗口，较长的作品标题限制为两行以保留图片空间',kind:'image_album',resolver:'dtk',formats:[],images});
+    Object.assign(tasks[0].video,{platform:'douyin',title:'图集尺寸回归测试，横竖图片共用固定舞台，较长的作品标题限制为两行以保留图片空间',kind:'image_album',resolver:'dtk',formats:[],images});
     if (new URLSearchParams(location.search).has('long-details')) tasks[0].video.title += '。用于验证右侧详情独立滚动'.repeat(60);
     api.image=async(_id,index)=>{
       const [width,height]=sizes[index];

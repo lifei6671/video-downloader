@@ -21,9 +21,14 @@ async page => {
     await page.evaluate(async()=>{for(const weight of [400,500,600])await document.fonts.load(weight+' 14px "Alibaba PuHuiTi 3.0"')});
     check(await page.evaluate(()=>document.fonts.check('400 14px "Alibaba PuHuiTi 3.0"') && getComputedStyle(document.body).fontFamily.includes('Alibaba PuHuiTi 3.0')),'global font did not load');
     await input().fill('{platform}/{user_name}-{link_id}-{content}-{current_time}-{quality}');
-    await path('youtube/creator-sample-id-sample-video-20261026_120000-1080P.mp4');
+    await input().evaluate(el=>el.setSelectionRange(11,11));
+    const authorId = page.getByRole('button',{name:'插入作者 ID',exact:true});
+    await authorId.focus();await page.keyboard.press('Enter');
+    check(await input().inputValue()==='{platform}/{user_id}{user_name}-{link_id}-{content}-{current_time}-{quality}','author ID insertion missed the caret');
+    check(await input().evaluate(el=>el===document.activeElement),'keyboard insertion did not restore input focus');
+    await path('youtube/sample-author-idcreator-sample-id-sample-video-20261026_120000-1080P.mp4');
     const colors=await preview().locator('[data-filename-variable]').evaluateAll(nodes=>nodes.map(el=>getComputedStyle(el).backgroundColor));
-    check(colors.length===6 && new Set(colors).size===6 && !colors.includes('rgba(0, 0, 0, 0)'),'six variable colors are not distinct');
+    check(colors.length===7 && new Set(colors).size===7 && !colors.includes('rgba(0, 0, 0, 0)'),'seven variable colors are not distinct');
     await input().fill('youtube-{platform}-{platform}');await path('youtube-youtube-youtube.mp4');
     check(await preview().locator('[data-filename-variable="platform"]').count()===2,'literal text was incorrectly colored as a variable');
     const previousPreview=await preview().textContent();
@@ -73,15 +78,15 @@ async page => {
       await input().fill(invalid);await page.waitForFunction(()=>document.querySelector('#filename-template')?.getAttribute('aria-invalid')==='true');
       check(await save().isDisabled(),'invalid rule can save: '+invalid);
     }
-    const literalRule='{platform}/{user_name}-{link_id}-{quality-{unknown}';
-    await input().fill(literalRule);await path('youtube/creator-sample-id-{quality-{unknown}.mp4');
-    check((await preview().locator('[data-filename-variable]').evaluateAll(nodes=>nodes.map(node=>node.dataset.filenameVariable))).join(',')==='platform,user_name,link_id','literal braces received variable colors');
+    const literalRule='{platform}/{user_id}-{user_name}-{link_id}-{quality-{unknown}';
+    await input().fill(literalRule);await path('youtube/sample-author-id-creator-sample-id-{quality-{unknown}.mp4');
+    check((await preview().locator('[data-filename-variable]').evaluateAll(nodes=>nodes.map(node=>node.dataset.filenameVariable))).join(',')==='platform,user_id,user_name,link_id','literal braces received variable colors');
     await save().waitFor({state:'visible'});
     await page.waitForFunction(()=>!Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='保存命名规则')?.disabled);
     await page.keyboard.press('Enter');await saved();
     check(await stored()===literalRule,'Enter did not persist literal braces');
     await page.reload();await page.getByRole('button',{name:'系统设置',exact:true}).click();
-    await path('youtube/creator-sample-id-{quality-{unknown}.mp4');
+    await path('youtube/sample-author-id-creator-sample-id-{quality-{unknown}.mp4');
     check(await input().inputValue()===literalRule && await save().isDisabled(),'reload lost saved literal braces');
     await page.screenshot({path:'.local/naming-literal/settings-'+width+'.png',animations:'disabled'});
     await page.getByRole('button',{name:'恢复默认',exact:true}).click();

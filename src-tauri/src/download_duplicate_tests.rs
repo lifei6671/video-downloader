@@ -1,5 +1,172 @@
 use super::*;
 
+#[tokio::test]
+async fn redownload_album_upgrades_in_place_and_preserves_extra_files_on_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let static_fixture = root.path().join("album-static");
+    std::fs::write(&static_fixture, "").unwrap();
+    let app = core(root.path());
+    app.set_filename_template("album".into()).unwrap();
+    let original = app.resolve("album".into()).unwrap();
+    wait(&app, &original.id, Status::Ready).await;
+    app.download(&original.id, false).unwrap();
+    let original = wait(&app, &original.id, Status::Completed).await;
+    let path = original.path.as_ref().unwrap();
+    assert!(!path.join("001.mp4").exists());
+    std::fs::remove_file(static_fixture).unwrap();
+    app.set_filename_template("renamed".into()).unwrap();
+    let preview = app.resolve("album".into()).unwrap();
+    wait(&app, &preview.id, Status::Ready).await;
+    assert_eq!(
+        app.submit_download(&preview.id, true, Some("stale")).unwrap_err().to_string(),
+        "ALREADY_DOWNLOADED"
+    );
+    assert_eq!(app.submit_download(&preview.id, true, Some(&original.id)).unwrap(), original.id);
+    let updated = wait(&app, &original.id, Status::Completed).await;
+    assert_eq!(updated.insertion_id, original.insertion_id);
+    assert_eq!(updated.path.as_ref(), Some(path));
+    assert!(path.join("001.mp4").is_file());
+    assert!(updated.files[0].video.is_some());
+    assert_eq!(app.list().len(), 1);
+
+    let extra = path.join("keep.txt");
+    std::fs::write(&extra, "user file").unwrap();
+    let preview = app.resolve("album".into()).unwrap();
+    wait(&app, &preview.id, Status::Ready).await;
+    app.submit_download(&preview.id, true, Some(&original.id)).unwrap();
+    let preserved = wait(&app, &original.id, Status::Completed).await;
+    assert_eq!(preserved.error.as_deref(), Some("REDOWNLOAD_EXTRA_FILES"));
+    assert!(path.join("001.mp4").is_file());
+    assert_eq!(std::fs::read_to_string(&extra).unwrap(), "user file");
+    assert_eq!(app.list().len(), 1);
+    app.shutdown().await;
+    assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn redownload_cancel_restores_existing_task_and_file() {
+    let root = tempfile::tempdir().unwrap();
+    let app = core(root.path());
+    app.set_filename_template("{link_id}".into()).unwrap();
+    let task = enqueue(&app, "8922").await;
+    release(root.path(), "8922");
+    let original = wait(&app, &task.id, Status::Completed).await;
+    std::fs::remove_file(root.path().join("release-8922")).unwrap();
+    std::fs::remove_file(root.path().join("started-8922")).unwrap();
+    let preview = app.resolve("hold:8922".into()).unwrap();
+    wait(&app, &preview.id, Status::Ready).await;
+    app.submit_download(&preview.id, true, Some(&task.id)).unwrap();
+    started(root.path(), "8922").await;
+    let path = original.path.as_ref().unwrap();
+    let old = std::fs::read(path).unwrap();
+    assert_eq!(app.list().len(), 1);
+    app.cancel(&task.id).await.unwrap();
+    let restored = wait(&app, &task.id, Status::Completed).await;
+    assert_eq!(restored.completed_at, original.completed_at);
+    assert_eq!(restored.path.as_ref(), Some(path));
+    assert_eq!(std::fs::read(path).unwrap(), old);
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn redownload_recovery_rolls_back_an_uncommitted_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let app = core(root.path());
+    let task = app.resolve("valid".into()).unwrap();
+    wait(&app, &task.id, Status::Ready).await;
+    app.download(&task.id, false).unwrap();
+    let original = wait(&app, &task.id, Status::Completed).await;
+    app.shutdown().await;
+    drop(app);
+    let target = original.path.as_ref().unwrap();
+    let previous = std::fs::read(target).unwrap();
+    let stage = target.parent().unwrap().join(format!("yingqu-{}-interrupted", task.id));
+    let source = stage.join("media/video.mp4");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let replacement = b"\0\0\0\x18ftypmp42new-version";
+    std::fs::write(&source, replacement).unwrap();
+    let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
+    redownload::remember(&db, &original, "preview").unwrap();
+    let mut attempt = original.clone();
+    attempt.status = Status::Downloading;
+    attempt.path = None;
+    persist_new_attempt(&db, &attempt).unwrap();
+    db.execute("INSERT INTO task_staging VALUES(?1,?2)", params![task.id, stage.to_string_lossy()]).unwrap();
+    db.execute("INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,?4)",
+        params![task.id, source.to_string_lossy(), target.to_string_lossy(), i64::try_from(replacement.len()).unwrap()]).unwrap();
+    redownload::replace(&source, target, &original).unwrap();
+    assert_eq!(std::fs::read(target).unwrap(), replacement);
+    drop(db);
+
+    let app = core(root.path());
+    assert_eq!(std::fs::read(target).unwrap(), previous);
+    assert!(!stage.exists());
+    assert_eq!(app.list()[0].error.as_deref(), Some("INTERRUPTED"));
+    app.start_backup_service();
+    let recovered = wait(&app, &task.id, Status::Completed).await;
+    assert_eq!(recovered.path.as_ref(), Some(target));
+    assert_eq!(app.list().len(), 1);
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn redownload_rollback_failure_is_retained_even_when_canceling() {
+    let root = tempfile::tempdir().unwrap();
+    let app = core(root.path());
+    let task = app.resolve("valid".into()).unwrap();
+    wait(&app, &task.id, Status::Ready).await;
+    app.download(&task.id, false).unwrap();
+    let original = wait(&app, &task.id, Status::Completed).await;
+    {
+        let mut inner = app.inner.lock().unwrap();
+        let mut attempt = original.clone();
+        attempt.status = Status::Downloading;
+        attempt.canceling = true;
+        redownload::remember(&inner.db, &original, "preview").unwrap();
+        persist_new_attempt(&inner.db, &attempt).unwrap();
+        *inner.tasks.iter_mut().find(|task| task.id == original.id).unwrap() = attempt;
+    }
+    app.finish(&original.id, Err(anyhow::anyhow!("REDOWNLOAD_RESTORE_FAILED")), true);
+    let failed = wait(&app, &original.id, Status::Failed).await;
+    assert_eq!(failed.error.as_deref(), Some("REDOWNLOAD_RESTORE_FAILED"));
+    assert!(redownload::original(&app.inner.lock().unwrap().db, &original.id).unwrap().is_some());
+    assert!(app.remove_history(&original.id).is_err());
+    app.shutdown().await;
+    drop(app);
+    let app = core(root.path());
+    app.start_backup_service();
+    let restored = &app.list()[0];
+    assert_eq!(restored.status, Status::Completed);
+    assert_eq!(restored.path, original.path);
+    assert!(redownload::original(&app.inner.lock().unwrap().db, &original.id).unwrap().is_none());
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn redownload_unknown_legacy_format_requires_a_separate_file() {
+    let root = tempfile::tempdir().unwrap();
+    let app = core(root.path());
+    let task = app.resolve("valid".into()).unwrap();
+    wait(&app, &task.id, Status::Ready).await;
+    app.download(&task.id, false).unwrap();
+    let mut original = wait(&app, &task.id, Status::Completed).await;
+    original.video.as_mut().unwrap()["selected_format_id"] = Value::Null;
+    publish(&mut app.inner.lock().unwrap(), original.clone(), &*app.emit).unwrap();
+    let preview = app.resolve("valid".into()).unwrap();
+    wait(&app, &preview.id, Status::Ready).await;
+    app.choose_format(&preview.id, &"2".repeat(24)).unwrap();
+    assert_eq!(
+        app.submit_download(&preview.id, true, Some(&original.id)).unwrap_err().to_string(),
+        "ALREADY_DOWNLOADED"
+    );
+    app.download(&preview.id, true).unwrap();
+    let copied = wait(&app, &preview.id, Status::Completed).await;
+    assert_ne!(copied.path, original.path);
+    assert!(original.path.unwrap().is_file());
+    assert_eq!(app.list().len(), 2);
+    app.shutdown().await;
+}
+
 #[test]
 fn duplicate_in_progress_only_matches_submitted_same_identity_and_variant() {
     let candidate: Task = serde_json::from_value(json!({

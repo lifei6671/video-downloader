@@ -1,5 +1,5 @@
 use crate::{
-    files::{finalize_album, finalize_to, validate_album, AlbumFile, Video},
+    files::{finalize_album, finalize_album_with, finalize_to, finalize_to_with, validate_album, AlbumFile, Video},
     parse_cache,
     python_bridge::PythonBridge,
     resolve_progress::{ResolvePhase, ResolveProgress},
@@ -22,6 +22,8 @@ use uuid::Uuid;
 pub mod transcription;
 #[path = "task_actions.rs"]
 pub mod task_actions;
+#[path = "redownload.rs"]
+mod redownload;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -175,12 +177,18 @@ fn same_download_variant(old: &Value, video: &Value) -> bool {
             || old["selected_format_id"] == video["selected_format_id"])
 }
 
+fn same_replacement_variant(old: &Value, video: &Value) -> bool {
+    same_download_variant(old, video)
+        && (video["kind"] == "image_album" || video["platform"] == "telegram"
+            || old["selected_format_id"].as_str().zip(video["selected_format_id"].as_str())
+                .is_some_and(|(old, new)| old == new))
+}
+
 fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
     task.video.as_ref().is_some_and(|video| {
         tasks.iter().any(|old| {
             old.id != task.id
-                && (matches!(old.status, Status::Queued | Status::Downloading)
-                    || (old.status == Status::Parsing && old.download_requested)
+                && (download_in_progress(old)
                     || (old.status == Status::Completed && !file_missing(old)))
                 && old
                     .video
@@ -188,6 +196,11 @@ fn previously_downloaded(tasks: &[Task], task: &Task) -> bool {
                     .is_some_and(|v| same_download_variant(v, video))
         })
     })
+}
+
+fn download_in_progress(task: &Task) -> bool {
+    matches!(task.status, Status::Queued | Status::Downloading)
+        || (task.status == Status::Parsing && task.download_requested)
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -343,15 +356,23 @@ fn persist_new_attempt(db: &Connection, task: &Task) -> Result<()> {
 }
 fn publish(inner: &mut Inner, mut task: Task, emit: &dyn Fn(TaskEvent)) -> Result<()> {
     let tx = inner.db.transaction().context("DATABASE_ERROR")?;
-    crate::backup::repository::associate(&tx, &mut task)?;
-    persist(&tx, &task)?;
+    persist_published(&tx, &mut task)?;
+    tx.commit().context("DATABASE_ERROR")?;
+    emit_published(inner, task, emit);
+    Ok(())
+}
+fn persist_published(tx: &Connection, task: &mut Task) -> Result<()> {
+    crate::backup::repository::associate(tx, task)?;
+    persist(tx, task)?;
     let insertion_id = tx.query_row("SELECT rowid FROM download_tasks WHERE id=?", [&task.id], |row| row.get(0))
         .context("DATABASE_ERROR")?;
     if task.insertion_id != insertion_id {
         task.insertion_id = insertion_id;
-        persist(&tx, &task)?;
+        persist(tx, task)?;
     }
-    tx.commit().context("DATABASE_ERROR")?;
+    Ok(())
+}
+fn emit_published(inner: &mut Inner, task: Task, emit: &dyn Fn(TaskEvent)) {
     if task.status==Status::Completed {inner.backup_wake.notify_waiters();}
     if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
         *old = task.clone();
@@ -359,7 +380,20 @@ fn publish(inner: &mut Inner, mut task: Task, emit: &dyn Fn(TaskEvent)) -> Resul
         inner.tasks.insert(0, task.clone());
     }
     emit(TaskEvent::Updated(Box::new(task)));
-    Ok(())
+}
+
+fn restore_original_task(inner: &mut Inner, attempt: &Task, emit: &dyn Fn(TaskEvent)) -> Result<bool> {
+    let Some(mut original) = redownload::original(&inner.db, &attempt.id)? else {
+        return Ok(false);
+    };
+    original.revision = attempt.revision;
+    original.error = attempt.error.clone().or_else(|| Some("CANCELED".into()));
+    let tx = inner.db.transaction().context("DATABASE_ERROR")?;
+    redownload::forget(&tx, &attempt.id)?;
+    persist(&tx, &original)?;
+    tx.commit().context("DATABASE_ERROR")?;
+    emit_published(inner, original, emit);
+    Ok(true)
 }
 
 fn apply_video_format(video: &mut Value, format_id: &str) -> Result<()> {
@@ -403,7 +437,8 @@ impl Core {
             "CREATE TABLE IF NOT EXISTS download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS commit_intents(task_id TEXT PRIMARY KEY,source TEXT NOT NULL,
                 target TEXT NOT NULL,size INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS task_staging(task_id TEXT PRIMARY KEY,path TEXT NOT NULL);",
+            CREATE TABLE IF NOT EXISTS task_staging(task_id TEXT PRIMARY KEY,path TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS download_replacements(task_id TEXT PRIMARY KEY,original TEXT NOT NULL);",
         )
         .context("DATABASE_ERROR")?;
         let has_manifest = schema_tx
@@ -486,6 +521,24 @@ impl Core {
             parse_cache::save(&mut db, video, images, cover, task.created_at)?;
         }
         for task in &mut tasks {
+            if let Some(mut original) = redownload::original(&db, &task.id)? {
+                if redownload::rollback(&db, &original).is_err() {
+                    task.status = Status::Failed;
+                    task.error = Some("REDOWNLOAD_RESTORE_FAILED".into());
+                    task.canceling = false;
+                    task.revision += 1;
+                    persist(&db, task)?;
+                    continue;
+                }
+                if task.canceling || task.error.as_deref() == Some("REDOWNLOAD_RESTORE_FAILED") {
+                    original.revision = task.revision + 1;
+                    let tx = db.transaction().context("DATABASE_ERROR")?;
+                    redownload::forget(&tx, &original.id)?;
+                    persist(&tx, &original)?;
+                    tx.commit().context("DATABASE_ERROR")?;
+                    *task = original;
+                }
+            }
             if task.status == Status::Ready {
                 if let Some(video) = task.video.as_ref() {
                     let identity: Video =
@@ -565,7 +618,7 @@ impl Core {
                                             .video
                                             .as_ref()
                                             .is_none_or(|v| v["platform"] != "telegram")
-                                            || crate::files::telegram_recovery_valid(
+                                            || crate::files::video_recovery_valid(
                                                 Path::new(&target),
                                                 size,
                                             ))
@@ -625,6 +678,9 @@ impl Core {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (id, path) in staging {
+            if tasks.iter().any(|task| task.id == id && task.error.as_deref() == Some("REDOWNLOAD_RESTORE_FAILED")) {
+                continue;
+            }
             cleanup_staging(&db, &id, Path::new(&path))?;
         }
         let backup_wake=Arc::new(tokio::sync::Notify::new());
@@ -1387,6 +1443,12 @@ impl Core {
                 .iter()
                 .find(|t| t.id == id)
                 .context("TASK_NOT_FOUND")?;
+            if task.error.as_deref() == Some("REDOWNLOAD_RESTORE_FAILED") {
+                bail!("REDOWNLOAD_RESTORE_FAILED");
+            }
+            if redownload::original(&inner.db, id)?.is_some() {
+                bail!("TASK_BUSY");
+            }
             if !matches!(task.status, Status::Failed | Status::Canceled) {
                 bail!("INVALID_STATE");
             }
@@ -1415,7 +1477,7 @@ impl Core {
         if !matches!(
             task.status,
             Status::Completed | Status::Failed | Status::Canceled
-        ) || inner
+        ) || task.error.as_deref() == Some("REDOWNLOAD_RESTORE_FAILED") || inner
             .transcription
             .as_ref()
             .is_some_and(|a| a.snapshot.task_id == id)
@@ -1429,7 +1491,7 @@ impl Core {
     }
 
     pub fn clear_history(&self, platform: Option<&str>) -> Result<Vec<String>> {
-        if platform.is_some_and(|p| !matches!(p, "douyin" | "tiktok" | "youtube" | "telegram")) {
+        if platform.is_some_and(|p| !matches!(p, "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram")) {
             bail!("CONFIG_INVALID");
         }
         let mut inner = self.inner.lock().unwrap();
@@ -1449,6 +1511,7 @@ impl Core {
                         task.status,
                         Status::Completed | Status::Failed | Status::Canceled
                     )
+                    && task.error.as_deref() != Some("REDOWNLOAD_RESTORE_FAILED")
                     && !inner.active.contains_key(&task.id)
                     && !inner.downloads.contains(&task.id)
                     && !inner
@@ -1521,6 +1584,10 @@ impl Core {
             .collect();
         let tx = inner.db.transaction().context("DATABASE_ERROR")?;
         for id in &ids {
+            if tx.query_row("SELECT EXISTS(SELECT 1 FROM download_replacements WHERE task_id=?)",
+                [id], |row| row.get::<_, bool>(0)).context("DATABASE_ERROR")? {
+                bail!("TASK_BUSY");
+            }
             tx.execute("INSERT OR IGNORE INTO asset_hidden_history SELECT asset_id FROM media_assets WHERE task_id=?",[id]).context("DATABASE_ERROR")?;
             tx.execute("UPDATE media_assets SET task_id=NULL WHERE task_id=?", [id])
                 .context("DATABASE_ERROR")?;
@@ -1872,7 +1939,7 @@ impl Core {
                 core.resolve_progress(&id, ResolvePhase::StartingEngine);
                 let result = PythonBridge::operation_cancellable(
                     &core.program, &core.args, &id, "resolve_video",
-                    json!({"input":input,"profiles":profiles,"resolver":resolver,"preview_dir":stage.path(),"runtime_directory":core.runtime_directory,"report_resolve_progress":true}),
+                    json!({"input":input,"profiles":profiles,"resolver":resolver,"format_id":requested_format,"preview_dir":stage.path(),"runtime_directory":core.runtime_directory,"report_resolve_progress":true}),
                     |event| core.resolve_event(&id, &event), async { let _ = cancellation.wait_for(|v| *v).await; },
                 ).await.and_then(|result| {
                     core.resolve_progress(&id, ResolvePhase::Finalizing);
@@ -1946,7 +2013,10 @@ impl Core {
             .find(|t| t.id == id)
             .expect("active task exists")
             .clone();
-        if task.canceling {
+        if result.as_ref().is_err_and(|error| error.to_string() == "REDOWNLOAD_RESTORE_FAILED") {
+            task.status = Status::Failed;
+            task.error = Some("REDOWNLOAD_RESTORE_FAILED".into());
+        } else if task.canceling {
             task.status = Status::Canceled;
             task.error = None;
         } else if inner.closing && (!downloading || result.is_err()) {
@@ -1999,7 +2069,17 @@ impl Core {
         task.eta_seconds = None;
         task.merging = false;
         task.revision += 1;
-        if publish(&mut inner, task.clone(), &*self.emit).is_err() {
+        let saved = if downloading && !inner.closing
+            && matches!(task.status, Status::Failed | Status::Canceled)
+            && task.error.as_deref() != Some("REDOWNLOAD_RESTORE_FAILED")
+        {
+            restore_original_task(&mut inner, &task, &*self.emit).and_then(|restored| {
+                if restored { Ok(()) } else { publish(&mut inner, task.clone(), &*self.emit) }
+            })
+        } else {
+            publish(&mut inner, task.clone(), &*self.emit)
+        };
+        if saved.is_err() {
             task.status = Status::Failed;
             task.error = Some("DATABASE_ERROR".into());
             let previous = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
@@ -2053,6 +2133,15 @@ impl Core {
     }
 
     pub fn download(self: &Arc<Self>, id: &str, confirm_duplicate: bool) -> Result<()> {
+        self.submit_download(id, confirm_duplicate, None).map(|_| ())
+    }
+
+    pub fn submit_download(
+        self: &Arc<Self>,
+        id: &str,
+        confirm_duplicate: bool,
+        replace_task_id: Option<&str>,
+    ) -> Result<String> {
         let mut inner = self.inner.lock().unwrap();
         if inner.closing {
             bail!("TASK_BUSY");
@@ -2071,16 +2160,57 @@ impl Core {
         if task.status != Status::Ready && !deferred {
             bail!("INVALID_STATE");
         }
-        if !confirm_duplicate && previously_downloaded(&inner.tasks, &task) {
-            bail!("ALREADY_DOWNLOADED");
+        let matches = |old: &&Task| {
+            old.id != task.id && old.video.as_ref().zip(task.video.as_ref())
+                .is_some_and(|(old, video)| same_download_variant(old, video))
+        };
+        let in_progress = inner.tasks.iter().filter(matches).any(download_in_progress);
+        let completed = |old: &&Task| old.status == Status::Completed && !file_missing(old);
+        let replaceable = |old: &&Task| {
+            old.video.as_ref().zip(task.video.as_ref())
+                .is_some_and(|(old, video)| same_replacement_variant(old, video))
+        };
+        let original = if let Some(replace_id) = replace_task_id {
+            if !confirm_duplicate {
+                bail!("ALREADY_DOWNLOADED");
+            }
+            let original = inner.tasks.iter().filter(completed).filter(replaceable)
+                .find(|old| old.id == replace_id).context("ALREADY_DOWNLOADED")?;
+            if inner.active.contains_key(replace_id)
+                || inner.transcription.as_ref().is_some_and(|active| {
+                    active.snapshot.task_id == replace_id
+                        || original.asset_id.as_deref() == Some(active.snapshot.task_id.as_str())
+                })
+            {
+                bail!("TASK_BUSY");
+            }
+            Some(original.clone())
+        } else {
+            let mut completed = inner.tasks.iter().filter(matches).filter(completed);
+            if completed.clone().any(|old| replaceable(&old))
+                || (!confirm_duplicate && (in_progress || completed.next().is_some())) {
+                bail!("ALREADY_DOWNLOADED");
+            }
+            None
+        };
+        if let Some(original) = &original {
+            task.id.clone_from(&original.id);
+            task.insertion_id = original.insertion_id;
+            task.created_at = original.created_at;
+            task.revision = original.revision;
+            task.asset_id.clone_from(&original.asset_id);
         }
         task.duplicate_confirmed |= confirm_duplicate;
-        self.queue_download(&mut inner, task, true)?;
+        let queued_id = task.id.clone();
+        self.queue_download(&mut inner, task, true, original.as_ref().map(|original| (original, id)))?;
         self.dispatch(&mut inner);
-        Ok(())
+        Ok(queued_id)
     }
 
-    fn queue_download(self: &Arc<Self>, inner: &mut Inner, mut task: Task, new_request: bool) -> Result<()> {
+    fn queue_download(
+        self: &Arc<Self>, inner: &mut Inner, mut task: Task, new_request: bool,
+        replacing: Option<(&Task, &str)>,
+    ) -> Result<()> {
         let deferred = task.video.is_none() && task.telegram_link.is_some();
         if !inner.active.contains_key(&task.id) {
             let telegram = deferred
@@ -2095,7 +2225,14 @@ impl Core {
             };
             let (cancel, _) = watch::channel(false);
             let (_, done) = watch::channel(true);
-            let directory = inner.settings.download_directory.clone();
+            let replacement = if let Some((original, _)) = replacing {
+                Some(original.clone())
+            } else {
+                redownload::original(&inner.db, &task.id)?
+            };
+            let directory = replacement.as_ref().map(|original| {
+                original.path.as_deref().and_then(Path::parent).map(Path::to_owned).context("FILE_MISSING")
+            }).transpose()?.unwrap_or_else(|| inner.settings.download_directory.clone());
             let filename_template = inner.settings.filename_template.clone();
             inner.active.insert(
                 task.id.clone(),
@@ -2135,7 +2272,24 @@ impl Core {
             );
         }
         task.revision += 1;
-        persist_new_attempt(&inner.db, &task)?;
+        if let Some((original, preview_id)) = replacing {
+            let saved = (|| {
+                let tx = inner.db.transaction().context("DATABASE_ERROR")?;
+                tx.execute("DELETE FROM commit_intents WHERE task_id=?", [&task.id]).context("DATABASE_ERROR")?;
+                redownload::remember(&tx, original, preview_id)?;
+                persist(&tx, &task)?;
+                tx.commit().context("DATABASE_ERROR")
+            })();
+            if let Err(error) = saved {
+                inner.active.remove(&task.id);
+                return Err(error);
+            }
+            inner.active.remove(preview_id);
+            inner.tasks.retain(|stored| stored.id != preview_id);
+            (self.emit)(TaskEvent::Removed(preview_id.to_owned()));
+        } else {
+            persist_new_attempt(&inner.db, &task)?;
+        }
         *inner.tasks.iter_mut().find(|stored| stored.id == task.id).context("TASK_NOT_FOUND")? = task.clone();
         (self.emit)(TaskEvent::Updated(Box::new(task)));
         Ok(())
@@ -2149,12 +2303,14 @@ impl Core {
         ).cloned().collect();
         pending.sort_by_key(|task| (task.queue_order.unwrap_or(u64::MAX), task.insertion_id));
         for mut task in pending {
-            if let Err(error) = self.queue_download(inner, task.clone(), false) {
+            if let Err(error) = self.queue_download(inner, task.clone(), false, None) {
                 inner.active.remove(&task.id);
                 task.status = Status::Failed;
                 task.error = Some(error.to_string());
                 task.revision += 1;
-                let _ = publish(inner, task, &*self.emit);
+                let _ = restore_original_task(inner, &task, &*self.emit).and_then(|restored| {
+                    if restored { Ok(()) } else { publish(inner, task, &*self.emit) }
+                });
                 eprintln!("startup_download event=queue_failed");
             }
         }
@@ -2189,7 +2345,10 @@ impl Core {
                 task.status = Status::Failed;
                 task.error = Some("DATABASE_ERROR".into());
                 task.revision += 1;
-                if publish(inner, task.clone(), &*self.emit).is_err() {
+                let saved = restore_original_task(inner, &task, &*self.emit).and_then(|restored| {
+                    if restored { Ok(()) } else { publish(inner, task.clone(), &*self.emit) }
+                });
+                if saved.is_err() {
                     *inner.tasks.iter_mut().find(|t| t.id == id).unwrap() = task.clone();
                     (self.emit)(TaskEvent::Updated(Box::new(task)));
                 }
@@ -2313,6 +2472,7 @@ impl Core {
         let telegram = active.telegram;
         let directory = active.directory.clone();
         let filename_template = active.filename_template.clone();
+        let replacement = redownload::original(&inner.db, id)?;
         let naming_time = crate::naming::current_time();
         let video = task.video.clone().context("INVALID_STATE")?;
         let telegram_input = if telegram {
@@ -2421,6 +2581,20 @@ impl Core {
                 if result.as_ref().is_err_and(|error| error.to_string() == "TELEGRAM_MEDIA_CHANGED") {
                     parse_cache::invalidate_telegram(&mut core.inner.lock().unwrap().db, &video)?;
                 }
+                // Release, upload and restore may still be using the old local
+                // asset. Serialize their file work with the replacement commit.
+                let asset = replacement.as_ref().and_then(|original| original.asset_id.as_deref());
+                let (result, _backup_guards) = match (result, asset) {
+                    (Ok(result), Some(asset)) => tokio::select! {
+                        _ = cancellation.wait_for(|value| *value) => (Err(anyhow::anyhow!("CANCELED")), None),
+                        guards = async {
+                            let write = core.backup_write_lock.read().await;
+                            let file = core.restore_file_guard(asset).await;
+                            (write, file)
+                        } => (Ok(result), Some(guards)),
+                    },
+                    (result, _) => (result, None),
+                };
                 let committed = result.and_then(|result| {
                     let mut inner = core.inner.lock().unwrap();
                     let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
@@ -2434,15 +2608,32 @@ impl Core {
                     if video["selected_format_id"].is_string() && result["format_id"] != video["selected_format_id"] {
                         bail!("INVALID_ENGINE_RESULT");
                     }
-                    let relative = crate::naming::render(&filename_template, &video, &naming_time)?;
+                    let relative = if replacement.is_none() {
+                        Some(crate::naming::render(&filename_template, &video, &naming_time)?)
+                    } else {
+                        None
+                    };
+                    let previous_path = replacement.as_ref().and_then(|task| task.path.as_deref());
                     let identity: Video = serde_json::from_value(video).context("INVALID_ENGINE_RESULT")?;
                     let file = if identity.kind == "image_album" {
-                        let target = crate::naming::destination(&directory, &relative, None)?;
-                        let file = finalize_album(&identity, &result, &media, &target, |source,size,files| {
+                        let target = if let Some(previous_path) = previous_path {
+                            previous_path.to_owned()
+                        } else {
+                            crate::naming::destination(&directory, relative.as_deref().context("NAMING_INVALID")?, None)?
+                        };
+                        let record = |source: &Path, size, files: &[AlbumFile]| {
                             inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size,manifest) VALUES(?1,?2,?3,?4,?5)", params![
                                 id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?,serde_json::to_string(files)?]).context("DATABASE_ERROR")?;
                             Ok(())
-                        })?;
+                        };
+                        let file = if let Some(original) = replacement.as_ref() {
+                            finalize_album_with(&identity, &result, &media, &target, |source, size, files| {
+                                record(source, size, files)?;
+                                redownload::replace(source, &target, original)
+                            })?
+                        } else {
+                            finalize_album(&identity, &result, &media, &target, record)?
+                        };
                         task.files = serde_json::from_value(result["files"].clone()).context("INVALID_ENGINE_RESULT")?;
                         if let Some(video) = task.video.as_mut() { video["images"] = result["files"].clone(); }
                         task.completed_items = Some(task.files.len() as u64);
@@ -2451,12 +2642,24 @@ impl Core {
                     } else {
                     let extension = result["container"].as_str().context("INVALID_ENGINE_RESULT")?;
                     if !matches!(extension, "mp4" | "webm") && !(identity.platform == "telegram" && matches!(extension, "mov" | "mkv")) { bail!("INVALID_MEDIA_CONTENT"); }
-                    let target = crate::naming::destination(&directory, &relative, Some(extension))?;
-                    let file = finalize_to(&identity, &result, &media, &target, |source,size| {
+                    let target = if let Some(previous_path) = previous_path {
+                        previous_path.with_extension(extension)
+                    } else {
+                        crate::naming::destination(&directory, relative.as_deref().context("NAMING_INVALID")?, Some(extension))?
+                    };
+                    let record = |source: &Path, size| {
                         inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,?4)", params![
                             id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?]).context("DATABASE_ERROR")?;
                         Ok(())
-                    })?;
+                    };
+                    let file = if let Some(original) = replacement.as_ref() {
+                        finalize_to_with(&identity, &result, &media, &target, |source, size| {
+                            record(source, size)?;
+                            redownload::replace(source, &target, original)
+                        })?
+                    } else {
+                        finalize_to(&identity, &result, &media, &target, record)?
+                    };
                     let saved = crate::files::staged_cover(&result, &media).and_then(|body| {
                         parse_cache::save_cover(&inner.db, task.video.as_ref().context("INVALID_ENGINE_RESULT")?, &body)
                     }).unwrap_or(false);
@@ -2489,9 +2692,27 @@ impl Core {
                 task.merging = false;
                     task.revision += 1;
                     // Cancellation and file/DB commit share this lock.
-                    publish(&mut inner, task, &*core.emit)?;
+                    if let Some(original) = replacement.as_ref() {
+                        let tx = inner.db.transaction().context("DATABASE_ERROR")?;
+                        redownload::retire_local_asset(&tx, original)?;
+                        if original.asset_id.is_some() {
+                            task.asset_id = Some(Uuid::new_v4().to_string());
+                        }
+                        persist_published(&tx, &mut task)?;
+                        redownload::forget(&tx, &id)?;
+                        tx.commit().context("DATABASE_ERROR")?;
+                        emit_published(&mut inner, task, &*core.emit);
+                    } else {
+                        publish(&mut inner, task, &*core.emit)?;
+                    }
                     Ok(Value::Null)
                 });
+                if let Some(original) = replacement.as_ref().filter(|_| committed.is_err()) {
+                    if redownload::rollback(&core.inner.lock().unwrap().db, original).is_err() {
+                        let _ = stage.keep();
+                        bail!("REDOWNLOAD_RESTORE_FAILED");
+                    }
+                }
                 stage.close().context("IO_ERROR")?;
                 core.inner.lock().unwrap().db.execute("DELETE FROM task_staging WHERE task_id=?",[&id]).context("DATABASE_ERROR")?;
                 committed
@@ -2535,7 +2756,9 @@ impl Core {
             if matches!(task.status, Status::Ready | Status::Queued) {
                 task.status = Status::Canceled;
                 task.revision += 1;
-                publish(&mut inner, task, &*self.emit)?;
+                if !restore_original_task(&mut inner, &task, &*self.emit)? {
+                    publish(&mut inner, task, &*self.emit)?;
+                }
                 inner.active.remove(id);
                 self.dispatch(&mut inner);
                 return Ok(());
@@ -2824,7 +3047,7 @@ mod tests {
         .unwrap()
     }
     async fn transcript_video(app: &Arc<Core>, name: &str) -> Task {
-        let task = app.resolve("valid".into()).unwrap();
+        let task = app.resolve(format!("hold:6{}", app.list().len())).unwrap();
         wait(app, &task.id, Status::Ready).await;
         app.download(&task.id, true).unwrap();
         let mut task = wait(app, &task.id, Status::Completed).await;
@@ -4074,9 +4297,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_allows_immediate_reopen_after_completion() {
         let root = tempfile::tempdir().unwrap();
-        for _ in 0..16 {
+        for index in 0..16 {
             let app = core(root.path());
-            let task = app.resolve("valid".into()).unwrap();
+            let task = app.resolve(format!("hold:6{index:02}")).unwrap();
             wait(&app, &task.id, Status::Ready).await;
             app.download(&task.id, true).unwrap();
             wait(&app, &task.id, Status::Completed).await;
@@ -4268,9 +4491,9 @@ mod tests {
         let original = std::fs::read(c.path.as_ref().unwrap()).unwrap();
         let repeat = app.resolve("hold:9103".into()).unwrap();
         wait(&app, &repeat.id, Status::Ready).await;
-        app.download(&repeat.id, true).unwrap();
-        let repeat = wait(&app, &repeat.id, Status::Completed).await;
-        assert!(repeat.path.unwrap().ends_with("new/9103 (1).mp4"));
+        assert_eq!(app.submit_download(&repeat.id, true, Some(&c.id)).unwrap(), c.id);
+        let repeat = wait(&app, &c.id, Status::Completed).await;
+        assert_eq!(repeat.path, c.path);
         assert_eq!(std::fs::read(c.path.unwrap()).unwrap(), original);
         app.set_directory(root.path().to_owned()).unwrap();
         app.set_max_downloads(3).unwrap();
@@ -4287,7 +4510,7 @@ mod tests {
     async fn filename_rules_preserve_literal_braces_in_settings_and_downloads() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        let rule = "literal{unknown}/{link_id}-{quality";
+        let rule = "literal{unknown}/{user_id}-{link_id}-{quality";
         app.set_filename_template(rule.into()).unwrap();
         app.shutdown().await;
         drop(app);
@@ -4297,7 +4520,7 @@ mod tests {
         release(root.path(), "9120");
         let completed = wait(&app, &task.id, Status::Completed).await;
         let path = completed.path.unwrap();
-        assert!(path.ends_with("literal{unknown}/9120-{quality.mp4"));
+        assert!(path.ends_with("literal{unknown}/fixture-author-9120-{quality.mp4"));
         assert!(path.is_file());
         app.shutdown().await;
     }
@@ -4424,9 +4647,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_resumes_an_accepted_duplicate_without_requiring_new_confirmation() {
+    async fn startup_resumes_an_accepted_replacement_without_requiring_new_confirmation() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
+        app.set_filename_template("{link_id}".into()).unwrap();
         let first = enqueue(&app,"8606").await;
         started(root.path(),"8606").await;
         release(root.path(),"8606");
@@ -4436,7 +4660,7 @@ mod tests {
         std::fs::remove_file(root.path().join("started-8606")).unwrap();
         let repeat = app.resolve("hold:8606".into()).unwrap();
         wait(&app,&repeat.id,Status::Ready).await;
-        app.download(&repeat.id,true).unwrap();
+        app.submit_download(&repeat.id,true,Some(&first.id)).unwrap();
         started(root.path(),"8606").await;
         app.shutdown().await;
         drop(app);
@@ -4445,10 +4669,10 @@ mod tests {
         app.start_backup_service();
         started(root.path(),"8606").await;
         release(root.path(),"8606");
-        let repeat = wait(&app,&repeat.id,Status::Completed).await;
-        assert_ne!(first.path,repeat.path);
+        let repeat = wait(&app,&first.id,Status::Completed).await;
+        assert_eq!(first.path,repeat.path);
         assert_eq!(std::fs::read(first.path.unwrap()).unwrap(),original);
-        assert_eq!(app.list().len(),2);
+        assert_eq!(app.list().len(),1);
         app.shutdown().await;
     }
 
@@ -4654,7 +4878,11 @@ mod tests {
         .unwrap();
         assert_eq!(captured["douyin"]["user_agent"], old);
         assert_eq!(captured["youtube"]["http_chunk_size"], 10_485_760);
-        assert_eq!(app.settings().profiles[2].http_chunk_size, Some(0));
+        assert_eq!(
+            app.settings().profiles.iter().find(|profile| profile.platform == "youtube")
+                .unwrap().http_chunk_size,
+            Some(0)
+        );
         let c = enqueue(&app, "8203").await;
         let parsing = app.resolve("block".into()).unwrap();
         app.shutdown().await;
@@ -5407,9 +5635,12 @@ mod tests {
             app.download(&retry.id, false).err().unwrap().to_string(),
             "ALREADY_DOWNLOADED"
         );
-        app.download(&retry.id, true).unwrap();
-        let repeated = wait(&app, &retry.id, Status::Completed).await;
-        assert_ne!(original.path, repeated.path);
+        assert_eq!(app.download(&retry.id, true).unwrap_err().to_string(), "ALREADY_DOWNLOADED");
+        app.submit_download(&retry.id, true, Some(&original.id)).unwrap();
+        let repeated = wait(&app, &original.id, Status::Completed).await;
+        assert_eq!(original.path, repeated.path);
+        assert_eq!(original.insertion_id, repeated.insertion_id);
+        assert_eq!(app.list().len(), 1);
         assert!(original.path.unwrap().is_file());
         let mut other_platform = repeated.clone();
         other_platform.id = "other-platform".into();

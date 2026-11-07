@@ -37,6 +37,32 @@ impl Video {
             }
             return Ok(());
         }
+        if self.platform == "xiaohongshu" {
+            let url = url::Url::parse(&self.canonical_url).context("INVALID_ENGINE_RESULT")?;
+            if !matches!(self.kind.as_str(), "video" | "image_album")
+                || self.resolver != "yt-dlp"
+                || self.video_id.len() != 24
+                || !self
+                    .video_id
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || matches!(c, b'a'..=b'f'))
+                || url.scheme() != "https"
+                || url.host_str() != Some("www.xiaohongshu.com")
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.port().is_some()
+                || url.fragment().is_some()
+                || !["/explore/", "/discovery/item/"]
+                    .iter()
+                    .any(|prefix| url.path().strip_prefix(prefix) == Some(&self.video_id))
+                || url
+                    .query_pairs()
+                    .any(|(key, _)| !matches!(key.as_ref(), "xsec_token" | "xsec_source"))
+            {
+                bail!("INVALID_ENGINE_RESULT");
+            }
+            return Ok(());
+        }
         if !matches!(self.kind.as_str(), "video" | "image_album")
             || !matches!(self.resolver.as_str(), "yt-dlp" | "dtk")
             || (self.kind == "image_album" && self.resolver != "dtk")
@@ -99,6 +125,23 @@ pub fn finalize_to(
     path: &Path,
     before_move: impl FnOnce(&Path, u64) -> Result<()>,
 ) -> Result<Downloaded> {
+    finalize_to_with(video, result, staging, path, |source, size| {
+        before_move(source, size)?;
+        // Keep the existing create-if-absent behavior for ordinary downloads.
+        tempfile::TempPath::try_from_path(source)
+            .context("IO_ERROR")?
+            .persist_noclobber(path)
+            .map_err(|_| anyhow::anyhow!("IO_ERROR: destination exists or cannot finalize"))
+    })
+}
+
+pub(crate) fn finalize_to_with(
+    video: &Video,
+    result: &Value,
+    staging: &Path,
+    path: &Path,
+    commit: impl FnOnce(&Path, u64) -> Result<()>,
+) -> Result<Downloaded> {
     video.validate()?;
     if result["platform"] != video.platform || result["video_id"] != video.video_id {
         bail!("INVALID_ENGINE_RESULT");
@@ -145,13 +188,7 @@ pub fn finalize_to(
     }
     file.sync_all().context("IO_ERROR")?;
     drop(file);
-    before_move(&source, size)?;
-    // Platform-specific create-if-absent move on the same volume (also works on
-    // Windows filesystems without hard links). Never check then overwrite.
-    tempfile::TempPath::try_from_path(source)
-        .context("IO_ERROR")?
-        .persist_noclobber(path)
-        .map_err(|_| anyhow::anyhow!("IO_ERROR: destination exists or cannot finalize"))?;
+    commit(&source, size)?;
     Ok(Downloaded {
         path: path.to_owned(),
         bytes: size,
@@ -167,7 +204,7 @@ pub(crate) fn video_header_valid(container: &str, head: &[u8]) -> bool {
     }
 }
 
-pub(crate) fn telegram_recovery_valid(path: &Path, size: u64) -> bool {
+pub(crate) fn video_recovery_valid(path: &Path, size: u64) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -346,7 +383,7 @@ pub fn validate_album(directory: &Path, files: &[AlbumFile]) -> Result<u64> {
     Ok(total)
 }
 
-fn move_album(source: &Path, target: &Path) -> Result<()> {
+pub(crate) fn move_noclobber(source: &Path, target: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
@@ -398,6 +435,19 @@ pub fn finalize_album(
     target: &Path,
     before_move: impl FnOnce(&Path, u64, &[AlbumFile]) -> Result<()>,
 ) -> Result<Downloaded> {
+    finalize_album_with(video, result, staging, target, |source, size, files| {
+        before_move(source, size, files)?;
+        move_noclobber(source, target)
+    })
+}
+
+pub(crate) fn finalize_album_with(
+    video: &Video,
+    result: &Value,
+    staging: &Path,
+    target: &Path,
+    commit: impl FnOnce(&Path, u64, &[AlbumFile]) -> Result<()>,
+) -> Result<Downloaded> {
     video.validate()?;
     if video.kind != "image_album"
         || result["kind"] != "image_album"
@@ -431,8 +481,7 @@ pub fn finalize_album(
                 .sync_all()?;
         }
     }
-    before_move(&source, size, &files)?;
-    move_album(&source, target)?;
+    commit(&source, size, &files)?;
     Ok(Downloaded {
         path: target.to_owned(),
         bytes: size,
@@ -454,6 +503,24 @@ mod tests {
     }
     fn result(size: usize) -> Value {
         json!({"platform":"tiktok","video_id":"123","container":"mp4","filename":"video.mp4","bytes":size})
+    }
+    #[test]
+    fn xiaohongshu_album_requires_a_matching_note_url() {
+        let id = "a0123456789abcdef0123456";
+        let canonical_url = format!("https://www.xiaohongshu.com/discovery/item/{id}");
+        let mut video = Video {
+            platform: "xiaohongshu".into(),
+            video_id: id.into(),
+            canonical_url: format!("{canonical_url}?xsec_token=fixture&xsec_source=pc_share"),
+            kind: "image_album".into(),
+            resolver: "yt-dlp".into(),
+        };
+        assert!(video.validate().is_ok());
+        video.canonical_url = format!("{canonical_url}?cookie=fixture");
+        assert!(video.validate().is_err());
+        video.canonical_url = canonical_url;
+        video.video_id = "b".repeat(24);
+        assert!(video.validate().is_err());
     }
     #[test]
     fn saves_without_overwriting_and_rejects_bad_content() {

@@ -5,6 +5,7 @@ import pytest
 
 import engine
 import dtk_adapter
+import media_album
 from yt_dlp import YoutubeDL
 
 
@@ -61,7 +62,7 @@ def test_real_http_downloader_preserves_image_bytes_and_progress(tmp_path, media
     with YoutubeDL(dict(proxy=proxy, quiet=True, noprogress=True, retries=0, continuedl=False,
                         logger=engine.SafeLogger(), http_headers={'User-Agent': engine.DEFAULT_UA})) as ydl:
         ydl._request_director = ydl.build_request_director([functools.partial(GuardedRH, platform='douyin')])
-        dtk_adapter.download_images(ydl, content(), tmp_path, lambda event_type, **value: events.append((event_type, value)))
+        media_album.download_images(ydl, dtk_adapter.image_choices(content()), 'douyin', '123', 'dtk', tmp_path, lambda event_type, **value: events.append((event_type, value)))
     body = (tmp_path / 'album/001.webp').read_bytes()
     assert body == b'RIFF' + b'\x10\x00\x00\x00WEBPfixture'
     result = events[-1][1]
@@ -77,13 +78,13 @@ def test_real_http_downloader_preserves_image_bytes_and_progress(tmp_path, media
 
 
 def test_image_format_is_detected_without_transcoding():
-    assert dtk_adapter.image_extension(b'\xff\xd8\xfforiginal') == 'jpeg'
-    assert dtk_adapter.image_extension(b'\x89PNG\r\n\x1a\noriginal') == 'png'
-    assert dtk_adapter.image_extension(b'GIF89aoriginal') == 'gif'
-    assert dtk_adapter.image_extension(b'\x00\x00\x00\x18ftypavif') == 'avif'
-    assert dtk_adapter.image_extension(b'\x00\x00\x00\x18ftypheic') == 'heic'
+    assert media_album.image_extension(b'\xff\xd8\xfforiginal') == 'jpeg'
+    assert media_album.image_extension(b'\x89PNG\r\n\x1a\noriginal') == 'png'
+    assert media_album.image_extension(b'GIF89aoriginal') == 'gif'
+    assert media_album.image_extension(b'\x00\x00\x00\x18ftypavif') == 'avif'
+    assert media_album.image_extension(b'\x00\x00\x00\x18ftypheic') == 'heic'
     with pytest.raises(ValueError):
-        dtk_adapter.image_extension(b'<html>not an image</html>')
+        media_album.image_extension(b'<html>not an image</html>')
 
 
 @pytest.mark.parametrize('status', [404, 403])
@@ -109,10 +110,10 @@ def test_original_unavailable_downgrades_but_auth_failure_does_not(status, tmp_p
         emit = lambda event_type, **value: events.append((event_type, value))
         if status == 403:
             with pytest.raises(HTTPError):
-                dtk_adapter.download_images(ydl, item, tmp_path, emit)
+                media_album.download_images(ydl, dtk_adapter.image_choices(item), 'douyin', '123', 'dtk', tmp_path, emit)
             assert not list((tmp_path / 'album').iterdir())
         else:
-            dtk_adapter.download_images(ydl, item, tmp_path, emit)
+            media_album.download_images(ydl, dtk_adapter.image_choices(item), 'douyin', '123', 'dtk', tmp_path, emit)
             file = events[-1][1]['files'][0]
             assert file['quality_source'] == 'high_definition' and file['width'] == 2160
 
@@ -210,6 +211,6 @@ def test_live_clip_failure_never_finishes_album(mode, tmp_path, media_proxy, med
                         logger=engine.SafeLogger(), http_headers={'User-Agent': engine.DEFAULT_UA})) as ydl:
         ydl._request_director = ydl.build_request_director([functools.partial(GuardedRH, platform='douyin')])
         with pytest.raises((engine.EngineError, HTTPError, DownloadError)):
-            dtk_adapter.download_images(ydl, item, tmp_path, lambda kind, **value: events.append((kind, value)))
+            media_album.download_images(ydl, dtk_adapter.image_choices(item), 'douyin', '123', 'dtk', tmp_path, lambda kind, **value: events.append((kind, value)))
     assert not any(kind == 'download_finished' for kind, _ in events)
     assert not any(value.get('completed_items') for _, value in events)

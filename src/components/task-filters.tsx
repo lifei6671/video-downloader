@@ -18,6 +18,6 @@ export function TaskStatusFilters({ value, counts, onChange }: {
 
 export function TaskPlatformFilters() {
   return <TabsList variant="line" aria-label="按平台筛选下载任务" className="min-w-0 flex-1 justify-start">
-    {[['all', '全部'], ['douyin', '抖音'], ['tiktok', 'TikTok'], ['youtube', 'YouTube'], ['telegram', 'Telegram']].map(([value, label]) => <TabsTrigger key={value} value={value}>{label}</TabsTrigger>)}
+    {[['all', '全部'], ['douyin', '抖音'], ['xiaohongshu', '小红书'], ['tiktok', 'TikTok'], ['youtube', 'YouTube'], ['telegram', 'Telegram']].map(([value, label]) => <TabsTrigger key={value} value={value}>{label}</TabsTrigger>)}
   </TabsList>;
 }

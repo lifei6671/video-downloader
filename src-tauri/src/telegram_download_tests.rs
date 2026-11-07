@@ -862,7 +862,7 @@ async fn duplicate_telegram_in_progress_needs_confirmation_before_creating_anoth
 }
 
 #[tokio::test]
-async fn original_bytes_cover_cache_noclobber_and_restart() {
+async fn original_bytes_cover_cache_replacement_and_restart() {
     let root = tempfile::tempdir().unwrap();
     let fixture = Arc::new(Fixture::default());
     let app = app(root.path(), &fixture);
@@ -885,9 +885,10 @@ async fn original_bytes_cover_cache_noclobber_and_restart() {
         app.download(&again.id, false).unwrap_err().to_string(),
         "ALREADY_DOWNLOADED"
     );
-    app.download(&again.id, true).unwrap();
-    let other = wait(&app, &again.id, Status::Completed).await;
-    assert_ne!(done.path, other.path);
+    app.submit_download(&again.id, true, Some(&done.id)).unwrap();
+    let other = wait(&app, &done.id, Status::Completed).await;
+    assert_eq!(done.path, other.path);
+    assert_eq!(app.list().len(), 1);
     app.shutdown().await;
     drop(app);
     let reopened = super::tests::app(root.path(), &fixture);
@@ -1397,7 +1398,7 @@ async fn startup_restores_interrupted_telegram_with_and_without_resolved_metadat
 }
 
 #[tokio::test]
-async fn startup_keeps_duplicate_consent_for_deferred_telegram_recovery() {
+async fn startup_keeps_legacy_duplicate_consent_for_deferred_telegram_recovery() {
     for confirmed in [false,true] {
         let root = tempfile::tempdir().unwrap();
         let fixture = Arc::new(Fixture::default());
@@ -1407,17 +1408,12 @@ async fn startup_keeps_duplicate_consent_for_deferred_telegram_recovery() {
         let first = wait(&application,&first.id,Status::Completed).await;
         let original = std::fs::read(first.path.as_ref().unwrap()).unwrap();
         let repeat = resolve(&application,9).await;
-        if confirmed {
-            fixture.gates.lock().unwrap().insert(9,Arc::new(Semaphore::new(0)));
-            application.download(&repeat.id,true).unwrap();
-            timeout(Duration::from_secs(2),async {while fixture.active.load(Ordering::SeqCst)==0 {tokio::task::yield_now().await;}}).await.unwrap();
-        }
         application.shutdown().await;
         drop(application);
         let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
-        db.execute("UPDATE download_tasks SET snapshot=json_set(snapshot,'$.video',NULL,'$.download_requested',json('true'),'$.status','failed','$.error','INTERRUPTED') WHERE id=?",[&repeat.id]).unwrap();
+        db.execute("UPDATE download_tasks SET snapshot=json_set(snapshot,'$.video',NULL,'$.download_requested',json('true'),'$.status','failed','$.error','INTERRUPTED','$.duplicate_confirmed',json(?2)) WHERE id=?1",
+            rusqlite::params![repeat.id, if confirmed { "true" } else { "false" }]).unwrap();
         drop(db);
-        fixture.gates.lock().unwrap().clear();
         let application = app(root.path(),&fixture);
         application.start_backup_service();
         let status = if confirmed {Status::Completed} else {Status::Ready};

@@ -46,9 +46,11 @@ fn revision(resolver: &str) -> String {
     }
     let dtk: Value = serde_json::from_str(include_str!("../../vendor/dtk/manifest.json"))
         .expect("bundled manifest");
+    // Handshake changes can add platforms without changing saved previews.
+    const PREVIEW_FORMAT_VERSION: &str = "0.14.4";
     format!(
         "{}:{}:{}",
-        crate::python_bridge::ENGINE_VERSION,
+        PREVIEW_FORMAT_VERSION,
         crate::python_bridge::YTDLP_VERSION,
         dtk["upstream_commit"].as_str().expect("bundled commit")
     )
@@ -85,6 +87,11 @@ pub fn share_url(input: &str) -> Option<String> {
     if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
         return None;
     }
+    // Resolve the current share token instead of reusing a previous token from an alias.
+    if matches!(url.host_str(), Some("xiaohongshu.com" | "www.xiaohongshu.com"
+        | "xhslink.cn" | "www.xhslink.cn" | "xhslink.com" | "www.xhslink.com")) {
+        return None;
+    }
     url.set_scheme("https").ok()?;
     let video_id = if url.path() == "/watch" {
         url.query_pairs()
@@ -107,7 +114,7 @@ pub fn get(db: &Connection, platform: &str, id: &str, resolver: &str) -> Result<
     let row = db.query_row(
         "SELECT cache_key,metadata,saved_at,cover IS NOT NULL,author_avatar IS NOT NULL FROM parse_cache
          WHERE platform=?1 AND video_id=?2 AND revision=?4 AND
-           (resolver=?3 OR (?3='auto' AND resolver=CASE WHEN kind='image_album' THEN 'dtk' ELSE 'yt-dlp' END))",
+           (resolver=?3 OR (?3='auto' AND resolver=CASE WHEN kind='image_album' AND platform<>'xiaohongshu' THEN 'dtk' ELSE 'yt-dlp' END))",
         params![platform,id,resolver,revision(resolver)],
         |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,bool>(3)?,r.get::<_,bool>(4)?)),
     ).optional().context("DATABASE_ERROR")?;

@@ -7,10 +7,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent, CardFooter } from '@/components/ui/card';
 import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 const defaultTemplate = '{platform}/{user_name}-{content}';
 const variables = [
-  ['platform', '平台'], ['user_name', '作者昵称'], ['link_id', '作品 ID'],
+  ['platform', '平台'], ['user_name', '作者昵称'], ['user_id', '作者 ID'], ['link_id', '作品 ID'],
   ['content', '作品描述'], ['current_time', '当前时间'], ['quality', '清晰度'],
 ];
 
@@ -125,7 +126,11 @@ export function FilenameSettings({ settings, saved, previewCache }: { settings: 
       </Field>
       <Field>
         <FieldLabel id="filename-preview-label">实时预览</FieldLabel>
-        <div role="status" aria-busy={checking} aria-labelledby="filename-preview-label" className="filename-preview min-h-12 rounded-md border-[0.5px] bg-surface-subtle p-3 break-all">{preview ? preview.segments.map((segment, index) => segment.variable ? <span key={index} data-filename-variable={segment.variable} title={`{${segment.variable}}`}>{nativePath(segment.text)}</span> : <span key={index}>{nativePath(segment.text)}</span>) : <span className="text-xs text-muted-foreground">{checking ? '正在预览…' : '请修正规则后预览'}</span>}</div>
+        <div role="status" aria-busy={checking} aria-labelledby="filename-preview-label" className="filename-preview min-h-12 rounded-md border-[0.5px] bg-surface-subtle p-3 break-all">{preview ? preview.segments.map((segment, index) => segment.variable ?
+          <Tooltip key={index}>
+            <TooltipTrigger asChild><span data-filename-variable={segment.variable} tabIndex={0}>{nativePath(segment.text)}</span></TooltipTrigger>
+            <TooltipContent collisionPadding={8}>{`{${segment.variable}}`}</TooltipContent>
+          </Tooltip> : <span key={index}>{nativePath(segment.text)}</span>) : <span className="text-xs text-muted-foreground">{checking ? '正在预览…' : '请修正规则后预览'}</span>}</div>
         <FieldDescription className="break-all">{preview ? `示例路径：${nativePath(displayPath(settings.download_directory)).replace(/[\\/]$/, '')}${separator}${nativePath(preview.path)}` : '预览使用示例作品'}</FieldDescription>
       </Field>
     </FieldGroup></CardContent>

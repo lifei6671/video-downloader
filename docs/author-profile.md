@@ -1,10 +1,11 @@
 # 作者资料
 
-抖音、TikTok、YouTube 和 Telegram 的头像字节保存在 SQLite。Telegram 使用频道身份和频道头像。
+抖音、TikTok、YouTube、小红书和 Telegram 的头像字节保存在 SQLite。Telegram 使用频道身份和频道头像。
 
 - `author_profile` 为可选对象：`id`、`nickname`、`handle`、`kind=user|channel`。ID 按字符串保存。旧记录仍可显示原有 `author`，不自动联网补全历史任务。
 - 抖音沿用 DTK 的 `sec_uid` 身份语义，账号名另存 `handle`；TikTok 使用数字作者 ID；YouTube 使用 `UC…` 频道 ID，`@handle` 单独保存。昵称不再统一加 `@`。
 - 抖音/TikTok 的 yt-dlp 适配从已有详情响应补充字段，DTK 视频和图集读取已有 Author；不切换引擎、不新增签名算法。
+- 小红书从笔记详情的 `user` 对象读取 `userId` 和 `avatar`。网页分享链接和 App 短链共用视频及图集的头像缓存流程。
 - YouTube 只根据单视频解析得到的频道 ID读取 `/channel/<id>/about` 的频道头像元数据，不枚举频道视频。复用锁定版本 yt-dlp 的页面/缩略图解析能力，并核对频道 ID；网络通过 GuardedRH、使用该平台配置。头像额外允许 `yt3.ggpht.com`、`yt3.googleusercontent.com`。
 - Python 引擎的头像资料请求和下载各使用 5 秒网络超时，并使用固定暂存名 `author-avatar`。Telegram SDK 读取小头像的整个阶段限时 5 秒，直接返回图片字节。头像上限 2 MiB，只接受 JPEG、PNG 和 WebP。Rust 校验后写入 `parse_cache.author_avatar BLOB`。远程头像 URL 不进入事件、任务快照或 SQLite。
 - 头像是可选资源。资料缺失、网络失败或头像无效时，作品仍可解析和下载。作品预览、下载任务和任务详情通过 `get_author_avatar(taskId)` 读取缓存字节，在署名前显示头像，缺失时显示占位。可用作者昵称或 ID 搜索本地记录。

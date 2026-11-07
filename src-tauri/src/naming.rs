@@ -3,9 +3,10 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_TEMPLATE: &str = "{platform}/{user_name}-{content}";
-const VARIABLES: [&str; 6] = [
+const VARIABLES: [&str; 7] = [
     "platform",
     "user_name",
+    "user_id",
     "link_id",
     "content",
     "current_time",
@@ -145,6 +146,10 @@ fn render_segments(template: &str, video: &Value, time: &str) -> Result<Vec<Prev
             .filter(|s| !s.trim().is_empty())
             .or_else(|| text("author"))
             .unwrap_or("未知作者"),
+        video["author_profile"]["id"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("未知作者ID"),
         text("video_id").unwrap_or("unknown"),
         text("title")
             .or_else(|| text("video_id"))
@@ -203,7 +208,7 @@ pub fn current_time() -> String {
 pub fn preview(template: &str) -> Result<FilenamePreview> {
     let mut segments = render_segments(
         template,
-        &json!({"platform":"youtube", "author":"creator", "video_id":"sample-id",
+        &json!({"platform":"youtube", "author":"creator", "author_profile":{"id":"sample-author-id"}, "video_id":"sample-id",
             "title":"sample-video", "width":1920, "height":1080}),
         &current_time(),
     )?;
@@ -310,6 +315,24 @@ mod tests {
             );
             assert!(segments.iter().any(|s| s.variable == Some("content")));
             assert!(path.len() <= 182);
+        }
+    }
+
+    #[test]
+    fn author_id_uses_platform_identity_and_supports_legacy_records() {
+        let example = preview("{user_id}").unwrap();
+        assert_eq!(example.path, "sample-author-id.mp4");
+        assert_eq!(example.segments[0].variable, Some("user_id"));
+        let video = json!({"author_profile":{"id":"a/b", "nickname":"作者", "handle":"account"}, "video_id":"note-id"});
+        assert_eq!(
+            render("{user_name}/{user_id}-{link_id}", &video, "now").unwrap(),
+            "作者/a_b-note-id"
+        );
+        for video in [
+            json!({"author":"legacy"}),
+            json!({"author_profile":{"id":"  ", "handle":"account"}}),
+        ] {
+            assert_eq!(render("{user_id}", &video, "now").unwrap(), "未知作者ID");
         }
     }
 

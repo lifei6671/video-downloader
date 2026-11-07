@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.4", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.5", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.buffer.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
@@ -146,12 +146,13 @@ else:
     video_id = params["expected"]["video_id"]
     if params["expected"].get("kind") == "image_album":
         album=stage/"album"; album.mkdir()
+        static = (stage.parent.parent.parent / "album-static").is_file()
         files=[];total=0
         for index, ext in enumerate(("jpeg", "webp"), 1):
             body=b"\xff\xd8\xfffixture" if ext=="jpeg" else b"RIFF\x10\x00\x00\x00WEBPfixture"
             name=f"{index:03d}.{ext}"; (album/name).write_bytes(body);total+=len(body)
             files.append(dict(filename=name,bytes=len(body),sha256=hashlib.sha256(body).hexdigest(),width=100,height=200,quality_source="high_definition"))
-            if index == 1:
+            if index == 1 and not static:
                 clip = b"\0\0\0\x18ftypmp42live-fixture"
                 (album / "001.mp4").write_bytes(clip)
                 files[-1]['video'] = dict(filename="001.mp4", bytes=len(clip), sha256=hashlib.sha256(clip).hexdigest())

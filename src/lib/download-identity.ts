@@ -8,12 +8,21 @@ export function sameDownloadVariant(old: Video, video: Video) {
       || old.selected_format_id === video.selected_format_id);
 }
 
+export function sameReplacementVariant(old: Video, video: Video) {
+  return sameDownloadVariant(old, video)
+    && (video.kind === 'image_album' || video.platform === 'telegram'
+      || old.selected_format_id != null && old.selected_format_id === video.selected_format_id);
+}
+
 export function previousDownload(tasks: Task[], task: Task) {
-  return task.video && tasks.find(old => old.id !== task.id
-    && (old.status === 'queued' || old.status === 'downloading'
-      || old.status === 'parsing' && old.download_requested
-      || old.status === 'completed' && !old.file_missing && !!old.path)
-    && old.video && sameDownloadVariant(old.video, task.video!));
+  const video = task.video;
+  if (!video) return;
+  const matches = (old: Task) => old.id !== task.id && !!old.video && sameDownloadVariant(old.video, video);
+  const completed = (old: Task) => matches(old) && old.status === 'completed' && !old.file_missing && !!old.path;
+  return tasks.find(old => completed(old) && old.video && sameReplacementVariant(old.video, video))
+    ?? tasks.find(completed)
+    ?? tasks.find(old => matches(old) && (old.status === 'queued' || old.status === 'downloading'
+      || old.status === 'parsing' && old.download_requested));
 }
 
 export function duplicatePromptKey(task: Task) {

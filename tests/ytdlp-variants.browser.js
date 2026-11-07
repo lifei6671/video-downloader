@@ -46,7 +46,9 @@ async page => {
   await parse('variant-missing'); await download();
   check(!await dialog.isVisible(),'missing file blocked redownload');
   await parse('variant-legacy');
-  await dialog.waitFor(); await dismissDuplicate();
+  await dialog.waitFor();
+  check(await dialog.getByRole('button',{name:'另存一份',exact:true}).count()===1,'legacy unknown format offered destructive replacement');
+  await dismissDuplicate();
   await choose('3840'); await dialog.waitFor();
   await parse('variant-race'); await download(); await dialog.waitFor();
   await dialog.getByRole('button',{name:'重新下载',exact:true}).click();

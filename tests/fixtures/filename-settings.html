@@ -3,7 +3,7 @@
 import {api} from '/src/api';
 const initial={download_directory:new URL(location.href).searchParams.get('directory')||'C:\\TestVideos',filename_template:'{platform}/{user_name}-{content}',max_downloads:5,profiles:['douyin','tiktok','youtube'].map(platform=>({platform,user_agent:'test-only',proxy:null,cookie_configured:false}))};
 let settings=JSON.parse(sessionStorage.getItem('filename-settings')||'null')||initial;
-const values={platform:'youtube',user_name:'creator',link_id:'sample-id',content:'sample-video',current_time:'20261026_120000',quality:'1080P'};
+const values={platform:'youtube',user_name:'creator',user_id:'sample-author-id',link_id:'sample-id',content:'sample-video',current_time:'20261026_120000',quality:'1080P'};
 const state={failSave:false,holdSave:false,release:()=>{},calls:[],previewCalls:[],holdPreview:false,pendingPreviews:[],releasePreview:index=>state.pendingPreviews[index].resolve(),snapshot:()=>structuredClone(settings)};
 window.filenameSettingsTest=state;
 state.concurrencyCalls=[];

@@ -65,7 +65,7 @@ async page => {
     cases.push(width+': keyboard/browser mode/save/tab/reload/proxy/manual Cookie/isolation/layout');
   }
   await fresh();
-  for(const [platform,name] of [['douyin','抖音'],['tiktok','TikTok'],['youtube','YouTube']]) {
+  for(const [platform,name] of [['douyin','抖音'],['xiaohongshu','小红书'],['tiktok','TikTok'],['youtube','YouTube']]) {
     await page.getByRole('tab',{name,exact:true}).click();
     await page.waitForFunction(id=>!document.querySelector('#'+id+'-clear')?.disabled, platform, {timeout:10000});
     if(await browser().isChecked())await browser().click();

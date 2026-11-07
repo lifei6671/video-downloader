@@ -220,6 +220,7 @@ fn canonical_source(video: &Value) -> Option<String> {
     let valid = match video["platform"].as_str()? {
         "youtube" => matches!(host, "www.youtube.com" | "youtube.com" | "youtu.be"),
         "douyin" => matches!(host, "www.douyin.com" | "douyin.com"),
+        "xiaohongshu" => host == "www.xiaohongshu.com",
         "tiktok" => matches!(host, "www.tiktok.com" | "tiktok.com"),
         "telegram" => host == "t.me",
         _ => false,

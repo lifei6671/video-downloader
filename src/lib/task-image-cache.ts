@@ -22,10 +22,23 @@ export function forgetTaskImages(ids: string[]) {
   trim();
 }
 
+export async function readTaskImageSize(taskId: string, index: number) {
+  const source = URL.createObjectURL(new Blob([new Uint8Array(await api.image(taskId, index))]));
+  try {
+    const image = new Image();
+    image.src = source;
+    await image.decode();
+    return { width: image.naturalWidth, height: image.naturalHeight };
+  } finally {
+    URL.revokeObjectURL(source);
+  }
+}
+
 export function useTaskImage(task: Task, index?: number) {
   const filename = index === undefined ? task.cover_path : task.files[index]?.filename ?? task.video?.images?.[index]?.preview_filename;
   const local = index !== undefined || !!(task.cover_path || task.cover_cached);
   const key = local ? JSON.stringify([task.id, index ?? 'cover', filename, task.cached_at,
+    task.status === 'completed' ? task.download_requested_at ?? task.completed_at : null,
     index === undefined ? task.video?.cover_url : task.status === 'completed',
     index === undefined ? task.cover_cached : task.path]) : undefined;
   const [state, setState] = useState<{ key?: string; source?: string; failed?: boolean }>({});

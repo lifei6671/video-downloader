@@ -427,8 +427,9 @@ async fn start_download(
     core: State<'_, AppCore>,
     task_id: String,
     confirm_duplicate: Option<bool>,
-) -> Result<(), String> {
-    core.download(&task_id, confirm_duplicate.unwrap_or(false))
+    replace_task_id: Option<String>,
+) -> Result<String, String> {
+    core.submit_download(&task_id, confirm_duplicate.unwrap_or(false), replace_task_id.as_deref())
         .map_err(error)
 }
 #[tauri::command]

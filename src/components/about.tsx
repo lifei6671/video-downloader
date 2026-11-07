@@ -7,6 +7,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import { Separator } from '@/components/ui/separator';
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Spinner } from '@/components/ui/spinner';
 import { Progress } from '@/components/ui/progress';
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -14,10 +15,10 @@ import { api, errorText, type ProjectPage, type UpdateCheck, type UpdateDownload
 const ReleaseNotes = lazy(() => import('@/components/release-notes').then(module => ({ default: module.ReleaseNotes })));
 
 const brandIcon = new URL('../../src-tauri/icons/128x128.png', import.meta.url).href;
-const engineInfo = '引擎 0.7.5，yt-dlp 2026.08.19，DTK 5.1.3';
+const engineInfo = '引擎 0.14.5，yt-dlp 2026.10.26，DTK 5.1.10';
 export const aboutVersionInfo = `映取 v${__APP_VERSION__}\n${engineInfo}\nWindows / macOS`;
 const features = [
-  { Icon: Link, title: '从分享链接开始', description: '粘贴抖音、TikTok 或 YouTube 链接，先看预览，再选择视频规格。' },
+  { Icon: Link, title: '从分享链接开始', description: '粘贴抖音、小红书、TikTok 或 YouTube 链接，预览后下载。' },
   { Icon: Images, title: '视频与图集，一起收藏', description: '保存视频与封面；抖音、TikTok 图集原图优先，保留图片原格式。' },
   { Icon: FolderOpen, title: '作品与记录，留在本机', description: '在下载任务中查看进度、搜索记录，直接打开本地文件夹。' },
 ];
@@ -126,7 +127,7 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
         </div>
       </CardHeader>
       <CardFooter className="flex flex-wrap justify-between gap-3 border-t">
-        <div className="flex flex-wrap gap-2">{['抖音', 'TikTok', 'YouTube', 'Telegram'].map(platform => <Badge key={platform} variant="secondary" title={platform === 'Telegram' ? 'Telegram 实验模式' : undefined}>{platform}</Badge>)}</div>
+        <div className="flex flex-wrap gap-2">{['抖音', '小红书', 'TikTok', 'YouTube'].map(platform => <Badge key={platform} variant="secondary">{platform}</Badge>)}<Tooltip><TooltipTrigger asChild><Badge variant="secondary" tabIndex={0}>Telegram</Badge></TooltipTrigger><TooltipContent>Telegram 实验模式</TooltipContent></Tooltip></div>
         <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy} onClick={copyVersion}><Copy data-icon="inline-start" />复制版本信息</Button>{download && <Button variant="outline" onClick={() => { setUpdate({ status: 'checked', result: download.release }); setUpdateOpen(true); }}><Download data-icon="inline-start" />{downloading ? '查看下载进度' : download.phase === 'completed' ? '查看安装包' : '查看更新下载'}</Button>}<Button ref={checkButton} aria-busy={checking} aria-disabled={opening || downloading || starting} disabled={busy || checking} onClick={() => void checkUpdates()}>{checking ? <Spinner aria-hidden="true" data-icon="inline-start" /> : <RefreshCw data-icon="inline-start" />}{checking ? '正在检查…' : '检查更新'}</Button></div>
       </CardFooter>
     </Card>
