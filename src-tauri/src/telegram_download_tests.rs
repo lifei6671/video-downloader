@@ -21,6 +21,8 @@ struct Fixture {
     inspected: Mutex<Vec<u32>>,
     cover: Mutex<Option<Vec<u8>>>,
     cover_reads: AtomicUsize,
+    avatar: Mutex<Option<std::result::Result<Vec<u8>, &'static str>>>,
+    avatar_reads: AtomicUsize,
     native_attributes: std::sync::atomic::AtomicBool,
     channel_title: Mutex<Option<String>>,
 }
@@ -147,6 +149,54 @@ async fn channel_title_is_refreshed_on_download_and_persisted_without_renaming_t
     assert_eq!(stored.video.unwrap()["author_profile"]["nickname"], "改名后的频道");
     assert_eq!(stored.path, done.path);
     reopened.shutdown().await;
+}
+
+#[tokio::test]
+async fn telegram_channel_avatar_survives_download_and_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let avatar = png([180, 40, 90]);
+    let cover = png([40, 90, 180]);
+    *fixture.avatar.lock().unwrap() = Some(Ok(avatar.clone()));
+    *fixture.cover.lock().unwrap() = Some(cover.clone());
+    let application = app(root.path(), &fixture);
+
+    let private = resolve(&application, 9).await;
+    let public = application.resolve("https://t.me/example_channel/10".into()).unwrap();
+    let public = wait(&application, &public.id, Status::Ready).await;
+    for task in [&private, &public] {
+        assert_eq!(task.video.as_ref().unwrap()["author_profile"]["avatar_cached"], true);
+        assert_eq!(application.author_avatar(&task.id).unwrap(), avatar);
+        assert_eq!(application.cover(&task.id).unwrap(), cover);
+    }
+
+    application.download(&private.id, false).unwrap();
+    let done = wait(&application, &private.id, Status::Completed).await;
+    assert_eq!(done.video.unwrap()["author_profile"]["avatar_cached"], true);
+    assert_eq!(fixture.avatar_reads.load(Ordering::SeqCst), 2);
+    application.shutdown().await;
+    drop(application);
+
+    let reopened = app(root.path(), &fixture);
+    let stored = reopened.list().into_iter().find(|task| task.id == private.id).unwrap();
+    assert_eq!(stored.video.unwrap()["author_profile"]["avatar_cached"], true);
+    assert_eq!(reopened.author_avatar(&private.id).unwrap(), avatar);
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
+async fn telegram_channel_avatar_is_optional_when_missing_unavailable_or_invalid() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let application = app(root.path(), &fixture);
+    let cases = [None, Some(Err("TELEGRAM_CONNECTION_ERROR")), Some(Ok(b"invalid image".to_vec()))];
+    for (message, avatar) in (9..).zip(cases) {
+        *fixture.avatar.lock().unwrap() = avatar;
+        let task = resolve(&application, message).await;
+        assert_eq!(task.video.unwrap()["author_profile"]["avatar_cached"], false);
+        assert!(application.author_avatar(&task.id).is_err());
+    }
+    application.shutdown().await;
 }
 
 fn sdk_document(
@@ -388,6 +438,12 @@ async fn native_attributes_keep_downloaded_cover_without_metadata_probe() {
 
 impl Transport for Fake {
     fn cover(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> { Box::pin(async { self.fixture.cover_reads.fetch_add(1, Ordering::SeqCst); Ok(self.fixture.cover.lock().unwrap().clone()) }) }
+    fn avatar(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async {
+            self.fixture.avatar_reads.fetch_add(1, Ordering::SeqCst);
+            self.fixture.avatar.lock().unwrap().clone().transpose().map_err(anyhow::Error::msg)
+        })
+    }
     fn inspect<'a>(&'a mut self, link: &'a MessageLink) -> ProviderFuture<'a, Media> {
         Box::pin(async move {
             if self.fixture.auth_denied.load(Ordering::SeqCst) { bail!("TELEGRAM_AUTH_REQUIRED"); }

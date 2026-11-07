@@ -12,7 +12,7 @@ async page => {
     await group.waitFor();
     check((await group.innerText()).includes(platform === 'telegram' ? 'channel_name' : '作者昵称'), `name: ${platform}`);
     check((await group.innerText()).includes('ID:') === (platform !== 'telegram'), `id visibility: ${platform}`);
-    const hasAvatar = !['telegram', 'missing', 'broken'].includes(platform);
+    const hasAvatar = !['missing', 'broken'].includes(platform);
     if (hasAvatar) {
       await group.getByRole('img').waitFor();
       await group.getByRole('img').evaluate(image => image.decode());
@@ -23,7 +23,17 @@ async page => {
     for (const pageName of ['下载作品', '下载任务']) {
       await page.getByRole('button', {name: pageName, exact: true}).click();
       if (pageName === '下载任务') {
-        check((await group.innerText()).trim() === (platform === 'telegram' ? 'channel_name' : '作者昵称'), `task name must prefer channel name or nickname: ${platform}`);
+        await group.getByText(platform === 'telegram' ? 'channel_name' : '作者昵称', {exact: true}).waitFor();
+        if (hasAvatar) {
+          const image = group.getByRole('img');
+          await image.waitFor();
+          await image.evaluate(node => node.decode());
+          const avatarBox = await image.boundingBox();
+          const nameBox = await group.getByText(platform === 'telegram' ? 'channel_name' : '作者昵称', {exact: true}).boundingBox();
+          check(avatarBox.x + avatarBox.width <= nameBox.x, 'avatar must be before the name');
+        } else {
+          check(await group.getByRole('img').count() === 0, 'task avatar fallback loaded remote media');
+        }
       }
       for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
         await page.setViewportSize({width, height});
@@ -48,22 +58,24 @@ async page => {
       await page.evaluate(async () => {
         const { api } = await import('/src/api.ts');
         const tasks = await api.tasks();
-        tasks[0].revision++;
-        tasks[0].video.author_profile.nickname = '   ';
+        const listed = tasks.find(task => task.download_requested);
+        listed.revision++;
+        listed.video.author_profile.nickname = '   ';
         api.tasks = async () => structuredClone(tasks);
         window.dispatchEvent(new Event('focus'));
       });
-      await page.waitForFunction(() => document.querySelector('.task-row [data-author-info]')?.textContent.trim() === 'MS4w.' + 'author-id-'.repeat(6));
+      await page.getByText('MS4w.' + 'author-id-'.repeat(6), {exact:true}).waitFor();
       await page.evaluate(async () => {
         const { api } = await import('/src/api.ts');
         const tasks = await api.tasks();
-        tasks[0].revision++;
-        tasks[0].video.author_profile = null;
-        tasks[0].video.author = '旧记录昵称';
+        const listed = tasks.find(task => task.download_requested);
+        listed.revision++;
+        listed.video.author_profile = null;
+        listed.video.author = '旧记录昵称';
         api.tasks = async () => structuredClone(tasks);
         window.dispatchEvent(new Event('focus'));
       });
-      await page.waitForFunction(() => document.querySelector('.task-row [data-author-info]')?.textContent.trim() === '旧记录昵称');
+      await page.getByText('旧记录昵称', {exact:true}).waitFor();
     }
     results.push(platform);
   }

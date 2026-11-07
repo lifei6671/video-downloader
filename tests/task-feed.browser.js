@@ -54,7 +54,7 @@ async page => {
     }),'duration text lacks contrast over a light cover');
     check(await row('visual-6').locator('.task-feed-caption').textContent()==='2 张图片','album count missing');
     const coverBox=await row('visual-3').getByRole('button',{name:'查看封面',exact:true}).boundingBox();
-    const completed=row('visual-3').locator('.task-feed-completed');
+    const completed=row('visual-3').locator('.task-feed-status').filter({hasText:'已完成'});
     const completedBox=await completed.boundingBox();
     const play=row('visual-3').getByRole('button',{name:'播放视频',exact:true});
     const playBox=await play.boundingBox();
@@ -166,7 +166,7 @@ async page => {
     await page.waitForFunction(()=>document.activeElement?.closest('[data-task-id]')?.dataset.taskId==='visual-3' && document.activeElement?.hasAttribute('data-media-cover'));
     await row('visual-3').getByRole('button',{name:'播放视频',exact:true}).click();
     await page.waitForFunction(()=>window.backgroundTest.calls.some(call=>call.type==='prepare-playback'&&call.id==='visual-3'));
-    check(await page.locator('.video-player-dialog').count()===1 && await page.getByRole('dialog',{name:'任务详情',exact:true}).count()===0,'overlay play did not open only the player');
+    check(await page.locator('.video-player-dialog').count()===1 && await page.getByRole('dialog',{name:'任务详情',exact:true}).getByRole('region',{name:'任务详细信息'}).isVisible(),'overlay play did not open the unified viewer');
     await page.keyboard.press('Escape');await page.locator('.video-player-dialog').waitFor({state:'detached'});
     await row('visual-3').locator('.task-row-title').click({button:'right'});
     const menu=page.getByRole('menu',{name:'任务操作',exact:true});await menu.waitFor();

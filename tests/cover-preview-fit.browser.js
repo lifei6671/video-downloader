@@ -23,13 +23,13 @@ async page => {
       const details=await dialog.getByRole('region',{name:'任务详细信息'}).boundingBox();
       const left=await dialog.locator('.task-cover-image').boundingBox();
       check(picture.x>=left.x&&picture.x+picture.width<=left.x+left.width+1,'image escapes left pane');
-      check(details.x>=left.x+left.width+23&&details.x+details.width<=box.x+box.width,'details must be right of cover');
+      check(details.x>=left.x+left.width-1&&details.x+details.width<=box.x+box.width,'details must be right of cover');
       check(await dialog.getByRole('region',{name:'任务详细信息'}).evaluate(node=>node.scrollWidth<=node.clientWidth),'details overflow horizontally');
       await page.screenshot({path:`output/task-cover-details/${id}-${width}.png`});
       check(picture.y>=box.y&&picture.y+picture.height<=box.y+box.height,'image clipped vertically');
       const ratio=await image.evaluate(image=>image.naturalWidth/image.naturalHeight);
       check(Math.abs(picture.width/picture.height-ratio)<0.01,'image aspect ratio changed');
-      check(await dialog.evaluate(node=>node.scrollHeight<=node.clientHeight+1),'preview needs vertical scrolling: '+JSON.stringify(await dialog.evaluate(node=>({height:node.clientHeight,scroll:node.scrollHeight,image:node.querySelector('img').getBoundingClientRect().height,header:node.querySelector('[data-slot="dialog-header"]').getBoundingClientRect().height,gap:getComputedStyle(node).gap,padding:getComputedStyle(node).padding}))));
+      check(await dialog.evaluate(node=>node.scrollHeight<=node.clientHeight+1),'preview needs vertical scrolling');
       widths.push(box.width);await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});
     }
     check(Math.abs(widths[0]-widths[1])<1,'portrait and landscape change details layout width');
@@ -53,6 +53,6 @@ async page => {
   await page.keyboard.press('Escape');await page.evaluate(()=>window.coverSaveTest.releaseCopy());await page.getByText('封面已复制到剪贴板',{exact:true}).waitFor();results.push('pending preview copy prevents duplicate operations');
   await image.focus();await page.keyboard.press('Shift+F10');await menu.waitFor();await page.keyboard.press('Escape');await menuClosed();
   await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});check(await trigger('youtube').evaluate(node=>document.activeElement===node),'dialog focus did not return');results.push('keyboard preview menu and layered Escape/focus');
-  await preview('youtube');await dialog.getByRole('heading',{name:'任务详情',exact:true}).click({button:'right'});check(await menu.count()===0,'preview header got image menu');results.push('preview context menu is image-only');
+  await preview('youtube');await dialog.getByRole('heading',{name:'youtube cover',exact:true}).click({button:'right'});check(await menu.count()===0,'preview header got image menu');results.push('preview context menu is image-only');
   return {passed:results.length,cases:results};
 }

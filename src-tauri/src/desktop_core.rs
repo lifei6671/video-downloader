@@ -2217,7 +2217,12 @@ impl Core {
             serde_json::from_value(video.clone()).context("INVALID_ENGINE_RESULT")?;
         identity.validate()?;
         let mut inner = self.inner.lock().unwrap();
-        let cached = parse_cache::save(&mut inner.db, &video, Vec::new(), outcome.cover, now())?;
+        let mut cached = parse_cache::save(&mut inner.db, &video, Vec::new(), outcome.cover, now())?;
+        if let Some(body) = outcome.avatar {
+            let _ = parse_cache::save_avatar(&inner.db, &cached.video, &body);
+        }
+        cached.video["author_profile"]["avatar_cached"] =
+            parse_cache::avatar(&inner.db, &cached.video).is_ok().into();
         parse_cache::remember(&inner.db, input, &cached.video)?;
         let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
         task.cached_at = Some(cached.saved_at);

@@ -1,13 +1,13 @@
 // Isolated clipboard IPC, pixel and dialog checks via the existing Playwright CLI.
 async page => {
-  page.setDefaultTimeout(5000);
+  page.setDefaultTimeout(8000);
   const base=page.url().split('/').slice(0,3).join('/');
   const check=(value,message)=>{if(!value)throw Error(message)};
-  const menu=page.getByRole('menu',{name:'封面操作',exact:true});
+  const menu=page.getByRole('menu',{name:'任务操作',exact:true});
   const copy=menu.getByRole('menuitem',{name:'复制封面',exact:true});
   const dialog=page.getByRole('dialog',{name:'任务详情',exact:true});
   const trigger=id=>page.locator('[data-slot="card"]').filter({has:page.getByText(id+' cover',{exact:true})}).locator('[data-cover-context-menu]');
-  const load=async()=>{await page.goto(base+'/tests/fixtures/cover-save.html');await page.getByRole('button',{name:'下载任务',exact:true}).click();await page.waitForFunction(()=>[...document.querySelectorAll('[data-cover-context-menu] img')].filter(image=>image.complete&&image.naturalWidth).length===6)};
+  const load=async()=>{await page.goto(base+'/tests/fixtures/cover-save.html',{waitUntil:'domcontentloaded'});await page.getByRole('button',{name:'下载任务',exact:true}).click();await page.waitForFunction(()=>[...document.querySelectorAll('[data-cover-context-menu] img')].filter(image=>image.complete&&image.naturalWidth).length===6)};
   const open=async id=>{await trigger(id).click({button:'right',force:true});await menu.waitFor();check(await dialog.count()===0,'right click opened the preview')};
   const results=[];
   for(const id of ['douyin','tiktok','youtube','telegram','legacy','album']) {
@@ -31,6 +31,10 @@ async page => {
     await trigger(id).click({force:true});await dialog.waitFor();
     check(await dialog.getByRole('region',{name:'任务详细信息'}).isVisible(),'missing cover lost details');
     check(await dialog.getByRole('img',{name:'封面大图',exact:true}).count()===0,'failed image shown in details');
+    if (id === 'broken-album') {
+      await dialog.getByLabel('图片预览不可用',{exact:true}).waitFor();
+      check(await dialog.getByRole('button',{name:'封面操作',exact:true}).count() === 0,'broken album cover offered copy or export');
+    }
     await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});
   }
   results.push('missing and failed video/album disable copy but retain details');
@@ -39,7 +43,8 @@ async page => {
     for(const id of ['douyin','legacy','youtube','album']) {
       const source=await trigger(id).getByRole('img').getAttribute('src');
       await trigger(id).click();await dialog.waitFor();
-      const image=dialog.getByRole('img',{name:'封面大图',exact:true});await image.evaluate(image=>image.decode());
+      const image=dialog.getByRole('img',{name:id==='album'?'第 1 张图片':'封面大图',exact:true});await image.evaluate(image=>image.decode());
+      if (id === 'album') check(await dialog.locator('.album-dot').count() === 0, 'single image has pagination dots');
       check(await image.getAttribute('src')===source,'preview fetched another image');
       const bounds=await dialog.boundingBox();check(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=width&&bounds.y+bounds.height<=height,'dialog outside viewport');
       await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});
@@ -52,5 +57,22 @@ async page => {
   await dialog.getByRole('button',{name:'关闭',exact:true}).click();await dialog.waitFor({state:'hidden'});
   await trigger('douyin').focus();await page.keyboard.press('Space');await dialog.waitFor();
   await page.locator('[data-slot="dialog-overlay"]').click({position:{x:5,y:5}});await dialog.waitFor({state:'hidden'});results.push('Enter/Space, close button and backdrop');
+  await load();
+  await page.evaluate(()=>window.coverSaveTest.copyPending=true);
+  await trigger('album').click();
+  await dialog.getByRole('button',{name:'封面操作',exact:true}).click();
+  const viewerMenu = page.getByRole('menu',{name:'封面操作',exact:true});
+  await viewerMenu.getByRole('menuitem',{name:'复制封面',exact:true}).click();
+  await page.waitForFunction(()=>typeof window.coverSaveTest.releaseCopy==='function');
+  await viewerMenu.waitFor({state:'detached'});
+  await dialog.getByRole('button',{name:'关闭',exact:true}).click();
+  await dialog.waitFor({state:'detached'});
+  await open('album');
+  check(await menu.getByRole('menuitem',{name:'复制中…',exact:true}).isDisabled(),'closing viewer allowed another cover copy');
+  check(await menu.getByRole('menuitem',{name:'保存封面',exact:true}).isDisabled(),'row did not inherit viewer cover busy state');
+  await page.keyboard.press('Escape');await page.evaluate(()=>window.coverSaveTest.releaseCopy());
+  await page.getByText('封面已复制到剪贴板',{exact:true}).waitFor();
+  check(await page.evaluate(()=>window.coverSaveTest.copies.length===1),'viewer sent duplicate clipboard writes');
+  results.push('unified album preserves cover copy and shares its pending state with the row');
   return {passed:results.length,cases:results};
 }

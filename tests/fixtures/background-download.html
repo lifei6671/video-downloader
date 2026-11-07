@@ -27,8 +27,9 @@ if (scenario === 'parse-controls') {
   };
 }
 if (scenario.startsWith('author-')) {
-  tasks[0].download_requested = true;
-  tasks[0].video.author_profile = {id:platform === 'telegram' ? '100' : 'MS4w.'+'author-id-'.repeat(6),nickname:platform === 'telegram' ? null : '作者昵称',handle:platform === 'telegram' ? 'channel_name' : 'account_handle',kind:platform === 'telegram' ? 'channel' : 'user',avatar_cached:platform !== 'telegram' && scenario !== 'author-missing'};
+  tasks[0].video.author_profile = {id:platform === 'telegram' ? '100' : 'MS4w.'+'author-id-'.repeat(6),nickname:platform === 'telegram' ? null : '作者昵称',handle:platform === 'telegram' ? 'channel_name' : 'account_handle',kind:platform === 'telegram' ? 'channel' : 'user',avatar_cached:scenario !== 'author-missing'};
+  tasks.push({...structuredClone(tasks[0]),id:'author-list',created_at:9,status:'completed',download_requested:true,
+    video:{...structuredClone(tasks[0].video),video_id:'100_8'}});
   api.authorAvatar = async id => {control.calls.push({type:'avatar',id}); if(scenario === 'author-broken') throw 'FILE_MISSING'; return api.cover(id)};
 }
 if (scenario === 'author-results') {
@@ -239,6 +240,7 @@ if (scenario.startsWith('visual')) {
     const images=sizes.map(([width,height],index)=>({quality_source:'high_definition',width:index===5?null:width,height:index===5?null:height,preview_filename:`preview-${index}.png`}));
     Object.assign(tasks[0],{status:'completed',download_requested:true,path:'C:\\TestVideos\\album',completed_at:20,files:images.map((image,index)=>({...image,filename:`${index}.png`}))});
     Object.assign(tasks[0].video,{platform:'douyin',title:'图集尺寸回归测试，横竖图片切换后按比例适应窗口，较长的作品标题限制为两行以保留图片空间',kind:'image_album',resolver:'dtk',formats:[],images});
+    if (new URLSearchParams(location.search).has('long-details')) tasks[0].video.title += '。用于验证右侧详情独立滚动'.repeat(60);
     api.image=async(_id,index)=>{
       const [width,height]=sizes[index];
       const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;

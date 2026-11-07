@@ -2,7 +2,7 @@
 use crate::backup::{provider::ProviderFuture, telegram_session::{rpc_error, retry_read}};
 use anyhow::{bail, Context, Result};
 use grammers_client::{
-    media::{Media as SdkMedia, Photo, PhotoSize},
+    media::{ChatPhoto, Downloadable, Media as SdkMedia, Photo, PhotoSize},
     peer::Peer,
     tl, Client,
 };
@@ -126,12 +126,17 @@ impl PartialEq for Media {
     }
 }
 #[derive(Debug)]
-pub(crate) struct TransferResult { pub value: Value, pub cover: Option<Vec<u8>> }
+pub(crate) struct TransferResult {
+    pub value: Value,
+    pub cover: Option<Vec<u8>>,
+    pub avatar: Option<Vec<u8>>,
+}
 pub(crate) struct ReceivedPart { offset: u64, bytes: Vec<u8> }
 pub(crate) trait Transport: Send {
     fn inspect<'a>(&'a mut self, link: &'a MessageLink) -> ProviderFuture<'a, Media>;
     fn next(&mut self, offset: u64) -> ProviderFuture<'_, Option<ReceivedPart>>;
     fn cover(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> { Box::pin(async { Ok(None) }) }
+    fn avatar(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> { Box::pin(async { Ok(None) }) }
 }
 #[cfg(test)]
 pub(crate) type Factory = std::sync::Arc<dyn Fn() -> Box<dyn Transport> + Send + Sync>;
@@ -141,11 +146,12 @@ struct SdkTransport {
     budget: std::sync::Arc<crate::telegram_transfer_engine::Budget>,
     authorization: std::sync::Arc<crate::telegram_transfer_engine::Authorization>,
     covers: Vec<PhotoSize>,
+    channel_photo: Option<ChatPhoto>,
 }
 impl Transport for SdkTransport {
     fn inspect<'a>(&'a mut self, link: &'a MessageLink) -> ProviderFuture<'a, Media> {
         Box::pin(async move {
-            let (peer, channel_title) = if let Some(channel) = link.channel {
+            let (peer, channel_title, photo_id) = if let Some(channel) = link.channel {
                 let mut dialogs = self.client.iter_dialogs();
                 let mut found = None;
                 while let Some(dialog) = dialogs.next().await.map_err(rpc_error)? {
@@ -153,7 +159,11 @@ impl Transport for SdkTransport {
                         && dialog.peer_id().bare_id_unchecked() as u64 == channel
                     {
                         let Peer::Channel(channel) = dialog.peer() else { unreachable!("checked channel peer"); };
-                        found = Some((dialog.peer_ref(), channel.title().trim().to_owned()));
+                        found = Some((
+                            dialog.peer_ref(),
+                            channel.title().trim().to_owned(),
+                            channel.photo().map(|photo| photo.photo_id),
+                        ));
                         break;
                     }
                 }
@@ -168,11 +178,12 @@ impl Transport for SdkTransport {
                     .context("TELEGRAM_CHANNEL_FORBIDDEN")?;
                 let Peer::Channel(channel) = &peer else { bail!("UNSUPPORTED_CONTENT"); };
                 let title = channel.title().trim().to_owned();
+                let photo_id = channel.photo().map(|photo| photo.photo_id);
                 let peer = peer.to_ref()
                     .await
                     .map_err(|_| anyhow::anyhow!("TELEGRAM_CHANNEL_FORBIDDEN"))?
                     .context("TELEGRAM_CHANNEL_FORBIDDEN")?;
-                (peer, title)
+                (peer, title, photo_id)
             };
             let message = self
                 .client
@@ -196,6 +207,13 @@ impl Transport for SdkTransport {
             };
             let mut result = media_info(peer.id.bare_id_unchecked() as u64, link.message, &raw)?;
             result.channel_title = (!channel_title.is_empty()).then_some(channel_title);
+            self.channel_photo = photo_id.map(|photo_id| ChatPhoto {
+                raw: tl::types::InputPeerPhotoFileLocation {
+                    big: false,
+                    peer: peer.into(),
+                    photo_id,
+                }.into(),
+            });
             let client = self.client.clone();
             let message_id = link.message as i32;
             let refresh: crate::telegram_transfer_engine::Refresh = std::sync::Arc::new(move || {
@@ -221,17 +239,35 @@ impl Transport for SdkTransport {
         Box::pin(async {
             let client = &self.client;
             let budget = &self.budget;
-            first_available_cover(&self.covers, move |candidate| Box::pin(async move {
-                let mut download = client.iter_download(candidate);
-                let mut body = vec![];
-                while let Some(chunk) = crate::telegram_transfer_engine::cover_chunk(budget, download.next()).await? {
-                    anyhow::ensure!(body.len() + chunk.len() <= crate::telegram_cover::MAX_BYTES, "COVER_UNAVAILABLE");
-                    body.extend_from_slice(&chunk);
-                }
-                Ok(body)
-            })).await
+            first_available_cover(&self.covers, move |candidate| {
+                Box::pin(download_preview_bytes(client, budget, candidate, crate::telegram_cover::MAX_BYTES))
+            }).await
         })
     }
+    fn avatar(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async {
+            let Some(photo) = &self.channel_photo else { return Ok(None); };
+            let bytes = download_preview_bytes(
+                &self.client, &self.budget, photo, crate::parse_cache::MAX_AVATAR_BYTES,
+            ).await?;
+            Ok(Some(bytes))
+        })
+    }
+}
+
+async fn download_preview_bytes(
+    client: &Client,
+    budget: &crate::telegram_transfer_engine::Budget,
+    image: &impl Downloadable,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    let mut download = client.iter_download(image);
+    let mut bytes = Vec::new();
+    while let Some(chunk) = crate::telegram_transfer_engine::cover_chunk(budget, download.next()).await? {
+        anyhow::ensure!(bytes.len() + chunk.len() <= max_bytes, "INVALID_MEDIA_CONTENT");
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 async fn first_available_cover<'a>(candidates: &'a [PhotoSize], read: impl Fn(&'a PhotoSize) -> ProviderFuture<'a, Vec<u8>>) -> Result<Option<Vec<u8>>> {
@@ -457,6 +493,7 @@ async fn operation_once(
             budget: crate::telegram_transfer_engine::Budget::account(&binding.session.status().account.context("TELEGRAM_AUTH_REQUIRED")?.id),
             authorization: connection.as_ref().context("TELEGRAM_NOT_CONNECTED")?.file_authorization(),
             covers: vec![],
+            channel_photo: None,
         })
     };
     let (_stop, mut stop) = watch::channel(false);
@@ -528,7 +565,12 @@ async fn transfer(
         _ => None,
     };
     if expected.is_none() {
-        return Ok(TransferResult { value: preview(&media, link), cover });
+        let avatar = match timeout(Duration::from_secs(5), source.avatar()).await {
+            Ok(Ok(avatar)) => avatar,
+            Ok(Err(error)) if matches!(error.to_string().as_str(), "TELEGRAM_AUTH_REQUIRED" | "CANCELED") => return Err(error),
+            _ => None,
+        };
+        return Ok(TransferResult { value: preview(&media, link), cover, avatar });
     };
     let directory = directory.context("IO_ERROR")?;
     // Acquire exclusive creation and cleanup ownership together, without a
@@ -608,7 +650,11 @@ async fn transfer(
         .await
         .context("IO_ERROR")?;
     let display = preview(&media, link);
-    Ok(TransferResult { value: json!({"platform":"telegram","video_id":format!("{}_{}",media.channel,media.message),"container":media.container,"filename":filename,"bytes":received,"format_id":"original","width":media.width,"height":media.height,"duration_ms":media.duration_ms,"author":display["author"],"author_profile":display["author_profile"]}), cover })
+    Ok(TransferResult {
+        value: json!({"platform":"telegram","video_id":format!("{}_{}",media.channel,media.message),"container":media.container,"filename":filename,"bytes":received,"format_id":"original","width":media.width,"height":media.height,"duration_ms":media.duration_ms,"author":display["author"],"author_profile":display["author_profile"]}),
+        cover,
+        avatar: None,
+    })
 }
 #[cfg(test)]
 #[path = "telegram_download_tests.rs"]

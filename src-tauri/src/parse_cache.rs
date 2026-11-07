@@ -453,8 +453,10 @@ pub fn cover(db: &Connection, video: &Value) -> Result<Vec<u8>> {
     cached_image(db, video, "SELECT cover FROM parse_cache WHERE cache_key=?", 10 * 1024 * 1024)
 }
 
+pub(crate) const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+
 pub fn save_avatar(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {
-    if body.len() > 2 * 1024 * 1024
+    if body.len() > MAX_AVATAR_BYTES
         || !matches!(image_extension(body), Some("jpeg" | "png" | "webp")) {
         bail!("INVALID_MEDIA_CONTENT");
     }
@@ -463,7 +465,7 @@ pub fn save_avatar(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> 
 }
 
 pub fn avatar(db: &Connection, video: &Value) -> Result<Vec<u8>> {
-    cached_image(db, video, "SELECT author_avatar FROM parse_cache WHERE cache_key=?", 2 * 1024 * 1024)
+    cached_image(db, video, "SELECT author_avatar FROM parse_cache WHERE cache_key=?", MAX_AVATAR_BYTES)
 }
 
 fn cached_image(db: &Connection, video: &Value, query: &str, limit: usize) -> Result<Vec<u8>> {

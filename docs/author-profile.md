@@ -1,15 +1,15 @@
 # 作者资料
 
-2026-10-24 用户授权：抖音、TikTok、YouTube 展示作者 ID、昵称和头像；头像字节保存在 SQLite。Telegram 使用频道身份，不识别个人发帖者。
+抖音、TikTok、YouTube 和 Telegram 的头像字节保存在 SQLite。Telegram 使用频道身份和频道头像。
 
 - `author_profile` 为可选对象：`id`、`nickname`、`handle`、`kind=user|channel`。ID 按字符串保存。旧记录仍可显示原有 `author`，不自动联网补全历史任务。
 - 抖音沿用 DTK 的 `sec_uid` 身份语义，账号名另存 `handle`；TikTok 使用数字作者 ID；YouTube 使用 `UC…` 频道 ID，`@handle` 单独保存。昵称不再统一加 `@`。
 - 抖音/TikTok 的 yt-dlp 适配从已有详情响应补充字段，DTK 视频和图集读取已有 Author；不切换引擎、不新增签名算法。
 - YouTube 只根据单视频解析得到的频道 ID读取 `/channel/<id>/about` 的频道头像元数据，不枚举频道视频。复用锁定版本 yt-dlp 的页面/缩略图解析能力，并核对频道 ID；网络通过 GuardedRH、使用该平台配置。头像额外允许 `yt3.ggpht.com`、`yt3.googleusercontent.com`。
-- 头像资料请求和头像下载各使用 5 秒网络超时，头像上限 2 MiB，只接受 JPEG/PNG/WebP。暂存名称固定 `author-avatar`，Rust 校验字节数及格式后写入 `parse_cache.author_avatar BLOB`；迁移仅添加可空列。远程头像 URL 不进入事件、任务快照或 SQLite。
-- 头像是可选资源：资料缺失、网络失败或头像无效不影响作品解析/下载。头像通过 `get_author_avatar(taskId)` 读取任务对应缓存，前端使用 Blob URL 和 shadcn Avatar 占位。预览与任务列表展示昵称、ID和头像，搜索支持作者昵称/ID。
+- Python 引擎的头像资料请求和下载各使用 5 秒网络超时，并使用固定暂存名 `author-avatar`。Telegram SDK 读取小头像的整个阶段限时 5 秒，直接返回图片字节。头像上限 2 MiB，只接受 JPEG、PNG 和 WebP。Rust 校验后写入 `parse_cache.author_avatar BLOB`。远程头像 URL 不进入事件、任务快照或 SQLite。
+- 头像是可选资源。资料缺失、网络失败或头像无效时，作品仍可解析和下载。作品预览、下载任务和任务详情通过 `get_author_avatar(taskId)` 读取缓存字节，在署名前显示头像，缺失时显示占位。可用作者昵称或 ID 搜索本地记录。
 - 相同作品再次解析、作者 ID 不变时可保留已有头像；作者 ID 改变时清空旧头像。移除最后一个同作品任务或预览时，沿用封面引用清理事务清空头像，保留作者文字元数据与解析别名。
-- Telegram 原生 SDK 从已解析的频道资料读取真实标题，写入 `author_profile.nickname` 和兼容的 `author`；频道 ID 仍保留为稳定身份及本地作者搜索条件，普通作者区不再用 ID 代替频道名称，完整 ID 在任务详情可查。历史记录缺标题时沿用已有名称或公开用户名，否则显示“Telegram 频道”，不自动联网补全历史任务，不推测头像。旧 Telegram 解析缓存下次访问时按新的 SDK 缓存修订刷新，下载或重试也会更新已确认的频道名；频道改名不改变媒体文档身份，也不触发旧文件重命名。
+- Telegram 原生 SDK 从已解析的频道资料读取真实标题，写入 `author_profile.nickname` 和兼容的 `author`。频道 ID 用于本地作者搜索，完整 ID 在任务详情可查。历史记录缺标题时沿用已有名称或公开用户名，否则显示“Telegram 频道”。解析公开或数字频道链接时，使用同一频道的头像标识读取小头像。下载使用已有头像缓存，历史任务不会自动联网补全。下载或重试可更新已确认的频道名。频道改名后，媒体文档身份和原文件名仍按已有记录识别。
 
 作者字段沿用 JSON Lines v3 的可选资料契约；Telegram SDK 解析缓存使用独立修订，不改变 Python 引擎协议或备份协议。
 

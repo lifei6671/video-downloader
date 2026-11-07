@@ -23,7 +23,7 @@ async page => {
   }, code);
   await open(); await playing();
   check(await dialog.locator('video').evaluate(video => video.muted && video.loop && video.controls && video.videoHeight > video.videoWidth), 'live portrait does not play with controls');
-  check(await dialog.locator('.album-thumbnail img').count() === 3, 'static thumbnails changed');
+  check(await dialog.getByRole('group', {name:'切换图集媒体'}).getByRole('button').count() === 3, 'media does not have one dot per item');
   results.push('portrait live photo plays original clip, muted and looping');
   await dialog.locator('video').evaluate(video => { window.firstAlbumVideo = video; });
   await dialog.getByRole('button', { name: '查看第 2 张图片', exact: true }).click();
@@ -33,7 +33,7 @@ async page => {
   results.push('switching live photos changes clip and releases previous playback');
   await dialog.locator('video').evaluate(video => { window.secondAlbumVideo = video; });
   await dialog.getByRole('button', { name: '查看第 3 张图片', exact: true }).click();
-  await dialog.locator('.album-stage > img:last-child').evaluate(image => image.decode());
+  await dialog.locator('.album-stage .album-still:not([aria-hidden]) > img:last-child').evaluate(image => image.decode());
   check(await dialog.locator('video').count() === 0 && await page.evaluate(() => window.secondAlbumVideo.paused && !window.secondAlbumVideo.hasAttribute('src')), 'still selection did not release video');
   results.push('mixed album keeps ordinary images static');
   await close(); await open(); await playing();

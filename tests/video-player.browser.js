@@ -7,10 +7,10 @@ async page => {
   const dialog=()=>page.locator('.video-player-dialog');
   const video=()=>dialog().locator('video');
   const externalCalls=()=>page.evaluate(()=>window.backgroundTest.calls.filter(c=>c.type==='play'));
-  const load=async()=>{
+  const load=async(scenario='visual-list')=>{
     await page.evaluate(()=>localStorage.removeItem('yingqu.task-view'));
     await page.evaluate(()=>{for(const key of Object.keys(localStorage))if(key.startsWith('yingqu.playback-position.'))localStorage.removeItem(key)});
-    await page.goto(base+'/tests/fixtures/background-download.html?scenario=visual-list');
+    await page.goto(base+'/tests/fixtures/background-download.html?scenario='+scenario);
     await page.getByRole('button',{name:'下载任务',exact:true}).click();
   };
   const open=async(id=3)=>{await row(id).locator('.task-play').click();await dialog().waitFor()};
@@ -30,7 +30,7 @@ async page => {
   page.on('request',request=>{if(request.url().endsWith('/player.webm'))mediaRequests.push(request.headers().range)});
   const results=[];
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]){
-    await page.setViewportSize({width,height});await load();
+    await page.setViewportSize({width,height});await load(width===1024?'visual-list-long-details':'visual-list');
     const snapshot=await page.evaluate(()=>JSON.stringify(window.backgroundTest.snapshot()));
     await open();await ready();
     const media=await video().evaluate(async v=>{
@@ -38,12 +38,24 @@ async page => {
       return {width:v.videoWidth,height:v.videoHeight,controls:v.controls,fit:getComputedStyle(v).objectFit};
     });
     await page.waitForFunction(()=>{const v=document.querySelector('.video-player-dialog video');return v?.currentTime>=1.4&&!v.seeking});
-    check(media.width===160&&media.height===90&&media.controls&&media.fit==='contain','real video not decoded or controls/fit missing');
+    check(media.width===160&&media.height===90&&media.controls&&media.fit==='scale-down','real video not decoded or controls/fit missing');
     check(await video().evaluate(v=>v.paused&&Math.abs(v.currentTime-1.5)<0.1&&Math.abs(v.volume-0.3)<0.01),'seek/pause/volume failed');
     check((await externalCalls()).length===0,'playable video launched external player');
     check(mediaRequests.some(value=>value?.startsWith('bytes=')),'browser media did not request byte ranges');
     const bounds=await dialog().boundingBox();
     check(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=width&&bounds.y+bounds.height<=height,'player escaped viewport');
+    const detailRegion = dialog().getByRole('region',{name:'任务详细信息'});
+    const button = dialog().getByRole('button',{name:'使用系统播放器',exact:true});
+    const details = await detailRegion.boundingBox();
+    const systemPlayer = await button.boundingBox();
+    const stage = await dialog().locator('.video-player-stage').boundingBox();
+    check(systemPlayer.x >= details.x && systemPlayer.y >= details.y + details.height, 'system player is not at the bottom of the right panel');
+    check(stage.x + stage.width <= details.x + 1 && stage.height >= 90, 'system player occupies space in the video pane');
+    if (width===1024) {
+      await detailRegion.evaluate(node=>{node.scrollTop=node.scrollHeight});
+      check(await detailRegion.evaluate(node=>node.scrollTop>0), 'long details do not scroll');
+      check(Math.abs((await button.boundingBox()).y-systemPlayer.y)<1, 'scrolling details moved the system player button');
+    }
     await video().evaluate(v=>window.closedVideo=v);
     await page.addStyleTag({content:'.video-player-dialog[data-state="closed"] {animation-duration:600ms!important}'});
     await page.keyboard.press('Escape');await page.locator('.video-player-dialog[data-state="closed"]').waitFor({state:'attached'});

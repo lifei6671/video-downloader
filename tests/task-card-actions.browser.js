@@ -54,8 +54,9 @@ async page => {
     const gb=await gallery.boundingBox(),ab=await row(6).locator('.task-row-cover').boundingBox();
     check(gb.y<ab.y+12 && gb.x+gb.width>ab.x+ab.width-12,'gallery icon is not top right');
     await gallery.focus();await page.keyboard.press('Enter');
-    const dialog=page.getByRole('dialog',{name:'街角光影，城市漫游图集',exact:true});await dialog.waitFor();
-    check(await dialog.locator('.album-thumbnail').count()===2,'gallery viewer lost images');
+    const dialog=page.getByRole('dialog',{name:'任务详情',exact:true});await dialog.waitFor();
+    await dialog.getByRole('heading',{name:'街角光影，城市漫游图集',exact:true}).waitFor();
+    check(await dialog.locator('.album-dot').count()===2,'gallery viewer lost images');
     await page.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
     await page.evaluate(()=>{
       window.copiedTaskPaths=[];

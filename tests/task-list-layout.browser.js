@@ -45,7 +45,7 @@ async page => {
     check(await row(3).locator('.task-row-title').evaluate(node=>getComputedStyle(node).fontSize==='14px'), 'title typography');
     const downloadedAt = row(3).getByLabel(/下载时间：/);
     check(await downloadedAt.isVisible(), 'download timestamp missing');
-    check(await downloadedAt.evaluate(node => node.previousElementSibling?.getAttribute('title') === '文件大小'), 'download timestamp must follow file size');
+    check(await downloadedAt.evaluate(node => node.previousElementSibling?.getAttribute('aria-label')?.startsWith('文件大小：')), 'download timestamp must follow file size');
     check(await row(1).getByLabel(/下载时间：/).count()===0, 'unfinished task shows download timestamp');
     const adjacent = await page.locator('[data-task-row]').evaluateAll(rows=>rows.slice(0,7).map(n=>{const r=n.getBoundingClientRect();return {top:r.top,bottom:r.bottom}}));
     check(adjacent.every((r,i)=>!i || Math.abs(r.top-adjacent[i-1].bottom)<1), 'gaps between media rows');
@@ -58,7 +58,7 @@ async page => {
     const cover = row(3).getByRole('button', {name:'查看封面',exact:true});
     await title.click();
     check(await page.getByRole('dialog').count()===0, 'title opens separate details');
-    const fullTitle = await title.getAttribute('title');
+    const fullTitle = await title.innerText();
     await cover.focus();
     await page.keyboard.press('Enter');
     const dialog = page.getByRole('dialog', {name:'任务详情'});
@@ -82,7 +82,7 @@ async page => {
     await menu.waitFor();
     const menuBox = await menu.boundingBox();
     check(menuBox.x>=0 && menuBox.x+menuBox.width<=width && menuBox.y>=0 && menuBox.y+menuBox.height<=height, 'context menu escaped viewport');
-    check((await menu.getByRole('menuitem').allTextContents()).map(t=>t.trim()).join(',')==='打开文件夹,提取文案,复制原链接,复制本地地址,从列表移除,删除本地视频', 'secondary actions changed');
+    check((await menu.getByRole('menuitem').allTextContents()).map(t=>t.trim()).join(',')==='播放视频,打开文件夹,提取文案,复制原链接,复制本地地址,保存封面,复制封面,从列表移除,删除本地视频', 'secondary actions changed');
     await page.keyboard.press('End');
     // Radix roving focus moves to the last item on the next timer turn.
     await page.waitForFunction(() => document.activeElement?.getAttribute('data-variant') === 'destructive' && document.activeElement?.textContent === '删除本地视频');
@@ -143,6 +143,7 @@ async page => {
   await page.getByRole('button', {name:'关于软件',exact:true}).click();
   await page.getByRole('button', {name:'检查更新',exact:true}).click();
   const checklist = page.locator('.release-notes .task-list-item');
+  await checklist.first().waitFor();
   check(await checklist.count()===2, 'release checklist fixture missing');
   check(await checklist.evaluateAll(nodes=>nodes.every(node=>getComputedStyle(node).borderTopWidth==='0px')), 'task row separators leak into release notes');
   await page.keyboard.press('Escape');
