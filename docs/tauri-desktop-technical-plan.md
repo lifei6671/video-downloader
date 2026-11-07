@@ -16,7 +16,7 @@
 | 预览 | 标题、作者、封面、时长；可选字段缺失不阻止下载 |
 | 平台设置 | 抖音、TikTok、YouTube 各自独立 Cookie、User-Agent、可选 HTTP/SOCKS5 代理 |
 | 下载 | 实际下载字节、速度；总大小未知时显示不确定进度 |
-| 并发 | 同时下载默认 3，可配置 1–5；超出容量进入 FIFO 等待队列 |
+| 并发 | 同时下载默认 5，可配置 1–10；超出容量进入 FIFO 等待队列 |
 | 任务操作 | 取消、手动重试、打开文件夹、移除记录 |
 | 删除文件 | 明确的本地文件删除操作，同步移除对应任务与数据库下载记录；单条移除记录保留文件，两者均不二次确认 |
 | 持久化 | 重启恢复任务记录与已完成列表，已提交的中断下载按原队列自动重新开始 |
@@ -108,7 +108,7 @@ flowchart TD
 
 ### 5.1 进程模型
 
-每次解析或下载操作使用一个独占 sidecar 进程，一次操作结束即退出。预览解析最多同时执行一个；下载进程数量由 Rust 下载槽位限制为 1–5（默认 3）。这是取消与并发隔离边界，不维护常驻多请求引擎或额外进程池。
+每次解析或下载操作使用一个独占 sidecar 进程，一次操作结束即退出。预览解析最多同时执行一个；下载进程数量由 Rust 下载槽位限制为 1–10（默认 5）。这是取消与并发隔离边界，不维护常驻多请求引擎或额外进程池。
 
 Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消息并及时 flush；stdout 仅协议，stderr 仅脱敏诊断。当前 M1 启动上限 15 秒、单次解析含启动总上限 80 秒；读取协议无进展上限 65 秒，终端后退出上限 5 秒。下载不以固定短总时限截断长视频，yt-dlp 使用 socket timeout；超时会终止并回收操作进程。
 
@@ -193,7 +193,7 @@ FFmpeg 全量解码是验收手段，不作为产品运行依赖。首版重试�
 | --- | --- |
 | `download_tasks` | id、platform（解析前可空）、source_url、video_id、title、author、status、revision、downloaded_bytes、total_bytes、staging_path、target_path、final_size_bytes、error_code、脱敏 error_message、created_at、updated_at、completed_at |
 | `platform_settings` | platform、user_agent、非敏感代理设置、credential_ref、updated_at |
-| `app_settings` | 下载目录、max_concurrent_downloads（默认 3，允许 1–5） |
+| `app_settings` | 下载目录、max_downloads（默认 5，允许 1–10） |
 
 SQLite 位于应用数据目录，由 Rust 独占写入；Python 不访问。进度在内存维护并节流保存，状态转换持久化。source_url 为可重新提取的作品链接，任务表不保存完整分享文案、原始 info dict、Cookie、代理密码或签名媒体 URL。Cookie 单独保存在平台设置表。
 
@@ -304,7 +304,7 @@ M2 开发可执行文件从仓库 `python-engine/dist/video-engine/` 启动既�
 
 ### M2 第二张任务卡落地
 
-Rust 使用每任务配置快照与独立取消/完成信号，下载槽位在引擎退出和清理结束后释放；FIFO 按提交顺序号选取，每次锁内预留槽位，解析独立且最多一个。`set_max_downloads(value)` 命令只接受 1–5，`get_settings` 返回 `max_downloads`；旧 app_settings 自动增加该列，默认 3；已有 1–3 约束在事务内扩展至 1–5，并保留目录、命名规则及已保存的并发数量。任务快照增加 queued 状态与 queue_order，前端按 Rust 序号显示等待位置。降低上限保留已运行进程；退出先关闭调度，再取消并等待所有任务。详见 [本卡验收](m2-queue-validation.md)。
+Rust 使用每任务配置快照与独立取消/完成信号，下载槽位在引擎退出和清理结束后释放；FIFO 按提交顺序号选取，每次锁内预留槽位，解析独立且最多一个。`set_max_downloads(value)` 命令只接受 1–10，`get_settings` 返回 `max_downloads`；旧 app_settings 自动增加该列，默认 5；已有 1–3 或 1–5 约束在事务内扩展至 1–10，并保留目录、命名规则及已保存的并发数量。任务快照增加 queued 状态与 queue_order，前端按 Rust 序号显示等待位置。降低上限保留已运行进程；退出先关闭调度，再取消并等待所有任务。详见 [本卡验收](m2-queue-validation.md)。
 
 ### M2 第三张任务卡落地
 
@@ -391,7 +391,7 @@ Rust 使用 reqwest（系统 TLS 与系统代理支持）请求固定 GitHub 公
 
 系统设置采用左侧下载设置、平台账号、运行依赖菜单及右侧操作区。平台账号沿用既有字段和保存命令；运行依赖新增检查、下载、取消命令，具体见 [运行依赖](runtime-dependencies.md)。平台账号通过顶部 shadcn/ui Tabs 每次展示一个平台，Cookie、网络代理、User-Agent 在同一个表单内统一保存。TabsContent forceMount 保持各平台表单挂载，通过 inactive 状态隐藏非当前平台，避免草稿丢失或隐藏控件参与键盘导航。切换分类和平台均保留未保存输入。save_profile 每次传当前平台的完整 user_agent、已读取的 Cookie 和代理修改；未修改代理传 null，选择直连传空字符串；Cookie 未读取成功时传 null 保留原值，其编辑与清除禁用，其他配置仍可保存。保存提示绑定发起保存的平台，隐藏平台的输入不被提交或清空。下载目录和并发值仍使用原有即时保存命令。
 
-下载中的 Telegram 解析与其他下载分别使用独立 SDK 请求；解析不占下载槽位，下载继续按全局 FIFO 和 1–5 槽位调度。旧未解析队列项保留规范链接、顺序和取消/重试行为，取得槽位后直接用 SDK 解析。详见 [Telegram 下载](telegram-download.md)。
+下载中的 Telegram 解析与其他下载分别使用独立 SDK 请求；解析不占下载槽位，下载继续按全局 FIFO 和 1–10 槽位调度。旧未解析队列项保留规范链接、顺序和取消/重试行为，取得槽位后直接用 SDK 解析。详见 [Telegram 下载](telegram-download.md)。
 
 ### 作品后台下载入口
 

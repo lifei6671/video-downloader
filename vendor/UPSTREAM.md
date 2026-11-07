@@ -64,7 +64,7 @@ PyInstaller 使用官方 yt-dlp hook，收集 DTK 的具体平台模块、完整
 
 ## M2 桌面界面
 
-生产界面使用 shadcn/ui 官方 radix-nova 注册表生成的组件，来源 https://ui.shadcn.com/r/styles/radix-nova/ ，CLI 4.21.0；组件保存在 `src/components/ui/`，MIT 许可副本见 `shadcn-LICENSE`（来自安装包 LICENSE.md）。仅 Progress 透传 value 到 Radix Root，以提供真实 ARIA 进度。页面仅组合这些组件与业务数据，不另建基础控件。React、Radix、Tailwind、Lucide 和 Tauri 的实际版本/完整性哈希由 package-lock.json 与 Cargo.lock 固定；没有运行时 CDN。
+生产界面使用 shadcn/ui 官方 radix-nova 注册表生成的组件，来源 https://ui.shadcn.com/r/styles/radix-nova/ ，CLI 4.21.0；组件保存在 `src/components/ui/`，MIT 许可副本见 `shadcn-LICENSE`（来自安装包 LICENSE.md）。Progress 透传 value 到 Radix Root，以提供真实 ARIA 进度；Slider 沿用官方 Root、Track、Range、Thumb 结构，将尺寸和颜色映射到设计 token，并向 Thumb 透传可访问名称、说明及值文案。页面仅组合这些组件与业务数据，不另建基础控件。React、Radix、Tailwind、Lucide 和 Tauri 的实际版本/完整性哈希由 package-lock.json 与 Cargo.lock 固定；没有运行时 CDN。
 
 
 ## 视频规格与抖音高清补充（2026-10-14）

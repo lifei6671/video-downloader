@@ -119,6 +119,10 @@
   --content-padding: 24px;
   --page-header-min-height: 56px;
   --page-header-padding-block: 8px;
+  --slider-height: 32px;
+  --slider-vertical-min-height: 160px;
+  --slider-track-height: 8px;
+  --slider-thumb-size: 20px;
   --task-row-min-height: 80px;
   --task-row-gap: 4px;
   --task-row-active-min-height: 120px;
@@ -416,6 +420,19 @@
 .app-page-header h1 { font-size: 20px; line-height: 28px; font-weight: 600; }
 .app-page-header [data-slot="input-group"] { min-height: 28px; height: 28px; }
 .app-page-header [data-slot="input-group-control"] { min-height: 26px; height: 26px; }
+.ui-slider { height: var(--slider-height); }
+.ui-slider [data-slot="slider-track"] { height: var(--slider-track-height); }
+.ui-slider [data-slot="slider-range"] { height: 100%; }
+.ui-slider [data-slot="slider-thumb"] { width: var(--slider-thumb-size); height: var(--slider-thumb-size); border: 0.5px solid var(--ring); }
+.ui-slider [data-slot="slider-thumb"]:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.ui-slider[data-orientation="vertical"] { flex-direction: column; width: var(--slider-height); height: auto; min-height: var(--slider-vertical-min-height); }
+.ui-slider[data-orientation="vertical"] [data-slot="slider-track"] { width: var(--slider-track-height); height: 100%; }
+.ui-slider[data-orientation="vertical"] [data-slot="slider-range"] { width: 100%; height: auto; }
+.download-concurrency { width: 100%; }
+.download-concurrency[aria-busy="true"] [data-slot="slider"] { opacity: 1; }
+.download-concurrency-stops { position: relative; width: calc(100% - var(--slider-thumb-size)); height: 18px; margin-inline: calc(var(--slider-thumb-size) / 2); font-size: 12px; line-height: 18px; color: var(--muted-foreground); }
+.download-concurrency-stops > span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.download-concurrency-stops > span[data-selected="true"] { color: var(--primary); font-weight: 500; }
 
 /* The cover is the visual anchor; no filter is applied to the readable foreground. */
 #video-input { height: 80px; min-height: 80px; line-height: 20px; padding: 8px; }

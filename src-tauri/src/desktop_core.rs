@@ -1977,7 +1977,7 @@ impl Core {
     }
 
     pub fn set_max_downloads(self: &Arc<Self>, value: u8) -> Result<Settings> {
-        if !(1..=5).contains(&value) {
+        if !(1..=10).contains(&value) {
             bail!("CONFIG_INVALID");
         }
         let mut inner = self.inner.lock().unwrap();
@@ -4340,7 +4340,7 @@ mod tests {
     async fn fifo_completion_failure_and_queued_cancellation_release_slots() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        assert_eq!(app.settings().max_downloads, 3);
+        assert_eq!(app.settings().max_downloads, 5);
         app.set_max_downloads(2).unwrap();
         let a = enqueue(&app, "8001").await;
         let b = enqueue(&app, "7002").await;
@@ -4406,32 +4406,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn five_download_slots_dispatch_and_reduce_without_interrupting() {
+    async fn ten_download_slots_dispatch_and_reduce_without_interrupting() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        assert_eq!(app.settings().max_downloads, 3);
-        app.set_max_downloads(5).unwrap();
+        assert_eq!(app.settings().max_downloads, 5);
+        app.set_max_downloads(10).unwrap();
         let mut tasks = Vec::new();
-        for id in ["8151", "8152", "8153", "8154", "8155", "8156"] {
-            tasks.push(enqueue(&app, id).await);
+        for id in 8151..=8161 {
+            tasks.push(enqueue(&app, &id.to_string()).await);
         }
-        for id in ["8151", "8152", "8153", "8154", "8155"] {
-            started(root.path(), id).await;
+        for id in 8151..=8160 {
+            started(root.path(), &id.to_string()).await;
         }
-        assert!(!root.path().join("started-8156").exists());
-        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 5);
-        app.set_max_downloads(4).unwrap();
-        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 5);
+        assert!(!root.path().join("started-8161").exists());
+        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 10);
+        app.set_max_downloads(9).unwrap();
+        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 10);
         app.cancel(&tasks[0].id).await.unwrap();
-        assert_eq!(app.list().iter().find(|task| task.id == tasks[5].id).unwrap().status, Status::Queued);
+        assert_eq!(app.list().iter().find(|task| task.id == tasks[10].id).unwrap().status, Status::Queued);
         app.cancel(&tasks[1].id).await.unwrap();
-        started(root.path(), "8156").await;
-        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 4);
-        app.set_max_downloads(5).unwrap();
+        started(root.path(), "8161").await;
+        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 9);
+        app.set_max_downloads(10).unwrap();
         app.shutdown().await;
         drop(app);
         let app = core(root.path());
-        assert_eq!(app.settings().max_downloads, 5);
+        assert_eq!(app.settings().max_downloads, 10);
         app.shutdown().await;
     }
 
@@ -4452,7 +4452,7 @@ mod tests {
             1
         );
         assert!(app.set_max_downloads(0).is_err());
-        assert!(app.set_max_downloads(6).is_err());
+        assert!(app.set_max_downloads(11).is_err());
         assert_eq!(app.settings().max_downloads, 1);
         app.set_max_downloads(3).unwrap();
         for id in ["8101", "8102", "8103"] {

@@ -168,10 +168,10 @@ fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losi
             }
         }
     }
-    db.execute("UPDATE app_settings SET max_downloads=5", [])
+    db.execute("UPDATE app_settings SET max_downloads=10", [])
         .unwrap();
     assert!(db
-        .execute("UPDATE app_settings SET max_downloads=6", [])
+        .execute("UPDATE app_settings SET max_downloads=11", [])
         .is_err());
     assert!(rows(&db, "PRAGMA foreign_key_check").is_empty());
     let current_schema = schema(&db);
@@ -215,7 +215,7 @@ fn migration_failure_rolls_back_settings_all_new_objects_and_version_together() 
     let core = open(&path);
     assert_eq!(version(&db), 1);
     assert_eq!(core.list().len(), 1);
-    db.execute("UPDATE app_settings SET max_downloads=5", [])
+    db.execute("UPDATE app_settings SET max_downloads=10", [])
         .unwrap();
 }
 
