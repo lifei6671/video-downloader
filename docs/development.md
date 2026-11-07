@@ -125,7 +125,7 @@ Windows 桌面主程序的 Debug 和 Release 构建均使用 GUI 子系统，启
 
 同一右键菜单提供“复制封面”：通过浏览器解码已加载图片，保留原始像素尺寸，将 RGBA 图片经现有原生剪贴板插件写入系统剪贴板；不复制 URL 或文件路径，不新增解码依赖。无图时禁用，复制或保存进行时禁用重复操作，失败显示提示。单击封面（或键盘 Enter/Space）通过现有 Dialog 展示大图，复用同一图片 URL，保持比例并限制在窗口内；可通过关闭按钮、遮罩或 Esc 关闭并恢复焦点。图集使用首图。浏览器回归见 `tests/cover-copy-preview.browser.js`；原生 RGBA 参数校验测试在 `desktop.rs`，不读写系统剪贴板。
 
-“查看图集”弹窗按当前图片实际比例自适应宽高，尺寸缺失时在解码后修正；切换图片同步调整，原有首页舞台高度保留。启动 `npm run dev`，用现有 Playwright CLI 打开 `tests/fixtures/background-download.html?scenario=visual-album-sizing` 并执行 `tests/album-sizing.browser.js`，覆盖三个设计视口下的横图、竖图、方图、长图、未知尺寸、缩略图键盘操作、重复选择与关闭焦点恢复。该隔离浏览器验证不代表原生 Tauri 或打包验收。实况项的原始 MP4 通过同一受控 asset 文件协议播放，`tests/album-live.browser.js` 使用 `scenario=visual-album-live` 验证实况/静态混合展示、静音循环、切换/关闭释放、失败可见和迟到结果隔离。
+“查看图集”弹窗按当前图片实际比例自适应宽高，尺寸缺失时在解码后修正；切换图片同步调整，原有首页舞台高度保留。启动 `npm run dev`，用现有 Playwright CLI 打开 `tests/fixtures/background-download.html?scenario=visual-album-sizing` 并执行 `tests/album-sizing.browser.js`，覆盖三个设计视口下的横图、竖图、方图、长图、未知尺寸、圆点键盘操作、重复选择与关闭焦点恢复。`tests/album-wheel.browser.js` 在同一隔离入口验证滚轮方向、单手势合并、首尾边界、圆点与宽高同步、右侧详情独立滚动、慢加载淡化、淡化途中反向滚动、横向滚动及修饰键、关闭清理和实况切换释放；滚轮监听仅绑定已展开弹窗的媒体区，使用非 passive 监听阻止纵向默认滚动，按事件时间戳合并 180ms 内连续输入，避免渲染排队影响手势判断。该隔离浏览器验证不代表原生 Tauri 或打包验收。实况项的原始 MP4 通过同一受控 asset 文件协议播放，`tests/album-live.browser.js` 使用 `scenario=visual-album-live` 验证实况/静态混合展示、静音循环、切换/关闭释放、失败可见和迟到结果隔离。
 
 预览浮层内也可右键图片“另存为…”或“复制封面”，复用相同保存和剪贴板路径；复制时读取当前浮层图片的原尺寸像素。浮层按图片宽高收缩，长标题不撑宽，保留关闭控件所需的最小宽度，并在窗口内等比缩放。菜单可用 Shift+F10 打开，Esc 先关闭菜单，再关闭浮层。尺寸及浮层菜单回归见 `tests/cover-preview-fit.browser.js`。
 
