@@ -199,6 +199,7 @@ components:
   task-menu: { width: 236px, itemHeight: 36px, padding: 8px, rounded: 10px }
   menu: { minWidth: 192px, itemHeight: 32px, padding: "{spacing.xxs}", rounded: "{rounded.lg}" }
   dialog: { width: 480px, maxHeight: 85dvh, viewportGap: 16px, padding: "{spacing.lg}", rounded: "{rounded.xl}" }
+  toast: { minHeight: 36px, paddingBlock: 8px, paddingInline: 12px, paddingEnd: 40px, gap: 8px, rounded: "{rounded.md}", titleLineHeight: 20px, closeSize: 24px, closeInset: 6px }
   transcript-dialog: { width: 720px, maxHeight: 85dvh }
   update-dialog: { width: 640px, maxHeight: 85dvh }
   task-media-dialog: { fallbackWidth: 920px, fallbackHeight: 520px, viewportInset: 96px, frameWidth: 2px, minHeight: 300px, minPaneWidth: 168px, detailsWidth: "clamp(260px, 26vw, 320px)", minVideoWidth: 280px, minVideoHeight: 160px, dotSize: 6px, dotHitSize: 24px, dotFooterHeight: 38px, albumTransitionDuration: 180ms }
@@ -576,7 +577,7 @@ YAML `palette` 记录本版使用的 Radix Colors light sRGB 色值，`colors` �
 
 空分享链接提交时，以 Toast 提示“请输入视频分享链接”，并聚焦链接输入框，不新增页内错误提示。
 
-Toast 复用 Sonner，顶部居中、实色浅表面、0.5px 边界，标题 14px、辅助内容 12px；状态图标和语义色表达成功/错误/警告/信息，默认和加载使用中性样式。通知始终悬浮，不占据页面布局；出现、关闭或切换页面时不移动页面标题。关闭按钮位于内部右上角，正文预留空间，中文可访问名称“关闭通知”。操作反馈仅提示一次；恢复已有记录不重放成功/失败，Toast 不替代任务或字段本身的持续错误。
+Toast 复用 Sonner，顶部居中、实色浅表面、0.5px 边界、8px 圆角，采用紧凑布局：最小高度 36px，上下内边距 8px，左侧 12px，元素间距 8px；标题 14px、行高 20px，辅助内容 12px。多行内容和操作按钮按实际内容撑高，不截断正文。状态图标和语义色表达成功/错误/警告/信息，默认和加载使用中性样式。通知始终悬浮，不占据页面布局；出现、关闭或切换页面时不移动页面标题。关闭按钮位于内部右上角，尺寸 24px、距边缘 6px，正文右侧预留 40px，中文可访问名称“关闭通知”。操作反馈仅提示一次；恢复已有记录不重放成功/失败，Toast 不替代任务或字段本身的持续错误。
 
 任务操作遇到 `TASK_BUSY` 时由 Rust 等待资源释放，不显示失败 Toast，也不循环提示。等待期间状态标签显示“等待中”，右上角保留带 Tooltip 的“取消等待”图标；列表使用相同等待标签。等待只占用当前任务的操作入口，其他任务仍可操作，取消等待后恢复原状态标签，不改写任务的持久状态和失败原因。重试开始时隐藏此前错误，等待期间反馈位置留空，保持卡片高度；取消等待和视图切换不恢复旧错误，仅新的失败任务版本显示新的错误（包括内容相同的再次失败）。重复点击合并为一次操作；任务版本变化、用户取消或应用退出时停止等待。
 

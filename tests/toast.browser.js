@@ -8,6 +8,34 @@ async page => {
   for (const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
     await page.setViewportSize({width,height});
     await page.goto(base+'/tests/fixtures/toast.html');
+    await page.getByRole('button',{name:'compact',exact:true}).click();
+    await notifications.waitFor();
+    const compact = await notifications.evaluate(node=>{
+      const bounds=node.getBoundingClientRect(),style=getComputedStyle(node);
+      const close=node.querySelector('[data-close-button]').getBoundingClientRect();
+      const title=node.querySelector('[data-title]').getBoundingClientRect();
+      return {height:bounds.height,padding:style.paddingTop,radius:style.borderRadius,
+        titleHeight:title.height,closeSize:close.width,overlap:title.right>close.left,
+        inside:title.left>=bounds.left&&title.bottom<=bounds.bottom};
+    });
+    check(compact.height>=36&&compact.height<=40,'single-line Toast is not compact: '+JSON.stringify(compact));
+    check(compact.padding==='8px'&&compact.radius==='8px','compact spacing or radius changed');
+    check(compact.titleHeight===20&&compact.closeSize>=24&&compact.inside&&!compact.overlap,'compact content clipped or overlapping close');
+    if(width===1440)await page.screenshot({path:'.local/compact-toast/compact.png',animations:'disabled'});
+    await notifications.getByRole('button',{name:'关闭通知'}).click();
+    await notifications.waitFor({state:'detached'});
+    await page.getByRole('button',{name:'action',exact:true}).click();
+    await notifications.waitFor();
+    check(await notifications.evaluate(node=>{
+      const bounds=node.getBoundingClientRect(),content=node.querySelector('[data-content]').getBoundingClientRect();
+      const action=node.querySelector('[data-button]').getBoundingClientRect(),close=node.querySelector('[data-close-button]').getBoundingClientRect();
+      return bounds.height>40&&content.bottom<=bounds.bottom&&content.right<=action.left&&action.right<=close.left;
+    }),'multi-line content or action overlaps');
+    if(width===1440)await page.screenshot({path:'.local/compact-toast/action.png',animations:'disabled'});
+    await notifications.getByRole('button',{name:'查看更新',exact:true}).focus();
+    await page.keyboard.press('Enter');
+    await notifications.waitFor({state:'detached'});
+    check(await page.evaluate(()=>window.toastActionCount)===1,'Toast action did not run once');
     for (const type of ['default','success','error','warning','info']) {
       await page.getByRole('button',{name:type,exact:true}).click();
       const item = notifications.filter({has:page.getByRole('button',{name:'关闭通知',exact:true})});
@@ -31,7 +59,7 @@ async page => {
       await notifications.waitFor({state:'detached'});
     }
     check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'viewport overflow');
-    results.push(width+' variants, icons, upper-right close, text spacing and keyboard');
+    results.push(width+' compact title, multiline action, variants, icons, upper-right close, text spacing and keyboard');
   }
   check(colors.size===4,'status styles are not distinct');
   await page.getByRole('button',{name:'loading',exact:true}).click();
