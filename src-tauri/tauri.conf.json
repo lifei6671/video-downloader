@@ -26,7 +26,8 @@
     "windows": {
       "nsis": {
         "languages": ["SimpChinese"],
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "windows/installer-hooks.nsh"
       }
     }
   }

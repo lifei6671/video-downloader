@@ -79,10 +79,10 @@
 
 ```sh
 .venv/bin/python scripts/update_dtk_vendor.py --check
-cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
+cargo build --locked --manifest-path src-tauri/Cargo.toml --features probe --bin m1-probe
 .venv/bin/python -m pytest -q
 cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
-cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop,probe --all-targets -- -D warnings
 npm run build
 .venv/bin/python -m PyInstaller --noconfirm --distpath python-engine/dist --workpath python-engine/build python-engine/pyinstaller.spec
 APPLE_SIGNING_IDENTITY=- npm run tauri -- build --features desktop --config src-tauri/tauri.release.conf.json --bundles app,dmg -- --locked

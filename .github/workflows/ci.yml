@@ -61,13 +61,13 @@ jobs:
         run: python scripts/update_dtk_vendor.py --check
       - name: Offline tests
         run: |
-          cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
+          cargo build --locked --manifest-path src-tauri/Cargo.toml --features probe --bin m1-probe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q
       - name: Rust lint
-        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop,probe --all-targets -- -D warnings
       - name: Build CPU speech helper
         run: python scripts/build_asr.py
       - name: Package engine

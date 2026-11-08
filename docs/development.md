@@ -9,9 +9,9 @@
 ```powershell
 uv venv --python 3.12 .venv
 uv pip sync --python .venv/Scripts/python.exe python-engine/requirements-dev.txt
-cargo build --manifest-path src-tauri/Cargo.toml --bin m1-probe
+cargo build --manifest-path src-tauri/Cargo.toml --features probe --bin m1-probe
 cargo test --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --features probe --all-targets -- -D warnings
 .venv/Scripts/python.exe -m pytest -q
 ```
 
@@ -26,10 +26,10 @@ uv venv --python 3.12 .venv
 uv pip sync --python .venv/bin/python python-engine/requirements-dev.txt
 uv pip check --python .venv/bin/python
 npm ci
-cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
+cargo build --locked --manifest-path src-tauri/Cargo.toml --features probe --bin m1-probe
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 .venv/bin/python -m pytest -q
-cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop,probe --all-targets -- -D warnings
 .venv/bin/python scripts/build_asr.py
 .venv/bin/python -m PyInstaller --noconfirm --distpath python-engine/dist --workpath python-engine/build python-engine/pyinstaller.spec
 .venv/bin/python scripts/check_packaged_engine.py python-engine/dist/video-engine/video-engine
@@ -47,7 +47,7 @@ open src-tauri/target/release/bundle/macos/映取.app
 
 应用位于 `src-tauri/target/release/bundle/macos/映取.app`，DMG 位于相邻的 `bundle/dmg/`。`-` 是本地 ad-hoc 签名；按 2026-10-14 用户决定，macOS 不要求 Developer ID、证书或公证，不将这些设置为本次验收阻塞项。本地签名检查不代表下载后的 Gatekeeper 场景已验证。
 
-当前 Tauri CLI 按 Cargo 的 `[[bin]]` 声明顺序签名，因此 `m1-probe` 必须排在主程序 `yingqu` 前，避免主程序签名检查同包中尚未签名的辅助程序。日常 CI 的两种 macOS 架构均生成 ad-hoc 签名的 `.app`，并执行 `codesign --verify --deep --strict`；Release 另生成 DMG。
+日常 CI 的两种 macOS 架构均生成 ad-hoc 签名的 `.app`，并执行 `codesign --verify --deep --strict`；Release 另生成 DMG。
 
 `tauri.macos.conf.json` 自动合并，声明最低 macOS 13.3，以匹配现有 Tailwind 4 的 Safari/WebKit 16.4 要求；13.3 实机兼容性仍待验证。依据：[Tailwind 浏览器要求](https://tailwindcss.com/docs/compatibility)、[WebKit 16.4](https://webkit.org/blog/13966/webkit-features-in-safari-16-4/)。Apple Silicon 本机证据及剩余验收见 [macOS 验证记录](macos-validation.md)。
 
@@ -108,7 +108,7 @@ npm run desktop
 
 Windows 桌面主程序的 Debug 和 Release 构建均使用 GUI 子系统，启动时不附带命令行窗口；`m1-probe` 保留命令行探针用途。调试诊断可将标准输出和错误重定向到本机日志，预览时正常显示应用窗口。
 
-前端检查：`npm run build`。完整桌面编译：`npm run desktop:build`（不生成安装器）。该命令先使用项目 `.venv` 执行打包引擎检查，对照当前 Rust 的引擎及 yt-dlp 版本；切换分支后若提示 sidecar 版本不匹配，先按本文 PyInstaller 命令重建整个 `python-engine/dist/video-engine/`，再编译桌面程序，不复用其他分支的忽略产物。Rust 桌面门禁：`cargo test --manifest-path src-tauri/Cargo.toml`、`cargo clippy --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings`。
+前端检查：`npm run build`。完整桌面编译：`npm run desktop:build`（不生成安装器）。该命令先使用项目 `.venv` 执行打包引擎检查，对照当前 Rust 的引擎及 yt-dlp 版本；切换分支后若提示 sidecar 版本不匹配，先按本文 PyInstaller 命令重建整个 `python-engine/dist/video-engine/`，再编译桌面程序，不复用其他分支的忽略产物。Rust 桌面门禁：`cargo test --manifest-path src-tauri/Cargo.toml`、`cargo clippy --manifest-path src-tauri/Cargo.toml --features desktop,probe --all-targets -- -D warnings`。
 
 桌面 release 构建必须设置 `YINGQU_TELEGRAM_API_ID`（正 `i32` 整数）和 `YINGQU_TELEGRAM_API_HASH`（32 位 ASCII 十六进制字符串），否则 Rust 构建检查直接失败。`telegram-app.local.json` 仅用于 debug，不会自动用于 release 预览；本机打包需在构建进程环境中显式提供身份，不能把值写入命令行或日志。应用身份的来源与存储约定见 [Telegram 构建配置](telegram-storage-implementation.md#构建与本机应用身份)。CI 和 Release 工作流的桌面打包步骤从同名 GitHub Actions Secrets 注入这两个变量；缺失 Secrets 会阻止生成可交付应用，不使用测试身份代替。无需身份的核心离线测试和 debug 开发仍可运行。
 
@@ -176,7 +176,7 @@ git tag -a v1.3.0 --cleanup=verbatim -F docs/releases/v1.3.0.md
 git push --atomic origin master v1.3.0
 ```
 
-工作流分别在 Windows x64、macOS Intel、macOS Apple Silicon 原生 runner 上安装 Node 24、Python 3.12 和 Rust stable，执行锁文件安装、离线测试、PyInstaller onedir 打包、隔离 cwd/PATH 的引擎启动检查，以及 Tauri 前端/桌面安装器构建。安装包包含整个 `video-engine/` 目录；Release 使用应用资源路径，不依赖构建机源码位置。
+工作流分别在 Windows x64、macOS Intel、macOS Apple Silicon 原生 runner 上安装 Node 24、Python 3.12 和 Rust stable，执行锁文件安装、离线测试、PyInstaller onedir 打包、隔离 cwd/PATH 的引擎启动检查，以及 Tauri 前端/桌面安装器构建。安装包包含整个 `video-engine/` 目录；Release 使用应用资源路径，不依赖构建机源码位置。命令行探针 `m1-probe` 仅在开发和 CI 测试时通过 Cargo 的 `probe` feature 构建，桌面打包使用 `desktop` feature。Windows 安装结束时删除目标安装目录中旧版遗留的 `m1-probe.exe`。
 
 三个构建全部成功后，使用仓库自带 `GITHUB_TOKEN` 创建草稿、上传 Windows NSIS `.exe` 和两种 macOS `.dmg`，随后公开 Release。创建时通过 `--notes-from-tag` 将附注标签中的 Markdown 原样作为 Release 正文，软件“检查更新”也会读取这份正文；不再自动生成仅含提交记录的说明。务必使用附注标签，轻量标签会退回到提交信息。构建失败不发布；已有同名 Release 不覆盖。若上传中断留下草稿，先检查并删除该草稿，再重跑失败的发布 job。Actions artifacts 保留 14 天。仓库/组织策略须允许该 workflow 的 `contents: write`，无需新增发布 Token。
 
@@ -231,7 +231,7 @@ uv pip compile --universal python-engine/requirements-dev.in -o python-engine/re
 uv pip sync --python .venv/bin/python python-engine/requirements-dev.txt
 uv pip check --python .venv/bin/python
 .venv/bin/python scripts/update_dtk_vendor.py --check
-cargo build --locked --manifest-path src-tauri/Cargo.toml --bin m1-probe
+cargo build --locked --manifest-path src-tauri/Cargo.toml --features probe --bin m1-probe
 .venv/bin/python -m pytest -q
 cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features desktop --all-targets -- -D warnings

@@ -32,7 +32,7 @@ def main():
     engine = args.engine or Path(sys.executable)
     script = args.script or (None if args.engine else ROOT / 'python-engine/bridge.py')
     if not args.probe.is_file():
-        parser.exit(2, 'Probe missing. Run: cargo build --manifest-path src-tauri/Cargo.toml --bin m1-probe\n')
+        parser.exit(2, 'Probe missing. Run: cargo build --manifest-path src-tauri/Cargo.toml --features probe --bin m1-probe\n')
     if not engine.is_file() or (script and not script.is_file()):
         parser.exit(2, 'Engine executable or script not found.\n')
     try:
