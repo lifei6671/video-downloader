@@ -1,0 +1,101 @@
+name: Recover Windows installer for v1.10.4
+
+on:
+  push:
+    branches:
+      - codex/recover-v1104-windows
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows x64 from v1.10.4
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/v1.10.4
+          persist-credentials: false
+      - name: Verify source and preload official NSIS tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ((git rev-parse HEAD) -ne '01e8ac78d2736a3c162f60b9f100ffabc939cb06') {
+            throw 'Unexpected release source'
+          }
+          $download = Join-Path $env:RUNNER_TEMP 'nsis-v1.10.4'
+          New-Item -ItemType Directory -Path $download | Out-Null
+
+          gh release download nsis-3.11 --repo tauri-apps/binary-releases --pattern 'nsis-3.11.zip' --dir $download
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release download nsis_tauri_utils-v0.5.3 --repo tauri-apps/nsis-tauri-utils --pattern 'nsis_tauri_utils.dll' --dir $download
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $archive = Join-Path $download 'nsis-3.11.zip'
+          $plugin = Join-Path $download 'nsis_tauri_utils.dll'
+          if ((Get-FileHash -LiteralPath $archive).Hash -ne 'C7D27F780DDB6CFFB4730138CD1591E841F4B7EDB155856901CDF5F214394FA1' -or
+              (Get-FileHash -LiteralPath $plugin).Hash -ne '5BA143B5DB4A87D32D6E7802E033330AAE56CBCEABE0D1E3BA41948385AD4709') {
+            throw 'Official NSIS asset SHA-256 mismatch'
+          }
+
+          Expand-Archive -LiteralPath $archive -DestinationPath $download
+          $nsis = Join-Path $download 'nsis-3.11'
+          $plugins = Join-Path $nsis 'Plugins/x86-unicode/additional'
+          New-Item -ItemType Directory -Path $plugins -Force | Out-Null
+          Copy-Item -LiteralPath $plugin -Destination $plugins
+          $cache = Join-Path $env:LOCALAPPDATA 'tauri'
+          $toolset = Join-Path $cache 'NSIS'
+          if (Test-Path -LiteralPath $toolset) { throw 'Unexpected NSIS cache on recovery runner' }
+          New-Item -ItemType Directory -Path $cache -Force | Out-Null
+          Copy-Item -LiteralPath $nsis -Destination $toolset -Recurse
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Inject tag version
+        run: |
+          python scripts/prepare_release.py v1.10.4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'APP_VERSION=1.10.4' >> $env:GITHUB_ENV
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default stable
+      - name: Install dependencies
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pythonDir = (Resolve-Path '.venv/Scripts').Path
+          $pythonDir >> $env:GITHUB_PATH
+          & "$pythonDir/python" -m pip install -r python-engine/requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$pythonDir/python" -m pip check
+      - name: Build CPU speech helper
+        run: python scripts/build_asr.py
+      - name: Package engine
+        run: python -m PyInstaller --noconfirm --distpath python-engine/dist --workpath python-engine/build python-engine/pyinstaller.spec
+      - name: Check packaged engine
+        run: python scripts/check_packaged_engine.py python-engine/dist/video-engine/video-engine.exe
+      - name: Build installer
+        env:
+          YINGQU_TELEGRAM_API_ID: ${{ secrets.YINGQU_TELEGRAM_API_ID }}
+          YINGQU_TELEGRAM_API_HASH: ${{ secrets.YINGQU_TELEGRAM_API_HASH }}
+        run: npm run tauri -- build --features desktop --config src-tauri/tauri.release.conf.json --bundles nsis -- --locked
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-windows-x64
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 14
