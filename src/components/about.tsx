@@ -149,7 +149,7 @@ export function About({ busy, openPage, copyVersion }: { busy: boolean; openPage
           {currentDownload && <div className="flex shrink-0 flex-col gap-2 rounded-md border p-3" aria-label="安装包下载状态">
             <p className="flex items-center gap-2 text-sm" role="status">{downloading ? <Spinner aria-hidden="true" /> : currentDownload.phase === 'completed' ? <Check aria-hidden="true" className="size-4" /> : null}{downloadPhases[currentDownload.phase]}</p>
             {['downloading', 'verifying', 'canceling', 'completed'].includes(currentDownload.phase) && <><Progress aria-label="安装包下载进度" value={percent} /><p className="text-xs tabular-nums text-muted-foreground">{megabytes(currentDownload.downloaded_bytes)} / {currentDownload.total_bytes == null ? '大小未知' : megabytes(currentDownload.total_bytes)}{percent == null ? '' : `，${percent}%`}</p></>}
-            {currentDownload.phase === 'completed' && <p className="text-xs text-muted-foreground">点击“打开安装包”继续安装，软件不会自动退出。</p>}
+            {currentDownload.phase === 'completed' && currentDownload.filename?.endsWith('.exe') && <p className="text-xs text-muted-foreground">安装包打开后，映取将自动退出。</p>}
             {currentDownload.error && <Alert variant="destructive" role="alert"><AlertCircle /><AlertDescription>{errorText(currentDownload.error)}</AlertDescription></Alert>}
           </div>}
           {(openError || downloadStatusError) && <Alert variant="destructive" className="shrink-0" role="alert"><AlertCircle /><AlertDescription>{openError || downloadStatusError}</AlertDescription></Alert>}

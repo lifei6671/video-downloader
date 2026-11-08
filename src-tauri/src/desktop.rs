@@ -597,10 +597,12 @@ async fn open_update_installer(
     let path = downloads.installer_path(&download_id).await?;
     #[cfg(windows)]
     {
-        let _ = app;
-        launch_windows_installer(&path)
-            .map(|_| ())
-            .map_err(|_| "UPDATE_INSTALLER_OPEN_FAILED".into())
+        if app.state::<AtomicBool>().load(Ordering::SeqCst) {
+            return Err("UPDATE_DOWNLOAD_SHUTTING_DOWN".into());
+        }
+        launch_windows_installer(&path).map_err(|_| "UPDATE_INSTALLER_OPEN_FAILED")?;
+        request_exit(&app);
+        Ok(())
     }
     #[cfg(not(windows))]
     app.opener()

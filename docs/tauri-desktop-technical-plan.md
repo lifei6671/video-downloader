@@ -387,7 +387,7 @@ Rust 使用 reqwest（系统 TLS 与系统代理支持）请求固定 GitHub 公
 
 `get_update_download` 返回当前快照，`update_download` 事件携带单调 revision，前端忽略迟到旧事件或快照。取消命令按下载 ID 作用于当前操作，取消传播至 HTTP future，临时文件随操作回收；提交与取消在同一状态锁下决定终态。关停先禁止新请求，取消并等待更新下载回收，再完成应用既有退出流程。关闭弹窗或切换页面不取消下载，返回关于页可恢复状态；应用重启不恢复下载。
 
-`open_update_installer(download_id)` 不接受前端文件路径，仅打开本次运行已完成下载的后端文件，再次核验文件类型、大小与 SHA-256；前端显示实际打开失败并可重新下载。Windows 将已验证的当前用户 NSIS EXE 直接作为独立进程启动，不经过异步线程上的 ShellExecuteEx/COM，不传入静默安装参数或继承标准输入输出；macOS 仍通过系统打开 DMG。应用不主动退出或重启，Windows 安装器在用户继续安装时仍可要求关闭正在运行的旧版。安装包命名和签名方式见 [GitHub Actions 标签发布](development.md#github-actions-标签发布)。
+`open_update_installer(download_id)` 不接受前端文件路径，仅打开本次运行已完成下载的后端文件，再次核验文件类型、大小与 SHA-256。Windows 将已验证的当前用户 NSIS EXE 直接作为独立进程启动，避开异步线程上的 ShellExecuteEx/COM。安装器接收空标准输入输出，不传入静默安装参数，用户在简体中文向导中继续安装。启动成功后，旧版沿用托盘退出流程，停止后台任务、回收子进程并退出。校验或启动失败时，应用继续运行并显示错误，用户可以重新下载。macOS 通过系统打开 DMG，继续保留当前应用进程。安装包命名和签名方式见 [GitHub Actions 标签发布](development.md#github-actions-标签发布)。
 
 ### 设置二级分类
 
