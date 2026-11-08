@@ -152,175 +152,54 @@ async page => {
     await page.goto(base + '/tests/fixtures/background-download.html?scenario=visual-media-wheel');
     await page.getByRole('button', { name: '下载任务', exact: true }).click();
     await page.getByRole('textbox', { name: '搜索作品标题或作者' }).fill('连播');
-    await page.locator('[data-asset-id="wheel-cloud"]').waitFor();
+    const remote = page.locator('[data-asset-id="wheel-cloud"]');
+    await remote.waitFor();
     const toggle = page.getByRole('button', { name: feed ? '切换为信息流' : '切换为列表', exact: true });
     if (await toggle.isVisible()) await toggle.click();
-    check(await page.getByRole('list', { name: '媒体任务列表' }).getAttribute('data-view') === (feed ? 'feed' : 'list'), 'test opened the wrong task view');
-    const trigger = page.locator('[data-task-row="visual-3"]').getByRole('button', { name: '播放视频', exact: true });
-    const stage = page.locator('.task-media-panel, .video-player-dialog:not(.task-media-dialog) .video-player-stage');
-    const active = page.locator('[data-slot="dialog-content"][data-state="open"]');
-    const scroll = async direction => {
-      await page.waitForTimeout(780);
-      await stage.hover();
-      await page.mouse.wheel(0, direction * 120);
-    };
-    const expectVideo = async title => {
-      await active.getByRole('heading', { name: title, exact: true }).waitFor();
-      await page.waitForFunction(() => {
-        const video = document.querySelector('.video-player-dialog video');
-        return video && !video.paused && video.currentTime > 0;
-      });
-    };
-    const expectAlbum = async (title, number, count) => {
-      await active.getByRole('heading', { name: title, exact: true }).waitFor();
-      await dialog().locator('.album-gallery > [role="status"]').filter({ hasText: new RegExp('^' + number + ' / ' + count + '，') }).waitFor();
-    };
-    await trigger.press('Enter');
-    await expectVideo('连播视频 A');
-    await scroll(-1);
-    check(await active.getByRole('heading', { name: '连播视频 A' }).isVisible(), 'first work wrapped backwards');
-    await active.evaluate(element => {
-      window.wheelStartDialog = element;
-      window.wheelStartVideo = element.querySelector('video');
-      element.addEventListener('wheel', event => { window.lastMediaWheel = event.timeStamp; }, { once: true });
-    });
-    await scroll(1);
-    await expectAlbum('连播图集 B', 1, 3);
-    await stage.evaluate(element => {
-      const tail = new WheelEvent('wheel', { deltaY: 60, bubbles: true, cancelable: true });
-      Object.defineProperty(tail, 'timeStamp', { value: window.lastMediaWheel + 20 });
-      element.dispatchEvent(tail);
-    });
-    await expectAlbum('连播图集 B', 1, 3);
-    check(await active.evaluate(element => element === window.wheelStartDialog && window.wheelStartVideo.paused && !window.wheelStartVideo.hasAttribute('src')), 'work switch remounted the dialog or left the old video playing');
-    await scroll(1); await expectAlbum('连播图集 B', 2, 3);
-    await scroll(1); await expectAlbum('连播图集 B', 3, 3);
-    await scroll(1); await expectAlbum('连播单张图集 C', 1, 1);
-    await scroll(1); await expectVideo('连播视频 D');
-    await scroll(1); await expectVideo('连播远端视频 E');
-    await scroll(1);
-    check(await active.getByRole('heading', { name: '连播远端视频 E' }).isVisible(), 'last work wrapped forwards');
-    await scroll(-1); await expectVideo('连播视频 D');
-    await scroll(-1); await expectAlbum('连播单张图集 C', 1, 1);
-    await scroll(-1); await expectAlbum('连播图集 B', 3, 3);
-    await scroll(-1); await expectAlbum('连播图集 B', 2, 3);
-    await scroll(-1); await expectAlbum('连播图集 B', 1, 3);
-    await scroll(-1); await expectVideo('连播视频 A');
-    check(await page.evaluate(() => window.backgroundTest.calls.filter(call => call.type === 'prepare-playback').map(call => call.id).join(',') === 'visual-3,visual-9,wheel-cloud,visual-9,visual-3'), 'playback prepared the wrong works');
-    const bounds = await active.boundingBox();
-    check(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= height, 'media dialog exceeds viewport');
+    const active = page.getByRole('dialog', { name: '任务详情', exact: true });
+    const play = page.locator('[data-task-row="visual-9"]').getByRole('button', { name: '播放视频', exact: true });
+    await play.press('Enter');
+    await active.getByRole('heading', { name: '连播视频 D', exact: true }).waitFor();
+    const videoStage = active.locator('.video-player-stage');
+    await videoStage.locator('video').waitFor();
+    await videoStage.hover();
+    for (const delta of [-120, 120]) {
+      await page.mouse.wheel(0, delta);
+      await idle();
+      check(await active.getByRole('heading', { name: '连播视频 D', exact: true }).isVisible(), 'normal video changed to an adjacent work');
+    }
+    check(await page.evaluate(() => window.backgroundTest.calls.filter(call => call.type === 'prepare-playback').map(call => call.id).join(',') === 'visual-9'), 'normal video prepared another work');
     await page.keyboard.press('Escape');
     await active.waitFor({ state: 'detached' });
-    check(await trigger.evaluate(element => element === document.activeElement), 'closing after wheel navigation lost focus restoration');
-    results.push(`${width}: mixed media ${feed ? 'feed' : 'list'} follows filtered order in both directions and autoplays videos`);
+    check(await play.evaluate(element => element === document.activeElement), 'closing normal playback lost focus restoration');
+
+    if (width === 1440) {
+      await remote.getByRole('button', { name: '播放视频', exact: true }).click();
+      const asset = page.getByRole('dialog', { name: '连播远端视频 E', exact: true });
+      await asset.locator('.video-player-stage video').waitFor();
+      await asset.locator('.video-player-stage').hover();
+      await page.mouse.wheel(0, -120);
+      await idle();
+      check(await asset.isVisible(), 'normal backup playback changed to a local work');
+      await page.keyboard.press('Escape');
+      await asset.waitFor({ state: 'detached' });
+    }
+
+    const openAlbum = page.locator('[data-task-row="visual-0"]').getByRole('button', { name: '查看图集', exact: true });
+    await openAlbum.press('Enter');
+    const album = active.getByRole('heading', { name: '连播图集 B', exact: true });
+    await album.waitFor();
+    await selected(1);
+    await wheel(-120); await idle();
+    check(await album.isVisible() && await current() === '查看第 1 张图片', 'normal album switched works at the first image');
+    await wheel(120); await selected(2);
+    await idle(); await wheel(120); await selected(3);
+    await idle(); await wheel(120); await idle();
+    check(await album.isVisible() && await current() === '查看第 3 张图片', 'normal album switched works at the last image');
+    await page.keyboard.press('Escape');
+    await active.waitFor({ state: 'detached' });
+    check(await openAlbum.evaluate(element => element === document.activeElement), 'closing normal album lost focus restoration');
+    results.push(width + ': normal video and album stay on the current work');
   }
-  await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await page.goto(base + '/tests/fixtures/background-download.html?scenario=visual-media-wheel');
-  await page.getByRole('button', { name: '下载任务', exact: true }).click();
-  await page.getByRole('textbox', { name: '搜索作品标题或作者' }).fill('连播');
-  const play = page.locator('[data-task-row="visual-9"]').getByRole('button', { name: '播放视频', exact: true });
-  await play.press('Enter');
-  const stage = page.locator('.task-media-panel, .video-player-dialog:not(.task-media-dialog) .video-player-stage');
-  const heading = title => page.getByRole('dialog').getByRole('heading', { name: title, exact: true });
-  await heading('连播视频 D').waitFor();
-  await page.waitForFunction(() => document.querySelector('.video-player-stage video')?.currentTime > 0.05);
-  await page.evaluate(async () => {
-    const { api } = await import('/src/api.ts');
-    const load = api.assetPlaybackSource;
-    api.assetPlaybackSource = async id => {
-      await new Promise(resolve => { window.releaseWheelVideo = resolve; });
-      return load(id);
-    };
-    const animate = Element.prototype.animate;
-    window.workSlides = [];
-    Element.prototype.animate = function (frames, options) {
-      if (this.matches('.media-work-frame, .video-player-stage video')) {
-        window.workSlides.push(frames.map(frame => frame.transform));
-      }
-      return animate.call(this, frames, options);
-    };
-  });
-  const send = (delta, mode = 0) => stage.dispatchEvent('wheel', { deltaY: delta, deltaMode: mode, bubbles: true, cancelable: true });
-  await send(-8); await send(-10);
-  check(await heading('连播视频 D').isVisible(), 'tiny wheel deltas started a switch');
-  check(await page.evaluate(() => window.workSlides.length === 0), 'tiny wheel deltas started an animation');
-  await idle(); await send(120);
-  await heading('连播远端视频 E').waitFor();
-  const heldFrame = page.locator('canvas.media-work-frame');
-  await heldFrame.waitFor();
-  check(await heldFrame.evaluate(canvas => canvas.getContext('2d').getImageData(0, 0, 1, 1).data[3] === 255), 'loading did not preserve the previous video frame');
-  await idle(); await send(-120);
-  await page.waitForTimeout(800); await send(-120);
-  check(await heading('连播远端视频 E').isVisible() && await heldFrame.isVisible(), 'wheel changed work during a slow load');
-  check(await page.evaluate(() => window.workSlides.length === 0), 'slide started before the next video played');
-  await page.evaluate(() => window.releaseWheelVideo());
-  await page.waitForFunction(() => document.querySelector('.video-player-stage video')?.currentTime > 0);
-  await heldFrame.waitFor({ state: 'detached' });
-  await send(-120);
-  check(await heading('连播远端视频 E').isVisible(), 'wheel skipped the video immediately after the slide');
-  await page.waitForTimeout(750); await send(-1, 1);
-  await heading('连播视频 D').waitFor();
-  await page.waitForFunction(() => window.workSlides.length === 4);
-  check(await page.evaluate(() => JSON.stringify(window.workSlides) === JSON.stringify([
-    ['translateY(0)', 'translateY(-100%)'],
-    ['translateY(100%)', 'translateY(0)'],
-    ['translateY(0)', 'translateY(100%)'],
-    ['translateY(-100%)', 'translateY(0)'],
-  ])), 'work slides did not follow the wheel direction');
-  await heldFrame.waitFor({ state: 'detached' });
-  await page.evaluate(() => { window.previousWheelRelease = window.releaseWheelVideo; });
-  await page.waitForTimeout(750); await send(120);
-  await heldFrame.waitFor();
-  await page.waitForFunction(() => window.releaseWheelVideo !== window.previousWheelRelease);
-  await page.keyboard.press('Escape');
-  await page.getByRole('dialog').waitFor({ state: 'detached' });
-  await page.evaluate(() => window.releaseWheelVideo());
-  await page.waitForTimeout(180);
-  check(await page.getByRole('dialog').count() === 0, 'closing during a slide reopened the player');
-  results.push('small deltas, playback-gated wheel, retained frames, directional slide, and cancellation');
-  await play.press('Enter');
-  await page.waitForFunction(() => document.querySelector('.video-player-stage video')?.currentTime > 0.05);
-  await page.evaluate(async () => {
-    const { api } = await import('/src/api.ts');
-    api.assetPlaybackSource = async () => { throw 'FILE_MISSING'; };
-  });
-  await send(120);
-  await heading('连播远端视频 E').waitFor();
-  await page.getByRole('dialog').getByRole('alert').waitFor();
-  await heldFrame.waitFor({ state: 'detached' });
-  await page.waitForTimeout(750); await send(-120);
-  await heading('连播视频 D').waitFor();
-  results.push('source failure clears the old frame and allows browsing back');
-  await page.goto(base + '/tests/fixtures/background-download.html?scenario=visual-media-wheel');
-  await page.getByRole('button', { name: '下载任务', exact: true }).click();
-  await page.getByRole('textbox', { name: '搜索作品标题或作者' }).fill('连播');
-  await page.locator('[data-task-row="visual-0"]').getByRole('button', { name: '查看图集', exact: true }).click();
-  await dialog().getByRole('img', { name: '第 1 张图片' }).evaluate(image => image.decode());
-  await page.evaluate(async () => {
-    const { api } = await import('/src/api.ts');
-    const load = api.image;
-    const gate = new Promise(resolve => { window.releaseLastAlbumImage = resolve; });
-    api.image = async (id, index) => {
-      if (id === 'visual-0' && index === 2) await gate;
-      return load(id, index);
-    };
-  });
-  await dialog().getByRole('button', { name: '查看第 3 张图片', exact: true }).click();
-  await dialog().locator('.album-still-outgoing > img:last-child').waitFor();
-  await page.evaluate(() => {
-    const animate = Element.prototype.animate;
-    window.albumSwitchHadFrame = false;
-    Element.prototype.animate = function (frames, options) {
-      if (this.matches('.media-work-frame')) {
-        window.albumSwitchHadFrame = this.getContext('2d').getImageData(0, 0, 1, 1).data[3] === 255;
-      }
-      return animate.call(this, frames, options);
-    };
-  });
-  await send(120);
-  await heading('连播单张图集 C').waitFor();
-  await page.waitForFunction(() => window.albumSwitchHadFrame);
-  await page.evaluate(() => window.releaseLastAlbumImage());
-  results.push('switching away from a slow boundary image preserves the visible album frame');
   return { passed: results.length, results };
 }

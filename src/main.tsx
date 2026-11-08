@@ -432,7 +432,6 @@ const streamWorkSelector = '.stream-playback-work:not(.stream-playback-outgoing)
 type WorkSwitch = {
   next: TaskMediaEntry;
   direction: MediaDirection;
-  frame?: HTMLCanvasElement;
   page?: { element: HTMLDivElement; detailsScrollTop: number; coveredSidebar?: HTMLElement; coveredControls?: HTMLElement };
   animations?: Animation[];
   finishTimer?: number;
@@ -472,7 +471,6 @@ function clearWorkFrame(switching: WorkSwitch) {
   if (switching.page?.coveredSidebar) switching.page.coveredSidebar.inert = false;
   if (switching.page?.coveredControls) switching.page.coveredControls.inert = false;
   switching.page?.element.remove();
-  switching.frame?.remove();
 }
 
 function captureStreamWork(dialog: Element, frame?: HTMLCanvasElement): WorkSwitch['page'] {
@@ -534,15 +532,12 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
       wheelGesture.current.lockedUntil = performance.now() + workSwitchPauseMs;
       if (switching.page && document.activeElement === dialog) details.current?.focus({ preventScroll: true });
     };
-    const stage = dialog?.querySelector(workStageSelector);
-    const outgoing = switching.page?.element ?? switching.frame;
-    const incoming = switching.page ? dialog?.querySelector(streamWorkSelector)
-      : stage?.querySelector('video') ?? stage?.querySelector(workImageSelector)?.closest('.album-still');
+    const outgoing = switching.page?.element;
+    const incoming = dialog?.querySelector(streamWorkSelector);
     if (!ready || !outgoing?.isConnected || !incoming || matchMedia('(prefers-reduced-motion: reduce)').matches) {
       finish();
       return;
     }
-    if (!switching.page) stage?.append(outgoing);
     const offset = switching.direction * 100;
     const timing = { duration: workSlideDurationMs, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'both' } as const;
     const leaving = outgoing.animate([{ transform: 'translateY(0)' }, { transform: `translateY(${-offset}%)` }], timing);
@@ -574,9 +569,6 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
         dialog.append(switching.page.element);
         const oldDetails = switching.page.element.querySelector('.task-details-content');
         if (oldDetails) oldDetails.scrollTop = switching.page.detailsScrollTop;
-      } else if (!switching.page && switching.frame && !switching.frame.isConnected) {
-        const stage = dialog?.querySelector(workStageSelector) ?? dialog?.querySelector('.task-media-panel');
-        stage?.append(switching.frame);
       }
     }
     if (open && previous && previous !== entry) {
@@ -592,7 +584,7 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
   useEffect(() => {
     const gesture = wheelGesture.current;
     if (!open) Object.assign(gesture, { lastAt: -Infinity, lockedUntil: -Infinity, delta: 0, consumed: false });
-    if (!open || !mediaEntry || !dialog) return;
+    if (!open || !mediaEntry || !dialog || (!streaming && !album)) return;
     const wheel = (event: WheelEvent) => {
       const mode = event.deltaMode;
       if (!(event.target instanceof Element) || !event.target.closest('.task-media-panel, .video-player-stage')
@@ -614,10 +606,11 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
       }
       gesture.consumed = true;
       if (album && (albumNavigation.current?.step(direction) ?? true)) return;
+      if (!streaming) return;
       const next = adjacent(direction);
       if (!next) return;
       const frame = captureWorkFrame(dialog.querySelector(workStageSelector));
-      workSwitch.current = { next, direction, frame, page: streaming ? captureStreamWork(dialog, frame) : undefined };
+      workSwitch.current = { next, direction, page: captureStreamWork(dialog, frame) };
       navigate(mediaEntry, next);
     };
     dialog.addEventListener('wheel', wheel, { passive: false });
@@ -673,7 +666,7 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
   const playerStyle = { '--video-player-ratio': Number.isFinite(ratio) && ratio > 0 ? ratio : 16 / 9 } as React.CSSProperties;
   const albumGallery = currentTask && current?.entry.kind === 'task' && album && (waitingForAlbumSize
     ? <Spinner className="m-auto" aria-label="正在加载图集" />
-    : <AlbumGallery key={currentTask.id} task={currentTask} expanded open={open} slideshow={streaming} startAtLast={current.entry.startAtLast} navigation={albumNavigation} onMediaReady={onMediaReady} />);
+    : <AlbumGallery key={currentTask.id} task={currentTask} expanded open={open} slideshow startAtLast={current.entry.startAtLast} navigation={albumNavigation} onMediaReady={streaming ? onMediaReady : undefined} />);
   const taskDetails = currentTask && <TaskDetails key={currentTask.id} task={currentTask} regionRef={details}
     coverTools={!streaming && (video || album) && <VideoCover task={currentTask} mode="actions" operations={coverOperations} />} />;
   const renderLayout = (media: React.ReactNode, tools?: React.ReactNode) => <>
@@ -730,7 +723,7 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
             {video?.video?.width && video.video.height && <dl className="task-details-fields"><dt>分辨率</dt><dd>{video.video.width} × {video.video.height}</dd></dl>}
           </div>}
         </div>
-      </div> : video && mediaEntry ? <PlaybackSession key={playbackKey(mediaEntry)} task={video} open={open} close={close} removedIds={removedIds} onMediaSize={onMediaSize} onMediaReady={onMediaReady} renderLayout={standalone ? undefined : renderLayout} />
+      </div> : video && mediaEntry ? <PlaybackSession key={playbackKey(mediaEntry)} task={video} open={open} close={close} removedIds={removedIds} onMediaSize={onMediaSize} renderLayout={standalone ? undefined : renderLayout} />
         : currentTask && renderLayout(albumGallery || <VideoCover key={currentTask.id} task={currentTask} mode="details" operations={coverOperations} />)}
     </DialogContent>
   </Dialog>;
@@ -1199,12 +1192,12 @@ function App() {
   }
   const visibleAssets = filteredAssets.filter(a => page !== 'tasks' || taskStatus === 'all' || backupAssetStatus(backup, a) === taskStatus);
   function adjacentMedia(direction: MediaDirection): TaskMediaEntry | undefined {
-    if (!taskListPage || !mediaEntry || busy) return;
+    if (!taskListPage || mediaEntry?.streamStep === undefined || busy) return;
     const rows = taskListRows(visible, visibleAssets);
     const current = rows.findIndex(row => row.kind === mediaEntry.kind && (row.kind === 'task' ? row.task.id : row.asset.asset_id) === mediaEntry.id);
     if (current < 0) return;
     const { returnFocus } = mediaEntry;
-    const streamStep = mediaEntry.streamStep === undefined ? undefined : mediaEntry.streamStep + 1;
+    const streamStep = mediaEntry.streamStep + 1;
     for (let i = current + direction; i >= 0 && i < rows.length; i += direction) {
       const row = rows[i];
       if (row.kind === 'task') {
@@ -1226,7 +1219,7 @@ function App() {
       }
     }
   }
-  const nextStreamEntry = mediaEntry?.streamStep !== undefined ? adjacentMedia(1) : undefined;
+  const nextStreamEntry = adjacentMedia(1);
   // Preparing a backup asset can restore it from the remote library. Warm local videos only.
   const preloadSubject = nextStreamEntry?.kind === 'task' && nextStreamEntry.playVideo && !nextStreamEntry.asset
     ? tasks.find(task => task.id === nextStreamEntry.id) : undefined;

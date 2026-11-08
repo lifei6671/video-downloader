@@ -56,5 +56,21 @@ async page => {
   await page.evaluate(() => window.releaseAlbumVideo('/tests/fixtures/media/player.webm'));
   check(await page.evaluate(() => !window.pendingAlbumVideo.hasAttribute('src')) && await dialog.count() === 0, 'late source restarted closed playback');
   results.push('late preparation result after close cannot restart playback');
+
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.goto(base + '/tests/fixtures/background-download.html?scenario=visual-album-live');
+  await page.getByRole('button', { name: '下载任务', exact: true }).click();
+  await open();
+  await playing();
+  await dialog.locator('video[aria-label="第 2 张实况视频"]').waitFor();
+  await playing();
+  await dialog.locator('.album-still-outgoing').waitFor({ state: 'detached' });
+  await dialog.locator('.album-stage').hover();
+  await page.mouse.wheel(0, 120);
+  await dialog.getByRole('img', { name: '第 3 张图片', exact: true }).waitFor();
+  await dialog.locator('video[aria-label="第 1 张实况视频"]').waitFor();
+  await playing();
+  await close();
+  results.push('normal album advances automatically, accepts wheel input, and wraps to the first item');
   return { passed: results.length, results };
 }

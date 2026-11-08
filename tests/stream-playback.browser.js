@@ -165,6 +165,9 @@ async page => {
         && !!element.querySelector('canvas.media-work-frame')), 'loading did not retain the complete previous page');
       check(await stream.evaluate(element => element.querySelector('.stream-playback-work:not(.stream-playback-outgoing) .task-media-sidebar')?.inert
         && document.activeElement === element), 'covered details could be focused or clicked while the old page was visible');
+      await page.waitForTimeout(450);
+      await media.dispatchEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true });
+      check(await active('连播远端视频 E').isVisible() && await outgoing.isVisible(), 'wheel changed work during a slow load');
       check(await page.evaluate(() => window.streamPageSlides.length === 0), 'page slid before the next video was ready');
       await page.waitForFunction(() => typeof window.releaseStreamCloud === 'function');
       await page.evaluate(() => window.releaseStreamCloud());
@@ -306,6 +309,38 @@ async page => {
     }
     results.push(`${width}x${height}: fixed 16:9 streaming across video, gallery and backup`);
   }
+  await page.goto(base + '/tests/fixtures/background-download.html?scenario=visual-media-wheel');
+  await page.getByRole('button', { name: '下载任务', exact: true }).click();
+  await page.getByRole('textbox', { name: '搜索作品标题或作者' }).fill('连播');
+  await page.locator('[data-asset-id="wheel-cloud"]').waitFor();
+  await page.evaluate(async () => {
+    const { api } = await import('/src/api.ts');
+    const load = api.assetPlaybackSource;
+    api.assetPlaybackSource = async id => {
+      if (!window.delayStreamAsset) throw 'FILE_MISSING';
+      await new Promise(resolve => { window.releaseStreamAsset = resolve; });
+      return load(id);
+    };
+  });
+  await openStream(row('visual-9').locator('.task-context-target'));
+  await expectPlaying('连播视频 D');
+  await wheel(1);
+  await active('连播远端视频 E').getByRole('alert').waitFor();
+  await outgoing.waitFor({ state: 'detached' });
+  await wheel(-1);
+  await expectPlaying('连播视频 D');
+  results.push('stream source failure clears the old page and allows browsing back');
+  await page.evaluate(() => { window.delayStreamAsset = true; });
+  await wheel(1);
+  await active('连播远端视频 E').waitFor();
+  await page.waitForFunction(() => typeof window.releaseStreamAsset === 'function');
+  await page.keyboard.press('Escape');
+  await stream.waitFor({ state: 'detached' });
+  await page.evaluate(() => window.releaseStreamAsset());
+  await page.waitForTimeout(180);
+  check(await stream.count() === 0, 'closing during a slow load reopened streaming playback');
+  results.push('closing a stream during a slow load keeps the dialog closed');
+
   await page.goto(base + '/tests/fixtures/background-download.html?scenario=visual-album-live');
   await page.getByRole('button', { name: '下载任务', exact: true }).click();
   await page.getByRole('textbox', { name: '搜索作品标题或作者' }).fill('实况图集');
