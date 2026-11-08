@@ -70,12 +70,8 @@ pub struct UpdateDownloads {
 
 fn cached_installer_version(name: &str) -> Option<semver::Version> {
     uuid::Uuid::parse_str(name.get(..36)?).ok()?;
-    let filename = name.get(36..)?.strip_prefix("-Yingqu_")?;
-    let version = ["_x64-setup.exe", "_x64.dmg", "_aarch64.dmg"]
-        .iter()
-        .find_map(|suffix| filename.strip_suffix(suffix))?;
-    let parsed = updates::stable_version(version).ok()?;
-    (parsed.to_string() == version).then_some(parsed)
+    let filename = name.get(36..)?.strip_prefix('-')?;
+    updates::installer_filename_version(filename)
 }
 
 // Only completed installers named by this module are candidates. Read the full
@@ -477,8 +473,8 @@ mod tests {
         (directory, manager)
     }
 
-    fn cached_file(directory: &Path, version: &str, suffix: &str) -> PathBuf {
-        let path = directory.join(format!("{}-Yingqu_{version}_{suffix}", uuid::Uuid::new_v4()));
+    fn cached_file(directory: &Path, name: &str) -> PathBuf {
+        let path = directory.join(format!("{}-{name}", uuid::Uuid::new_v4()));
         std::fs::write(&path, b"cached installer").unwrap();
         path
     }
@@ -486,42 +482,57 @@ mod tests {
     #[test]
     fn startup_cleanup_keeps_highest_semver_and_ignores_unmanaged_entries() {
         let directory = tempfile::tempdir().unwrap();
-        let old = cached_file(directory.path(), "1.9.0", "x64-setup.exe");
-        let latest = cached_file(directory.path(), "1.10.0", "x64-setup.exe");
-        let late_old = cached_file(directory.path(), "1.2.0", "aarch64.dmg");
-        let duplicate = cached_file(directory.path(), "1.10.0", "x64-setup.exe");
+        let old = cached_file(directory.path(), "Yingqu_1.9.0_x64-setup.exe");
+        let latest = cached_file(directory.path(), "Yingqu-windows-x64-setup-1.10.0.exe");
+        let late_old = cached_file(directory.path(), "Yingqu-darwin-aarch64-1.2.0.dmg");
+        let duplicate = cached_file(directory.path(), "Yingqu-darwin-x64-1.10.0.dmg");
         let unmanaged = directory.path().join("Yingqu_9.0.0_x64-setup.exe");
-        let noncanonical = directory.path().join(format!("{}-Yingqu_v9.0.0_x64-setup.exe", uuid::Uuid::new_v4()));
+        let noncanonical = cached_file(directory.path(), "Yingqu-windows-x64-setup-v9.0.0.exe");
         let partial = directory.path().join(".update-fixture.part");
-        let nested = directory.path().join(format!("{}-Yingqu_9.0.0_x64-setup.exe", uuid::Uuid::new_v4()));
+        let nested = directory.path().join(format!(
+            "{}-Yingqu_9.0.0_x64-setup.exe",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::write(&unmanaged, b"user file").unwrap();
-        std::fs::write(&noncanonical, b"user file").unwrap();
         std::fs::write(&partial, b"partial").unwrap();
         std::fs::create_dir(&nested).unwrap();
         std::fs::write(nested.join("keep.txt"), b"keep").unwrap();
         let _manager = UpdateDownloads::new(directory.path().to_owned(), "1.10.0".into(), |_| {});
         assert!(!old.exists() && !late_old.exists());
-        assert_eq!(usize::from(latest.exists()) + usize::from(duplicate.exists()), 1);
+        assert_eq!(
+            usize::from(latest.exists()) + usize::from(duplicate.exists()),
+            1
+        );
         assert_eq!(std::fs::read(unmanaged).unwrap(), b"user file");
-        assert_eq!(std::fs::read(noncanonical).unwrap(), b"user file");
+        assert_eq!(std::fs::read(noncanonical).unwrap(), b"cached installer");
         assert!(partial.is_file() && nested.join("keep.txt").is_file());
     }
 
     #[tokio::test]
     async fn successful_download_cleanup_keeps_the_active_duplicate_and_installer_checks_work() {
         let (directory, manager) = manager();
-        let old = cached_file(directory.path(), "1.1.0", "x64-setup.exe");
-        let duplicate = cached_file(directory.path(), "1.2.0", "x64-setup.exe");
+        let old = cached_file(directory.path(), "Yingqu_1.1.0_x64-setup.exe");
+        let duplicate = cached_file(directory.path(), "Yingqu_1.2.0_x64-setup.exe");
         let id = preparing(&manager);
         let file = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
         std::fs::write(file.path(), b"new verified installer").unwrap();
-        manager.finish(&id, Ok(Downloaded { file, filename: "Yingqu_1.2.0_x64-setup.exe".into(),
-            size: 22, sha256: format!("{:x}", Sha256::digest(b"new verified installer")) }));
+        manager.finish(
+            &id,
+            Ok(Downloaded {
+                file,
+                filename: "Yingqu-windows-x64-setup-1.2.0.exe".into(),
+                size: 22,
+                sha256: format!("{:x}", Sha256::digest(b"new verified installer")),
+            }),
+        );
         {
             let inner = manager.inner.lock().unwrap();
             assert_eq!(inner.status.as_ref().unwrap().phase, Phase::Completed);
             let installer = inner.installer.as_ref().unwrap();
-            assert_eq!(std::fs::read(&installer.path).unwrap(), b"new verified installer");
+            assert_eq!(
+                std::fs::read(&installer.path).unwrap(),
+                b"new verified installer"
+            );
             assert!(!old.exists() && !duplicate.exists());
         }
         assert!(manager.installer_path(&id).await.unwrap().is_file());
@@ -532,7 +543,7 @@ mod tests {
     fn failed_or_canceled_download_keeps_previous_complete_package() {
         for error in ["UPDATE_DOWNLOAD_CANCELED", "UPDATE_CHECKSUM_MISMATCH"] {
             let (directory, manager) = manager();
-            let previous = cached_file(directory.path(), "1.1.0", "x64-setup.exe");
+            let previous = cached_file(directory.path(), "Yingqu_1.1.0_x64-setup.exe");
             let id = preparing(&manager);
             manager.finish(&id, Err(error.into()));
             assert_eq!(std::fs::read(previous).unwrap(), b"cached installer");
@@ -545,10 +556,17 @@ mod tests {
     fn locked_old_installer_does_not_block_cleanup_and_is_removed_on_next_attempt() {
         use std::os::windows::fs::OpenOptionsExt;
         let directory = tempfile::tempdir().unwrap();
-        let old = cached_file(directory.path(), "1.0.0", "x64-setup.exe");
-        let latest = cached_file(directory.path(), "2.0.0", "x64-setup.exe");
-        let held = std::fs::OpenOptions::new().read(true).share_mode(1).open(&old).unwrap();
-        assert_eq!(cleanup_cache(directory.path(), None).unwrap(), Some(latest.clone()));
+        let old = cached_file(directory.path(), "Yingqu_1.0.0_x64-setup.exe");
+        let latest = cached_file(directory.path(), "Yingqu_2.0.0_x64-setup.exe");
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&old)
+            .unwrap();
+        assert_eq!(
+            cleanup_cache(directory.path(), None).unwrap(),
+            Some(latest.clone())
+        );
         assert!(old.exists() && latest.exists());
         drop(held);
         cleanup_cache(directory.path(), None).unwrap();
@@ -558,15 +576,25 @@ mod tests {
     #[test]
     fn lower_download_cannot_remove_newer_cache_or_offer_a_deleted_installer() {
         let (directory, manager) = manager();
-        let latest = cached_file(directory.path(), "2.0.0", "x64-setup.exe");
+        let latest = cached_file(directory.path(), "Yingqu-windows-x64-setup-2.0.0.exe");
         let id = preparing(&manager);
         let file = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
         std::fs::write(file.path(), b"older").unwrap();
-        manager.finish(&id, Ok(Downloaded { file, filename: "Yingqu_1.2.0_x64-setup.exe".into(),
-            size: 5, sha256: format!("{:x}", Sha256::digest(b"older")) }));
+        manager.finish(
+            &id,
+            Ok(Downloaded {
+                file,
+                filename: "Yingqu_1.2.0_x64-setup.exe".into(),
+                size: 5,
+                sha256: format!("{:x}", Sha256::digest(b"older")),
+            }),
+        );
         let inner = manager.inner.lock().unwrap();
         assert_eq!(inner.status.as_ref().unwrap().phase, Phase::Failed);
-        assert_eq!(inner.status.as_ref().unwrap().error.as_deref(), Some("UPDATE_NEWER_INSTALLER_CACHED"));
+        assert_eq!(
+            inner.status.as_ref().unwrap().error.as_deref(),
+            Some("UPDATE_NEWER_INSTALLER_CACHED")
+        );
         assert!(inner.installer.is_none() && latest.is_file());
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }

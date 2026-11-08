@@ -48,6 +48,50 @@ pub(crate) struct InstallerAsset {
     pub sha256: String,
 }
 
+struct InstallerNaming {
+    platform: (&'static str, &'static str),
+    prefix: &'static str,
+    extension: &'static str,
+    legacy_suffix: &'static str,
+}
+
+const INSTALLER_NAMING: [InstallerNaming; 3] = [
+    InstallerNaming {
+        platform: ("windows", "x86_64"),
+        prefix: "Yingqu-windows-x64-setup-",
+        extension: ".exe",
+        legacy_suffix: "_x64-setup.exe",
+    },
+    InstallerNaming {
+        platform: ("macos", "x86_64"),
+        prefix: "Yingqu-darwin-x64-",
+        extension: ".dmg",
+        legacy_suffix: "_x64.dmg",
+    },
+    InstallerNaming {
+        platform: ("macos", "aarch64"),
+        prefix: "Yingqu-darwin-aarch64-",
+        extension: ".dmg",
+        legacy_suffix: "_aarch64.dmg",
+    },
+];
+
+pub(crate) fn installer_filename_version(filename: &str) -> Option<Version> {
+    let version = if let Some(legacy) = filename.strip_prefix("Yingqu_") {
+        INSTALLER_NAMING
+            .iter()
+            .find_map(|naming| legacy.strip_suffix(naming.legacy_suffix))?
+    } else {
+        INSTALLER_NAMING.iter().find_map(|naming| {
+            filename
+                .strip_prefix(naming.prefix)?
+                .strip_suffix(naming.extension)
+        })?
+    };
+    let parsed = stable_version(version).ok()?;
+    (parsed.to_string() == version).then_some(parsed)
+}
+
 pub(crate) fn stable_version(tag: &str) -> Result<Version, String> {
     let version = Version::parse(tag.strip_prefix('v').unwrap_or(tag))
         .map_err(|_| "UPDATE_INVALID_RESPONSE")?;
@@ -101,22 +145,21 @@ pub(crate) fn select_installer(
     arch: &str,
 ) -> Result<InstallerAsset, String> {
     let version = stable_version(&release.tag_name)?;
-    let suffix = match (os, arch) {
-        ("windows", "x86_64") => "x64-setup.exe",
-        ("macos", "x86_64") => "x64.dmg",
-        ("macos", "aarch64") => "aarch64.dmg",
-        _ => return Err("UPDATE_UNSUPPORTED_SYSTEM".into()),
-    };
-    let name = format!("Yingqu_{version}_{suffix}");
-    let matches: Vec<_> = release
-        .assets
+    let naming = INSTALLER_NAMING
         .iter()
-        .filter(|asset| asset.name == name)
-        .collect();
-    if matches.len() != 1 {
+        .find(|naming| naming.platform == (os, arch))
+        .ok_or("UPDATE_UNSUPPORTED_SYSTEM")?;
+    let name = format!("{}{version}{}", naming.prefix, naming.extension);
+    let name = if release.assets.iter().any(|asset| asset.name == name) {
+        name
+    } else {
+        format!("Yingqu_{version}{}", naming.legacy_suffix)
+    };
+    let mut matching = release.assets.iter().filter(|asset| asset.name == name);
+    let asset = matching.next().ok_or("UPDATE_NO_INSTALLER")?;
+    if matching.next().is_some() {
         return Err("UPDATE_NO_INSTALLER".into());
     }
-    let asset = matches[0];
     let digest = asset
         .digest
         .as_deref()
@@ -226,14 +269,25 @@ mod tests {
             "body": "## 更新说明\n- 修复下载问题", "published_at": "2026-10-18T00:00:00Z"})
     }
 
+    fn uploaded_asset(name: &str) -> serde_json::Value {
+        json!({
+            "name": name,
+            "size": 4096,
+            "state": "uploaded",
+            "digest": format!("sha256:{}", "a".repeat(64)),
+            "browser_download_url": format!("https://github.com/lifei6671/video-downloader/releases/download/v1.2.0/{name}"),
+        })
+    }
+
     #[test]
     fn installer_selection_matches_os_arch_version_and_verified_asset() {
         let mut value = release("v1.2.0");
-        value["assets"] = json!(["x64-setup.exe", "x64.dmg", "aarch64.dmg"].map(|suffix| {
-            let name = format!("Yingqu_1.2.0_{suffix}");
-            json!({"name":name,"size":4096,"state":"uploaded","digest":format!("sha256:{}", "a".repeat(64)),
-                "browser_download_url":format!("https://github.com/lifei6671/video-downloader/releases/download/v1.2.0/{name}")})
-        }));
+        value["assets"] = json!([
+            "Yingqu_1.2.0_x64-setup.exe",
+            "Yingqu_1.2.0_x64.dmg",
+            "Yingqu_1.2.0_aarch64.dmg",
+        ]
+        .map(uploaded_asset));
         for (os, arch, suffix) in [
             ("windows", "x86_64", "x64-setup.exe"),
             ("macos", "x86_64", "x64.dmg"),
@@ -264,6 +318,48 @@ mod tests {
         value["assets"].as_array_mut().unwrap().push(duplicate);
         let data: Release = serde_json::from_value(value).unwrap();
         assert!(select_installer(&data, "windows", "x86_64").is_err());
+    }
+
+    #[test]
+    fn installer_selection_prefers_new_names_and_requires_valid_metadata() {
+        let windows = "Yingqu-windows-x64-setup-1.2.0.exe";
+        let intel = "Yingqu-darwin-x64-1.2.0.dmg";
+        let apple = "Yingqu-darwin-aarch64-1.2.0.dmg";
+        let mut value = release("v1.2.0");
+        value["assets"] = json!([windows, intel, apple].map(uploaded_asset));
+        for (os, arch, filename) in [
+            ("windows", "x86_64", windows),
+            ("macos", "x86_64", intel),
+            ("macos", "aarch64", apple),
+        ] {
+            let data: Release = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                select_installer(&data, os, arch).unwrap().asset.name,
+                filename
+            );
+        }
+
+        let legacy = uploaded_asset("Yingqu_1.2.0_x64-setup.exe");
+        value["assets"] = json!([legacy, uploaded_asset(windows)]);
+        let data: Release = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            select_installer(&data, "windows", "x86_64")
+                .unwrap()
+                .asset
+                .name,
+            windows
+        );
+
+        let mut missing_digest = uploaded_asset(windows);
+        missing_digest["digest"] = serde_json::Value::Null;
+        for invalid in [
+            json!([legacy, uploaded_asset(windows), uploaded_asset(windows)]),
+            json!([legacy, missing_digest]),
+        ] {
+            value["assets"] = invalid;
+            let data: Release = serde_json::from_value(value.clone()).unwrap();
+            assert!(select_installer(&data, "windows", "x86_64").is_err());
+        }
     }
 
     async fn lookup(status: u16, body: String, current: &str) -> Result<UpdateCheck, String> {

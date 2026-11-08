@@ -381,13 +381,13 @@ Rust 使用 reqwest（系统 TLS 与系统代理支持）请求固定 GitHub 公
 
 ### 用户触发的更新安装包下载
 
-`updates.rs` 从同一 Release 的 assets 中按版本与系统架构精确选择 `Yingqu_{version}_x64-setup.exe`、`Yingqu_{version}_x64.dmg` 或 `Yingqu_{version}_aarch64.dmg`，只接收该仓库该 tag 的 HTTPS 下载地址、uploaded 状态、正数且不超过 1 GiB 的大小及完整 SHA-256。不支持的系统、缺包或缺少 digest 时不猜测替代包，保留具体发行页入口。
+`updates.rs` 从同一 Release 的附件中按版本与系统架构精确匹配 `Yingqu-windows-x64-setup-{version}.exe`、`Yingqu-darwin-x64-{version}.dmg` 或 `Yingqu-darwin-aarch64-{version}.dmg`。仅当对应新文件名缺席时，才查找同平台的历史下划线命名。选中的附件必须唯一，且具备该仓库该 tag 的 HTTPS 下载地址、uploaded 状态、正数且不超过 1 GiB 的大小及完整 SHA-256。没有可验证的安装包时，保留具体发行页入口。
 
 `update_download.rs` 是更新下载状态权威，与媒体任务队列隔离。`start_update_download(release_tag)` 只接受实际检查到的新版本；下载前重新获取该 tag 的元数据。更新下载单槽位，采用应用 updates 目录下独占 `.part` 文件、流式保存和增量 SHA-256，验证大小与摘要、刷新文件后才以不覆盖方式提交。初始地址固定于本仓库，重定向仅允许 HTTPS 的 GitHub 与官方 Release CDN；连接超时 15 秒、读取等待 30 秒、整体上限 15 分钟，不增加重试或镜像。
 
 `get_update_download` 返回当前快照，`update_download` 事件携带单调 revision，前端忽略迟到旧事件或快照。取消命令按下载 ID 作用于当前操作，取消传播至 HTTP future，临时文件随操作回收；提交与取消在同一状态锁下决定终态。关停先禁止新请求，取消并等待更新下载回收，再完成应用既有退出流程。关闭弹窗或切换页面不取消下载，返回关于页可恢复状态；应用重启不恢复下载。
 
-`open_update_installer(download_id)` 不接受前端文件路径，仅打开本次运行已完成下载的后端文件，再次核验文件类型、大小与 SHA-256；前端显示实际打开失败并可重新下载。Windows 将已验证的当前用户 NSIS EXE 直接作为独立进程启动，不经过异步线程上的 ShellExecuteEx/COM，不传入静默安装参数或继承标准输入输出；macOS 仍通过系统打开 DMG。应用不主动退出或重启，Windows 安装器在用户继续安装时仍可要求关闭正在运行的旧版。没有接入 Tauri Updater，不改变现有发布工作流、签名方式或媒体下载状态。
+`open_update_installer(download_id)` 不接受前端文件路径，仅打开本次运行已完成下载的后端文件，再次核验文件类型、大小与 SHA-256；前端显示实际打开失败并可重新下载。Windows 将已验证的当前用户 NSIS EXE 直接作为独立进程启动，不经过异步线程上的 ShellExecuteEx/COM，不传入静默安装参数或继承标准输入输出；macOS 仍通过系统打开 DMG。应用不主动退出或重启，Windows 安装器在用户继续安装时仍可要求关闭正在运行的旧版。安装包命名和签名方式见 [GitHub Actions 标签发布](development.md#github-actions-标签发布)。
 
 ### 设置二级分类
 

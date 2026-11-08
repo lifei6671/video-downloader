@@ -118,7 +118,6 @@ jobs:
         with:
           pattern: installer-*
           path: installers
-          merge-multiple: true
       - name: Publish all installers
         env:
           GH_TOKEN: ${{ github.token }}
@@ -127,19 +126,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -d '' assets < <(find installers -type f \( -name '*.exe' -o -name '*.dmg' \) -print0)
-          test "${#assets[@]}" -eq 3
+          shopt -s nullglob globstar
+          windows=(installers/installer-windows-x64/**/*.exe)
+          intel=(installers/installer-macos-x64/**/*.dmg)
+          apple=(installers/installer-macos-arm64/**/*.dmg)
+          if [[ ${#windows[@]} -ne 1 || ${#intel[@]} -ne 1 || ${#apple[@]} -ne 1 ]] ||
+             [[ ! -f ${windows[0]} || ! -f ${intel[0]} || ! -f ${apple[0]} ]]; then
+            echo 'Expected one installer for each release platform.' >&2
+            exit 1
+          fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo 'Release already exists; refusing to overwrite published assets.' >&2
             exit 1
           fi
-          # GitHub normalizes non-ASCII asset names; keep a readable ASCII prefix.
-          for i in "${!assets[@]}"; do
-            asset="${assets[$i]}"
-            filename="${asset##*/}"
-            renamed="${asset%/*}/Yingqu_${filename#*_}"
-            mv -- "$asset" "$renamed"
-            assets[$i]="$renamed"
-          done
+          version="${RELEASE_TAG#v}"
+          assets=(
+            "installers/Yingqu-windows-x64-setup-$version.exe"
+            "installers/Yingqu-darwin-x64-$version.dmg"
+            "installers/Yingqu-darwin-aarch64-$version.dmg"
+          )
+          mv -- "${windows[0]}" "${assets[0]}"
+          mv -- "${intel[0]}" "${assets[1]}"
+          mv -- "${apple[0]}" "${assets[2]}"
           gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --draft --title "映取 $RELEASE_TAG" --notes-from-tag
           gh release edit "$RELEASE_TAG" --draft=false
