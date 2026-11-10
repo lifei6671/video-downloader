@@ -85,6 +85,23 @@ pub(crate) fn init(db: &Connection) -> Result<()> {
         db.execute_batch("ALTER TABLE platform_settings ADD COLUMN bypass_proxy INTEGER NOT NULL DEFAULT 0 CHECK(bypass_proxy IN (0,1))")
             .context("DATABASE_ERROR")?;
     }
+    // Rotate an opaque scope in the same transaction as an effective profile edit.
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS douyin_author_scope(
+            id INTEGER PRIMARY KEY CHECK(id=1), scope TEXT NOT NULL);
+         INSERT OR IGNORE INTO douyin_author_scope VALUES(1,lower(hex(randomblob(16))));
+         CREATE TRIGGER IF NOT EXISTS douyin_author_profile_insert AFTER INSERT ON platform_settings
+           WHEN NEW.platform='douyin' BEGIN
+             UPDATE douyin_author_scope SET scope=lower(hex(randomblob(16))) WHERE id=1;
+           END;
+         CREATE TRIGGER IF NOT EXISTS douyin_author_profile_update AFTER UPDATE ON platform_settings
+           WHEN NEW.platform='douyin' AND (
+             OLD.cookie IS NOT NEW.cookie OR OLD.user_agent IS NOT NEW.user_agent
+             OR OLD.proxy IS NOT NEW.proxy OR OLD.credential_ref IS NOT NEW.credential_ref
+             OR OLD.bypass_proxy IS NOT NEW.bypass_proxy) BEGIN
+             UPDATE douyin_author_scope SET scope=lower(hex(randomblob(16))) WHERE id=1;
+           END;",
+    ).context("DATABASE_ERROR")?;
     let has_limit = db
         .prepare("PRAGMA table_info(app_settings)")?
         .query_map([], |r| r.get::<_, String>(1))?
@@ -150,34 +167,10 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         Err(rusqlite::Error::QueryReturnedNoRows) => default_directory,
         Err(_) => bail!("DATABASE_ERROR"),
     };
-    let mut profiles = Vec::new();
-    for platform in ["douyin", "xiaohongshu", "tiktok", "youtube", "telegram"] {
-        let row = db.query_row(
-            "SELECT user_agent,proxy,cookie,credential_ref,http_chunk_size,bypass_proxy FROM platform_settings WHERE platform=?",
-            [platform],
-            |r| {
-                Ok(Profile {
-                    platform: platform.into(),
-                    user_agent: r.get(0)?,
-                    proxy: r.get(1)?,
-                    bypass_proxy: r.get(5)?,
-                    cookie_configured: !r.get::<_, String>(2)?.is_empty(),
-                    cookie: r.get(2)?,
-                    credential_ref: r.get(3)?,
-                    http_chunk_size: r.get::<_, Option<u32>>(4)?.map(u64::from),
-                })
-            },
-        );
-        profiles.push(match row {
-            Ok(profile) => profile,
-            Err(rusqlite::Error::QueryReturnedNoRows) => Profile {
-                platform: platform.into(),
-                user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0".into(),
-                proxy: None, bypass_proxy: false, cookie_configured: false, cookie: String::new(), credential_ref: None, http_chunk_size: None,
-            },
-            Err(_) => bail!("DATABASE_ERROR"),
-        });
-    }
+    let profiles = ["douyin", "xiaohongshu", "tiktok", "youtube", "telegram"]
+        .into_iter()
+        .map(|platform| read_profile(db, platform))
+        .collect::<Result<Vec<_>>>()?;
     if profiles.iter().any(|p| p.http_chunk_size.is_some_and(|n| p.platform != "youtube" || !valid_chunk_size(n))) {
         bail!("DATABASE_ERROR");
     }
@@ -186,6 +179,35 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         filename_template,
         max_downloads,
         profiles,
+    })
+}
+
+pub(crate) fn read_profile(db: &Connection, platform: &str) -> Result<Profile> {
+    let row = db.query_row(
+        "SELECT user_agent,proxy,cookie,credential_ref,http_chunk_size,bypass_proxy FROM platform_settings WHERE platform=?",
+        [platform],
+        |r| {
+            let cookie: String = r.get(2)?;
+            Ok(Profile {
+                platform: platform.into(),
+                user_agent: r.get(0)?,
+                proxy: r.get(1)?,
+                bypass_proxy: r.get(5)?,
+                cookie_configured: !cookie.is_empty(),
+                cookie,
+                credential_ref: r.get(3)?,
+                http_chunk_size: r.get::<_, Option<u32>>(4)?.map(u64::from),
+            })
+        },
+    );
+    Ok(match row {
+        Ok(profile) => profile,
+        Err(rusqlite::Error::QueryReturnedNoRows) => Profile {
+            platform: platform.into(),
+            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0".into(),
+            proxy: None, bypass_proxy: false, cookie_configured: false, cookie: String::new(), credential_ref: None, http_chunk_size: None,
+        },
+        Err(_) => bail!("DATABASE_ERROR"),
     })
 }
 
@@ -230,6 +252,14 @@ pub fn snapshot(settings: &Settings) -> Result<Value> {
         profiles.insert(profile.platform.clone(), value);
     }
     Ok(Value::Object(profiles))
+}
+
+pub(crate) fn douyin_snapshot(settings: &Settings) -> Result<Value> {
+    let profile = settings.profiles.iter().find(|profile| profile.platform == "douyin")
+        .context("CONFIG_INVALID")?;
+    Ok(json!({"douyin": {
+        "user_agent": profile.user_agent, "proxy": effective_proxy(profile)?, "cookie": profile.cookie
+    }}))
 }
 
 pub(crate) fn parse_proxy(platform: &str, proxy: &str) -> Result<(url::Url, u16)> {

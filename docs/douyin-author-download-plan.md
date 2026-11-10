@@ -23,7 +23,7 @@
 
 现有 DTK 桌面切片包含 `douyin.author_posts` 的请求参数、签名及 `parse_author_posts`，现有适配器主要使用 `content_detail`。新增作者枚举操作复用 GuardedRH、DTK NativeSigner、CookieJar 和代理；Rust 负责扫描生命周期、持久化、调度和文件提交。DTK 上游的身份池、服务端调度器及 Go 下载器不并入桌面端。
 
-源码：[DTK 切片](../../../vendor/UPSTREAM.md) · [Python 适配器](../../../python-engine/dtk_adapter.py) · [下载队列](../../../src-tauri/src/desktop_core.rs) · [上游作者下载说明](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/documents/en/08-downloads-and-library.md#an-authors-recent-posts)
+源码：[DTK 切片](../vendor/UPSTREAM.md) · [Python 适配器](../python-engine/dtk_adapter.py) · [下载队列](../src-tauri/src/desktop_core.rs) · [上游作者下载说明](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/documents/en/08-downloads-and-library.md#an-authors-recent-posts)
 
 ## 2. 用户交互和模式契约
 
@@ -64,7 +64,7 @@
 ## 4. 作品枚举：DTK 请求与分页协议
 
 1. 首次调用 `DOUYIN.build_request("douyin.author_posts", sec_user_id=..., cursor=None, count=20)`，对应 `GET /aweme/v1/web/aweme/post/`、`max_cursor=0`；每页沿用抖音 UA、代理和同一个 CookieJar。`NativeSigner(fill_ms_token=False)` 保留当前单作品基线行为，签名必须基于该 API 实际可发送的 Cookie，而不是无作用域的全量 Cookie 字典。
-2. 每页调用 `parse_author_posts`，对返回的作品进行严格白名单提取：`platform`、`sec_user_id`、`aweme_id`、`kind`、`title`、`publish_time`、规范作品 URL。作者身份不匹配、作品 ID 无效、异常类型及破坏页面可信度的解析错误使本次扫描成为部分结果。明确私密、删除或不支持的作品按类型记录，不泄露原始媒体链接。
+2. 每页调用 `parse_author_posts`，仅传输作者 ID、作品 ID、类型、标题和发布时间。Rust 校验每条候选属于目标作者，并生成规范作品链接。列表明确混入其他作者的作品时逐条跳过，保留同页本人作品。身份无法识别、作品 ID 无效或解析错误时保留此前可信页，并报告部分结果。明确私密、删除或不支持的作品计入跳过数。
 3. 对每个 `aweme_id` 在本次扫描去重，置顶作品重复不算新的下载任务。**单页实际返回条数不以请求的 20 条为上限**：2026-11-09 已观察到 `count=20` 但首屏返回 23 条，必须完整保留和统计。
 4. `has_more=true` 时，原样使用上页有效 `max_cursor`；缺失游标、与历史游标重复、游标循环或非法值均停止并标为部分结果。`has_more=false` 且 `aweme_list` 结构有效才可正常结束。缺失 `aweme_list`、`has_more` 类型非法或未知、只有 `status_code=0` 的空壳、结构不合法的 JSON，均不得视作末页。
 5. DTK 当前 `parse_author_posts` 使用 `optional_bool` 读取 `has_more`，未知值可能按 `false` 处理。**在调用解析器之前额外严格验证响应中 `has_more` 只为可识别的布尔/0/1 值**，保留 `aweme_list` 字段完整性检查；避免错误宣告已扫完。
@@ -72,7 +72,7 @@
 7. 每页请求启动间隔初值不少于 **8.5 秒**；完整遍历以有效末页为准，不采用 DTK 控制台 40 页/800 条界面上限。出于资源安全，可采用可配置的扫描保护阈值（请求次数/最长运行时间/内存），触发时必须报告 `scan_partial:resource_limit`，不能报告完成。
 8. 全量和增量首版均遵循完整游标翻页。不能以“连续遇到已知作品”或发布时间早于上次扫描作为末页依据。后续优化的快速扫描必须单列为 `range_scan`，不能更新“完整扫描”基线，也不能用来判断历史作品消失。
 
-参考：[分页参数](../../../vendor/dtk/upstream/src/dtk/platforms/douyin/params.py) · [分页解析](../../../vendor/dtk/upstream/src/dtk/platforms/douyin/parser.py) · [DTK 节流说明](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/documents/en/14-troubleshooting.md#throughput-is-capped-and-the-cap-is-per-identity-per-endpoint)
+参考：[分页参数](../vendor/dtk/upstream/src/dtk/platforms/douyin/params.py) · [分页解析](../vendor/dtk/upstream/src/dtk/platforms/douyin/parser.py) · [DTK 节流说明](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/documents/en/14-troubleshooting.md#throughput-is-capped-and-the-cap-is-per-identity-per-endpoint)
 
 ## 5. Python 桥接、扫描状态与取消
 
@@ -95,7 +95,7 @@
 - Rust 按每页小事务提交 `author_scan_items`，以降低进程崩溃时的丢失范围；网络请求和长时间等待不得持有 SQLite 事务或全局队列互斥锁。
 - 首版同一时间只执行一个作者枚举。取消、异常、应用退出后的扫描状态进入可恢复的已终止状态；下次扫描**从第一页重新开始**，不复用跨会话游标，不跨 Cookie 拼接页面。
 
-参考：[Rust 桥接](../../../src-tauri/src/python_bridge.rs) · [Python 协议入口](../../../python-engine/bridge.py)
+参考：[Rust 桥接](../src-tauri/src/python_bridge.rs) · [Python 协议入口](../python-engine/bridge.py)
 
 ## 6. 登录、Cookie 与请求安全
 
@@ -115,7 +115,7 @@
 - 已有配置快照中的手动 Cookie 只驻留活动任务内存，不能随着批次持久化。浏览器模式下载时按现有任务契约重新读取默认浏览器；应用重启后重建配置并重新校验可用性。Cookie 改动后旧身份的基线不自动合并到新作用域。
 - 采集失败按层分类：`author_list`、`content_detail`、`media_cdn`、`local_commit`；CDN 单个 403 不等于整个账号失效。`Retry-After` 仅对来源可信、语义明确的限流响应展示建议重试时间。
 
-参考：[浏览器读取](../../../python-engine/browser_cookies.py) · [平台设置与快照](../../../src-tauri/src/settings.rs) · [DTK 登录标记](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/src/dtk/identity/marks.py) · [反馈 #782](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/782) · [反馈 #783](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/783)
+参考：[浏览器读取](../python-engine/browser_cookies.py) · [平台设置与快照](../src-tauri/src/settings.rs) · [DTK 登录标记](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/src/dtk/identity/marks.py) · [反馈 #782](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/782) · [反馈 #783](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/783)
 
 ## 7. SQLite 数据模型与事务边界
 
@@ -159,7 +159,7 @@
 - **批次统计**：状态来自 `author_batch_items` 对关联任务当前状态的聚合，已完成、失败、跳过、排队、暂停分别计算；任务被其他批次复用时不增加第二个物理下载。
 - **备份影响**：继续按现有已完成任务登记本地资产，云端备份调度使用原有契约。媒体本地缺失但云端存在时，不视为本地已归档；未来可新增“从备份恢复”作为候选决策，首版不引入。
 
-参考：[队列及持久化](../../../src-tauri/src/desktop_core.rs) · [视频与图集文件校验](../../../src-tauri/src/files.rs) · [Python 媒体执行](../../../python-engine/engine.py) · [技术契约](tauri-desktop-technical-plan.md)
+参考：[队列及持久化](../src-tauri/src/desktop_core.rs) · [视频与图集文件校验](../src-tauri/src/files.rs) · [Python 媒体执行](../python-engine/engine.py) · [技术契约](tauri-desktop-technical-plan.md)
 
 ## 9. 请求调度、性能和资源治理
 
@@ -231,6 +231,31 @@ UI 保留现有「下载作品」入口。作者解析成功后展示作者信�
 | 安全与数据库 | 非白名单跳转、超大输入/响应、非法路径、Cookie 改动、重复提交 | 无凭据持久化到批次/日志；OCC/事务与幂等约束有效 |
 
 **可观测统计**：`scan_completed`、`scan_partial`、`found_posts`、`deduplicated_posts`、`already_local`、`newly_discovered`、`retry_candidates`、`batch_queued`、`batch_completed`、`batch_failed`、`blocked_by_identity`；按照 `author_list / content_detail / media_cdn / local_commit` 分类失败。
+
+### 11.4 全量下载首个闭环（2026-11-10）
+
+「下载作品」新增「抖音主页」入口。扫描页写入 `author_scans` 和 `author_scan_items`，用户确认后由原下载队列逐条处理。确认结果与任务在同一事务保存。批量视频和图集在下载时重新解析详情，提交前校验作品身份与文件。扫描和批量下载串行运行，批次内每条下载结束后至少等待 3.5 秒再开始下一条。
+
+使用原样例和映取已保存的抖音 Cookie 请求 12 页，读到 `has_more=false`，得到 221 条视频、7 条图集，无重复作品。第 10 页的 19 条记录中有 1 条属于其他作者，跳过后继续处理同页的 18 条本人作品。从本次作品列表选取一条视频和一条图集，在隔离的 Windows 核心测试库里经原队列完成下载、文件提交及完整性校验。视频 7,304,067 字节，图集 3 张、456,332 字节。生产下载库未执行本批入队。
+
+### 11.5 手动增量下载
+
+- 首次确认时可选择归档当前历史作品，或在完整末页后仅建立基线。基线确认与作品索引及任务入队在同一事务执行。全量确认也可建立基线，部分结果只记录用户明确确认的下载意图。
+- 增量按作品 ID 比较已确认索引。首次出现的作品和已确认但本地缺失的作品可入队。完整扫描也可补下载本次列表未返回的旧失败项。部分扫描只处理本次已验证的作品。历史基线记录可在后续全量确认时升级为待归档。
+- 有效本地文件直接跳过，已有进行中任务复用。同身份下安全可重试的失败或取消批量任务保留任务 ID，新一轮批次通过关联表继续统计。重新扫描只读，用户确认后才更新基线或写入下载任务。
+- 增量需要已保存的抖音登录 Cookie。抖音 Cookie、UA 或代理配置变化时，在设置写入的同一事务更换不透明作用域。浏览器登录仍可用于全量扫描。旧版扫描没有可确认的登录作用域，其完成文件仍参与全局去重，增量基线由用户重新确认。
+
+2026-11-10 使用同一抖音主页和已保存的 Cookie 在隔离 Windows 核心测试库实测。两轮均扫描到第 12 页末页，每轮返回 221 条视频、7 条图集。第一轮选择「仅建立基线」后入队 0 条，第二轮新增候选为 0。随后用真实列表中的作品构造隔离验证场景，识别 1 条新增图集和 1 条未再次出现在列表中的失败视频。两条均经原队列下载和提交，失败视频复用原任务 ID。账号的线上作品与生产下载记录未参与故障构造。
+
+### 11.6 Windows 原生窗口验收（2026-11-10）
+
+在 Windows 原生 Tauri 开发窗口使用隔离数据库、打包后的 Windows 引擎和已保存的抖音 Cookie，扫描同一账号三次。每次均读到第 12 页末页，得到 221 条视频、7 条图集，跳过 1 条其他作者作品。
+
+- 首次增量选择「仅建立基线」，记录 228 条作品，入队 0 条。重启后恢复基线状态和增量模式，再次扫描显示新增 0 条、待补 0 条。
+- 从隔离基线中移除同一真实结果中的 1 条视频和 1 条图集，重新打开该结果显示新增 2 条。原生窗口确认入队后两条均完成，实际文件为 7,304,067 字节的 MP4 和共 456,332 字节的 3 张 WebP。
+- 全量确认后入队 220 条视频、6 条图集，跳过已有本地文件的 2 条作品。队列共 228 个不同作品，验收到入队和任务列表展示，随后停止隔离批次。
+
+验收修正了下载范围和模式的选中样式、重新打开时的模式恢复，以及详情尚未获取时图集张数误显示为 0 的问题。原生窗口复测了键盘切换、模式恢复和待解析图集的未知张数显示。单作品重试预览的占位分支通过构建和代码复核验证。
 
 ## 12. 实施顺序与交付边界
 

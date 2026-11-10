@@ -34,7 +34,7 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.14.5'
+ENGINE_VERSION = '0.14.6'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.10.26'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -356,6 +356,10 @@ def input_identity(platform, url, resolver, source_url):
 def operate(method, params, emit):
     if not isinstance(params, dict):
         raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
+    if method == 'scan_author_posts':
+        import douyin_author
+        douyin_author.scan(params, emit)
+        return
     try:
         runtime_dependencies.configure(params.get('runtime_directory'))
         if method == 'transcribe_video':
@@ -405,12 +409,17 @@ def operate(method, params, emit):
     chunk_configured = 'http_chunk_size' in profiles.get(platform, {})
     downloading = method == 'download_video'
     expected = params.get('expected')
+    batch_author = expected.get('author_id') if downloading and isinstance(expected, dict) else None
     if resolver not in ('auto', 'yt-dlp', 'dtk'):
         raise EngineError('CONFIG_INVALID', 'resolver')
     stage = None
     if downloading:
         if (not isinstance(expected, dict) or expected.get('platform') != platform
                 or not isinstance(expected.get('video_id'), str)):
+            raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
+        if batch_author is not None and (platform != 'douyin' or resolver != 'dtk' or short
+                                        or not isinstance(batch_author, str)
+                                        or not re.fullmatch(r'[A-Za-z0-9_-]{10,256}', batch_author)):
             raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
         try:
             stage = Path(params['staging_dir'])
@@ -507,7 +516,23 @@ def operate(method, params, emit):
                 phase('fetching_metadata')
             if actual_resolver == 'dtk':
                 video_id = url.rstrip('/').split('/')[-1]
-                content = dtk_adapter.extract(ydl, platform, video_id, ua, cookies, proxy)
+                if batch_author:
+                    from douyin_author import has_login
+                    if not has_login(ydl.cookiejar):
+                        raise EngineError('AUTHOR_LOGIN_REQUIRED', 'content_detail')
+                    try:
+                        content = dtk_adapter.extract(ydl, platform, video_id, ua, None, proxy)
+                    except HTTPError as error:
+                        code = {401: 'AUTHOR_LOGIN_REQUIRED', 429: 'AUTHOR_API_LIMIT'}.get(error.status)
+                        raise EngineError(code or error_code(error), 'content_detail') from None
+                    except EngineError as error:
+                        if error.code == 'RISK_CONTROL':
+                            raise EngineError('AUTHOR_API_LIMIT', 'content_detail') from None
+                        raise
+                    if content.author.sec_uid != batch_author or str(content.kind) != expected.get('kind'):
+                        raise EngineError('UPSTREAM_CHANGED', 'identity')
+                else:
+                    content = dtk_adapter.extract(ydl, platform, video_id, ua, cookies, proxy)
                 if str(content.kind) == 'image_album':
                     result = dtk_adapter.metadata(content)
                     album = dtk_adapter.image_choices(content)
@@ -532,11 +557,13 @@ def operate(method, params, emit):
                 if downloading:
                     if (result['video_id'] != expected['video_id']
                             or expected.get('kind', 'video') != 'image_album'
-                            or len(album) != expected.get('image_count')):
+                            or (not batch_author and len(album) != expected.get('image_count'))):
                         raise EngineError('UPSTREAM_CHANGED', 'identity')
                     # Album counters keep their existing conservative retry policy.
                     ydl.params['retries'] = 0
-                    media_album.download_images(ydl, album, platform, result['video_id'], actual_resolver, stage, emit)
+                    media_album.download_images(
+                        ydl, album, platform, result['video_id'], actual_resolver, stage, emit,
+                        **({'metadata': result} if batch_author else {}))
                 else:
                     if preview:
                         phase('loading_preview')
@@ -571,6 +598,8 @@ def operate(method, params, emit):
                 return
             if result['video_id'] != expected['video_id'] or expected.get('kind', 'video') != 'video':
                 raise EngineError('UPSTREAM_CHANGED', 'identity')
+            if batch_author:
+                result['cover_url'] = None
             # The validated single-file format and identity remain in this process;
             # start media I/O only after validation, never forward a URL to Rust.
             if platform == 'douyin':
@@ -595,6 +624,7 @@ def operate(method, params, emit):
             emit('download_finished', platform=platform, video_id=result['video_id'],
                  filename=file.name, bytes=file.stat().st_size, container=info['ext'],
                  format_id=result['selected_format_id'], width=result['width'], height=result['height'],
+                 **({'metadata': result} if batch_author else {}),
                  **({'transferred_bytes': progress.transferred} if platform == 'youtube' else {}),
                  **download_cover(ydl, info, stage))
     except DtkError as error:

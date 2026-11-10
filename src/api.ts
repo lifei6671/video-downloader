@@ -12,6 +12,29 @@ export interface RuntimeStatus { platform: string; directory: string; tools: Run
 export interface RuntimeProgress { tool: RuntimeTool['id']; phase: 'downloading' | 'verifying' | 'installing'; downloaded_bytes: number; total_bytes: number }
 export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string; video?: { filename: string; bytes: number; sha256: string } }
 export interface VideoFormat { requires_merge?: boolean; format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
+export type AuthorScanMode = 'full' | 'incremental';
+export type AuthorBaselineAction = 'archive_history' | 'baseline_only';
+export interface AuthorBatch { queued: number; skipped: number; baseline_only: boolean }
+export interface AuthorScan {
+  id: string;
+  author_name: string | null;
+  status: 'scanning' | 'completed' | 'partial';
+  pages: number;
+  videos: number;
+  albums: number;
+  skipped: number;
+  error: string | null;
+  batch: AuthorBatch | null;
+  pause_reason: string | null;
+  remaining: number;
+  completed: number;
+  failed: number;
+  mode: AuthorScanMode;
+  needs_baseline: boolean;
+  new_posts: number;
+  retry_posts: number;
+  already_local: number;
+}
 export interface AuthorProfile { id?: string | null; nickname?: string | null; handle?: string | null; kind: 'user' | 'channel'; avatar_cached?: boolean }
 export interface Video { author_profile?: AuthorProfile; cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
 export type ResolvePhase = 'checking_link' | 'checking_cache' | 'starting_engine' | 'loading_configuration' | 'resolving_link' | 'connecting_account' | 'fetching_metadata' | 'selecting_formats' | 'loading_preview' | 'loading_author' | 'finalizing' | 'cache_hit' | 'completed';
@@ -111,6 +134,12 @@ export const api = {
   tasks: () => invoke<Task[]>('list_tasks'),
   settings: () => invoke<Settings>('get_settings'),
   resolve: (input: string, resolver: Resolver = 'auto') => invoke<Task>('resolve_video', { input, resolver }),
+  startAuthorScan: (input: string, mode: AuthorScanMode) => invoke<AuthorScan>('start_author_scan', { input, mode }),
+  authorScan: (scanId?: string) => invoke<AuthorScan | null>('get_author_scan', { scanId }),
+  cancelAuthorScan: (scanId: string) => invoke<AuthorScan>('cancel_author_scan', { scanId }),
+  confirmAuthorScan: (scanId: string, allowPartial: boolean, baselineAction?: AuthorBaselineAction) =>
+    invoke<AuthorBatch>('confirm_author_scan', { scanId, allowPartial, baselineAction }),
+  resumeAuthorBatch: (scanId: string) => invoke<AuthorScan>('resume_author_batch', { scanId }),
   chooseFormat: (taskId: string, formatId: string) => invoke<Task>('choose_video_format', { taskId, formatId }),
   download: (taskId: string, confirmDuplicate = false, replaceTaskId?: string) => invoke<string>('start_download', { taskId, confirmDuplicate, replaceTaskId }),
   cancel: (taskId: string) => invoke<void>('cancel_task', { taskId }),
@@ -302,6 +331,17 @@ const errors: Record<string, string> = {
   CONFIG_INVALID: '配置格式有误，请检查 Cookie、代理或 User-Agent',
   NETWORK_ERROR: '网络连接失败，请检查网络或代理设置',
   ACCESS_DENIED: '平台拒绝访问，请检查 Cookie 或稍后重试',
+  INVALID_AUTHOR_LINK: '请输入抖音用户主页链接或主页分享口令',
+  AUTHOR_LOGIN_REQUIRED: '请在默认浏览器登录抖音，或在系统设置中更新抖音 Cookie',
+  AUTHOR_API_LIMIT: '抖音暂时限制详情请求，批次已暂停',
+  AUTHOR_CURSOR_INVALID: '抖音返回了无效或重复的翻页位置',
+  AUTHOR_SCAN_LIMIT: '已达到本次扫描的处理上限',
+  AUTHOR_SCAN_NOT_FOUND: '找不到这次作者扫描',
+  AUTHOR_BASELINE_COOKIE_REQUIRED: '请在系统设置中保存抖音登录 Cookie 后，再使用增量下载',
+  AUTHOR_SCOPE_CHANGED: '抖音登录或网络配置已变更，请重新扫描',
+  AUTHOR_SCAN_STALE: '已有更新的归档基线，请重新扫描',
+  AUTHOR_BASELINE_ACTION_REQUIRED: '请选择如何处理首次扫描发现的历史作品',
+  AUTHOR_BASELINE_INCOMPLETE: '扫描到末页后才能建立基线',
   RISK_CONTROL: '平台要求验证或暂时限制当前网络出口；请在浏览器打开链接完成验证，或切换 TUN/代理出口后重试。',
   NOT_FOUND: '当前视频无法访问',
   TIMEOUT: '请求超时，请检查网络后重新解析',

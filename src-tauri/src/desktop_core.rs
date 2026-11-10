@@ -24,6 +24,8 @@ pub mod transcription;
 pub mod task_actions;
 #[path = "redownload.rs"]
 mod redownload;
+#[path = "douyin_author.rs"]
+pub mod douyin_author;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -222,7 +224,7 @@ pub enum TaskEvent {
 struct Active {
     telegram: bool,
     download_after_resolve: bool,
-    profiles: Value,
+    profiles: Arc<Value>,
     directory: PathBuf,
     filename_template: String,
     cancel: watch::Sender<bool>,
@@ -233,6 +235,8 @@ fn running_downloads(inner: &Inner) -> usize {
 }
 
 struct Inner {
+    author_scan: Option<douyin_author::ActiveScan>,
+    author_paused: HashSet<String>,
     backup_cancel: watch::Sender<bool>,
     backup_started: bool,
     telegram_recovery_epoch: u64,
@@ -250,6 +254,7 @@ struct Inner {
     transcription_unsaved: HashMap<String, transcription::Snapshot>,
 }
 pub struct Core {
+    author_download_finished: Mutex<Option<Instant>>,
     backup_display_db: Mutex<Connection>,
     pub(crate) backup_file_presence: Mutex<crate::backup::reconcile::FilePresence>,
     task_actions: Mutex<HashMap<String, task_actions::PendingAction>>,
@@ -453,6 +458,7 @@ impl Core {
         let migrate_cache = parse_cache::init(&schema_tx)?;
         transcription::init(&schema_tx)?;
         settings::init(&schema_tx)?;
+        douyin_author::init(&schema_tx)?;
         crate::backup::repository::init_in_transaction(&schema_tx, backup_migration)?;
         schema_tx.commit()?;
         transcription::recover(&db)?;
@@ -684,7 +690,9 @@ impl Core {
             cleanup_staging(&db, &id, Path::new(&path))?;
         }
         let backup_wake=Arc::new(tokio::sync::Notify::new());
+        let author_paused = douyin_author::paused(&db)?;
         Ok(Arc::new(Self {
+            author_download_finished: Default::default(),
             telegram_accounts,
             task_actions: Mutex::default(),
             delete_activity: Default::default(),
@@ -702,6 +710,8 @@ impl Core {
             telegram_map_refresh: tokio::sync::Mutex::new(()),
             _instance_lock: instance_lock,
             inner: Mutex::new(Inner {
+                author_scan: None,
+                author_paused,
                 backup_cancel: watch::channel(false).0,
                 backup_started: false,
                 telegram_recovery_epoch: 0,
@@ -1423,6 +1433,9 @@ impl Core {
     }
 
     pub fn retry(self: &Arc<Self>, id: &str) -> Result<Task> {
+        if let Some(task) = self.retry_author_download(id)? {
+            return Ok(task);
+        }
         if self.list().iter().any(|task| {
             task.id == id
                 && task.video.is_none()
@@ -1866,7 +1879,7 @@ impl Core {
             Active {
                 telegram,
                 download_after_resolve,
-                profiles: profiles.clone(),
+                profiles: Arc::new(profiles.clone()),
                 directory: directory.clone(),
                 filename_template,
                 cancel,
@@ -2220,6 +2233,8 @@ impl Core {
                     .is_some_and(|v| v["platform"] == "telegram");
             let profiles = if telegram {
                 json!({})
+            } else if douyin_author::batch_id(&task).is_some() {
+                settings::douyin_snapshot(&inner.settings)?
             } else {
                 settings::snapshot(&inner.settings)?
             };
@@ -2239,7 +2254,7 @@ impl Core {
                 Active {
                     telegram,
                     download_after_resolve: deferred,
-                    profiles,
+                    profiles: Arc::new(profiles),
                     directory,
                     filename_template,
                     cancel,
@@ -2321,10 +2336,13 @@ impl Core {
     // submissions, settings changes, cancellation, and process completion.
     fn dispatch(self: &Arc<Self>, inner: &mut Inner) {
         while !inner.closing && running_downloads(inner) < usize::from(inner.settings.max_downloads) {
+            let author_busy = inner.author_scan.is_some() || inner.tasks.iter().any(|task|
+                douyin_author::batch_id(task).is_some() && inner.downloads.contains(&task.id));
             let Some(id) = inner
                 .tasks
                 .iter()
                 .filter(|t| t.status == Status::Queued && !inner.downloads.contains(&t.id))
+                .filter(|t| douyin_author::batch_id(t).is_none_or(|id| !author_busy && !inner.author_paused.contains(id)))
                 .filter(|t| !(t.telegram_link.is_some() || t.video.as_ref().is_some_and(|v| v["platform"] == "telegram"))
                     || !self.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download).session.reconnect.waiting()
                     || !inner.tasks.iter().any(|other| inner.active.contains_key(&other.id) && other.error.as_deref() == Some("TELEGRAM_RECONNECTING")))
@@ -2475,6 +2493,7 @@ impl Core {
         let replacement = redownload::original(&inner.db, id)?;
         let naming_time = crate::naming::current_time();
         let video = task.video.clone().context("INVALID_STATE")?;
+        let author_batch = douyin_author::batch_id(&task).map(str::to_owned);
         let telegram_input = if telegram {
             Some(parse_cache::telegram_source(&inner.db, &video)?)
         } else {
@@ -2495,6 +2514,12 @@ impl Core {
         inner.workers.retain(|worker| !worker.is_finished());
         let worker = tokio::spawn(async move {
             let result = async {
+                if author_batch.is_some() {
+                    tokio::select! {
+                        _ = core.wait_author_detail() => {},
+                        _ = cancellation.wait_for(|v| *v) => bail!("CANCELED"),
+                    }
+                }
                 std::fs::create_dir_all(&directory).context("IO_ERROR")?;
                 let stage = tempfile::Builder::new().prefix(&format!("yingqu-{id}-")).tempdir_in(&directory).context("IO_ERROR")?;
                 let media = stage.path().join("media");
@@ -2565,11 +2590,12 @@ impl Core {
                     }
                 } else {
                     PythonBridge::operation_cancellable(&core.program, &core.args, &id, "download_video",
-                    json!({"input":video["canonical_url"],"profiles":profiles,"runtime_directory":core.runtime_directory,
+                    json!({"input":video["canonical_url"],"profiles":profiles.as_ref(),"runtime_directory":core.runtime_directory,
                         "resolver":video["resolver"].as_str().unwrap_or("yt-dlp"),
-                        "format_id":video["selected_format_id"],
+                        "format_id":if author_batch.is_some() { &Value::Null } else { &video["selected_format_id"] },
                         "expected":{"platform":video["platform"],"video_id":video["video_id"],"kind":video["kind"].as_str().unwrap_or("video"),
-                            "image_count":video["images"].as_array().map(Vec::len)},"staging_dir":media}),
+                            "image_count":video["images"].as_array().map(Vec::len),
+                            "author_id":video["batch_author_id"]},"staging_dir":media}),
                     progress, async { let _ = cancellation.wait_for(|v| *v).await; }).await
                 };
                 if result.as_ref().is_err_and(|error| error.root_cause().to_string() == telegram_download::ALIAS_IDENTITY_MISMATCH) {
@@ -2600,6 +2626,10 @@ impl Core {
                     let mut task = inner.tasks.iter().find(|t| t.id == id).unwrap().clone();
                     if task.canceling { bail!("CANCELED"); }
                     let mut video = video;
+                    if author_batch.is_some() {
+                        video = douyin_author::downloaded_metadata(&video, &result)?;
+                        task.video = Some(video.clone());
+                    }
                     if telegram {
                         telegram_download::merge_attributes(&mut video, &result);
                         parse_cache::update_telegram_metadata(&inner.db, &video)?;
@@ -2615,17 +2645,33 @@ impl Core {
                     };
                     let previous_path = replacement.as_ref().and_then(|task| task.path.as_deref());
                     let identity: Video = serde_json::from_value(video).context("INVALID_ENGINE_RESULT")?;
+                    let record_intent = |source: &Path, target: &Path, size: u64, files: Option<&[AlbumFile]>| -> Result<()> {
+                        let manifest = files.map(serde_json::to_string).transpose()?;
+                        let size = i64::try_from(size).context("IO_ERROR")?;
+                        let insert = |db: &Connection| {
+                            db.execute("INSERT INTO commit_intents(task_id,source,target,size,manifest) VALUES(?1,?2,?3,?4,?5)",
+                                params![id, source.to_string_lossy(), target.to_string_lossy(), size, manifest])
+                                .context("DATABASE_ERROR")
+                        };
+                        if author_batch.is_some() {
+                            // Recovery needs the deferred metadata if the move succeeds before the final snapshot.
+                            let tx = inner.db.unchecked_transaction().context("DATABASE_ERROR")?;
+                            persist(&tx, &task)?;
+                            insert(&tx)?;
+                            tx.commit().context("DATABASE_ERROR")?;
+                        } else {
+                            insert(&inner.db)?;
+                        }
+                        Ok(())
+                    };
                     let file = if identity.kind == "image_album" {
                         let target = if let Some(previous_path) = previous_path {
                             previous_path.to_owned()
                         } else {
                             crate::naming::destination(&directory, relative.as_deref().context("NAMING_INVALID")?, None)?
                         };
-                        let record = |source: &Path, size, files: &[AlbumFile]| {
-                            inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size,manifest) VALUES(?1,?2,?3,?4,?5)", params![
-                                id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?,serde_json::to_string(files)?]).context("DATABASE_ERROR")?;
-                            Ok(())
-                        };
+                        let record = |source: &Path, size, files: &[AlbumFile]|
+                            record_intent(source, &target, size, Some(files));
                         let file = if let Some(original) = replacement.as_ref() {
                             finalize_album_with(&identity, &result, &media, &target, |source, size, files| {
                                 record(source, size, files)?;
@@ -2647,11 +2693,7 @@ impl Core {
                     } else {
                         crate::naming::destination(&directory, relative.as_deref().context("NAMING_INVALID")?, Some(extension))?
                     };
-                    let record = |source: &Path, size| {
-                        inner.db.execute("INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,?4)", params![
-                            id,source.to_string_lossy(),target.to_string_lossy(),i64::try_from(size).context("IO_ERROR")?]).context("DATABASE_ERROR")?;
-                        Ok(())
-                    };
+                    let record = |source: &Path, size| record_intent(source, &target, size, None);
                     let file = if let Some(original) = replacement.as_ref() {
                         finalize_to_with(&identity, &result, &media, &target, |source, size| {
                             record(source, size)?;
@@ -2717,6 +2759,12 @@ impl Core {
                 core.inner.lock().unwrap().db.execute("DELETE FROM task_staging WHERE task_id=?",[&id]).context("DATABASE_ERROR")?;
                 committed
             }.await;
+            if let Some(batch) = author_batch.as_deref() {
+                *core.author_download_finished.lock().unwrap() = Some(Instant::now());
+                if let Err(error) = &result {
+                    core.pause_author_on_error(batch, error);
+                }
+            }
             // Preserve an already committed success, including when staging cleanup fails.
             if !core
                 .list()
@@ -2788,6 +2836,9 @@ impl Core {
             }
             if let Some(cancel) = &inner.dependency_cancel {
                 let _ = cancel.send(true);
+            }
+            if let Some(scan) = &inner.author_scan {
+                scan.cancel.send_replace(true);
             }
             let active = inner
                 .active
