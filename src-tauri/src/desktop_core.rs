@@ -2703,7 +2703,13 @@ impl Core {
                         finalize_to(&identity, &result, &media, &target, record)?
                     };
                     let saved = crate::files::staged_cover(&result, &media).and_then(|body| {
-                        parse_cache::save_cover(&inner.db, task.video.as_ref().context("INVALID_ENGINE_RESULT")?, &body)
+                        let video = task.video.as_ref().context("INVALID_ENGINE_RESULT")?;
+                        let updated = parse_cache::save_cover(&inner.db, video, &body)?;
+                        if updated || author_batch.is_none() {
+                            return Ok(updated);
+                        }
+                        // Author downloads get their first full metadata while downloading.
+                        Ok(parse_cache::save(&mut inner.db, video, Vec::new(), Some(body), now())?.has_cover)
                     }).unwrap_or(false);
                     task.cover_path = None;
                     if saved {

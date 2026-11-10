@@ -209,7 +209,7 @@ else:
         (stage / "video.mp4").write_bytes(body)
         emit("progress", downloaded_bytes=len(body), total_bytes=len(body), speed_bps=None)
         cover = {}
-        if video_id in ("456", "fixture0001"):
+        if video_id in ("456", "fixture0001") or (batch_author and video_id == "501"):
             image = b"\x89PNG\r\n\x1a\ndownloaded-fixture"
             (stage / "cover").write_bytes(image)
             cover = dict(cover_filename="cover", cover_bytes=len(image))

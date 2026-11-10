@@ -342,6 +342,9 @@ pub fn save(
         "cookie_warning",
         "author_avatar_filename",
         "author_avatar_bytes",
+        "author_scan_id",
+        "batch_author_id",
+        "author_scope",
     ] {
         object.remove(field);
     }

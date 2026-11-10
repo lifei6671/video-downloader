@@ -1165,9 +1165,23 @@ mod tests {
         assert_eq!(album.files.len(), 2);
         assert!(album.files[0].video.is_some());
         assert!(tasks.iter().all(archived));
-        assert!(tasks
-            .iter()
-            .any(|task| task.video.as_ref().unwrap()["selected_format_id"].is_string()));
+        let video = tasks.iter().find(|task| task.files.is_empty()).unwrap();
+        assert!(video.video.as_ref().unwrap()["selected_format_id"].is_string());
+        assert!(video.cover_cached && video.cover_error.is_none());
+        assert_eq!(
+            app.cover(&video.id).unwrap(),
+            b"\x89PNG\r\n\x1a\ndownloaded-fixture"
+        );
+        {
+            let inner = app.inner.lock().unwrap();
+            let preview = crate::parse_cache::get(&inner.db, "douyin", "501", "dtk")
+                .unwrap()
+                .unwrap();
+            assert!(preview.has_cover);
+            for field in ["author_scan_id", "batch_author_id", "author_scope"] {
+                assert!(preview.video.get(field).is_none());
+            }
+        }
         let repeat = scan_ready(&app, "full").await;
         let result = app.confirm_author_scan(&repeat.id, false, None).unwrap();
         assert_eq!((result.queued, result.skipped), (0, 2));
