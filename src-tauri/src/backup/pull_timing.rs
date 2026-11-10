@@ -22,7 +22,9 @@ impl<'a> Run<'a> {
             tx.commit()?;
             Ok(id)
         });
-        let id = result.inspect_err(|e| eprintln!("backup pull timing start: {e}")).ok();
+        let id = result
+            .inspect_err(|e| eprintln!("backup pull timing start: {e}"))
+            .ok();
         Self { core, id }
     }
 

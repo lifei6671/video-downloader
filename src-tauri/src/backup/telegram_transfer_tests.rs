@@ -15,11 +15,19 @@ async fn preparation_failure_keeps_prepared_and_retry_publishes_once() {
     let source = source(root.path(), "video", b"original bytes");
     let (_cancel, _stop, io) = io();
     net.prepare_failure.store(true, Ordering::SeqCst);
-    assert_eq!(upload(&net, &journal, &target(), source.clone(), &io).await.unwrap_err().to_string(), "TELEGRAM_CONNECTION_ERROR");
+    assert_eq!(
+        upload(&net, &journal, &target(), source.clone(), &io)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_CONNECTION_ERROR"
+    );
     assert_eq!(journal.entry(&source).state, SendState::Prepared);
     assert_eq!(net.sends.load(Ordering::SeqCst), 0);
     assert_eq!(net.uploads.load(Ordering::SeqCst), 0);
-    upload(&net, &journal, &target(), source.clone(), &io).await.unwrap();
+    upload(&net, &journal, &target(), source.clone(), &io)
+        .await
+        .unwrap();
     assert_eq!(journal.entry(&source).state, SendState::Confirmed);
     assert_eq!(net.sends.load(Ordering::SeqCst), 1);
 }
@@ -31,13 +39,26 @@ async fn proxy_stop_is_durable_but_explicit_cancellation_takes_priority() {
     let io = Io::new(rx, stopped, None).with_network_stop(epoch);
     let pending = io.run(std::future::pending::<Result<()>>());
     tokio::pin!(pending);
-    assert!(tokio::time::timeout(Duration::from_millis(10), &mut pending).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut pending)
+            .await
+            .is_err()
+    );
     network.send_replace(());
     connection.send_replace(true);
-    assert_eq!(pending.await.unwrap_err().to_string(), "TELEGRAM_NETWORK_CHANGED");
-    assert_eq!(io.check().unwrap_err().to_string(), "TELEGRAM_NETWORK_CHANGED");
+    assert_eq!(
+        pending.await.unwrap_err().to_string(),
+        "TELEGRAM_NETWORK_CHANGED"
+    );
+    assert_eq!(
+        io.check().unwrap_err().to_string(),
+        "TELEGRAM_NETWORK_CHANGED"
+    );
     cancel.send_replace(true);
-    assert_eq!(io.check().unwrap_err().to_string(), "TELEGRAM_TRANSFER_CANCELED");
+    assert_eq!(
+        io.check().unwrap_err().to_string(),
+        "TELEGRAM_TRANSFER_CANCELED"
+    );
 }
 
 #[tokio::test]
@@ -50,13 +71,17 @@ async fn proxy_change_after_publication_reconciles_without_uploading_or_sending_
     let (network, epoch) = watch::channel(());
     *net.network_on_send.lock().unwrap() = Some(network);
     let first_io = first_io.with_network_stop(epoch);
-    let error = upload(&net, &journal, &target(), source.clone(), &first_io).await.unwrap_err();
+    let error = upload(&net, &journal, &target(), source.clone(), &first_io)
+        .await
+        .unwrap_err();
     assert_eq!(error.to_string(), "TELEGRAM_NETWORK_CHANGED");
     let interrupted = journal.entry(&source);
     assert_eq!(interrupted.state, SendState::Sending);
     std::fs::remove_file(&source.path).unwrap();
     let (_cancel, _stop, retry_io) = io();
-    let receipt = upload(&net, &journal, &target(), source.clone(), &retry_io).await.unwrap();
+    let receipt = upload(&net, &journal, &target(), source.clone(), &retry_io)
+        .await
+        .unwrap();
     let confirmed = journal.entry(&source);
     assert_eq!(confirmed.state, SendState::Confirmed);
     assert_eq!(confirmed.random_id, interrupted.random_id);
@@ -139,7 +164,9 @@ impl Transport for Mock {
     type Prepared = ();
     fn prepare<'a>(&'a self, _: &'a Envelope, _: &'a Io) -> ProviderFuture<'a, ()> {
         Box::pin(async move {
-            if self.prepare_failure.swap(false, Ordering::SeqCst) { bail!("TELEGRAM_CONNECTION_ERROR"); }
+            if self.prepare_failure.swap(false, Ordering::SeqCst) {
+                bail!("TELEGRAM_CONNECTION_ERROR");
+            }
             Ok(())
         })
     }
@@ -266,7 +293,10 @@ impl Transport for Mock {
                 body[0] ^= 1;
             }
             if let Some(delay) = self.read_delay {
-                return Ok(Box::new(SlowFirstRead {body:std::io::Cursor::new(body),ready:Box::pin(tokio::time::sleep(delay))}) as Box<dyn AsyncRead + Unpin + Send>);
+                return Ok(Box::new(SlowFirstRead {
+                    body: std::io::Cursor::new(body),
+                    ready: Box::pin(tokio::time::sleep(delay)),
+                }) as Box<dyn AsyncRead + Unpin + Send>);
             }
             Ok(Box::new(std::io::Cursor::new(body)) as Box<dyn AsyncRead + Unpin + Send>)
         })
@@ -300,7 +330,12 @@ fn source(root: &Path, kind: &str, body: &[u8]) -> MediaSource {
     let path = root.join(format!("input-{kind}"));
     std::fs::write(&path, body).unwrap();
     MediaSource {
-        video: (kind == "video").then_some(crate::backup::provider::VideoAttributes { duration_ms:2000, width:640, height:360, supports_streaming:false }),
+        video: (kind == "video").then_some(crate::backup::provider::VideoAttributes {
+            duration_ms: 2000,
+            width: 640,
+            height: 360,
+            supports_streaming: false,
+        }),
         base_revision: None,
         recreate_revision: None,
         asset_id: "asset".into(),
@@ -540,7 +575,13 @@ async fn telegram_transfer_uncertain_send_reconciles_after_restart_without_readi
 }
 /// Inject a lost reply after the mock channel has committed the real transfer payload.
 pub(in crate::backup) async fn send_archive_losing_reply(
-    root: &Path, journal: &impl Journal, target: &Target, operation: &str, device: &str, body: &[u8], io: &Io,
+    root: &Path,
+    journal: &impl Journal,
+    target: &Target,
+    operation: &str,
+    device: &str,
+    body: &[u8],
+    io: &Io,
 ) -> (RemoteDocument, Vec<u8>) {
     let net = Mock::new();
     net.sends.store(29, Ordering::SeqCst); // next channel message ID is 30
@@ -549,7 +590,13 @@ pub(in crate::backup) async fn send_archive_losing_reply(
     file.asset_id.clone_from(&target.scope.library_id);
     file.operation_id = operation.into();
     file.device_id = device.into();
-    assert_eq!(upload(&net, journal, target, file, io).await.unwrap_err().to_string(), "TELEGRAM_CONNECTION_ERROR");
+    assert_eq!(
+        upload(&net, journal, target, file, io)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_CONNECTION_ERROR"
+    );
     assert_eq!(net.uploads.load(Ordering::SeqCst), 1);
     net.documents.into_inner().unwrap().remove(&30).unwrap()
 }
@@ -653,23 +700,32 @@ async fn telegram_transfer_changed_source_and_size_limit_never_publish_a_message
 
 #[tokio::test]
 async fn missing_parts_after_upload_return_to_prepared_without_confirming_or_blind_resend() {
-    let root=tempfile::tempdir().unwrap();
-    let journal=TestJournal::open(&root.path().join("journal.sqlite"));
-    let net=Mock::new();
-    let (_cancel,_stop,io)=io();
-    let target=target();
-    let source=source(root.path(),"video",b"unchanged original bytes");
-    *net.reject_once.lock().unwrap()=Some("TELEGRAM_UPLOAD_PART_MISSING".into());
-    assert_eq!(upload(&net,&journal,&target,source.clone(),&io).await.unwrap_err().to_string(),"TELEGRAM_UPLOAD_PART_MISSING");
-    assert_eq!(journal.entry(&source).state,SendState::Prepared);
+    let root = tempfile::tempdir().unwrap();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let net = Mock::new();
+    let (_cancel, _stop, io) = io();
+    let target = target();
+    let source = source(root.path(), "video", b"unchanged original bytes");
+    *net.reject_once.lock().unwrap() = Some("TELEGRAM_UPLOAD_PART_MISSING".into());
+    assert_eq!(
+        upload(&net, &journal, &target, source.clone(), &io)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_UPLOAD_PART_MISSING"
+    );
+    assert_eq!(journal.entry(&source).state, SendState::Prepared);
     assert!(journal.entry(&source).document.is_none());
     assert!(net.documents.lock().unwrap().is_empty());
-    upload(&net,&journal,&target,source.clone(),&io).await.unwrap();
-    assert_eq!(net.uploads.load(Ordering::SeqCst),2);
-    assert_eq!(journal.entry(&source).state,SendState::Confirmed);
-    let ids=net.random_ids.lock().unwrap();
-    assert_eq!(ids.len(),2);assert_eq!(ids[0],ids[1]);
-    assert_eq!(net.documents.lock().unwrap().len(),1);
+    upload(&net, &journal, &target, source.clone(), &io)
+        .await
+        .unwrap();
+    assert_eq!(net.uploads.load(Ordering::SeqCst), 2);
+    assert_eq!(journal.entry(&source).state, SendState::Confirmed);
+    let ids = net.random_ids.lock().unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids[0], ids[1]);
+    assert_eq!(net.documents.lock().unwrap().len(), 1);
 }
 #[tokio::test]
 async fn telegram_transfer_cancel_after_send_keeps_uncertain_evidence_and_reconciles() {
@@ -809,14 +865,23 @@ async fn telegram_transfer_flood_wait_is_durable_and_prevents_network_calls() {
 }
 #[tokio::test]
 async fn telegram_transfer_history_progress_keeps_send_alive_and_still_times_out_when_stalled() {
-    let (_cancel,_stop,mut io)=io();
-    io.idle=Duration::from_millis(150);
+    let (_cancel, _stop, mut io) = io();
+    io.idle = Duration::from_millis(150);
     io.run(async {
-        for _ in 0..4 {tokio::time::sleep(Duration::from_millis(80)).await;io.check()?;io.touch();}
+        for _ in 0..4 {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            io.check()?;
+            io.touch();
+        }
         Ok(())
-    }).await.unwrap();
-    let error=io.run(async {std::future::pending::<Result<()>>().await}).await.unwrap_err();
-    assert_eq!(error.to_string(),"TELEGRAM_TRANSFER_TIMEOUT");
+    })
+    .await
+    .unwrap();
+    let error = io
+        .run(async { std::future::pending::<Result<()>>().await })
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "TELEGRAM_TRANSFER_TIMEOUT");
 }
 #[tokio::test]
 async fn telegram_transfer_idle_timeout_and_abort_drop_the_request() {
@@ -854,9 +919,22 @@ async fn upload_io_observes_binding_and_login_stops_in_source_fingerprints() {
         let (login, login_stop) = watch::channel(false);
         let (binding, binding_stop) = watch::channel(());
         let io = io.with_session_stops(login_stop, binding_stop);
-        if binding_changed { binding.send_replace(()); } else { login.send_replace(true); }
-        assert_eq!(source_unchanged(&source, &io).await.unwrap_err().to_string(), "TELEGRAM_TRANSFER_CANCELED");
-        assert_eq!(io.run(async { Ok(()) }).await.unwrap_err().to_string(), "TELEGRAM_TRANSFER_CANCELED");
+        if binding_changed {
+            binding.send_replace(());
+        } else {
+            login.send_replace(true);
+        }
+        assert_eq!(
+            source_unchanged(&source, &io)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "TELEGRAM_TRANSFER_CANCELED"
+        );
+        assert_eq!(
+            io.run(async { Ok(()) }).await.unwrap_err().to_string(),
+            "TELEGRAM_TRANSFER_CANCELED"
+        );
     }
 }
 
@@ -870,15 +948,27 @@ async fn proxy_change_stops_the_source_fingerprint_worker_before_scanning() {
     let observed = calls.clone();
     io.control = Some(Arc::new(TransferControl {
         check: Box::new(move || {
-            if observed.fetch_add(1, Ordering::SeqCst) == 0 { network.send_replace(()); }
+            if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                network.send_replace(());
+            }
             Ok(())
         }),
         checkpoint: Box::new(|_| Ok(())),
         progress: Arc::new(AtomicU64::new(0)),
     }));
     let io = io.with_network_stop(epoch);
-    assert_eq!(source_unchanged(&source, &io).await.unwrap_err().to_string(), "TELEGRAM_NETWORK_CHANGED");
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "one worker check, then the final Io classification; no file scan checks");
+    assert_eq!(
+        source_unchanged(&source, &io)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_NETWORK_CHANGED"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "one worker check, then the final Io classification; no file scan checks"
+    );
 }
 
 #[tokio::test]
@@ -996,11 +1086,26 @@ async fn telegram_uncertain_send_does_not_probe_or_require_the_local_video_again
 
 #[tokio::test]
 async fn telegram_video_probe_respects_canceled_io_before_launch() {
-    let root=tempfile::tempdir().unwrap();
-    let core=crate::desktop_core::Core::open(&root.path().join("qa.sqlite"),root.path().join("downloads"),"python-must-not-run".into(),vec![],|_|{}).unwrap();
-    let mut source=source(root.path(),"video",b"original bytes");source.video=None;
-    let (cancel,_stop,io)=io();cancel.send_replace(true);
-    assert_eq!(prepare_video(&core,&mut source,&io).await.unwrap_err().to_string(),"TELEGRAM_TRANSFER_CANCELED");
+    let root = tempfile::tempdir().unwrap();
+    let core = crate::desktop_core::Core::open(
+        &root.path().join("qa.sqlite"),
+        root.path().join("downloads"),
+        "python-must-not-run".into(),
+        vec![],
+        |_| {},
+    )
+    .unwrap();
+    let mut source = source(root.path(), "video", b"original bytes");
+    source.video = None;
+    let (cancel, _stop, io) = io();
+    cancel.send_replace(true);
+    assert_eq!(
+        prepare_video(&core, &mut source, &io)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_TRANSFER_CANCELED"
+    );
     core.shutdown().await;
 }
 
@@ -1012,27 +1117,59 @@ async fn lost_direct_archive_receipt_finds_and_rereads_before_confirming() {
     let (_cancel, _stop, io) = io();
     let target = target();
     let source = source(root.path(), "library", b"archive");
-    let publish = || upload_with_timing(&net, &journal, &target, source.clone(), &io, Default::default(), ReceiptCheck::FreshDeleteArchive);
+    let publish = || {
+        upload_with_timing(
+            &net,
+            &journal,
+            &target,
+            source.clone(),
+            &io,
+            Default::default(),
+            ReceiptCheck::FreshDeleteArchive,
+        )
+    };
     net.lost_response.store(true, Ordering::SeqCst);
-    assert_eq!(publish().await.unwrap_err().to_string(), "TELEGRAM_CONNECTION_ERROR");
+    assert_eq!(
+        publish().await.unwrap_err().to_string(),
+        "TELEGRAM_CONNECTION_ERROR"
+    );
     assert_eq!(journal.entry(&source).state, SendState::Sending);
     net.hidden.store(true, Ordering::SeqCst);
-    assert_eq!(publish().await.unwrap_err().to_string(), "TELEGRAM_SEND_UNCONFIRMED");
+    assert_eq!(
+        publish().await.unwrap_err().to_string(),
+        "TELEGRAM_SEND_UNCONFIRMED"
+    );
     net.hidden.store(false, Ordering::SeqCst);
     publish().await.unwrap();
     assert_eq!(journal.entry(&source).state, SendState::Confirmed);
     assert_eq!(net.finds.load(Ordering::SeqCst), 2);
     assert_eq!(net.inspects.load(Ordering::SeqCst), 1);
     assert_eq!(net.sends.load(Ordering::SeqCst), 1);
-    net.documents.lock().unwrap().get_mut(&1).unwrap().0.document_id += 1;
-    assert_eq!(publish().await.unwrap_err().to_string(), "TELEGRAM_MEDIA_CHANGED");
+    net.documents
+        .lock()
+        .unwrap()
+        .get_mut(&1)
+        .unwrap()
+        .0
+        .document_id += 1;
+    assert_eq!(
+        publish().await.unwrap_err().to_string(),
+        "TELEGRAM_MEDIA_CHANGED"
+    );
 }
 
 #[tokio::test]
 async fn delete_index_transfer_timings_follow_parent_and_skip_reused_uploads() {
     use crate::{backup::delete_timing::IndexTiming, desktop_core::Core};
     let root = tempfile::tempdir().unwrap();
-    let core = Core::open(&root.path().join("core.sqlite"), root.path().join("downloads"), "unused".into(), vec![], |_| {}).unwrap();
+    let core = Core::open(
+        &root.path().join("core.sqlite"),
+        root.path().join("downloads"),
+        "unused".into(),
+        vec![],
+        |_| {},
+    )
+    .unwrap();
     core.backup_db(|db| {
         db.execute("INSERT INTO backup_spaces(space_id,library_id,endpoint,bucket,prefix,enabled) VALUES('qa','library','','','',0)", [])?;
         db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json) VALUES('deletion','qa','delete','running','objects','{}')", [])?;
@@ -1050,12 +1187,29 @@ async fn delete_index_transfer_timings_follow_parent_and_skip_reused_uploads() {
         source.operation_id = format!("{kind}-{stage}");
         let timing = IndexTiming::new(&core, "deletion", stage);
         let before = net.inspects.load(Ordering::SeqCst);
-        upload_with_timing(&net, &journal, &target(), source.clone(), &io, timing, check).await.unwrap();
+        upload_with_timing(
+            &net,
+            &journal,
+            &target(),
+            source.clone(),
+            &io,
+            timing,
+            check,
+        )
+        .await
+        .unwrap();
         assert_eq!(net.inspects.load(Ordering::SeqCst) - before, reads);
-        let read = || core.backup_db(|db| {
-            let raw: String = db.query_row("SELECT payload_json FROM backup_operations WHERE operation_id='deletion'", [], |r| r.get(0))?;
-            Ok(serde_json::from_str::<serde_json::Value>(&raw)?)
-        }).unwrap();
+        let read = || {
+            core.backup_db(|db| {
+                let raw: String = db.query_row(
+                    "SELECT payload_json FROM backup_operations WHERE operation_id='deletion'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok(serde_json::from_str::<serde_json::Value>(&raw)?)
+            })
+            .unwrap()
+        };
         let first = read();
         for step in ["upload", "send", "receipt"] {
             let metric = &first["timings"]["foreground"][format!("{stage}_{step}")];
@@ -1069,12 +1223,17 @@ async fn delete_index_transfer_timings_follow_parent_and_skip_reused_uploads() {
             db.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.local_cleanup_done',json('true')) WHERE operation_id='deletion'", [])?;
             Ok(())
         }).unwrap();
-        upload_with_timing(&net, &journal, &target(), source, &io, timing, check).await.unwrap();
+        upload_with_timing(&net, &journal, &target(), source, &io, timing, check)
+            .await
+            .unwrap();
         assert_eq!(net.inspects.load(Ordering::SeqCst) - before, reads + 1);
         let retry = read();
         let maintenance = &retry["timings"]["maintenance"];
         assert_eq!(maintenance[format!("{stage}_receipt")]["outcome"], "ok");
-        assert_eq!(maintenance[format!("{stage}_receipt")]["details"]["steps"]["receipt_by_id"]["calls"], 1);
+        assert_eq!(
+            maintenance[format!("{stage}_receipt")]["details"]["steps"]["receipt_by_id"]["calls"],
+            1
+        );
         assert!(maintenance.get(format!("{stage}_upload")).is_none());
         assert!(maintenance.get(format!("{stage}_send")).is_none());
         core.backup_db(|db| {
@@ -1093,17 +1252,36 @@ async fn new_asset_attachments_reuse_confirmed_video_before_projection_exists() 
     let net = Mock::new();
     let video = source(root.path(), "video", b"original bytes");
     let (_cancel, _stop, io) = io();
-    let receipt = upload(&net, &journal, &target(), video.clone(), &io).await.unwrap();
+    let receipt = upload(&net, &journal, &target(), video.clone(), &io)
+        .await
+        .unwrap();
     let id = target().message_id(&receipt.reference).unwrap();
     for kind in ["cover", "transcript"] {
-        let mut attachment = video.clone(); attachment.kind = kind.into();
-        assert_eq!(upload_destination(&journal, &target(), &attachment, None).unwrap(), Some(id));
+        let mut attachment = video.clone();
+        attachment.kind = kind.into();
+        assert_eq!(
+            upload_destination(&journal, &target(), &attachment, None).unwrap(),
+            Some(id)
+        );
         attachment.asset_id = "another-asset".into();
-        assert_eq!(upload_destination(&journal, &target(), &attachment, None).unwrap_err().to_string(), "TELEGRAM_OPERATION_MISMATCH");
+        assert_eq!(
+            upload_destination(&journal, &target(), &attachment, None)
+                .unwrap_err()
+                .to_string(),
+            "TELEGRAM_OPERATION_MISMATCH"
+        );
     }
-    let mut entry = journal.entry(&video); entry.state = SendState::Sending; journal.save(&entry).unwrap();
-    let mut attachment = video; attachment.kind = "cover".into();
-    assert_eq!(upload_destination(&journal, &target(), &attachment, None).unwrap_err().to_string(), "TELEGRAM_SEND_UNCONFIRMED");
+    let mut entry = journal.entry(&video);
+    entry.state = SendState::Sending;
+    journal.save(&entry).unwrap();
+    let mut attachment = video;
+    attachment.kind = "cover".into();
+    assert_eq!(
+        upload_destination(&journal, &target(), &attachment, None)
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_SEND_UNCONFIRMED"
+    );
 }
 
 struct SlowFirstRead {
@@ -1111,9 +1289,15 @@ struct SlowFirstRead {
     ready: Pin<Box<tokio::time::Sleep>>,
 }
 impl AsyncRead for SlowFirstRead {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buffer: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         use std::future::Future;
-        if self.ready.as_mut().poll(cx).is_pending() { return Poll::Pending; }
+        if self.ready.as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
         Pin::new(&mut self.body).poll_read(cx, buffer)
     }
 }
@@ -1122,25 +1306,51 @@ impl AsyncRead for SlowFirstRead {
 async fn full_media_verification_allows_seventy_second_chunk_and_cancels_promptly() {
     let root = tempfile::tempdir().unwrap();
     let journal = TestJournal::open(&root.path().join("journal.sqlite"));
-    let net = Mock {read_delay:Some(Duration::from_secs(70)), ..Mock::new()};
+    let net = Mock {
+        read_delay: Some(Duration::from_secs(70)),
+        ..Mock::new()
+    };
     let source = source(root.path(), "video", b"original verified media bytes");
     let (cancel, _stop, io) = io();
-    let receipt = upload(&net, &journal, &target(), source, &io).await.unwrap();
+    let receipt = upload(&net, &journal, &target(), source, &io)
+        .await
+        .unwrap();
     let started = tokio::time::Instant::now();
-    super::super::telegram_lifecycle::verify(&net,&target(),&receipt.reference,&io).await.unwrap();
+    super::super::telegram_lifecycle::verify(&net, &target(), &receipt.reference, &io)
+        .await
+        .unwrap();
     assert!(started.elapsed() >= Duration::from_secs(70));
     let destination = target();
-    let mut reading = Box::pin(super::super::telegram_lifecycle::verify(&net,&destination,&receipt.reference,&io));
-    assert!(tokio::time::timeout(Duration::from_secs(1), &mut reading).await.is_err());
+    let mut reading = Box::pin(super::super::telegram_lifecycle::verify(
+        &net,
+        &destination,
+        &receipt.reference,
+        &io,
+    ));
+    assert!(tokio::time::timeout(Duration::from_secs(1), &mut reading)
+        .await
+        .is_err());
     cancel.send_replace(true);
-    assert_eq!(tokio::time::timeout(Duration::from_millis(100),reading).await.unwrap().unwrap_err().to_string(), "TELEGRAM_TRANSFER_CANCELED");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(100), reading)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_TRANSFER_CANCELED"
+    );
 }
 
 #[tokio::test(start_paused = true)]
 async fn control_requests_keep_the_short_timeout() {
-    let (_cancel,_stop,io) = io();
+    let (_cancel, _stop, io) = io();
     let start = tokio::time::Instant::now();
-    let result = io.run(async {tokio::time::sleep(Duration::from_secs(70)).await; Ok(())}).await;
-    assert_eq!(result.unwrap_err().to_string(),"TELEGRAM_TRANSFER_TIMEOUT");
-    assert_eq!(start.elapsed(),Duration::from_secs(60));
+    let result = io
+        .run(async {
+            tokio::time::sleep(Duration::from_secs(70)).await;
+            Ok(())
+        })
+        .await;
+    assert_eq!(result.unwrap_err().to_string(), "TELEGRAM_TRANSFER_TIMEOUT");
+    assert_eq!(start.elapsed(), Duration::from_secs(60));
 }

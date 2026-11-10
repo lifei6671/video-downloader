@@ -33,17 +33,31 @@ pub struct DisplayEntry {
 
 /// File checks are independent of the one-second database status refresh.
 #[derive(Default)]
-pub(crate) struct FilePresence(std::collections::HashMap<std::path::PathBuf, (std::time::Instant, bool)>);
+pub(crate) struct FilePresence(
+    std::collections::HashMap<std::path::PathBuf, (std::time::Instant, bool)>,
+);
 impl FilePresence {
     fn check(&mut self, assets: &mut [Asset], force: bool) {
         let now = std::time::Instant::now();
-        let paths: std::collections::HashSet<_> = assets.iter().filter_map(|a| a.path.clone()).collect();
-        self.0.retain(|path, value| !force && paths.contains(path)
-            && now.duration_since(value.0) < std::time::Duration::from_secs(30));
+        let paths: std::collections::HashSet<_> =
+            assets.iter().filter_map(|a| a.path.clone()).collect();
+        self.0.retain(|path, value| {
+            !force
+                && paths.contains(path)
+                && now.duration_since(value.0) < std::time::Duration::from_secs(30)
+        });
         for asset in assets {
-            let Some(path) = &asset.path else { continue; };
-            let value = self.0.entry(path.clone()).or_insert_with(|| (now, path.is_file()));
-            if !value.1 { asset.path = None; asset.local_state = "missing".into(); }
+            let Some(path) = &asset.path else {
+                continue;
+            };
+            let value = self
+                .0
+                .entry(path.clone())
+                .or_insert_with(|| (now, path.is_file()));
+            if !value.1 {
+                asset.path = None;
+                asset.local_state = "missing".into();
+            }
         }
     }
 }
@@ -53,7 +67,11 @@ pub fn list_for_display(core: &Core, space_id: &str) -> Result<Vec<DisplayEntry>
     list_for_display_cached(core, space_id, true)
 }
 
-pub fn list_for_display_cached(core: &Core, space_id: &str, verify_local: bool) -> Result<Vec<DisplayEntry>> {
+pub fn list_for_display_cached(
+    core: &Core,
+    space_id: &str,
+    verify_local: bool,
+) -> Result<Vec<DisplayEntry>> {
     core.backup_display_db(|db| {
         let tx = db.unchecked_transaction()?;
         let mut query = tx.prepare("SELECT s.space_id,p.profile,COALESCE(n.display_name,''),s.bucket,l.channel_title
@@ -130,19 +148,30 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("video.mp4");
         std::fs::write(&path, b"video").unwrap();
-        let original = Asset { asset_id:"asset".into(),task_id:None,metadata:serde_json::json!({}),
-            original_filename:"video.mp4".into(),content_sha256:None,content_bytes:5,asset_state:"active".into(),
-            path:Some(path.clone()),local_state:"present".into() };
+        let original = Asset {
+            asset_id: "asset".into(),
+            task_id: None,
+            metadata: serde_json::json!({}),
+            original_filename: "video.mp4".into(),
+            content_sha256: None,
+            content_bytes: 5,
+            asset_state: "active".into(),
+            path: Some(path.clone()),
+            local_state: "present".into(),
+        };
         let mut cache = FilePresence::default();
         cache.check(&mut [original.clone()], false);
         std::fs::remove_file(&path).unwrap();
-        let mut polled = [original.clone()]; cache.check(&mut polled, false);
+        let mut polled = [original.clone()];
+        cache.check(&mut polled, false);
         assert!(polled[0].path.is_some());
-        let mut refreshed = [original.clone()]; cache.check(&mut refreshed, true);
+        let mut refreshed = [original.clone()];
+        cache.check(&mut refreshed, true);
         assert!(refreshed[0].path.is_none());
         std::fs::write(&path, b"video").unwrap();
         cache.0.get_mut(&path).unwrap().0 -= std::time::Duration::from_secs(31);
-        let mut expired = [original]; cache.check(&mut expired, false);
+        let mut expired = [original];
+        cache.check(&mut expired, false);
         assert!(expired[0].path.is_some());
         cache.check(&mut [], false);
         assert!(cache.0.is_empty());

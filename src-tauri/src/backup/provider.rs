@@ -69,14 +69,20 @@ pub struct MediaRef {
 }
 impl MediaRef {
     pub(crate) fn document_id(&self) -> Option<i64> {
-        match &self.location { MediaLocation::TelegramMessage {document_id,..}=>Some(*document_id), _=>None }
+        match &self.location {
+            MediaLocation::TelegramMessage { document_id, .. } => Some(*document_id),
+            _ => None,
+        }
     }
     pub fn validate_scope(&self, scope: &Scope) -> Result<()> {
         scope.check(&self.scope)?;
         if !matches!(
             (&self.location, scope.provider_type),
             (MediaLocation::S3Object { .. }, ProviderType::S3)
-                | (MediaLocation::TelegramMessage { .. }, ProviderType::Telegram)
+                | (
+                    MediaLocation::TelegramMessage { .. },
+                    ProviderType::Telegram
+                )
         ) {
             bail!("BACKUP_MEDIA_PROVIDER_MISMATCH");
         }
@@ -289,9 +295,18 @@ pub struct VideoAttributes {
 impl VideoAttributes {
     pub fn from_metadata(metadata: &serde_json::Value) -> Option<Self> {
         let duration_ms = metadata["duration_ms"].as_u64().filter(|v| *v > 0)?;
-        let width = u32::try_from(metadata["width"].as_u64()?).ok().filter(|v| *v > 0 && *v <= i32::MAX as u32)?;
-        let height = u32::try_from(metadata["height"].as_u64()?).ok().filter(|v| *v > 0 && *v <= i32::MAX as u32)?;
-        Some(Self { duration_ms, width, height, supports_streaming: false })
+        let width = u32::try_from(metadata["width"].as_u64()?)
+            .ok()
+            .filter(|v| *v > 0 && *v <= i32::MAX as u32)?;
+        let height = u32::try_from(metadata["height"].as_u64()?)
+            .ok()
+            .filter(|v| *v > 0 && *v <= i32::MAX as u32)?;
+        Some(Self {
+            duration_ms,
+            width,
+            height,
+            supports_streaming: false,
+        })
     }
 }
 
@@ -333,16 +348,26 @@ pub trait BackupProvider: Send + Sync {
     ) -> ProviderFuture<'_, UploadReceipt>;
     fn cancel_upload(&self, resume: ResumeState, operation_id: &str) -> ProviderFuture<'_, ()>;
     /// Maximum wait for the next delivered bytes; providers may assemble/retry chunks internally.
-    fn media_read_timeout(&self) -> std::time::Duration { std::time::Duration::from_secs(30) }
+    fn media_read_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
     fn download_media(&self, reference: MediaRef, offset: u64) -> ProviderFuture<'_, MediaStream>;
     fn verify_media(&self, reference: MediaRef) -> ProviderFuture<'_, ()>;
     fn delete_media(&self, reference: MediaRef, operation_id: &str) -> ProviderFuture<'_, ()>;
     /// Compact confirmed deleted records; implementations retain portable deletion evidence.
-    fn compact_deleted_records(&self, _candidates: Vec<RemoteAsset>, _retention_days: u32, _now: u64) -> ProviderFuture<'_, Vec<RemoteAsset>> {
+    fn compact_deleted_records(
+        &self,
+        _candidates: Vec<RemoteAsset>,
+        _retention_days: u32,
+        _now: u64,
+    ) -> ProviderFuture<'_, Vec<RemoteAsset>> {
         Box::pin(async { bail!("BACKUP_CLEANUP_UNSUPPORTED") })
     }
-    fn reconcile_deleted_asset(&self, asset_id: &str, operation_id: &str)
-        -> ProviderFuture<'_, DeleteCleanup>;
+    fn reconcile_deleted_asset(
+        &self,
+        asset_id: &str,
+        operation_id: &str,
+    ) -> ProviderFuture<'_, DeleteCleanup>;
 }
 
 #[cfg(test)]

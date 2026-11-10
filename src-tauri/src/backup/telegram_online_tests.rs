@@ -1,8 +1,8 @@
 //! Opt-in synthetic integration; separate processes can be terminated at durable boundaries.
-#[path = "telegram_delete_perf_online_tests.rs"]
-mod delete_perf_tests;
 #[path = "telegram_bundle_online_tests.rs"]
 mod bundle_tests;
+#[path = "telegram_delete_perf_online_tests.rs"]
+mod delete_perf_tests;
 #[path = "telegram_transcript_online_tests.rs"]
 mod transcript_tests;
 #[path = "telegram_transfer_perf_online_tests.rs"]
@@ -63,15 +63,17 @@ async fn connect(
     config: &Config,
     create: bool,
 ) -> Result<Arc<dyn BackupProvider>> {
-    let binding = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
-    let view = binding.session
-        .resume(binding.namespace)
-        .await?;
+    let binding = core
+        .telegram_accounts
+        .binding(crate::telegram_accounts::Purpose::Backup);
+    let view = binding.session.resume(binding.namespace).await?;
     if !matches!(view.phase, Phase::Ready) {
         bail!("dedicated account must be logged in first");
     }
     let channels = core
-        .telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session
+        .telegram_accounts
+        .binding(crate::telegram_accounts::Purpose::Backup)
+        .session
         .channels(
             view.operation_id
                 .as_deref()
@@ -296,11 +298,30 @@ async fn telegram_streaming_live_original_video_flag_and_hash() -> Result<()> {
         source_sha256: String,
         video_metadata: serde_json::Value,
     }
-    #[derive(Serialize,Deserialize)]
-    struct StreamingRun { target: Target, asset_id: String, operation_id: String, source_sha256: String }
-    let config: StreamingConfig=serde_json::from_slice(&std::fs::read(std::env::var_os("YINGQU_TELEGRAM_STREAMING_TEST_CONFIG").context("explicit ignored streaming config required")?)?)?;
-    if config.data_directory.file_name().and_then(|v|v.to_str()) != Some("me.disign.yingqu.telegram-validation") || config.channel_name.trim().is_empty() { bail!("existing dedicated session and channel required"); }
-    let core=Core::open(&config.data_directory.join("yingqu.sqlite"),config.work_directory.clone(),"unused-engine".into(),vec![], |_| {})?;
+    #[derive(Serialize, Deserialize)]
+    struct StreamingRun {
+        target: Target,
+        asset_id: String,
+        operation_id: String,
+        source_sha256: String,
+    }
+    let config: StreamingConfig = serde_json::from_slice(&std::fs::read(
+        std::env::var_os("YINGQU_TELEGRAM_STREAMING_TEST_CONFIG")
+            .context("explicit ignored streaming config required")?,
+    )?)?;
+    if config.data_directory.file_name().and_then(|v| v.to_str())
+        != Some("me.disign.yingqu.telegram-validation")
+        || config.channel_name.trim().is_empty()
+    {
+        bail!("existing dedicated session and channel required");
+    }
+    let core = Core::open(
+        &config.data_directory.join("yingqu.sqlite"),
+        config.work_directory.clone(),
+        "unused-engine".into(),
+        vec![],
+        |_| {},
+    )?;
     let result=async {
         let (hash,signature)=repository::fingerprint(&config.source)?;
         if hash != config.source_sha256 { bail!("original source hash changed"); }
@@ -354,12 +375,26 @@ async fn telegram_streaming_live_original_video_flag_and_hash() -> Result<()> {
 #[ignore = "explicit existing dedicated recovery session; reads channel metadata without uploading or deleting"]
 async fn telegram_busy_live_cold_resume_channel_reads_and_discovery() -> Result<()> {
     let config: Config = serde_json::from_slice(&std::fs::read(
-        std::env::var_os("YINGQU_TELEGRAM_T3_TEST_CONFIG").context("explicit ignored test config required")?,
+        std::env::var_os("YINGQU_TELEGRAM_T3_TEST_CONFIG")
+            .context("explicit ignored test config required")?,
     )?)?;
-    if config.recovery_data_directory.file_name().and_then(|v|v.to_str()) != Some("me.disign.yingqu.telegram-recovery-validation")
-        || config.channel_name.trim().is_empty() { bail!("dedicated recovery paths/channel required"); }
+    if config
+        .recovery_data_directory
+        .file_name()
+        .and_then(|v| v.to_str())
+        != Some("me.disign.yingqu.telegram-recovery-validation")
+        || config.channel_name.trim().is_empty()
+    {
+        bail!("dedicated recovery paths/channel required");
+    }
     for cycle in 1..=3 {
-        let core=Core::open(&config.recovery_data_directory.join("yingqu.sqlite"),config.work_directory.join("recovery-downloads"),"unused-engine".into(),vec![], |_| {})?;
+        let core = Core::open(
+            &config.recovery_data_directory.join("yingqu.sqlite"),
+            config.work_directory.join("recovery-downloads"),
+            "unused-engine".into(),
+            vec![],
+            |_| {},
+        )?;
         let result=async {
             let binding=core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
             let device=binding.namespace;

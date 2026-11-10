@@ -1,11 +1,14 @@
 use super::*;
-use std::{pin::Pin, task::{Context as TaskContext, Poll}};
-use tokio::io::ReadBuf;
 use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Mutex,
 };
+use std::{
+    pin::Pin,
+    task::{Context as TaskContext, Poll},
+};
+use tokio::io::ReadBuf;
 
 #[derive(Default)]
 struct Downloads {
@@ -47,7 +50,12 @@ impl Transport for Downloads {
     fn inspect(&self, id: i32) -> super::super::provider::ProviderFuture<'_, RemoteDocument> {
         Box::pin(async move {
             self.inspections.fetch_add(1, Ordering::SeqCst);
-            self.current.lock().unwrap().clone().filter(|doc| doc.message_id == id).context("TELEGRAM_MEDIA_MISSING")
+            self.current
+                .lock()
+                .unwrap()
+                .clone()
+                .filter(|doc| doc.message_id == id)
+                .context("TELEGRAM_MEDIA_MISSING")
         })
     }
     fn find<'a>(
@@ -67,7 +75,10 @@ impl Transport for Downloads {
                 bail!("TELEGRAM_FILE_REFERENCE_EXPIRED");
             }
             if let Some(delay) = self.read_delay {
-                return Ok(Box::new(SlowFirstRead {body:std::io::Cursor::new(self.body.lock().unwrap().clone()),ready:Box::pin(tokio::time::sleep(delay))}) as Box<dyn AsyncRead + Unpin + Send>);
+                return Ok(Box::new(SlowFirstRead {
+                    body: std::io::Cursor::new(self.body.lock().unwrap().clone()),
+                    ready: Box::pin(tokio::time::sleep(delay)),
+                }) as Box<dyn AsyncRead + Unpin + Send>);
             }
             Ok(
                 Box::new(std::io::Cursor::new(self.body.lock().unwrap().clone()))
@@ -107,9 +118,19 @@ fn legacy_standalone_reads_keep_document_and_size_checks() {
         envelope.kind = kind.into();
         evidence.caption = envelope.caption().unwrap();
         check_standalone_read(&evidence, evidence.document_id).unwrap();
-        assert_eq!(check_standalone_read(&evidence, evidence.document_id + 1).unwrap_err().to_string(), "TELEGRAM_MEDIA_CHANGED");
+        assert_eq!(
+            check_standalone_read(&evidence, evidence.document_id + 1)
+                .unwrap_err()
+                .to_string(),
+            "TELEGRAM_MEDIA_CHANGED"
+        );
         evidence.bytes += 1;
-        assert_eq!(check_standalone_read(&evidence, evidence.document_id).unwrap_err().to_string(), "TELEGRAM_MEDIA_CHANGED");
+        assert_eq!(
+            check_standalone_read(&evidence, evidence.document_id)
+                .unwrap_err()
+                .to_string(),
+            "TELEGRAM_MEDIA_CHANGED"
+        );
     }
 }
 
@@ -121,43 +142,127 @@ fn legacy_standalone_reads_reject_unknown_formats() {
         envelope.yingqu_media = version;
         envelope.kind = kind.into();
         evidence.caption = envelope.caption().unwrap();
-        assert_eq!(check_standalone_read(&evidence, evidence.document_id).unwrap_err().to_string(), "TELEGRAM_INDEX_INVALID");
+        assert_eq!(
+            check_standalone_read(&evidence, evidence.document_id)
+                .unwrap_err()
+                .to_string(),
+            "TELEGRAM_INDEX_INVALID"
+        );
     }
     let mut evidence = document(b"original bytes");
     evidence.caption = "not an envelope".into();
-    assert_eq!(check_standalone_read(&evidence, evidence.document_id).unwrap_err().to_string(), "TELEGRAM_INDEX_INVALID");
+    assert_eq!(
+        check_standalone_read(&evidence, evidence.document_id)
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_INDEX_INVALID"
+    );
 }
 
 #[test]
 fn legacy_video_is_readable_without_broadening_mutation_or_receipt_selection() {
-    use grammers_client::{message::{InputMessage, Message}, session::{SessionData, storages::MemorySession, types::{PeerAuth, PeerId, PeerRef}}, SenderPool};
+    use grammers_client::{
+        message::{InputMessage, Message},
+        session::{
+            storages::MemorySession,
+            types::{PeerAuth, PeerId, PeerRef},
+            SessionData,
+        },
+        SenderPool,
+    };
     // Construct SDK data without running a sender or issuing a request.
-    let pool = SenderPool::new(std::sync::Arc::new(MemorySession::from(SessionData::default())), 1);
+    let pool = SenderPool::new(
+        std::sync::Arc::new(MemorySession::from(SessionData::default())),
+        1,
+    );
     let client = Client::new(pool.handle);
-    let peer = PeerRef { id: PeerId::channel(1).unwrap(), auth: PeerAuth::from_hash(1) };
+    let peer = PeerRef {
+        id: PeerId::channel(1).unwrap(),
+        auth: PeerAuth::from_hash(1),
+    };
     let evidence = document(b"legacy video");
     let mut envelope: Envelope = serde_json::from_str(&evidence.caption).unwrap();
     envelope.kind = "video".into();
     let media = tl::types::MessageMediaDocument {
-        nopremium: false, spoiler: false, video: true, round: false, voice: false,
-        document: Some(tl::types::Document {
-            id: evidence.document_id, access_hash: 1, file_reference: vec![], date: 1,
-            mime_type: "video/mp4".into(), size: evidence.bytes as i64,
-            thumbs: None, video_thumbs: None, dc_id: 1, attributes: vec![],
-        }.into()),
-        alt_documents: None, video_cover: None, video_timestamp: None, ttl_seconds: None,
+        nopremium: false,
+        spoiler: false,
+        video: true,
+        round: false,
+        voice: false,
+        document: Some(
+            tl::types::Document {
+                id: evidence.document_id,
+                access_hash: 1,
+                file_reference: vec![],
+                date: 1,
+                mime_type: "video/mp4".into(),
+                size: evidence.bytes as i64,
+                thumbs: None,
+                video_thumbs: None,
+                dc_id: 1,
+                attributes: vec![],
+            }
+            .into(),
+        ),
+        alt_documents: None,
+        video_cover: None,
+        video_timestamp: None,
+        ttl_seconds: None,
     };
-    let mut message = Message::from_raw_short_updates(&client, tl::types::UpdateShortSentMessage {
-        out: false, id: evidence.message_id, pts: 1, pts_count: 1, date: 1,
-        media: Some(media.into()), entities: None, ttl_period: None,
-    }, InputMessage::new().text(envelope.caption().unwrap()), peer);
-    assert_eq!(select_read_document(&message, evidence.document_id).unwrap().0.document_id, evidence.document_id);
-    assert_eq!(select_document(&message, Some(evidence.document_id), None).unwrap_err().to_string(), "TELEGRAM_INDEX_INVALID");
-    assert_eq!(select_document(&message, None, Some(&envelope)).unwrap_err().to_string(), "TELEGRAM_INDEX_INVALID");
+    let mut message = Message::from_raw_short_updates(
+        &client,
+        tl::types::UpdateShortSentMessage {
+            out: false,
+            id: evidence.message_id,
+            pts: 1,
+            pts_count: 1,
+            date: 1,
+            media: Some(media.into()),
+            entities: None,
+            ttl_period: None,
+        },
+        InputMessage::new().text(envelope.caption().unwrap()),
+        peer,
+    );
+    assert_eq!(
+        select_read_document(&message, evidence.document_id)
+            .unwrap()
+            .0
+            .document_id,
+        evidence.document_id
+    );
+    assert_eq!(
+        select_document(&message, Some(evidence.document_id), None)
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_INDEX_INVALID"
+    );
+    assert_eq!(
+        select_document(&message, None, Some(&envelope))
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_INDEX_INVALID"
+    );
     assert!(select_read_document(&message, evidence.document_id + 1).is_err());
-    let tl::enums::Message::Message(raw) = &mut message.raw else { unreachable!() };
-    raw.rich_message = Some(tl::types::RichMessage { rtl: false, part: false, blocks: vec![], photos: vec![], documents: vec![] }.into());
-    assert_eq!(select_read_document(&message, evidence.document_id).unwrap_err().to_string(), "TELEGRAM_INDEX_INVALID");
+    let tl::enums::Message::Message(raw) = &mut message.raw else {
+        unreachable!()
+    };
+    raw.rich_message = Some(
+        tl::types::RichMessage {
+            rtl: false,
+            part: false,
+            blocks: vec![],
+            photos: vec![],
+            documents: vec![],
+        }
+        .into(),
+    );
+    assert_eq!(
+        select_read_document(&message, evidence.document_id)
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_INDEX_INVALID"
+    );
 }
 
 #[tokio::test]
@@ -337,18 +442,35 @@ async fn direct_archive_requires_this_attempts_remote_bytes_and_current_attachme
     envelope.kind = "library".into();
     doc.caption = envelope.caption()?;
     let target = Target {
-        scope: Scope {space_id: "space".into(), library_id: envelope.library_id.clone(), protocol: 2, provider_type: ProviderType::Telegram},
-        account_id: "1".into(), channel_id: "2".into(),
+        scope: Scope {
+            space_id: "space".into(),
+            library_id: envelope.library_id.clone(),
+            protocol: 2,
+            provider_type: ProviderType::Telegram,
+        },
+        account_id: "1".into(),
+        channel_id: "2".into(),
     };
-    let source = Downloads {body: Mutex::new(body.to_vec()), current: Mutex::new(Some(doc.clone())), ..Default::default()};
+    let source = Downloads {
+        body: Mutex::new(body.to_vec()),
+        current: Mutex::new(Some(doc.clone())),
+        ..Default::default()
+    };
     let (_cancel, rx) = tokio::sync::watch::channel(false);
     let io = Io::new(rx.clone(), rx, None);
     let cache = IndexBodyCache::default();
-    let publish = |cache| capture_publish_refresh(&target, &envelope.operation_id, read_index_body(&source, cache, doc.clone(), &io, None));
+    let publish = |cache| {
+        capture_publish_refresh(
+            &target,
+            &envelope.operation_id,
+            read_index_body(&source, cache, doc.clone(), &io, None),
+        )
+    };
     with_delete_archive_read(true, async {
         publish(&cache).await?;
         confirm_archive(&source, &target, &doc, body, &io).await
-    }).await?;
+    })
+    .await?;
     assert_eq!(source.calls.load(Ordering::SeqCst), 1);
     assert_eq!(source.inspections.load(Ordering::SeqCst), 1);
 
@@ -356,16 +478,23 @@ async fn direct_archive_requires_this_attempts_remote_bytes_and_current_attachme
     with_delete_archive_read(true, async {
         publish(&cache).await?;
         confirm_archive(&source, &target, &doc, body, &io).await
-    }).await?;
+    })
+    .await?;
     assert_eq!(source.calls.load(Ordering::SeqCst), 2);
     assert_eq!(source.inspections.load(Ordering::SeqCst), 1);
 
     // The retry itself can publish and download successfully. Its cleanup still performs a cold read.
     let retry_cache = IndexBodyCache::default();
     with_delete_archive_read(false, async {
-        capture_publish_refresh(&target, &envelope.operation_id, read_index_body(&source, &retry_cache, doc.clone(), &io, None)).await?;
+        capture_publish_refresh(
+            &target,
+            &envelope.operation_id,
+            read_index_body(&source, &retry_cache, doc.clone(), &io, None),
+        )
+        .await?;
         confirm_archive(&source, &target, &doc, body, &io).await
-    }).await?;
+    })
+    .await?;
     assert_eq!(source.calls.load(Ordering::SeqCst), 4);
     assert_eq!(source.inspections.load(Ordering::SeqCst), 1);
 
@@ -376,11 +505,20 @@ async fn direct_archive_requires_this_attempts_remote_bytes_and_current_attachme
     for current in [Some(replaced), Some(edited), None] {
         let fresh = IndexBodyCache::default();
         let result = with_delete_archive_read(true, async {
-            capture_publish_refresh(&target, &envelope.operation_id, read_index_body(&source, &fresh, doc.clone(), &io, None)).await?;
+            capture_publish_refresh(
+                &target,
+                &envelope.operation_id,
+                read_index_body(&source, &fresh, doc.clone(), &io, None),
+            )
+            .await?;
             *source.current.lock().unwrap() = current;
             confirm_archive(&source, &target, &doc, body, &io).await
-        }).await;
-        assert!(matches!(result.unwrap_err().to_string().as_str(), "TELEGRAM_MEDIA_CHANGED" | "TELEGRAM_MEDIA_MISSING"));
+        })
+        .await;
+        assert!(matches!(
+            result.unwrap_err().to_string().as_str(),
+            "TELEGRAM_MEDIA_CHANGED" | "TELEGRAM_MEDIA_MISSING"
+        ));
     }
     assert_eq!(source.calls.load(Ordering::SeqCst), 7);
     assert_eq!(source.inspections.load(Ordering::SeqCst), 4);
@@ -399,16 +537,26 @@ fn by_id_lookup_only_accepts_the_requested_broadcast_channel() {
     tl::enums::ChatPhoto::Empty.serialize(&mut wire);
     0i32.serialize(&mut wire);
     let mut raw = tl::types::Channel::from_bytes(&wire).unwrap();
-    assert_eq!(checked_channel_reply(42, vec![raw.clone().into()]).unwrap(), Some(raw.clone()));
+    assert_eq!(
+        checked_channel_reply(42, vec![raw.clone().into()]).unwrap(),
+        Some(raw.clone())
+    );
     assert!(checked_channel_reply(43, vec![raw.clone().into()]).is_err());
     raw.min = true;
-    assert!(checked_channel_reply(42, vec![raw.clone().into()]).unwrap().is_none());
+    assert!(checked_channel_reply(42, vec![raw.clone().into()])
+        .unwrap()
+        .is_none());
     raw.broadcast = false;
     assert!(checked_channel_reply(42, vec![raw.into()]).is_err());
     assert!(checked_channel_reply(42, Vec::new()).unwrap().is_none());
     let forbidden = tl::types::ChannelForbidden {
-        broadcast: true, megagroup: false, monoforum: false, id: 42, access_hash: 1,
-        title: "fixture".into(), until_date: None,
+        broadcast: true,
+        megagroup: false,
+        monoforum: false,
+        id: 42,
+        access_hash: 1,
+        title: "fixture".into(),
+        until_date: None,
     };
     assert!(checked_channel_reply(42, vec![forbidden.into()]).is_err());
 }
@@ -418,9 +566,15 @@ struct SlowFirstRead {
     ready: Pin<Box<tokio::time::Sleep>>,
 }
 impl AsyncRead for SlowFirstRead {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buffer: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         use std::future::Future;
-        if self.ready.as_mut().poll(cx).is_pending() { return Poll::Pending; }
+        if self.ready.as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
         Pin::new(&mut self.body).poll_read(cx, buffer)
     }
 }
@@ -429,20 +583,38 @@ impl AsyncRead for SlowFirstRead {
 async fn uncached_index_body_allows_seventy_second_chunk_and_cancels_promptly() {
     use std::time::Duration;
     let body = b"uncached validated index bytes";
-    let source = Downloads { body:Mutex::new(body.to_vec()), read_delay:Some(Duration::from_secs(70)), ..Default::default() };
+    let source = Downloads {
+        body: Mutex::new(body.to_vec()),
+        read_delay: Some(Duration::from_secs(70)),
+        ..Default::default()
+    };
     let cache = IndexBodyCache::default();
     let (cancel, rx) = tokio::sync::watch::channel(false);
     let (_stop, srx) = tokio::sync::watch::channel(false);
-    let io = Io::new(rx,srx,None);
+    let io = Io::new(rx, srx, None);
     let expected = document(body);
     let started = tokio::time::Instant::now();
-    assert_eq!(read_index_body(&source,&cache,expected.clone(),&io,None).await.unwrap(),body);
+    assert_eq!(
+        read_index_body(&source, &cache, expected.clone(), &io, None)
+            .await
+            .unwrap(),
+        body
+    );
     assert!(started.elapsed() >= Duration::from_secs(70));
-    assert_eq!(source.calls.load(Ordering::SeqCst),1);
+    assert_eq!(source.calls.load(Ordering::SeqCst), 1);
     cache.lock().unwrap().clear();
-    let mut reading = Box::pin(read_index_body(&source,&cache,expected,&io,None));
-    assert!(tokio::time::timeout(Duration::from_secs(1),&mut reading).await.is_err());
+    let mut reading = Box::pin(read_index_body(&source, &cache, expected, &io, None));
+    assert!(tokio::time::timeout(Duration::from_secs(1), &mut reading)
+        .await
+        .is_err());
     cancel.send_replace(true);
-    assert_eq!(tokio::time::timeout(Duration::from_millis(100),reading).await.unwrap().unwrap_err().to_string(),"TELEGRAM_TRANSFER_CANCELED");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(100), reading)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_TRANSFER_CANCELED"
+    );
     assert!(cache.lock().unwrap().is_empty());
 }

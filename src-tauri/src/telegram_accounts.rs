@@ -66,7 +66,9 @@ pub(crate) struct NetworkSessions<'a> {
     pub sessions: Vec<Arc<TelegramSession>>,
 }
 impl Drop for NetworkSessions<'_> {
-    fn drop(&mut self) { self.accounts.choices.lock().unwrap().network_changing = false; }
+    fn drop(&mut self) {
+        self.accounts.choices.lock().unwrap().network_changing = false;
+    }
 }
 pub struct TelegramAccounts {
     proxy: ProxySettings,
@@ -110,16 +112,30 @@ impl TelegramAccounts {
     }
     pub(crate) fn network_sessions(&self) -> Result<NetworkSessions<'_>> {
         let mut choices = self.choices.lock().unwrap();
-        if choices.closed { bail!("TELEGRAM_CLOSED"); }
-        if choices.network_changing { bail!("TELEGRAM_BUSY"); }
+        if choices.closed {
+            bail!("TELEGRAM_CLOSED");
+        }
+        if choices.network_changing {
+            bail!("TELEGRAM_BUSY");
+        }
         choices.network_changing = true;
         let mut sessions = vec![];
-        for binding in choices.active.iter().chain(choices.pending.iter().flatten()) {
-            if !sessions.iter().any(|session| Arc::ptr_eq(session, &binding.session)) {
+        for binding in choices
+            .active
+            .iter()
+            .chain(choices.pending.iter().flatten())
+        {
+            if !sessions
+                .iter()
+                .any(|session| Arc::ptr_eq(session, &binding.session))
+            {
                 sessions.push(binding.session.clone());
             }
         }
-        Ok(NetworkSessions { accounts: self, sessions })
+        Ok(NetworkSessions {
+            accounts: self,
+            sessions,
+        })
     }
     pub fn binding(&self, purpose: Purpose) -> Binding {
         self.choices.lock().unwrap().active[purpose.index()].clone()
@@ -159,7 +175,10 @@ impl TelegramAccounts {
         let view = match result {
             Ok(view) => view,
             Err(error) => {
-                if matches!(binding.session.status().phase, Phase::SignedOut | Phase::Disconnected) {
+                if matches!(
+                    binding.session.status().phase,
+                    Phase::SignedOut | Phase::Disconnected
+                ) {
                     let pending = {
                         let mut choices = self.choices.lock().unwrap();
                         if choices.pending[purpose.index()]
@@ -212,7 +231,9 @@ impl TelegramAccounts {
                         Ok(()) => {
                             // A media read may have entered after stop_current drained the old binding.
                             if matches!(purpose, Purpose::Backup) {
-                                choices.active[purpose.index()].session.invalidate_backup_reads();
+                                choices.active[purpose.index()]
+                                    .session
+                                    .invalidate_backup_reads();
                             }
                             let old = std::mem::replace(
                                 &mut choices.active[purpose.index()],
@@ -299,7 +320,9 @@ impl TelegramAccounts {
     pub async fn restore_saved(&self) {
         let bindings = {
             let choices = self.choices.lock().unwrap();
-            if choices.closed { return; }
+            if choices.closed {
+                return;
+            }
             let mut bindings = vec![choices.active[0].clone()];
             if !Arc::ptr_eq(&choices.active[0].session, &choices.active[1].session) {
                 bindings.push(choices.active[1].clone());
@@ -343,7 +366,9 @@ impl TelegramAccounts {
         if choices.closed {
             bail!("TELEGRAM_CLOSED");
         }
-        if choices.network_changing { bail!("TELEGRAM_BUSY"); }
+        if choices.network_changing {
+            bail!("TELEGRAM_BUSY");
+        }
         if choices.pending[purpose.index()].is_some() {
             bail!("TELEGRAM_BUSY");
         }
@@ -445,7 +470,9 @@ impl TelegramAccounts {
             if choices.closed {
                 bail!("TELEGRAM_CLOSED");
             }
-            if choices.network_changing { bail!("TELEGRAM_BUSY"); }
+            if choices.network_changing {
+                bail!("TELEGRAM_BUSY");
+            }
             if choices.pending[purpose.index()].is_some() {
                 bail!("TELEGRAM_BUSY");
             }
@@ -487,7 +514,9 @@ impl TelegramAccounts {
 
 /// Keep the original binding and stop waiting when its purpose is switched.
 pub(crate) async fn recover_network(
-    core: &Core, purpose: Purpose, cancel: tokio::sync::watch::Receiver<bool>,
+    core: &Core,
+    purpose: Purpose,
+    cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let binding = core.telegram_accounts.binding(purpose);
     let work = binding.session.recover_network(&binding.namespace, cancel);
@@ -514,22 +543,55 @@ mod tests {
     #[tokio::test]
     async fn proxy_transition_blocks_new_accounts_until_its_snapshot_is_released() {
         let root = tempfile::tempdir().unwrap();
-        let core = Core::open(&root.path().join("qa.sqlite"), root.path().join("downloads"),
-            "unused-engine".into(), vec![], |_| {}).unwrap();
+        let core = Core::open(
+            &root.path().join("qa.sqlite"),
+            root.path().join("downloads"),
+            "unused-engine".into(),
+            vec![],
+            |_| {},
+        )
+        .unwrap();
         let accounts = &core.telegram_accounts;
         let binding = accounts.binding(Purpose::Download);
         binding.session.set_test_view(Phase::Ready, "123");
         let login = binding.session.status().operation_id.unwrap();
         let network = accounts.network_sessions().unwrap();
         assert_eq!(network.sessions.len(), 1, "shared account is paused once");
-        assert_eq!(accounts.login(&core, Purpose::Download, LoginMode::OtherAccount).await.err().unwrap().to_string(), "TELEGRAM_BUSY");
-        assert_eq!(accounts.logout(&core, Purpose::Download, &login).await.err().unwrap().to_string(), "TELEGRAM_BUSY");
+        assert_eq!(
+            accounts
+                .login(&core, Purpose::Download, LoginMode::OtherAccount)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "TELEGRAM_BUSY"
+        );
+        assert_eq!(
+            accounts
+                .logout(&core, Purpose::Download, &login)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "TELEGRAM_BUSY"
+        );
         let update = |proxy| crate::settings::ProfileUpdate {
-            platform: "telegram".into(), user_agent: "test".into(), cookie: None,
-            proxy, bypass_proxy: None, http_chunk_size: None,
+            platform: "telegram".into(),
+            user_agent: "test".into(),
+            cookie: None,
+            proxy,
+            bypass_proxy: None,
+            http_chunk_size: None,
         };
-        assert_eq!(core.save_profile_with_network(update(Some(String::new()))).await.err().unwrap().to_string(), "TELEGRAM_BUSY",
-                   "even an unchanged proxy must serialize comparison with persistence");
+        assert_eq!(
+            core.save_profile_with_network(update(Some(String::new())))
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "TELEGRAM_BUSY",
+            "even an unchanged proxy must serialize comparison with persistence"
+        );
         core.save_profile_with_network(update(None)).await.unwrap();
         assert!(accounts.choices.lock().unwrap().pending[0].is_none());
         drop(network);
@@ -789,14 +851,33 @@ mod tests {
     }
     #[tokio::test]
     async fn connection_failure_during_account_replacement_keeps_the_selected_login() {
-        let root=tempfile::tempdir().unwrap();let app=core(root.path());
-        let original=app.telegram_accounts.binding(Purpose::Backup);
-        original.session.set_test_view(Phase::Ready,"account-a");
-        let failed=pending(&app.telegram_accounts,Purpose::Backup,Phase::Disconnected);
-        assert!(app.telegram_accounts.finish(&app,Purpose::Backup,&failed,Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR"))).await.is_err());
-        assert!(Arc::ptr_eq(&app.telegram_accounts.binding(Purpose::Backup).session,&original.session));
-        assert!(matches!(app.telegram_accounts.status(Purpose::Backup).phase,Phase::Ready));
-        assert!(app.telegram_accounts.choices.lock().unwrap().pending[Purpose::Backup.index()].is_none());
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let original = app.telegram_accounts.binding(Purpose::Backup);
+        original.session.set_test_view(Phase::Ready, "account-a");
+        let failed = pending(&app.telegram_accounts, Purpose::Backup, Phase::Disconnected);
+        assert!(app
+            .telegram_accounts
+            .finish(
+                &app,
+                Purpose::Backup,
+                &failed,
+                Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR"))
+            )
+            .await
+            .is_err());
+        assert!(Arc::ptr_eq(
+            &app.telegram_accounts.binding(Purpose::Backup).session,
+            &original.session
+        ));
+        assert!(matches!(
+            app.telegram_accounts.status(Purpose::Backup).phase,
+            Phase::Ready
+        ));
+        assert!(
+            app.telegram_accounts.choices.lock().unwrap().pending[Purpose::Backup.index()]
+                .is_none()
+        );
         app.shutdown().await;
     }
     #[tokio::test]
@@ -920,29 +1001,59 @@ mod tests {
     }
     #[tokio::test]
     async fn removing_telegram_backup_configuration_keeps_both_account_bindings_and_proxy() {
-        let root = tempfile::tempdir().unwrap(); let app = core(root.path());
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
         let download = app.telegram_accounts.binding(Purpose::Download);
         let backup = app.telegram_accounts.binding(Purpose::Backup);
-        backup.session.set_test_view(Phase::Ready,"account-a");
-        app.save_profile(crate::settings::ProfileUpdate { platform:"telegram".into(),user_agent:"test".into(),cookie:None,proxy:Some("socks5://127.0.0.1:1080".into()),bypass_proxy: None, http_chunk_size:None }).unwrap();
+        backup.session.set_test_view(Phase::Ready, "account-a");
+        app.save_profile(crate::settings::ProfileUpdate {
+            platform: "telegram".into(),
+            user_agent: "test".into(),
+            cookie: None,
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            bypass_proxy: None,
+            http_chunk_size: None,
+        })
+        .unwrap();
         app.backup_db(|db| {
             db.execute_batch("INSERT INTO backup_spaces VALUES('telegram-qa','library-qa','','','',NULL,0);
                 INSERT INTO backup_provider_config(space_id,provider_type,profile) VALUES('telegram-qa','telegram','telegram');
                 INSERT INTO telegram_spaces(space_id,account_id,channel_id) VALUES('telegram-qa','account-a','100');")?;
             Ok(())
         }).unwrap();
-        crate::backup::spaces::remove(&app,"telegram-qa",false).await.unwrap();
+        crate::backup::spaces::remove(&app, "telegram-qa", false)
+            .await
+            .unwrap();
         assert!(crate::backup::spaces::list(&app).unwrap().is_empty());
-        for (purpose, binding) in [(Purpose::Download,&download),(Purpose::Backup,&backup)] {
-            assert!(Arc::ptr_eq(&app.telegram_accounts.binding(purpose).session,&binding.session));
-            assert!(matches!(app.telegram_accounts.status(purpose).phase,Phase::Ready));
+        for (purpose, binding) in [(Purpose::Download, &download), (Purpose::Backup, &backup)] {
+            assert!(Arc::ptr_eq(
+                &app.telegram_accounts.binding(purpose).session,
+                &binding.session
+            ));
+            assert!(matches!(
+                app.telegram_accounts.status(purpose).phase,
+                Phase::Ready
+            ));
         }
         let id = download.session.status().operation_id.unwrap();
-        app.telegram_accounts.logout(&app,Purpose::Download,&id).await.unwrap();
-        assert!(matches!(backup.session.status().phase,Phase::Ready));
-        assert_eq!(app.proxy("telegram").unwrap().as_deref(),Some("socks5://127.0.0.1:1080/"));
-        assert!(app.telegram_accounts.proxy.lock().unwrap().as_ref().unwrap().proxy.is_some());
+        app.telegram_accounts
+            .logout(&app, Purpose::Download, &id)
+            .await
+            .unwrap();
+        assert!(matches!(backup.session.status().phase, Phase::Ready));
+        assert_eq!(
+            app.proxy("telegram").unwrap().as_deref(),
+            Some("socks5://127.0.0.1:1080/")
+        );
+        assert!(app
+            .telegram_accounts
+            .proxy
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .proxy
+            .is_some());
         app.shutdown().await;
     }
-
 }

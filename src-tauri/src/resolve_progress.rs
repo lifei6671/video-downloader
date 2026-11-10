@@ -40,11 +40,16 @@ pub struct ResolveProgress {
 
 impl ResolveProgress {
     pub fn new(phase: ResolvePhase) -> Self {
-        Self { phase, steps: vec![phase] }
+        Self {
+            phase,
+            steps: vec![phase],
+        }
     }
 
     pub fn advance(&mut self, phase: ResolvePhase) {
         self.phase = phase;
-        if !self.steps.contains(&phase) { self.steps.push(phase); }
+        if !self.steps.contains(&phase) {
+            self.steps.push(phase);
+        }
     }
 }

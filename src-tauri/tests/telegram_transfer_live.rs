@@ -93,14 +93,21 @@ fn open(config: &Config) -> Result<Arc<Core>> {
 }
 async fn transfer(core: &Arc<Core>, config: &Config) -> Result<()> {
     let device_id = core.telegram_storage_device_id()?;
-    let binding = core.telegram_accounts.binding(yingqu_core::telegram_accounts::Purpose::Backup);
+    let binding = core
+        .telegram_accounts
+        .binding(yingqu_core::telegram_accounts::Purpose::Backup);
     let view = binding.session.resume(binding.namespace.clone()).await?;
     if !matches!(view.phase, Phase::Ready) {
         bail!("existing session did not restore Ready");
     }
     let mut login_id = view.operation_id.context("missing login operation")?;
     let account = view.account.context("missing verified account")?;
-    let channels = core.telegram_accounts.binding(yingqu_core::telegram_accounts::Purpose::Backup).session.channels(&login_id).await?;
+    let channels = core
+        .telegram_accounts
+        .binding(yingqu_core::telegram_accounts::Purpose::Backup)
+        .session
+        .channels(&login_id)
+        .await?;
     let matching: Vec<_> = channels
         .iter()
         .filter(|c| c.title == config.channel_name)
@@ -166,11 +173,21 @@ async fn transfer(core: &Arc<Core>, config: &Config) -> Result<()> {
         let original = std::fs::read(&path)?;
         let sha256 = format!("{:x}", Sha256::digest(&original));
         let video = if kind == "video" {
-            config.video_metadata.as_ref().map(|v| VideoAttributes::from_metadata(v).context("invalid video presentation fixture")).transpose()?
-        } else { None };
+            config
+                .video_metadata
+                .as_ref()
+                .map(|v| {
+                    VideoAttributes::from_metadata(v).context("invalid video presentation fixture")
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let video_media_requested = kind == "video";
         let receipt = core
-            .telegram_accounts.binding(yingqu_core::telegram_accounts::Purpose::Backup).session
+            .telegram_accounts
+            .binding(yingqu_core::telegram_accounts::Purpose::Backup)
+            .session
             .upload_media(
                 core,
                 UploadRequest {
@@ -195,7 +212,9 @@ async fn transfer(core: &Arc<Core>, config: &Config) -> Result<()> {
             )
             .await?;
         let destination = output.join(name);
-        core.telegram_accounts.binding(yingqu_core::telegram_accounts::Purpose::Backup).session
+        core.telegram_accounts
+            .binding(yingqu_core::telegram_accounts::Purpose::Backup)
+            .session
             .restore_media(
                 core,
                 RestoreRequest {
@@ -212,7 +231,9 @@ async fn transfer(core: &Arc<Core>, config: &Config) -> Result<()> {
         }
         // The existing destination must stay intact.
         let error = core
-            .telegram_accounts.binding(yingqu_core::telegram_accounts::Purpose::Backup).session
+            .telegram_accounts
+            .binding(yingqu_core::telegram_accounts::Purpose::Backup)
+            .session
             .restore_media(
                 core,
                 RestoreRequest {
@@ -232,7 +253,9 @@ async fn transfer(core: &Arc<Core>, config: &Config) -> Result<()> {
         }
         // A failed transfer closes its sender; resume before the next transport request.
         login_id = core
-            .telegram_accounts.binding(yingqu_core::telegram_accounts::Purpose::Backup).session
+            .telegram_accounts
+            .binding(yingqu_core::telegram_accounts::Purpose::Backup)
+            .session
             .resume(binding.namespace.clone())
             .await?
             .operation_id

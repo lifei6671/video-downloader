@@ -122,7 +122,9 @@ async fn ready(core: &Core, id: &str) -> Result<Task> {
 async fn exercise(core: &Arc<Core>, config: &Config, _run: &Path) -> Result<serde_json::Value> {
     let view = timeout(
         Duration::from_secs(120),
-        core.telegram_accounts.binding(yingqu_core::telegram_accounts::Purpose::Download).session
+        core.telegram_accounts
+            .binding(yingqu_core::telegram_accounts::Purpose::Download)
+            .session
             .resume(config.session_device_id.clone()),
     )
     .await

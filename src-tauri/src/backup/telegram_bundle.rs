@@ -131,12 +131,16 @@ fn manifest(rich: &tl::types::RichMessage) -> Result<Option<Bundle>> {
         let tl::enums::PageBlock::Anchor(anchor) = block else {
             continue;
         };
-        let (encoded, old) = if let Some(encoded) = anchor.name.strip_prefix(ANCHOR_PREFIX) { (encoded, false) }
-            else if let Some(encoded) = anchor.name.strip_prefix("yingqu_bundle_v1_") { (encoded, true) }
-            else {
+        let (encoded, old) = if let Some(encoded) = anchor.name.strip_prefix(ANCHOR_PREFIX) {
+            (encoded, false)
+        } else if let Some(encoded) = anchor.name.strip_prefix("yingqu_bundle_v1_") {
+            (encoded, true)
+        } else {
             continue;
         };
-        if legacy.is_some_and(|previous| previous != old) { bail!("TELEGRAM_INDEX_INVALID"); }
+        if legacy.is_some_and(|previous| previous != old) {
+            bail!("TELEGRAM_INDEX_INVALID");
+        }
         legacy = Some(old);
         if encoded.len() > 4096 {
             bail!("TELEGRAM_INDEX_INVALID");
@@ -163,17 +167,25 @@ fn manifest(rich: &tl::types::RichMessage) -> Result<Option<Bundle>> {
             total = Some(count);
             continue;
         }
-        if !old || single.replace(encoded).is_some() { bail!("TELEGRAM_INDEX_INVALID"); }
+        if !old || single.replace(encoded).is_some() {
+            bail!("TELEGRAM_INDEX_INVALID");
+        }
     }
     let encoded = if let Some(total) = total {
-        if single.is_some() { bail!("TELEGRAM_INDEX_INVALID"); }
+        if single.is_some() {
+            bail!("TELEGRAM_INDEX_INVALID");
+        }
         if parts.len() != total {
             bail!("TELEGRAM_INDEX_INVALID");
         }
-        Some((0..total)
-            .map(|i| parts.get(&i).copied().context("TELEGRAM_INDEX_INVALID"))
-            .collect::<Result<String>>()?)
-    } else { single.map(str::to_owned) };
+        Some(
+            (0..total)
+                .map(|i| parts.get(&i).copied().context("TELEGRAM_INDEX_INVALID"))
+                .collect::<Result<String>>()?,
+        )
+    } else {
+        single.map(str::to_owned)
+    };
     if let Some(encoded) = encoded {
         let mut bundle: Bundle = serde_json::from_slice(
             &URL_SAFE_NO_PAD
@@ -405,9 +417,17 @@ fn owned_message_matches(loaded: &Loaded, expected: &[RemoteDocument]) -> bool {
 }
 
 impl crate::backup::telegram_lifecycle::OwnedMessageRemoval for GrammersTransport {
-    async fn read_owned_ids(&self, groups: &[(i32, Vec<RemoteDocument>)], io: &Io) -> Result<Vec<i32>> {
+    async fn read_owned_ids(
+        &self,
+        groups: &[(i32, Vec<RemoteDocument>)],
+        io: &Io,
+    ) -> Result<Vec<i32>> {
         let ids: Vec<_> = groups.iter().map(|(id, _)| *id).collect();
-        let messages = self.client.get_messages_by_id(self.peer, &ids).await.map_err(rpc_error)?;
+        let messages = self
+            .client
+            .get_messages_by_id(self.peer, &ids)
+            .await
+            .map_err(rpc_error)?;
         let mut verified = Vec::new();
         // grammers returns one slot for each requested ID, in request order.
         for ((id, expected), message) in groups.iter().zip(messages) {
@@ -426,8 +446,11 @@ impl crate::backup::telegram_lifecycle::OwnedMessageRemoval for GrammersTranspor
             }
             let matches = match read(&complete)? {
                 Some(loaded) => owned_message_matches(&loaded, expected),
-                None if matches!(&complete.raw, tl::enums::Message::Message(m) if m.rich_message.is_none() && m.grouped_id.is_none()) => {
-                    let [old] = expected.as_slice() else { bail!("TELEGRAM_MEDIA_CHANGED"); };
+                None if matches!(&complete.raw, tl::enums::Message::Message(m) if m.rich_message.is_none() && m.grouped_id.is_none()) =>
+                {
+                    let [old] = expected.as_slice() else {
+                        bail!("TELEGRAM_MEDIA_CHANGED");
+                    };
                     let envelope: Envelope = serde_json::from_str(&old.caption)?;
                     envelope.kind == "library" && document(&complete)?.0 == *old
                 }
@@ -442,13 +465,24 @@ impl crate::backup::telegram_lifecycle::OwnedMessageRemoval for GrammersTranspor
     }
 
     async fn delete_verified_ids(&self, ids: &[i32]) -> Result<()> {
-        self.client.delete_messages(self.peer, ids).await.map_err(rpc_error)?;
+        self.client
+            .delete_messages(self.peer, ids)
+            .await
+            .map_err(rpc_error)?;
         Ok(())
     }
 
     async fn confirm_ids_gone(&self, ids: &[i32]) -> Result<()> {
-        let messages = self.client.get_messages_by_id(self.peer, ids).await.map_err(rpc_error)?;
-        if messages.into_iter().flatten().any(|m| !matches!(m.raw, tl::enums::Message::Empty(_))) {
+        let messages = self
+            .client
+            .get_messages_by_id(self.peer, ids)
+            .await
+            .map_err(rpc_error)?;
+        if messages
+            .into_iter()
+            .flatten()
+            .any(|m| !matches!(m.raw, tl::enums::Message::Empty(_)))
+        {
             bail!("BACKUP_CLEANUP_PENDING");
         }
         Ok(())
@@ -482,10 +516,18 @@ impl GrammersTransport {
         Ok(found)
     }
     async fn edit_bundle(&self, id: i32, loaded: &Loaded) -> Result<()> {
-        self.edit_bundle_before_publish(id, loaded, &mut || Ok(())).await
+        self.edit_bundle_before_publish(id, loaded, &mut || Ok(()))
+            .await
     }
-    async fn edit_bundle_before_publish(&self, id: i32, loaded: &Loaded, before_publish: &mut (dyn FnMut() -> Result<()> + Send)) -> Result<()> {
-        if loaded.bundle.legacy { bail!("BACKUP_LEGACY_READ_ONLY"); }
+    async fn edit_bundle_before_publish(
+        &self,
+        id: i32,
+        loaded: &Loaded,
+        before_publish: &mut (dyn FnMut() -> Result<()> + Send),
+    ) -> Result<()> {
+        if loaded.bundle.legacy {
+            bail!("BACKUP_LEGACY_READ_ONLY");
+        }
         let rich_message = Some(rich_input(loaded)?);
         before_publish()?;
         self.client
@@ -507,9 +549,14 @@ impl GrammersTransport {
             .map_err(rpc_error)?;
         Ok(())
     }
-    pub(super) async fn prepare_bundle(&self, envelope: &Envelope, io: &Io) -> Result<PreparedBundle> {
-        let existing = if self.preferred_message.is_some() || (envelope.kind == "event"
-            && self.new_delete_operation.as_deref() == Some(&envelope.operation_id))
+    pub(super) async fn prepare_bundle(
+        &self,
+        envelope: &Envelope,
+        io: &Io,
+    ) -> Result<PreparedBundle> {
+        let existing = if self.preferred_message.is_some()
+            || (envelope.kind == "event"
+                && self.new_delete_operation.as_deref() == Some(&envelope.operation_id))
         {
             None
         } else {
@@ -521,11 +568,21 @@ impl GrammersTransport {
                 let message = io.run(self.message(id)).await?;
                 if let Some(loaded) = read(&message)? {
                     let first = &loaded.bundle.attachments[0].envelope;
-                    if first.library_id != envelope.library_id || first.asset_id != envelope.asset_id { bail!("BACKUP_SCOPE_MISMATCH"); }
+                    if first.library_id != envelope.library_id
+                        || first.asset_id != envelope.asset_id
+                    {
+                        bail!("BACKUP_SCOPE_MISMATCH");
+                    }
                     Some((id, loaded))
                 } else {
-                    let first: Envelope = serde_json::from_str(message.text()).context("TELEGRAM_INDEX_INVALID")?;
-                    if first.library_id != envelope.library_id || first.asset_id != envelope.asset_id || first.kind != "video" { bail!("BACKUP_SCOPE_MISMATCH"); }
+                    let first: Envelope =
+                        serde_json::from_str(message.text()).context("TELEGRAM_INDEX_INVALID")?;
+                    if first.library_id != envelope.library_id
+                        || first.asset_id != envelope.asset_id
+                        || first.kind != "video"
+                    {
+                        bail!("BACKUP_SCOPE_MISMATCH");
+                    }
                     None
                 }
             }
@@ -540,7 +597,10 @@ impl GrammersTransport {
                     bundle: Bundle {
                         legacy: false,
                         yingqu_bundle: 1,
-                        heading: self.bundle_heading.clone().unwrap_or_else(|| "映取备份".into()),
+                        heading: self
+                            .bundle_heading
+                            .clone()
+                            .unwrap_or_else(|| "映取备份".into()),
                         attachments: vec![],
                     },
                     documents: vec![],
@@ -556,7 +616,12 @@ impl GrammersTransport {
             if old.envelope != *envelope {
                 bail!("TELEGRAM_OPERATION_MISMATCH");
             }
-            return Ok(PreparedBundle { id, loaded, envelope: envelope.clone(), already_present: true });
+            return Ok(PreparedBundle {
+                id,
+                loaded,
+                envelope: envelope.clone(),
+                already_present: true,
+            });
         }
         if loaded
             .bundle
@@ -566,14 +631,30 @@ impl GrammersTransport {
         {
             bail!("TELEGRAM_OPERATION_MISMATCH");
         }
-        Ok(PreparedBundle { id, loaded, envelope: envelope.clone(), already_present: false })
+        Ok(PreparedBundle {
+            id,
+            loaded,
+            envelope: envelope.clone(),
+            already_present: false,
+        })
     }
     pub(super) async fn send_bundle(
-        &self, uploaded: PreparedUpload, prepared: PreparedBundle, random_id: i64,
-        video: Option<VideoAttributes>, before_publish: &mut (dyn FnMut() -> Result<()> + Send),
+        &self,
+        uploaded: PreparedUpload,
+        prepared: PreparedBundle,
+        random_id: i64,
+        video: Option<VideoAttributes>,
+        before_publish: &mut (dyn FnMut() -> Result<()> + Send),
     ) -> Result<Option<i32>> {
-        let PreparedBundle { id, mut loaded, envelope, already_present } = prepared;
-        if already_present { return Ok(id); }
+        let PreparedBundle {
+            id,
+            mut loaded,
+            envelope,
+            already_present,
+        } = prepared;
+        if already_present {
+            return Ok(id);
+        }
         let media = self
             .client
             .invoke(&tl::functions::messages::UploadMedia {
@@ -616,7 +697,8 @@ impl GrammersTransport {
             loaded.documents.push(document);
         }
         if let Some(id) = id {
-            self.edit_bundle_before_publish(id, &loaded, before_publish).await?;
+            self.edit_bundle_before_publish(id, &loaded, before_publish)
+                .await?;
             Ok(Some(id))
         } else {
             let rich_message = Some(rich_input(&loaded)?);
@@ -652,11 +734,17 @@ impl GrammersTransport {
             Ok(sent_id(updates, random_id))
         }
     }
-    pub(super) async fn remove_bundle_attachment(&self, expected: &RemoteDocument, message: &grammers_client::message::Message) -> Result<bool> {
+    pub(super) async fn remove_bundle_attachment(
+        &self,
+        expected: &RemoteDocument,
+        message: &grammers_client::message::Message,
+    ) -> Result<bool> {
         let Some(mut loaded) = read(message)? else {
             return Ok(false);
         };
-        if loaded.bundle.legacy { bail!("BACKUP_LEGACY_READ_ONLY"); }
+        if loaded.bundle.legacy {
+            bail!("BACKUP_LEGACY_READ_ONLY");
+        }
         let Some(a) = loaded.bundle.attachments.iter().find(|a| {
             a.document_id == expected.document_id
                 && a.envelope.caption().ok().as_deref() == Some(expected.caption.as_str())
@@ -901,21 +989,60 @@ mod tests {
     fn legacy_single_and_chunked_manifests_keep_unsequenced_event_identity() {
         for chunked in [false, true] {
             let mut f = fixture();
-            f.bundle.attachments.iter_mut().find(|a| a.envelope.kind == "event").unwrap().event_sequence = None;
+            f.bundle
+                .attachments
+                .iter_mut()
+                .find(|a| a.envelope.kind == "event")
+                .unwrap()
+                .event_sequence = None;
             let mut raw = received(&fixture());
-            raw.blocks.retain(|b| !matches!(b, tl::enums::PageBlock::Anchor(_)));
+            raw.blocks
+                .retain(|b| !matches!(b, tl::enums::PageBlock::Anchor(_)));
             let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&f.bundle).unwrap());
-            let anchors = if chunked { encoded.as_bytes().chunks(700).map(|s|std::str::from_utf8(s).unwrap().to_owned()).collect::<Vec<_>>() } else { vec![encoded] };
-            for (i,part) in anchors.iter().enumerate() {
-                raw.blocks.push(tl::types::PageBlockAnchor { name:if chunked {format!("yingqu_bundle_v1_part_{i}_{}_{}",anchors.len(),part)} else {format!("yingqu_bundle_v1_{part}")} }.into());
+            let anchors = if chunked {
+                encoded
+                    .as_bytes()
+                    .chunks(700)
+                    .map(|s| std::str::from_utf8(s).unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            } else {
+                vec![encoded]
+            };
+            for (i, part) in anchors.iter().enumerate() {
+                raw.blocks.push(
+                    tl::types::PageBlockAnchor {
+                        name: if chunked {
+                            format!("yingqu_bundle_v1_part_{i}_{}_{}", anchors.len(), part)
+                        } else {
+                            format!("yingqu_bundle_v1_{part}")
+                        },
+                    }
+                    .into(),
+                );
             }
             let bundle = manifest(&raw).unwrap().unwrap();
             assert!(bundle.legacy);
-            assert!(bundle.attachments.iter().find(|a|a.envelope.kind=="event").unwrap().event_sequence.is_none());
-            let loaded=load(bundle, &raw, false).unwrap();
+            assert!(bundle
+                .attachments
+                .iter()
+                .find(|a| a.envelope.kind == "event")
+                .unwrap()
+                .event_sequence
+                .is_none());
+            let loaded = load(bundle, &raw, false).unwrap();
             assert_eq!(loaded.documents.len(), 4);
-            let expected=loaded.bundle.attachments.iter().map(|a|RemoteDocument{message_id:1,document_id:a.document_id,bytes:a.envelope.bytes,caption:a.envelope.caption().unwrap()}).collect::<Vec<_>>();
-            assert!(!owned_message_matches(&loaded,&expected));
+            let expected = loaded
+                .bundle
+                .attachments
+                .iter()
+                .map(|a| RemoteDocument {
+                    message_id: 1,
+                    document_id: a.document_id,
+                    bytes: a.envelope.bytes,
+                    caption: a.envelope.caption().unwrap(),
+                })
+                .collect::<Vec<_>>();
+            assert!(!owned_message_matches(&loaded, &expected));
         }
     }
     #[test]
@@ -1031,14 +1158,29 @@ mod tests {
 
     #[test]
     fn whole_message_removal_requires_all_exact_archived_and_media_documents() {
-        let loaded=fixture();
-        let expected:Vec<_>=loaded.bundle.attachments.iter().map(|a|RemoteDocument {message_id:10,document_id:a.document_id,bytes:a.envelope.bytes,caption:a.envelope.caption().unwrap()}).collect();
-        assert!(owned_message_matches(&loaded,&expected));
-        assert!(!owned_message_matches(&loaded,&expected[1..]),"must not delete unlisted attachments");
-        let mut changed=expected.clone();changed[0].document_id+=100;
-        assert!(!owned_message_matches(&loaded,&changed));
-        let mut changed=expected.clone();changed[0].caption.push(' ');
-        assert!(!owned_message_matches(&loaded,&changed));
-        assert!(!owned_message_matches(&loaded,&[]));
+        let loaded = fixture();
+        let expected: Vec<_> = loaded
+            .bundle
+            .attachments
+            .iter()
+            .map(|a| RemoteDocument {
+                message_id: 10,
+                document_id: a.document_id,
+                bytes: a.envelope.bytes,
+                caption: a.envelope.caption().unwrap(),
+            })
+            .collect();
+        assert!(owned_message_matches(&loaded, &expected));
+        assert!(
+            !owned_message_matches(&loaded, &expected[1..]),
+            "must not delete unlisted attachments"
+        );
+        let mut changed = expected.clone();
+        changed[0].document_id += 100;
+        assert!(!owned_message_matches(&loaded, &changed));
+        let mut changed = expected.clone();
+        changed[0].caption.push(' ');
+        assert!(!owned_message_matches(&loaded, &changed));
+        assert!(!owned_message_matches(&loaded, &[]));
     }
 }

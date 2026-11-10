@@ -4,16 +4,25 @@ use rusqlite::OptionalExtension;
 use tokio::io::AsyncReadExt;
 
 // Respect explicit server cooldowns inside a sample. Keep their elapsed time in the durable result.
-async fn wait_flood<T,F: std::future::Future<Output=Result<T>>>(stage: &str, marker: &std::path::Path, mut call: impl FnMut() -> F) -> Result<T> {
+async fn wait_flood<T, F: std::future::Future<Output = Result<T>>>(
+    stage: &str,
+    marker: &std::path::Path,
+    mut call: impl FnMut() -> F,
+) -> Result<T> {
     for attempt in 0..=3 {
         match call().await {
             Err(error) if attempt < 3 => {
                 let code = error.to_string();
-                let Some(seconds) = code.strip_prefix("TELEGRAM_FLOOD_WAIT:").and_then(|s| s.parse::<u64>().ok()) else {
+                let Some(seconds) = code
+                    .strip_prefix("TELEGRAM_FLOOD_WAIT:")
+                    .and_then(|s| s.parse::<u64>().ok())
+                else {
                     return Err(error);
                 };
                 std::fs::write(marker, format!("{stage} {seconds}"))?;
-                if seconds > 900 { return Err(error); }
+                if seconds > 900 {
+                    return Err(error);
+                }
                 println!("explicit server cooldown: stage={stage} seconds={seconds}");
                 tokio::time::sleep(std::time::Duration::from_secs(seconds + 1)).await;
             }
@@ -27,21 +36,37 @@ async fn wait_flood<T,F: std::future::Future<Output=Result<T>>>(stage: &str, mar
 #[ignore = "explicit QA private channel and a new synthetic working directory; publishes and deletes ten new fixtures"]
 async fn telegram_delete_perf_live_warm_registered() -> Result<()> {
     let cfg: Config = serde_json::from_slice(&std::fs::read(
-        std::env::var_os("YINGQU_TELEGRAM_DELETE_PERF_CONFIG").context("explicit QA config required")?,
+        std::env::var_os("YINGQU_TELEGRAM_DELETE_PERF_CONFIG")
+            .context("explicit QA config required")?,
     )?)?;
-    if cfg.work_directory.file_name().and_then(|n| n.to_str()) != Some("telegram-delete-perf-validation")
-        || cfg.source_data_directory.file_name().and_then(|n| n.to_str()) != Some("me.disign.yingqu.telegram-validation")
+    if cfg.work_directory.file_name().and_then(|n| n.to_str())
+        != Some("telegram-delete-perf-validation")
+        || cfg
+            .source_data_directory
+            .file_name()
+            .and_then(|n| n.to_str())
+            != Some("me.disign.yingqu.telegram-validation")
         || cfg.input_directory.parent() != Some(&cfg.work_directory)
-
     {
         bail!("new, dedicated performance fixture directory required");
     }
     let case = std::env::var("YINGQU_TELEGRAM_DELETE_PERF_CASE").unwrap_or_else(|_| "warm".into());
-    anyhow::ensure!(matches!(case.as_str(), "warm" | "cold" | "missing-map" | "unregistered" | "concurrent-read"), "invalid perf case");
+    anyhow::ensure!(
+        matches!(
+            case.as_str(),
+            "warm" | "cold" | "missing-map" | "unregistered" | "concurrent-read"
+        ),
+        "invalid perf case"
+    );
     let samples = cfg.work_directory.join("samples");
     if samples.exists() {
-        anyhow::ensure!(std::env::var("YINGQU_TELEGRAM_DELETE_PERF_RESUME").as_deref() == Ok("1"), "explicit resume required");
-    } else { std::fs::create_dir(&samples)?; }
+        anyhow::ensure!(
+            std::env::var("YINGQU_TELEGRAM_DELETE_PERF_RESUME").as_deref() == Ok("1"),
+            "explicit resume required"
+        );
+    } else {
+        std::fs::create_dir(&samples)?;
+    }
     let core = open(&cfg, false)?;
     let result = async {
         let provider = wait_flood("connect", &cfg.work_directory.join("connect-retry.txt"), || connect(&core, &cfg, false)).await?;
@@ -250,113 +275,217 @@ async fn telegram_delete_perf_live_warm_registered() -> Result<()> {
 
 // Queue-backed contention samples use a second, unrelated asset and the production backup service.
 use crate::backup::{scheduler, sync_delete};
-use std::{path::Path, time::{Duration, Instant}};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 use tokio::io::AsyncRead;
 
-fn contention_fixture(core: &Arc<Core>, cfg: &Config, provider: &dyn BackupProvider, dir: &Path, media: &str) -> Result<Run> {
+fn contention_fixture(
+    core: &Arc<Core>,
+    cfg: &Config,
+    provider: &dyn BackupProvider,
+    dir: &Path,
+    media: &str,
+) -> Result<Run> {
     std::fs::create_dir(dir)?; // A run only introduces new asset IDs. Never adopt an unrelated directory.
     let input = dir.join("input");
     std::fs::create_dir(&input)?;
     std::fs::copy(cfg.input_directory.join(media), input.join("video.mp4"))?;
-    std::fs::copy(cfg.input_directory.join("cover.png"), input.join("cover.png"))?;
-    source(core, &Config {
-        work_directory: dir.into(), input_directory: input,
-        channel_name: cfg.channel_name.clone(), source_data_directory: cfg.source_data_directory.clone(),
-        recovery_data_directory: cfg.recovery_data_directory.clone(),
-    }, provider)
+    std::fs::copy(
+        cfg.input_directory.join("cover.png"),
+        input.join("cover.png"),
+    )?;
+    source(
+        core,
+        &Config {
+            work_directory: dir.into(),
+            input_directory: input,
+            channel_name: cfg.channel_name.clone(),
+            source_data_directory: cfg.source_data_directory.clone(),
+            recovery_data_directory: cfg.recovery_data_directory.clone(),
+        },
+        provider,
+    )
 }
 
-async fn observe_operation(core: &Core, id: &str, until: impl Fn(&scheduler::Operation) -> bool) -> Result<scheduler::Operation> {
+async fn observe_operation(
+    core: &Core,
+    id: &str,
+    until: impl Fn(&scheduler::Operation) -> bool,
+) -> Result<scheduler::Operation> {
     tokio::time::timeout(Duration::from_secs(1200), async {
         loop {
             let mut row = scheduler::operation(core, id)?;
-            if let Some(progress) = scheduler::operations_for_display(core, Some(&row.space_id))?.into_iter().find(|op| op.operation_id == id) {
+            if let Some(progress) = scheduler::operations_for_display(core, Some(&row.space_id))?
+                .into_iter()
+                .find(|op| op.operation_id == id)
+            {
                 for field in ["completed_bytes", "transfer_started"] {
-                    if let Some(value) = progress.payload.get(field) { row.payload[field] = value.clone(); }
+                    if let Some(value) = progress.payload.get(field) {
+                        row.payload[field] = value.clone();
+                    }
                 }
             }
-            if until(&row) { return Ok(row); }
+            if until(&row) {
+                return Ok(row);
+            }
             if matches!(row.state.as_str(), "blocked" | "completed" | "canceled") {
-                bail!("fixture operation ended early: {} {} {:?}", row.state, row.phase, row.last_error);
+                bail!(
+                    "fixture operation ended early: {} {} {:?}",
+                    row.state,
+                    row.phase,
+                    row.last_error
+                );
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await.context("fixture operation exceeded 20 minutes")?
+    })
+    .await
+    .context("fixture operation exceeded 20 minutes")?
 }
 
-async fn fixture_media(core: &Arc<Core>, p: &dyn BackupProvider, fixture: &Run) -> Result<MediaRef> {
-    let upload = fixture.operation_id.as_deref().context("missing fixture operation")?;
+async fn fixture_media(
+    core: &Arc<Core>,
+    p: &dyn BackupProvider,
+    fixture: &Run,
+) -> Result<MediaRef> {
+    let upload = fixture
+        .operation_id
+        .as_deref()
+        .context("missing fixture operation")?;
     let row = observe_operation(core, upload, |o| o.state == "completed").await?;
-    anyhow::ensure!(row.asset_id.as_deref() == Some(&fixture.asset_id) && row.space_id == p.scope().space_id);
+    anyhow::ensure!(
+        row.asset_id.as_deref() == Some(&fixture.asset_id) && row.space_id == p.scope().space_id
+    );
     let remote = sync_read::remote_id(core, &p.scope().space_id, &fixture.asset_id)?;
-    p.read_asset(&remote).await?.filter(|s| !s.snapshot.deleted).and_then(|s| s.snapshot.media)
+    p.read_asset(&remote)
+        .await?
+        .filter(|s| !s.snapshot.deleted)
+        .and_then(|s| s.snapshot.media)
         .context("fixture media was not published")
 }
 
-async fn drain_checked(reader: &mut (dyn AsyncRead + Unpin + Send), expected: &MediaRef, first: u8) -> Result<()> {
+async fn drain_checked(
+    reader: &mut (dyn AsyncRead + Unpin + Send),
+    expected: &MediaRef,
+    first: u8,
+) -> Result<()> {
     let mut hash = Sha256::new();
     hash.update([first]);
     let mut bytes = 1u64;
     let mut buffer = vec![0u8; 65536];
     loop {
         let n = reader.read(&mut buffer).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hash.update(&buffer[..n]);
         bytes += n as u64;
     }
-    anyhow::ensure!(bytes == expected.bytes && format!("{:x}", hash.finalize()) == expected.sha256,
-        "independent download did not verify");
+    anyhow::ensure!(
+        bytes == expected.bytes && format!("{:x}", hash.finalize()) == expected.sha256,
+        "independent download did not verify"
+    );
     Ok(())
 }
 
-async fn measured_delete(core: &Arc<Core>, provider: &dyn BackupProvider, fixture: &Run) -> Result<(serde_json::Value, Instant)> {
+async fn measured_delete(
+    core: &Arc<Core>,
+    provider: &dyn BackupProvider,
+    fixture: &Run,
+) -> Result<(serde_json::Value, Instant)> {
     let begin = Instant::now();
     let op = sync_delete::delete(core, &provider.scope().space_id, &fixture.asset_id).await?;
     observe_operation(core, &op, |o| o.payload["local_cleanup_done"] == true).await?;
     let finished = Instant::now();
     let row = observe_operation(core, &op, |o| {
-        o.payload["foreground_elapsed_ms"].is_number() && o.payload["timings"]["foreground"]["total"]["outcome"] == "ok"
-    }).await?;
-    Ok((json!({
-        "native_command_to_local_ms":finished.duration_since(begin).as_millis(),
-        "foreground_elapsed_ms":row.payload["foreground_elapsed_ms"],
-        "initial_queue_ms":row.payload["initial_queue_ms"], "attempt":row.attempt,
-        "phases":row.payload["timings"]["foreground"],
-    }), finished))
+        o.payload["foreground_elapsed_ms"].is_number()
+            && o.payload["timings"]["foreground"]["total"]["outcome"] == "ok"
+    })
+    .await?;
+    Ok((
+        json!({
+            "native_command_to_local_ms":finished.duration_since(begin).as_millis(),
+            "foreground_elapsed_ms":row.payload["foreground_elapsed_ms"],
+            "initial_queue_ms":row.payload["initial_queue_ms"], "attempt":row.attempt,
+            "phases":row.payload["timings"]["foreground"],
+        }),
+        finished,
+    ))
 }
 
 // Interrupted runs can retire only assets with the matching private manifest, captured upload and original receipt.
-async fn cleanup_contention(core: &Arc<Core>, p: &dyn BackupProvider, cfg: &Config, dir: &Path) -> Result<()> {
+async fn cleanup_contention(
+    core: &Arc<Core>,
+    p: &dyn BackupProvider,
+    cfg: &Config,
+    dir: &Path,
+) -> Result<()> {
     let manifest = dir.join("run.json");
-    if !manifest.exists() { return Ok(()); }
+    if !manifest.exists() {
+        return Ok(());
+    }
     let run: Run = serde_json::from_slice(&std::fs::read(manifest)?)?;
-    let id = run.operation_id.as_deref().context("incomplete fixture manifest")?;
+    let id = run
+        .operation_id
+        .as_deref()
+        .context("incomplete fixture manifest")?;
     let op = observe_operation(core, id, |o| o.state == "completed").await?;
     let path = dir.join("input").join("video.mp4");
-    let captured_path = op.payload["capture"]["asset"]["path"].as_str().map(Path::new);
-    anyhow::ensure!(op.kind == "upload" && op.asset_id.as_deref() == Some(&run.asset_id)
-        && op.space_id == p.scope().space_id && captured_path == Some(path.as_path()),
-        "fixture manifest did not match the original captured upload");
+    let captured_path = op.payload["capture"]["asset"]["path"]
+        .as_str()
+        .map(Path::new);
+    anyhow::ensure!(
+        op.kind == "upload"
+            && op.asset_id.as_deref() == Some(&run.asset_id)
+            && op.space_id == p.scope().space_id
+            && captured_path == Some(path.as_path()),
+        "fixture manifest did not match the original captured upload"
+    );
     let receipt: UploadReceipt = serde_json::from_value(op.payload["video_receipt"].clone())?;
-    let remote = op.payload["capture"]["remote"].as_str().context("invalid captured remote")?;
-    let latest = p.read_asset(remote).await?.context("fixture missing from replay")?;
-    let local = core.backup_assets()?.into_iter().find(|a|a.asset_id == run.asset_id).context("missing local fixture row")?;
+    let remote = op.payload["capture"]["remote"]
+        .as_str()
+        .context("invalid captured remote")?;
+    let latest = p
+        .read_asset(remote)
+        .await?
+        .context("fixture missing from replay")?;
+    let local = core
+        .backup_assets()?
+        .into_iter()
+        .find(|a| a.asset_id == run.asset_id)
+        .context("missing local fixture row")?;
     if let Some(current) = local.path.filter(|v| v.exists()) {
         let current = current.canonicalize()?;
         let downloads = cfg.work_directory.join("source-downloads").canonicalize()?;
-        anyhow::ensure!((current.parent() == Some(downloads.as_path()) || path.canonicalize().is_ok_and(|input| input == current))
-            && repository::fingerprint(&current)?.0 == receipt.reference.sha256, "unowned local cleanup target");
+        anyhow::ensure!(
+            (current.parent() == Some(downloads.as_path())
+                || path.canonicalize().is_ok_and(|input| input == current))
+                && repository::fingerprint(&current)?.0 == receipt.reference.sha256,
+            "unowned local cleanup target"
+        );
     }
     if latest.snapshot.deleted {
         let deletion = scheduler::operation(core, &latest.snapshot.operation_id)?;
-        anyhow::ensure!(deletion.space_id == p.scope().space_id && deletion.kind == "delete"
-            && deletion.asset_id.as_deref() == Some(&run.asset_id) && deletion.payload["remote_asset_id"] == remote,
-            "tombstone must belong to this fixture's deletion");
-        observe_operation(core, &deletion.operation_id, |o| o.payload["local_cleanup_done"] == true).await?;
+        anyhow::ensure!(
+            deletion.space_id == p.scope().space_id
+                && deletion.kind == "delete"
+                && deletion.asset_id.as_deref() == Some(&run.asset_id)
+                && deletion.payload["remote_asset_id"] == remote,
+            "tombstone must belong to this fixture's deletion"
+        );
+        observe_operation(core, &deletion.operation_id, |o| {
+            o.payload["local_cleanup_done"] == true
+        })
+        .await?;
         return Ok(());
     }
-    anyhow::ensure!(latest.snapshot.operation_id == id && latest.snapshot.media.as_ref() == Some(&receipt.reference),
-        "refusing to retire a different publication");
+    anyhow::ensure!(
+        latest.snapshot.operation_id == id
+            && latest.snapshot.media.as_ref() == Some(&receipt.reference),
+        "refusing to retire a different publication"
+    );
     measured_delete(core, p, &run).await?;
     Ok(())
 }
@@ -365,21 +494,43 @@ async fn cleanup_contention(core: &Arc<Core>, p: &dyn BackupProvider, cfg: &Conf
 #[ignore = "explicit authorized QA private channel and new synthetic directory; deletes run-owned fixtures"]
 async fn telegram_delete_perf_live_unrelated_transfer() -> Result<()> {
     let cfg: Config = serde_json::from_slice(&std::fs::read(
-        std::env::var_os("YINGQU_TELEGRAM_DELETE_PERF_CONFIG").context("explicit QA config required")?)?)?;
+        std::env::var_os("YINGQU_TELEGRAM_DELETE_PERF_CONFIG")
+            .context("explicit QA config required")?,
+    )?)?;
     let case = std::env::var("YINGQU_TELEGRAM_DELETE_PERF_CASE")?;
     anyhow::ensure!(matches!(case.as_str(), "read100" | "restore" | "upload"));
-    anyhow::ensure!(cfg.work_directory.file_name().and_then(|s| s.to_str()) == Some("telegram-delete-perf-validation")
-        && cfg.input_directory.parent() == Some(&cfg.work_directory)
-        && cfg.source_data_directory.canonicalize()?.parent() == cfg.work_directory.canonicalize()?.parent()
-        && cfg.source_data_directory.file_name().and_then(|s| s.to_str()) == Some("me.disign.yingqu.telegram-validation"));
+    anyhow::ensure!(
+        cfg.work_directory.file_name().and_then(|s| s.to_str())
+            == Some("telegram-delete-perf-validation")
+            && cfg.input_directory.parent() == Some(&cfg.work_directory)
+            && cfg.source_data_directory.canonicalize()?.parent()
+                == cfg.work_directory.canonicalize()?.parent()
+            && cfg
+                .source_data_directory
+                .file_name()
+                .and_then(|s| s.to_str())
+                == Some("me.disign.yingqu.telegram-validation")
+    );
     let small_hash = "b70dff6557209ff24e8dc7e28fa8ca8f895050b1dc0e532184e8e2de405a2219";
     let large_hash = "9516a32b35fc26c443ba7c02812ab5ba69425cd150e1f4e02f8ea57caba8b486";
-    anyhow::ensure!(repository::fingerprint(&cfg.input_directory.join("video.mp4"))?.0 == small_hash);
-    let background_hash = if case == "read100" { large_hash } else { small_hash };
-    anyhow::ensure!(repository::fingerprint(&cfg.input_directory.join("background.mp4"))?.0 == background_hash);
+    anyhow::ensure!(
+        repository::fingerprint(&cfg.input_directory.join("video.mp4"))?.0 == small_hash
+    );
+    let background_hash = if case == "read100" {
+        large_hash
+    } else {
+        small_hash
+    };
+    anyhow::ensure!(
+        repository::fingerprint(&cfg.input_directory.join("background.mp4"))?.0 == background_hash
+    );
     let samples = cfg.work_directory.join("unrelated-transfers");
     let cleanup = std::env::var("YINGQU_TELEGRAM_DELETE_PERF_CLEANUP").as_deref() == Ok("1");
-    if cleanup { anyhow::ensure!(samples.is_dir()); } else { std::fs::create_dir(&samples)?; }
+    if cleanup {
+        anyhow::ensure!(samples.is_dir());
+    } else {
+        std::fs::create_dir(&samples)?;
+    }
     let core = open(&cfg, false)?;
     let result = async {
         if !cleanup {

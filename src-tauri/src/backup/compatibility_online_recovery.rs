@@ -229,18 +229,49 @@ async fn authorized_seal_telegram_evidence() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "explicit authorization to restore the original default after verified recovery"]
-async fn authorized_finalize_recovery_and_sync()->Result<()> {
-    anyhow::ensure!(std::env::var("YINGQU_AUTHORIZED_BACKUP_RECOVERY").as_deref()==Ok("restore-verified-default-sync"),"EXPLICIT_RECOVERY_OPT_IN_REQUIRED");
-    let (path,work)=super::compatibility_online_audit::paths()?;
-    let completed:Vec<Value>=serde_json::from_slice(&std::fs::read(work.join("r2-recovery-completed.private.json"))?)?;
-    let sealed:Value=serde_json::from_slice(&std::fs::read(work.join("telegram-recovery.redacted.json"))?)?;
-    anyhow::ensure!(completed.len()==3&&completed.iter().all(|v|v["sha256_verified"]==true)&&sealed["original_observed_evidence_retained"]==true,"RECOVERY_NOT_VERIFIED");
-    let baseline=rusqlite::Connection::open_with_flags(work.join("before-recovery.sqlite"),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let selected:String=baseline.query_row("SELECT space_id FROM backup_current_space WHERE id=1",[],|r|r.get(0))?;
-    let original_cursor:String=baseline.query_row("SELECT cursor_json FROM telegram_observed_prefix WHERE space_id=?",[&selected],|r|r.get(0))?;
-    let original_cursor:super::telegram_replay::Cursor=serde_json::from_str(&original_cursor)?;
-    let audit:Vec<Value>=serde_json::from_slice(&std::fs::read(work.join("r2-audit.private.json"))?)?;
-    let core=crate::desktop_core::Core::open(&path,work.join("unused-downloads"),"unused-engine".into(),vec![],|_|{})?;
+async fn authorized_finalize_recovery_and_sync() -> Result<()> {
+    anyhow::ensure!(
+        std::env::var("YINGQU_AUTHORIZED_BACKUP_RECOVERY").as_deref()
+            == Ok("restore-verified-default-sync"),
+        "EXPLICIT_RECOVERY_OPT_IN_REQUIRED"
+    );
+    let (path, work) = super::compatibility_online_audit::paths()?;
+    let completed: Vec<Value> = serde_json::from_slice(&std::fs::read(
+        work.join("r2-recovery-completed.private.json"),
+    )?)?;
+    let sealed: Value = serde_json::from_slice(&std::fs::read(
+        work.join("telegram-recovery.redacted.json"),
+    )?)?;
+    anyhow::ensure!(
+        completed.len() == 3
+            && completed.iter().all(|v| v["sha256_verified"] == true)
+            && sealed["original_observed_evidence_retained"] == true,
+        "RECOVERY_NOT_VERIFIED"
+    );
+    let baseline = rusqlite::Connection::open_with_flags(
+        work.join("before-recovery.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let selected: String = baseline.query_row(
+        "SELECT space_id FROM backup_current_space WHERE id=1",
+        [],
+        |r| r.get(0),
+    )?;
+    let original_cursor: String = baseline.query_row(
+        "SELECT cursor_json FROM telegram_observed_prefix WHERE space_id=?",
+        [&selected],
+        |r| r.get(0),
+    )?;
+    let original_cursor: super::telegram_replay::Cursor = serde_json::from_str(&original_cursor)?;
+    let audit: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(work.join("r2-audit.private.json"))?)?;
+    let core = crate::desktop_core::Core::open(
+        &path,
+        work.join("unused-downloads"),
+        "unused-engine".into(),
+        vec![],
+        |_| {},
+    )?;
     let result=async {
         anyhow::ensure!(super::spaces::current_id(&core)?.as_deref()==Some(selected.as_str()),"RECOVERY_SELECTION_CHANGED");
         anyhow::ensure!(!super::spaces::enabled(&core)?,"RECOVERY_EXPECTED_PAUSED_SYNC");
@@ -268,7 +299,8 @@ async fn authorized_finalize_recovery_and_sync()->Result<()> {
         let summary=json!({"sync_enabled":true,"default_provider":"telegram","completed_r2_jobs":3,"unchanged_existing_r2_records":untouched,"original_telegram_cursor_evidence":original_cursor.evidence.len(),"current_telegram_cursor_evidence":cursor.evidence.len(),"pending_operations":unfinished,"integrity_check":"ok","foreign_key_errors":0});
         std::fs::write(work.join("final-recovery.redacted.json"),serde_json::to_vec_pretty(&summary)?)?;println!("{summary}");Ok::<_,anyhow::Error>(())
     }.await;
-    core.shutdown().await;result
+    core.shutdown().await;
+    result
 }
 
 #[derive(Clone)]

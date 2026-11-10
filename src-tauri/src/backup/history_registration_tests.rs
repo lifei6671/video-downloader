@@ -88,7 +88,10 @@ async fn history_registration_queues_only_unbacked_videos_and_keeps_existing_rec
             .unwrap()
             .asset_id
             .is_some());
-        assert_eq!(tasks.iter().find(|t|t.id==task.id).unwrap().revision,task.revision+1);
+        assert_eq!(
+            tasks.iter().find(|t| t.id == task.id).unwrap().revision,
+            task.revision + 1
+        );
     }
     for task in [&album, &failed, &missing] {
         assert!(tasks
@@ -132,12 +135,42 @@ async fn history_registration_queues_only_unbacked_videos_and_keeps_existing_rec
             .all(|o| o.asset_id.as_deref() == Some(new.id.as_str())
                 || o.asset_id == detached.asset_id)
     );
-    assert_eq!(core.asset_transcript(&new.id).unwrap().unwrap().text,"保留历史文案");
-    assert!(core.asset_transcript(detached.asset_id.as_deref().unwrap()).unwrap().is_none(),"a stale source transcript never joins the backup");
-    let operation=&pending.iter().find(|o|o.asset_id.as_deref()==Some(new.id.as_str())).unwrap().operation_id;
-    core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='running' WHERE operation_id=?",[operation])?;Ok(())}).unwrap();
+    assert_eq!(
+        core.asset_transcript(&new.id).unwrap().unwrap().text,
+        "保留历史文案"
+    );
+    assert!(
+        core.asset_transcript(detached.asset_id.as_deref().unwrap())
+            .unwrap()
+            .is_none(),
+        "a stale source transcript never joins the backup"
+    );
+    let operation = &pending
+        .iter()
+        .find(|o| o.asset_id.as_deref() == Some(new.id.as_str()))
+        .unwrap()
+        .operation_id;
+    core.backup_db(|db| {
+        db.execute(
+            "UPDATE backup_operations SET state='running' WHERE operation_id=?",
+            [operation],
+        )?;
+        Ok(())
+    })
+    .unwrap();
     engine.execute_upload(operation).await.unwrap();
-    assert!(engine.provider().read_asset(&new.id).await.unwrap().unwrap().snapshot.transcript.is_some(),"the validated historical transcript is uploaded with its original video");
+    assert!(
+        engine
+            .provider()
+            .read_asset(&new.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .transcript
+            .is_some(),
+        "the validated historical transcript is uploaded with its original video"
+    );
     assert_eq!(core.register_backup_history(&space.space_id).unwrap(), 0);
     let expected = core
         .list()
@@ -175,11 +208,23 @@ async fn history_registration_queues_only_unbacked_videos_and_keeps_existing_rec
 #[tokio::test]
 #[ignore = "explicit opt-in for the protected database copy; no sessions or cloud requests"]
 async fn authorized_history_copy_registration() -> Result<()> {
-    anyhow::ensure!(std::env::var("YINGQU_HISTORY_COPY_VALIDATION").as_deref()==Ok("registration-only"),"EXPLICIT_COPY_OPT_IN_REQUIRED");
-    let work=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().context("repository")?.join(".local/backup-history-recovery");
-    let path=work.join("validation-history.sqlite");
-    anyhow::ensure!(path.is_file(),"AUTHORIZED_COPY_MISSING");
-    let core=Core::open(&path,work.join("unused-downloads"),"unused-engine".into(),vec![],|_|{})?;
+    anyhow::ensure!(
+        std::env::var("YINGQU_HISTORY_COPY_VALIDATION").as_deref() == Ok("registration-only"),
+        "EXPLICIT_COPY_OPT_IN_REQUIRED"
+    );
+    let work = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("repository")?
+        .join(".local/backup-history-recovery");
+    let path = work.join("validation-history.sqlite");
+    anyhow::ensure!(path.is_file(), "AUTHORIZED_COPY_MISSING");
+    let core = Core::open(
+        &path,
+        work.join("unused-downloads"),
+        "unused-engine".into(),
+        vec![],
+        |_| {},
+    )?;
     let result=async {
         let selected=spaces::current_id(&core)?.context("BACKUP_SPACE_NOT_FOUND")?;
         let before=core.list();
@@ -226,7 +271,8 @@ async fn authorized_history_copy_registration() -> Result<()> {
         let summary=serde_json::json!({"registered_history_videos":registered,"preserved_valid_transcripts":expected_texts.len(),"existing_assets_unchanged":true,"existing_operations_unchanged":true,"collection_unchanged":true,"idempotent":true,"cloud_requests":0});
         std::fs::write(work.join("copy-validation.redacted.json"),serde_json::to_vec_pretty(&summary)?)?;println!("{summary}");Ok::<_,anyhow::Error>(())
     }.await;
-    core.shutdown().await;result
+    core.shutdown().await;
+    result
 }
 
 #[tokio::test(start_paused = true)]
@@ -236,18 +282,30 @@ async fn missing_history_file_is_rechecked_without_task_snapshot_changes() {
     let path = task.path.clone().unwrap();
     let bytes = std::fs::read(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
-    f.core.backup_db(|db| {
-        db.execute("INSERT INTO download_tasks(id,snapshot) VALUES(?1,?2)",params![task.id,serde_json::to_string(&task)?])?;
-        Ok(())
-    }).unwrap();
+    f.core
+        .backup_db(|db| {
+            db.execute(
+                "INSERT INTO download_tasks(id,snapshot) VALUES(?1,?2)",
+                params![task.id, serde_json::to_string(&task)?],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     f.core.shutdown().await;
     drop(f.core);
-    let core = Core::open(&f.root.path().join("app.sqlite"),f.root.path().join("downloads"),"unused".into(),vec![], |_| {}).unwrap();
-    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(),0);
-    std::fs::write(&path,bytes).unwrap();
-    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(),0);
+    let core = Core::open(
+        &f.root.path().join("app.sqlite"),
+        f.root.path().join("downloads"),
+        "unused".into(),
+        vec![],
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(), 0);
+    std::fs::write(&path, bytes).unwrap();
+    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(), 0);
     tokio::time::advance(std::time::Duration::from_secs(31)).await;
-    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(),1);
-    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(),0);
+    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(), 1);
+    assert_eq!(core.register_backup_history(&f.space.space_id).unwrap(), 0);
     core.shutdown().await;
 }

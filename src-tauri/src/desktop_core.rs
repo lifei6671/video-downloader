@@ -1,5 +1,8 @@
 use crate::{
-    files::{finalize_album, finalize_album_with, finalize_to, finalize_to_with, validate_album, AlbumFile, Video},
+    files::{
+        finalize_album, finalize_album_with, finalize_to, finalize_to_with, validate_album,
+        AlbumFile, Video,
+    },
     parse_cache,
     python_bridge::PythonBridge,
     resolve_progress::{ResolvePhase, ResolveProgress},
@@ -18,14 +21,14 @@ use std::{
 };
 use tokio::sync::watch;
 use uuid::Uuid;
-#[path = "transcription.rs"]
-pub mod transcription;
-#[path = "task_actions.rs"]
-pub mod task_actions;
-#[path = "redownload.rs"]
-mod redownload;
 #[path = "douyin_author.rs"]
 pub mod douyin_author;
+#[path = "redownload.rs"]
+mod redownload;
+#[path = "task_actions.rs"]
+pub mod task_actions;
+#[path = "transcription.rs"]
+pub mod transcription;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,7 +108,11 @@ impl DownloadProgressCadence {
     fn should_emit(&mut self, event: &Value, at: Instant) -> bool {
         let merging = event["phase"] == "merging";
         let phase_changed = merging && !self.merging;
-        if !phase_changed && self.emitted_at.is_some_and(|last| at.duration_since(last) < Duration::from_secs(1)) {
+        if !phase_changed
+            && self
+                .emitted_at
+                .is_some_and(|last| at.duration_since(last) < Duration::from_secs(1))
+        {
             return false;
         }
         self.emitted_at = Some(at);
@@ -136,7 +143,9 @@ impl YoutubeTransferRate {
             self.sample = Some((at, count));
         }
         let eta = self.speed.filter(|speed| *speed > 0.0).and_then(|speed| {
-            event["total_bytes"].as_u64().or_else(|| event["total_bytes_estimate"].as_u64())
+            event["total_bytes"]
+                .as_u64()
+                .or_else(|| event["total_bytes_estimate"].as_u64())
                 .map(|total| total.saturating_sub(count) as f64 / speed)
                 .filter(|eta| *eta <= 604800.0)
         });
@@ -155,12 +164,11 @@ fn file_missing(task: &Task) -> bool {
                 || task.files.iter().any(|file| {
                     !std::fs::symlink_metadata(path.join(&file.filename)).is_ok_and(|m| {
                         m.is_file() && !m.file_type().is_symlink() && m.len() == file.bytes
-                    })
-                        || file.video.as_ref().is_some_and(|video| {
-                            !std::fs::symlink_metadata(path.join(&video.filename)).is_ok_and(|m| {
-                                m.is_file() && !m.file_type().is_symlink() && m.len() == video.bytes
-                            })
+                    }) || file.video.as_ref().is_some_and(|video| {
+                        !std::fs::symlink_metadata(path.join(&video.filename)).is_ok_and(|m| {
+                            m.is_file() && !m.file_type().is_symlink() && m.len() == video.bytes
                         })
+                    })
                 })
         }
     })
@@ -181,8 +189,11 @@ fn same_download_variant(old: &Value, video: &Value) -> bool {
 
 fn same_replacement_variant(old: &Value, video: &Value) -> bool {
     same_download_variant(old, video)
-        && (video["kind"] == "image_album" || video["platform"] == "telegram"
-            || old["selected_format_id"].as_str().zip(video["selected_format_id"].as_str())
+        && (video["kind"] == "image_album"
+            || video["platform"] == "telegram"
+            || old["selected_format_id"]
+                .as_str()
+                .zip(video["selected_format_id"].as_str())
                 .is_some_and(|(old, new)| old == new))
 }
 
@@ -231,7 +242,15 @@ struct Active {
     done: watch::Receiver<bool>,
 }
 fn running_downloads(inner: &Inner) -> usize {
-    inner.downloads.iter().filter(|id| inner.tasks.iter().any(|task| &task.id == *id && task.error.as_deref() != Some("TELEGRAM_RECONNECTING"))).count()
+    inner
+        .downloads
+        .iter()
+        .filter(|id| {
+            inner.tasks.iter().any(|task| {
+                &task.id == *id && task.error.as_deref() != Some("TELEGRAM_RECONNECTING")
+            })
+        })
+        .count()
 }
 
 struct Inner {
@@ -241,7 +260,7 @@ struct Inner {
     backup_started: bool,
     telegram_recovery_epoch: u64,
     backup_wake: Arc<tokio::sync::Notify>,
-    backup_restores: HashMap<String,crate::backup::restore::Shared>,
+    backup_restores: HashMap<String, crate::backup::restore::Shared>,
     db: Connection,
     tasks: Vec<Task>,
     settings: Settings,
@@ -369,7 +388,12 @@ fn publish(inner: &mut Inner, mut task: Task, emit: &dyn Fn(TaskEvent)) -> Resul
 fn persist_published(tx: &Connection, task: &mut Task) -> Result<()> {
     crate::backup::repository::associate(tx, task)?;
     persist(tx, task)?;
-    let insertion_id = tx.query_row("SELECT rowid FROM download_tasks WHERE id=?", [&task.id], |row| row.get(0))
+    let insertion_id = tx
+        .query_row(
+            "SELECT rowid FROM download_tasks WHERE id=?",
+            [&task.id],
+            |row| row.get(0),
+        )
         .context("DATABASE_ERROR")?;
     if task.insertion_id != insertion_id {
         task.insertion_id = insertion_id;
@@ -378,7 +402,9 @@ fn persist_published(tx: &Connection, task: &mut Task) -> Result<()> {
     Ok(())
 }
 fn emit_published(inner: &mut Inner, task: Task, emit: &dyn Fn(TaskEvent)) {
-    if task.status==Status::Completed {inner.backup_wake.notify_waiters();}
+    if task.status == Status::Completed {
+        inner.backup_wake.notify_waiters();
+    }
     if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
         *old = task.clone();
     } else {
@@ -387,7 +413,11 @@ fn emit_published(inner: &mut Inner, task: Task, emit: &dyn Fn(TaskEvent)) {
     emit(TaskEvent::Updated(Box::new(task)));
 }
 
-fn restore_original_task(inner: &mut Inner, attempt: &Task, emit: &dyn Fn(TaskEvent)) -> Result<bool> {
+fn restore_original_task(
+    inner: &mut Inner,
+    attempt: &Task,
+    emit: &dyn Fn(TaskEvent),
+) -> Result<bool> {
     let Some(mut original) = redownload::original(&inner.db, &attempt.id)? else {
         return Ok(false);
     };
@@ -464,7 +494,13 @@ impl Core {
         transcription::recover(&db)?;
         let settings = settings::load(&db, directory)?;
         let telegram_accounts = crate::telegram_accounts::TelegramAccounts::load(&db)?;
-        telegram_accounts.configure_proxy(settings.profiles.iter().find(|p| p.platform == "telegram").cloned());
+        telegram_accounts.configure_proxy(
+            settings
+                .profiles
+                .iter()
+                .find(|p| p.platform == "telegram")
+                .cloned(),
+        );
         let mut tasks = {
             let mut query =
                 db.prepare("SELECT rowid,snapshot FROM download_tasks ORDER BY rowid DESC")?;
@@ -654,9 +690,9 @@ impl Core {
                     Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
                     Err(_) => bail!("DATABASE_ERROR"),
                 }
-                let tx=db.transaction()?;
-                crate::backup::repository::associate(&tx,task)?;
-                persist(&tx,task)?;
+                let tx = db.transaction()?;
+                crate::backup::repository::associate(&tx, task)?;
+                persist(&tx, task)?;
                 tx.commit()?;
             }
             // Also restore the cache flag if a crash occurred between the video
@@ -684,24 +720,26 @@ impl Core {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (id, path) in staging {
-            if tasks.iter().any(|task| task.id == id && task.error.as_deref() == Some("REDOWNLOAD_RESTORE_FAILED")) {
+            if tasks.iter().any(|task| {
+                task.id == id && task.error.as_deref() == Some("REDOWNLOAD_RESTORE_FAILED")
+            }) {
                 continue;
             }
             cleanup_staging(&db, &id, Path::new(&path))?;
         }
-        let backup_wake=Arc::new(tokio::sync::Notify::new());
+        let backup_wake = Arc::new(tokio::sync::Notify::new());
         let author_paused = douyin_author::paused(&db)?;
         Ok(Arc::new(Self {
             author_download_finished: Default::default(),
             telegram_accounts,
             task_actions: Mutex::default(),
             delete_activity: Default::default(),
-            backup_wake:backup_wake.clone(),
-            backup_window_wake:Default::default(),
-            delete_queue_wake:tokio::sync::Notify::new(),
-            deferred_pulls:Default::default(),
-            backup_foreground:std::sync::atomic::AtomicBool::new(true),
-            backup_active_probes:Mutex::new(HashSet::new()),
+            backup_wake: backup_wake.clone(),
+            backup_window_wake: Default::default(),
+            delete_queue_wake: tokio::sync::Notify::new(),
+            deferred_pulls: Default::default(),
+            backup_foreground: std::sync::atomic::AtomicBool::new(true),
+            backup_active_probes: Mutex::new(HashSet::new()),
             backup_config_lock: tokio::sync::Mutex::new(()),
             backup_restore_lock: tokio::sync::Mutex::new(()),
             restore_file_locks: Mutex::default(),
@@ -732,7 +770,10 @@ impl Core {
             args,
             runtime_directory: db_path.parent().context("IO_ERROR")?.join("runtime"),
             backup_file_presence: Mutex::default(),
-            backup_display_db: Mutex::new(Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?),
+            backup_display_db: Mutex::new(Connection::open_with_flags(
+                db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?),
             #[cfg(test)]
             telegram_source: Mutex::new(None),
             #[cfg(test)]
@@ -774,9 +815,18 @@ impl Core {
         if !enabled {
             return Ok(0);
         }
-        let generation: i64 = inner.db.query_row("SELECT generation FROM backup_history_generation WHERE id=1", [], |r| r.get(0))?;
+        let generation: i64 = inner.db.query_row(
+            "SELECT generation FROM backup_history_generation WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
         let mut registered = self.backup_history_registered.lock().unwrap();
-        if registered.get(space).is_some_and(|(saved, retry)| *saved == generation && retry.is_none_or(|deadline| tokio::time::Instant::now() < deadline)) { return Ok(0); }
+        if registered.get(space).is_some_and(|(saved, retry)| {
+            *saved == generation
+                && retry.is_none_or(|deadline| tokio::time::Instant::now() < deadline)
+        }) {
+            return Ok(0);
+        }
         let detached = {
             let mut q=inner.db.prepare("SELECT a.asset_id FROM media_assets a WHERE a.asset_state='active' AND NOT EXISTS(SELECT 1 FROM backup_space_assets m WHERE m.local_asset_id=a.asset_id) AND NOT EXISTS(SELECT 1 FROM backup_operations o WHERE o.asset_id=a.asset_id) AND NOT EXISTS(SELECT 1 FROM asset_hidden_history h WHERE h.asset_id=a.asset_id)")?;
             let rows = q
@@ -856,8 +906,19 @@ impl Core {
                 *old = task.clone();
             }
         }
-        let generation = inner.db.query_row("SELECT generation FROM backup_history_generation WHERE id=1", [], |r| r.get(0))?;
-        registered.insert(space.to_owned(), (generation, missing_file.then(|| tokio::time::Instant::now() + std::time::Duration::from_secs(30))));
+        let generation = inner.db.query_row(
+            "SELECT generation FROM backup_history_generation WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
+        registered.insert(
+            space.to_owned(),
+            (
+                generation,
+                missing_file
+                    .then(|| tokio::time::Instant::now() + std::time::Duration::from_secs(30)),
+            ),
+        );
         drop(registered);
         drop(inner);
         for task in &updated {
@@ -872,30 +933,54 @@ impl Core {
         self.backup_db(crate::backup::repository::device_id)
     }
 
-    pub(crate) fn backup_db<T>(&self, action: impl FnOnce(&Connection)->Result<T>) -> Result<T> {
+    pub(crate) fn backup_db<T>(&self, action: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         action(&self.inner.lock().unwrap().db)
     }
 
-    pub(crate) fn backup_display_db<T>(&self, action: impl FnOnce(&Connection)->Result<T>) -> Result<T> {
+    pub(crate) fn backup_display_db<T>(
+        &self,
+        action: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
         action(&self.backup_display_db.lock().unwrap())
     }
 
-    pub fn asset_transcript(&self, id: &str) -> Result<Option<crate::backup::model::AssetTranscript>> {
+    pub fn asset_transcript(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::backup::model::AssetTranscript>> {
         crate::backup::repository::transcript(&self.inner.lock().unwrap().db, id)
     }
 
     pub async fn verify_backup_asset(&self, id: &str) -> Result<()> {
-        let (_sender,cancel)=watch::channel(false);
-        self.verify_backup_asset_cancelable(id,cancel).await
+        let (_sender, cancel) = watch::channel(false);
+        self.verify_backup_asset_cancelable(id, cancel).await
     }
-    pub(crate) async fn verify_backup_asset_cancelable(&self, id: &str, extra:watch::Receiver<bool>) -> Result<()> {
+    pub(crate) async fn verify_backup_asset_cancelable(
+        &self,
+        id: &str,
+        extra: watch::Receiver<bool>,
+    ) -> Result<()> {
         let (path, cancel) = {
             let inner = self.inner.lock().unwrap();
-            let asset = crate::backup::repository::asset(&inner.db, id)?.context("BACKUP_ASSET_NOT_FOUND")?;
-            (asset.path.context("FILE_MISSING")?, inner.backup_cancel.subscribe())
+            let asset = crate::backup::repository::asset(&inner.db, id)?
+                .context("BACKUP_ASSET_NOT_FOUND")?;
+            (
+                asset.path.context("FILE_MISSING")?,
+                inner.backup_cancel.subscribe(),
+            )
         };
-        let (hash, source) = tokio::task::spawn_blocking(move || crate::backup::repository::fingerprint_with_cancel(&path, || *cancel.borrow() || *extra.borrow() || extra.has_changed().is_err())).await??;
-        crate::backup::repository::save_fingerprint(&self.inner.lock().unwrap().db, id, &hash, &source)
+        let (hash, source) = tokio::task::spawn_blocking(move || {
+            crate::backup::repository::fingerprint_with_cancel(&path, || {
+                *cancel.borrow() || *extra.borrow() || extra.has_changed().is_err()
+            })
+        })
+        .await??;
+        crate::backup::repository::save_fingerprint(
+            &self.inner.lock().unwrap().db,
+            id,
+            &hash,
+            &source,
+        )
     }
 
     pub fn start_backup_service(self: &Arc<Self>) {
@@ -913,20 +998,55 @@ impl Core {
         let recovery_core = self.clone();
         let mut recovery_stop = inner.backup_cancel.subscribe();
         let recovery_epoch = inner.telegram_recovery_epoch;
-        let recovery_binding = self.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download);
+        let recovery_binding = self
+            .telegram_accounts
+            .binding(crate::telegram_accounts::Purpose::Download);
         inner.workers.push(tokio::spawn(async move {
             loop {
-                let current = recovery_core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download);
-                if !Arc::ptr_eq(&recovery_binding.session, &current.session) || recovery_core.inner.lock().unwrap().telegram_recovery_epoch != recovery_epoch { break; }
-                if *recovery_stop.borrow() { break; }
-                let candidates: Vec<_> = recovery_core.inner.lock().unwrap().tasks.iter().filter(|task|
-                    task.status == Status::Failed && task.telegram_link.is_some()
-                    && task.error.as_deref().is_some_and(crate::telegram_reconnect::network_error)
-                ).cloned().collect();
+                let current = recovery_core
+                    .telegram_accounts
+                    .binding(crate::telegram_accounts::Purpose::Download);
+                if !Arc::ptr_eq(&recovery_binding.session, &current.session)
+                    || recovery_core.inner.lock().unwrap().telegram_recovery_epoch != recovery_epoch
+                {
+                    break;
+                }
+                if *recovery_stop.borrow() {
+                    break;
+                }
+                let candidates: Vec<_> = recovery_core
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .tasks
+                    .iter()
+                    .filter(|task| {
+                        task.status == Status::Failed
+                            && task.telegram_link.is_some()
+                            && task
+                                .error
+                                .as_deref()
+                                .is_some_and(crate::telegram_reconnect::network_error)
+                    })
+                    .cloned()
+                    .collect();
                 for task in candidates {
-                    if *recovery_stop.borrow() { break; }
-                    let format = task.video.as_ref().and_then(|v| v["selected_format_id"].as_str()).map(str::to_owned);
-                    let _ = recovery_core.resolve_task(task.telegram_link.unwrap(), Some(&task.id), "grammers".into(), format, task.download_requested, Some((task.revision, recovery_epoch)));
+                    if *recovery_stop.borrow() {
+                        break;
+                    }
+                    let format = task
+                        .video
+                        .as_ref()
+                        .and_then(|v| v["selected_format_id"].as_str())
+                        .map(str::to_owned);
+                    let _ = recovery_core.resolve_task(
+                        task.telegram_link.unwrap(),
+                        Some(&task.id),
+                        "grammers".into(),
+                        format,
+                        task.download_requested,
+                        Some((task.revision, recovery_epoch)),
+                    );
                 }
                 tokio::select! { biased;
                     _ = recovery_stop.wait_for(|v| *v) => break,
@@ -1031,19 +1151,41 @@ impl Core {
         inner.telegram_recovery_epoch = inner.telegram_recovery_epoch.wrapping_add(1);
     }
 
-    pub fn wake_backup(&self) {self.backup_wake.notify_waiters();}
+    pub fn wake_backup(&self) {
+        self.backup_wake.notify_waiters();
+    }
     pub fn current_delete_activity(&self) -> Option<DeleteActivity> {
-        self.delete_activity.lock().expect("delete activity lock poisoned").clone()
+        self.delete_activity
+            .lock()
+            .expect("delete activity lock poisoned")
+            .clone()
     }
 
-    pub(crate) fn replace_delete_activity(&self, activity: Option<DeleteActivity>) -> Option<DeleteActivity> {
-        let previous = std::mem::replace(&mut *self.delete_activity.lock().expect("delete activity lock poisoned"), activity.clone());
+    pub(crate) fn replace_delete_activity(
+        &self,
+        activity: Option<DeleteActivity>,
+    ) -> Option<DeleteActivity> {
+        let previous = std::mem::replace(
+            &mut *self
+                .delete_activity
+                .lock()
+                .expect("delete activity lock poisoned"),
+            activity.clone(),
+        );
         (self.emit)(TaskEvent::DeleteActivity(activity));
         previous
     }
 
-    pub fn set_backup_foreground(&self,foreground:bool) {self.backup_foreground.store(foreground,std::sync::atomic::Ordering::Relaxed);if foreground {self.backup_window_wake.notify_waiters();}}
-    pub(crate) fn backup_cancellation(&self)->watch::Receiver<bool> {self.inner.lock().unwrap().backup_cancel.subscribe()}
+    pub fn set_backup_foreground(&self, foreground: bool) {
+        self.backup_foreground
+            .store(foreground, std::sync::atomic::Ordering::Relaxed);
+        if foreground {
+            self.backup_window_wake.notify_waiters();
+        }
+    }
+    pub(crate) fn backup_cancellation(&self) -> watch::Receiver<bool> {
+        self.inner.lock().unwrap().backup_cancel.subscribe()
+    }
 
     pub(crate) async fn probe_video_metadata(
         &self,
@@ -1070,15 +1212,26 @@ impl Core {
         crate::local_media::extract(source, &self.runtime_directory, cancel).await
     }
 
-    pub async fn ensure_local_video(self:&Arc<Self>,asset_id:&str)->Result<PathBuf> {
-        let mut receiver={
-            let mut inner=self.inner.lock().unwrap();
-            if inner.closing {bail!("CANCELED");}
-            if let Some(shared)=inner.backup_restores.get(asset_id) {shared.result.clone()} else {
-                let (sender,receiver)=watch::channel(None);
-                let (cancel,mut cancellation)=watch::channel(false);
-                inner.backup_restores.insert(asset_id.into(),crate::backup::restore::Shared{result:receiver.clone(),cancel});
-                let core=self.clone();let id=asset_id.to_owned();
+    pub async fn ensure_local_video(self: &Arc<Self>, asset_id: &str) -> Result<PathBuf> {
+        let mut receiver = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.closing {
+                bail!("CANCELED");
+            }
+            if let Some(shared) = inner.backup_restores.get(asset_id) {
+                shared.result.clone()
+            } else {
+                let (sender, receiver) = watch::channel(None);
+                let (cancel, mut cancellation) = watch::channel(false);
+                inner.backup_restores.insert(
+                    asset_id.into(),
+                    crate::backup::restore::Shared {
+                        result: receiver.clone(),
+                        cancel,
+                    },
+                );
+                let core = self.clone();
+                let id = asset_id.to_owned();
                 inner.workers.push(tokio::spawn(async move {
                     let outcome=tokio::select!{_=cancellation.changed()=>Err(anyhow::anyhow!("CANCELED")),result=crate::backup::restore::ensure_current(&core,&id)=>result}.map_err(|e|e.to_string());
                     if let Err(error)=&outcome {
@@ -1086,10 +1239,16 @@ impl Core {
                     }
                     sender.send_replace(Some(outcome));
                     core.inner.lock().unwrap().backup_restores.remove(&id);
-                }));receiver
+                }));
+                receiver
             }
         };
-        let result=receiver.wait_for(|r|r.is_some()).await.context("CANCELED")?.clone().context("CANCELED")?;
+        let result = receiver
+            .wait_for(|r| r.is_some())
+            .await
+            .context("CANCELED")?
+            .clone()
+            .context("CANCELED")?;
         result.map_err(anyhow::Error::msg)
     }
 
@@ -1109,36 +1268,93 @@ impl Core {
         lock.lock_owned().await
     }
 
-    pub fn cancel_asset_restore(&self,id:&str)->Result<()> {
-        crate::backup::restore::cancel(self,id)?;
-        if let Some(shared)=self.inner.lock().unwrap().backup_restores.get(id){shared.cancel.send_replace(true);}
+    pub fn cancel_asset_restore(&self, id: &str) -> Result<()> {
+        crate::backup::restore::cancel(self, id)?;
+        if let Some(shared) = self.inner.lock().unwrap().backup_restores.get(id) {
+            shared.cancel.send_replace(true);
+        }
         Ok(())
     }
-    pub async fn cancel_asset_transcription(&self,id:&str)->Result<()> {
-        let operation={let inner=self.inner.lock().unwrap();inner.transcription.as_ref().filter(|a| a.snapshot.task_id==id || inner.tasks.iter().any(|t|t.id==a.snapshot.task_id && t.asset_id.as_deref()==Some(id))).map(|a|(a.snapshot.task_id.clone(),a.snapshot.operation_id.clone()))};
-        if let Some((task,operation))=operation {self.cancel_transcription(&task,&operation).await?;}
+    pub async fn cancel_asset_transcription(&self, id: &str) -> Result<()> {
+        let operation = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .transcription
+                .as_ref()
+                .filter(|a| {
+                    a.snapshot.task_id == id
+                        || inner.tasks.iter().any(|t| {
+                            t.id == a.snapshot.task_id && t.asset_id.as_deref() == Some(id)
+                        })
+                })
+                .map(|a| (a.snapshot.task_id.clone(), a.snapshot.operation_id.clone()))
+        };
+        if let Some((task, operation)) = operation {
+            self.cancel_transcription(&task, &operation).await?;
+        }
         Ok(())
     }
-    pub(crate) fn mark_asset_missing(&self,id:&str)->Result<()> {
-        let mut inner=self.inner.lock().unwrap();
-        let mut tasks:Vec<Task>=inner.tasks.iter().filter(|t|t.asset_id.as_deref()==Some(id)).cloned().collect();
-        let tx=inner.db.unchecked_transaction()?;
-        tx.execute("UPDATE asset_local_files SET local_state='missing',path=NULL WHERE asset_id=?",[id])?;
-        for task in &mut tasks {task.path=None;task.file_missing=true;task.revision+=1;persist(&tx,task)?;}
+    pub(crate) fn mark_asset_missing(&self, id: &str) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut tasks: Vec<Task> = inner
+            .tasks
+            .iter()
+            .filter(|t| t.asset_id.as_deref() == Some(id))
+            .cloned()
+            .collect();
+        let tx = inner.db.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE asset_local_files SET local_state='missing',path=NULL WHERE asset_id=?",
+            [id],
+        )?;
+        for task in &mut tasks {
+            task.path = None;
+            task.file_missing = true;
+            task.revision += 1;
+            persist(&tx, task)?;
+        }
         tx.commit()?;
-        for task in tasks {if let Some(old)=inner.tasks.iter_mut().find(|t|t.id==task.id){*old=task.clone();}(self.emit)(TaskEvent::Updated(Box::new(task)));}
+        for task in tasks {
+            if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
+                *old = task.clone();
+            }
+            (self.emit)(TaskEvent::Updated(Box::new(task)));
+        }
         Ok(())
     }
-    pub(crate) fn commit_asset_file(&self,id:&str,path:&Path,hash:&str,source:&Value)->Result<()> {
-        let mut inner=self.inner.lock().unwrap();
-        let mut tasks:Vec<Task>=inner.tasks.iter().filter(|t|t.asset_id.as_deref()==Some(id)).cloned().collect();
-        let tx=inner.db.unchecked_transaction()?;
+    pub(crate) fn commit_asset_file(
+        &self,
+        id: &str,
+        path: &Path,
+        hash: &str,
+        source: &Value,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut tasks: Vec<Task> = inner
+            .tasks
+            .iter()
+            .filter(|t| t.asset_id.as_deref() == Some(id))
+            .cloned()
+            .collect();
+        let tx = inner.db.unchecked_transaction()?;
         tx.execute("UPDATE asset_local_files SET path=?2,bytes=?3,sha256=?4,source_json=?5,local_state='present',verified_at=unixepoch() WHERE asset_id=?1",params![id,path.to_string_lossy(),source["size"].as_i64().context("BACKUP_INVALID_SIZE")?,hash,source.to_string()])?;
-        for task in &mut tasks {task.path=Some(path.to_owned());task.file_missing=false;task.revision+=1;persist(&tx,task)?;}
-        let transcripts=transcription::rebind_asset_source(&tx,id,hash,source)?;
+        for task in &mut tasks {
+            task.path = Some(path.to_owned());
+            task.file_missing = false;
+            task.revision += 1;
+            persist(&tx, task)?;
+        }
+        let transcripts = transcription::rebind_asset_source(&tx, id, hash, source)?;
         tx.commit()?;
-        for snapshot in transcripts {(self.emit)(TaskEvent::Transcription(Box::new(snapshot.summary())));}
-        for task in tasks {if let Some(old)=inner.tasks.iter_mut().find(|t|t.id==task.id){*old=task.clone();}(self.emit)(TaskEvent::Updated(Box::new(task)));}
+        for snapshot in transcripts {
+            (self.emit)(TaskEvent::Transcription(Box::new(snapshot.summary())));
+        }
+        for task in tasks {
+            if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
+                *old = task.clone();
+            }
+            (self.emit)(TaskEvent::Updated(Box::new(task)));
+        }
         Ok(())
     }
     pub fn settings(&self) -> Settings {
@@ -1182,7 +1398,9 @@ impl Core {
         {
             bail!("INVALID_INPUT");
         }
-        if variant.as_ref().is_some_and(|v| !matches!(v.as_str(), "cpu" | "cuda"))
+        if variant
+            .as_ref()
+            .is_some_and(|v| !matches!(v.as_str(), "cpu" | "cuda"))
             || (variant.is_some() && tool.as_deref() != Some("fun-asr-nano"))
         {
             bail!("INVALID_INPUT");
@@ -1210,7 +1428,9 @@ impl Core {
                     let stage = if let Some(tool) = tool {
                         std::fs::create_dir_all(&core.runtime_directory).context("IO_ERROR")?;
                         rollback = Some(crate::runtime_dependencies::InstallRollback::capture(
-                            &core.runtime_directory, &tool, variant.as_deref(),
+                            &core.runtime_directory,
+                            &tool,
+                            variant.as_deref(),
                         )?);
                         let stage = tempfile::Builder::new()
                             .prefix(".install-")
@@ -1246,7 +1466,9 @@ impl Core {
                             if let Err(error) = rollback.restore(prepared_stage.path()) {
                                 // Preserve recoverable backups rather than deleting them
                                 // when an OS error prevents restoration.
-                                if let Some(stage) = stage { let _ = stage.keep(); }
+                                if let Some(stage) = stage {
+                                    let _ = stage.keep();
+                                }
                                 return Err(error);
                             }
                         }
@@ -1275,8 +1497,14 @@ impl Core {
     }
     pub fn author_avatar(&self, id: &str) -> Result<Vec<u8>> {
         let inner = self.inner.lock().unwrap();
-        let video = inner.tasks.iter().find(|task| task.id == id)
-            .context("TASK_NOT_FOUND")?.video.as_ref().context("FILE_MISSING")?;
+        let video = inner
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .context("TASK_NOT_FOUND")?
+            .video
+            .as_ref()
+            .context("FILE_MISSING")?;
         parse_cache::avatar(&inner.db, video)
     }
     pub fn export_cover(&self, id: &str) -> Result<(String, Vec<u8>)> {
@@ -1304,16 +1532,29 @@ impl Core {
         );
         Ok((filename, body))
     }
-    pub async fn save_profile_with_network(&self, update: settings::ProfileUpdate) -> Result<Settings> {
+    pub async fn save_profile_with_network(
+        &self,
+        update: settings::ProfileUpdate,
+    ) -> Result<Settings> {
         settings::validate_profile_update(&self.settings(), &update)?;
-        let network = if update.platform == "telegram" && (update.proxy.is_some() || update.bypass_proxy.is_some()) {
+        let network = if update.platform == "telegram"
+            && (update.proxy.is_some() || update.bypass_proxy.is_some())
+        {
             Some(self.telegram_accounts.network_sessions()?)
-        } else { None };
+        } else {
+            None
+        };
         let changed = if network.is_some() {
             let settings = self.settings();
-            let current = settings.profiles.iter().find(|p| p.platform == "telegram").context("CONFIG_INVALID")?;
+            let current = settings
+                .profiles
+                .iter()
+                .find(|p| p.platform == "telegram")
+                .context("CONFIG_INVALID")?;
             let normalized = |value: &str| -> Result<Option<url::Url>> {
-                if value.is_empty() { return Ok(None); }
+                if value.is_empty() {
+                    return Ok(None);
+                }
                 let (mut proxy, _) = settings::parse_proxy("telegram", value)?;
                 proxy.set_path("/");
                 Ok(Some(proxy))
@@ -1326,15 +1567,25 @@ impl Core {
                 normalized(settings::profile_proxy(current)?.as_deref().unwrap_or(""))?
             };
             // An unreadable old credential must not prevent replacing or clearing it.
-            match settings::effective_proxy(current).and_then(|current| normalized(current.as_deref().unwrap_or(""))) {
+            match settings::effective_proxy(current)
+                .and_then(|current| normalized(current.as_deref().unwrap_or("")))
+            {
                 Ok(current) => requested != current,
                 Err(_) => true,
             }
-        } else { false };
-        if !changed { return self.save_profile(update); }
-        let network = network.as_ref().expect("changed Telegram proxy owns its snapshot");
+        } else {
+            false
+        };
+        if !changed {
+            return self.save_profile(update);
+        }
+        let network = network
+            .as_ref()
+            .expect("changed Telegram proxy owns its snapshot");
         let mut paused = Vec::with_capacity(network.sessions.len());
-        for session in &network.sessions { paused.push(session.pause_network().await?); }
+        for session in &network.sessions {
+            paused.push(session.pause_network().await?);
+        }
         // Guards keep connection admission and state locked through persistence.
         self.save_profile(update)
     }
@@ -1342,7 +1593,13 @@ impl Core {
         let mut inner = self.inner.lock().unwrap();
         let Inner { db, settings, .. } = &mut *inner;
         let result = settings::save_profile(db, settings, update);
-        self.telegram_accounts.configure_proxy(settings.profiles.iter().find(|p| p.platform == "telegram").cloned());
+        self.telegram_accounts.configure_proxy(
+            settings
+                .profiles
+                .iter()
+                .find(|p| p.platform == "telegram")
+                .cloned(),
+        );
         result?;
         Ok(settings.clone())
     }
@@ -1365,9 +1622,17 @@ impl Core {
     pub fn set_filename_template(&self, template: String) -> Result<Settings> {
         crate::naming::validate(&template)?;
         let mut inner = self.inner.lock().unwrap();
-        inner.db.execute("INSERT INTO app_settings(id,directory,filename_template) VALUES(1,?1,?2)
+        inner
+            .db
+            .execute(
+                "INSERT INTO app_settings(id,directory,filename_template) VALUES(1,?1,?2)
             ON CONFLICT(id) DO UPDATE SET filename_template=excluded.filename_template",
-            params![inner.settings.download_directory.to_string_lossy(), template]).context("DATABASE_ERROR")?;
+                params![
+                    inner.settings.download_directory.to_string_lossy(),
+                    template
+                ],
+            )
+            .context("DATABASE_ERROR")?;
         inner.settings.filename_template = template;
         Ok(inner.settings.clone())
     }
@@ -1378,11 +1643,25 @@ impl Core {
 
     pub(crate) fn resolve_progress(&self, id: &str, phase: ResolvePhase) {
         let mut inner = self.inner.lock().unwrap();
-        if inner.closing { return; }
-        let Some(task) = inner.tasks.iter_mut().find(|task| task.id == id) else { return; };
-        if task.status != Status::Parsing || task.canceling { return; }
-        if task.resolve_progress.as_ref().is_some_and(|progress| progress.phase == phase) { return; }
-        task.resolve_progress.get_or_insert_with(|| ResolveProgress::new(phase)).advance(phase);
+        if inner.closing {
+            return;
+        }
+        let Some(task) = inner.tasks.iter_mut().find(|task| task.id == id) else {
+            return;
+        };
+        if task.status != Status::Parsing || task.canceling {
+            return;
+        }
+        if task
+            .resolve_progress
+            .as_ref()
+            .is_some_and(|progress| progress.phase == phase)
+        {
+            return;
+        }
+        task.resolve_progress
+            .get_or_insert_with(|| ResolveProgress::new(phase))
+            .advance(phase);
         task.revision += 1;
         (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
     }
@@ -1470,8 +1749,21 @@ impl Core {
                     .context("INVALID_ENGINE_RESULT")?;
             video.validate()?;
             (
-                if video.platform == "telegram" { task.telegram_link.clone().unwrap_or(parse_cache::telegram_source(&inner.db, task.video.as_ref().unwrap())?) } else { video.canonical_url },
-                if video.platform == "telegram" { "grammers".into() } else { video.resolver },
+                if video.platform == "telegram" {
+                    task.telegram_link
+                        .clone()
+                        .unwrap_or(parse_cache::telegram_source(
+                            &inner.db,
+                            task.video.as_ref().unwrap(),
+                        )?)
+                } else {
+                    video.canonical_url
+                },
+                if video.platform == "telegram" {
+                    "grammers".into()
+                } else {
+                    video.resolver
+                },
                 task.video.as_ref().unwrap()["selected_format_id"]
                     .as_str()
                     .map(str::to_owned),
@@ -1490,10 +1782,11 @@ impl Core {
         if !matches!(
             task.status,
             Status::Completed | Status::Failed | Status::Canceled
-        ) || task.error.as_deref() == Some("REDOWNLOAD_RESTORE_FAILED") || inner
-            .transcription
-            .as_ref()
-            .is_some_and(|a| a.snapshot.task_id == id)
+        ) || task.error.as_deref() == Some("REDOWNLOAD_RESTORE_FAILED")
+            || inner
+                .transcription
+                .as_ref()
+                .is_some_and(|a| a.snapshot.task_id == id)
             || inner.active.contains_key(id)
             || inner.downloads.contains(id)
         {
@@ -1504,7 +1797,12 @@ impl Core {
     }
 
     pub fn clear_history(&self, platform: Option<&str>) -> Result<Vec<String>> {
-        if platform.is_some_and(|p| !matches!(p, "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram")) {
+        if platform.is_some_and(|p| {
+            !matches!(
+                p,
+                "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram"
+            )
+        }) {
             bail!("CONFIG_INVALID");
         }
         let mut inner = self.inner.lock().unwrap();
@@ -1538,16 +1836,30 @@ impl Core {
     }
 
     fn remove_history_records(&self, inner: &mut Inner, ids: Vec<String>) -> Result<Vec<String>> {
-        if ids.is_empty() { return Ok(ids); }
+        if ids.is_empty() {
+            return Ok(ids);
+        }
         self.remove_history_records_with(inner, ids, None, |_| Ok(()))
     }
 
     pub(crate) fn finish_asset_deletion(&self, asset: &str, operation: &str) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        let tasks: Vec<_> = inner.tasks.iter().filter(|task| task.asset_id.as_deref() == Some(asset)).collect();
-        if tasks.iter().any(|task| !matches!(task.status, Status::Completed | Status::Failed | Status::Canceled)
-            || inner.active.contains_key(&task.id) || inner.downloads.contains(&task.id)
-            || inner.transcription.as_ref().is_some_and(|active| active.snapshot.task_id == task.id)) {
+        let tasks: Vec<_> = inner
+            .tasks
+            .iter()
+            .filter(|task| task.asset_id.as_deref() == Some(asset))
+            .collect();
+        if tasks.iter().any(|task| {
+            !matches!(
+                task.status,
+                Status::Completed | Status::Failed | Status::Canceled
+            ) || inner.active.contains_key(&task.id)
+                || inner.downloads.contains(&task.id)
+                || inner
+                    .transcription
+                    .as_ref()
+                    .is_some_and(|active| active.snapshot.task_id == task.id)
+        }) {
             bail!("TASK_BUSY");
         }
         let ids = tasks.into_iter().map(|task| task.id.clone()).collect();
@@ -1564,7 +1876,13 @@ impl Core {
         Ok(())
     }
 
-    fn remove_history_records_with(&self, inner: &mut Inner, ids: Vec<String>, space: Option<&str>, update: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>) -> Result<Vec<String>> {
+    fn remove_history_records_with(
+        &self,
+        inner: &mut Inner,
+        ids: Vec<String>,
+        space: Option<&str>,
+        update: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>,
+    ) -> Result<Vec<String>> {
         let removing: HashSet<_> = ids.iter().map(String::as_str).collect();
         let retained: HashSet<_> = inner
             .tasks
@@ -1597,8 +1915,14 @@ impl Core {
             .collect();
         let tx = inner.db.transaction().context("DATABASE_ERROR")?;
         for id in &ids {
-            if tx.query_row("SELECT EXISTS(SELECT 1 FROM download_replacements WHERE task_id=?)",
-                [id], |row| row.get::<_, bool>(0)).context("DATABASE_ERROR")? {
+            if tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM download_replacements WHERE task_id=?)",
+                    [id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .context("DATABASE_ERROR")?
+            {
                 bail!("TASK_BUSY");
             }
             tx.execute("INSERT OR IGNORE INTO asset_hidden_history SELECT asset_id FROM media_assets WHERE task_id=?",[id]).context("DATABASE_ERROR")?;
@@ -1624,7 +1948,10 @@ impl Core {
             .retain(|id, _| !removing.contains(id.as_str()));
         for id in &ids {
             (self.emit)(match space {
-                Some(space) => TaskEvent::RemovedFromSpace { id: id.clone(), space_id: space.to_owned() },
+                Some(space) => TaskEvent::RemovedFromSpace {
+                    id: id.clone(),
+                    space_id: space.to_owned(),
+                },
                 None => TaskEvent::Removed(id.clone()),
             });
         }
@@ -1655,13 +1982,24 @@ impl Core {
 
     pub fn album_video_path(&self, id: &str, index: usize) -> Result<PathBuf> {
         let inner = self.inner.lock().unwrap();
-        let task = inner.tasks.iter().find(|t| t.id == id).context("TASK_NOT_FOUND")?;
+        let task = inner
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .context("TASK_NOT_FOUND")?;
         if task.status != Status::Completed
-            || task.video.as_ref().is_none_or(|video| video["kind"] != "image_album")
+            || task
+                .video
+                .as_ref()
+                .is_none_or(|video| video["kind"] != "image_album")
         {
             bail!("INVALID_STATE");
         }
-        let video = task.files.get(index).and_then(|file| file.video.as_ref()).context("FILE_MISSING")?;
+        let video = task
+            .files
+            .get(index)
+            .and_then(|file| file.video.as_ref())
+            .context("FILE_MISSING")?;
         if video.filename != format!("{:03}.mp4", index + 1) {
             bail!("INVALID_ENGINE_RESULT");
         }
@@ -1672,7 +2010,8 @@ impl Core {
         }
         let path = directory.join(&video.filename);
         let metadata = std::fs::symlink_metadata(&path).context("FILE_MISSING")?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != video.bytes {
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != video.bytes
+        {
             bail!("FILE_MISSING");
         }
         Ok(path)
@@ -1777,7 +2116,9 @@ impl Core {
         if inner.closing || inner.tasks.iter().any(|t| t.status == Status::Parsing) {
             bail!("TASK_BUSY");
         }
-        if recovery_revision.is_some_and(|(_, epoch)| inner.telegram_recovery_epoch != epoch) { bail!("TELEGRAM_ACCOUNT_MISMATCH"); }
+        if recovery_revision.is_some_and(|(_, epoch)| inner.telegram_recovery_epoch != epoch) {
+            bail!("TELEGRAM_ACCOUNT_MISMATCH");
+        }
         let previous = if let Some(id) = retry_id {
             let task = inner
                 .tasks
@@ -1787,7 +2128,14 @@ impl Core {
             if !matches!(task.status, Status::Failed | Status::Canceled) {
                 bail!("INVALID_STATE");
             }
-            if recovery_revision.is_some_and(|(revision, _)| task.status != Status::Failed || task.revision != revision || !task.error.as_deref().is_some_and(crate::telegram_reconnect::network_error)) {
+            if recovery_revision.is_some_and(|(revision, _)| {
+                task.status != Status::Failed
+                    || task.revision != revision
+                    || !task
+                        .error
+                        .as_deref()
+                        .is_some_and(crate::telegram_reconnect::network_error)
+            }) {
                 bail!("INVALID_STATE");
             }
             if inner.active.contains_key(id) || inner.downloads.contains(id) {
@@ -1797,7 +2145,11 @@ impl Core {
         } else {
             None
         };
-        let mut cached = if telegram { None } else { parse_cache::find(&inner.db, &input, &resolver)? };
+        let mut cached = if telegram {
+            None
+        } else {
+            parse_cache::find(&inner.db, &input, &resolver)?
+        };
         if let (Some(cached), Some(format_id)) = (&mut cached, &requested_format) {
             apply_video_format(&mut cached.video, format_id)?;
         }
@@ -1817,7 +2169,9 @@ impl Core {
             status: Status::Parsing,
             resolve_progress: Some({
                 let mut progress = ResolveProgress::new(ResolvePhase::CheckingLink);
-                if !telegram { progress.advance(ResolvePhase::CheckingCache); }
+                if !telegram {
+                    progress.advance(ResolvePhase::CheckingCache);
+                }
                 progress
             }),
             video: previous.as_ref().and_then(|t| t.video.clone()),
@@ -1830,13 +2184,16 @@ impl Core {
             error: None,
             path: None,
             created_at: previous.as_ref().map_or_else(now, |t| t.created_at),
-            download_requested_at: download_after_resolve.then(|| chrono::Utc::now().timestamp_millis().max(0) as u64),
+            download_requested_at: download_after_resolve
+                .then(|| chrono::Utc::now().timestamp_millis().max(0) as u64),
             completed_at: None,
             canceling: false,
             file_missing: false,
             queue_order: None,
             download_requested: download_after_resolve,
-            duplicate_confirmed: previous.as_ref().is_some_and(|task| task.duplicate_confirmed),
+            duplicate_confirmed: previous
+                .as_ref()
+                .is_some_and(|task| task.duplicate_confirmed),
             cover_path: None,
             cover_error: None,
             files: Vec::new(),
@@ -1870,7 +2227,12 @@ impl Core {
             (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
         } else {
             publish(&mut inner, task.clone(), &*self.emit)?;
-            task.insertion_id = inner.tasks.iter().find(|stored| stored.id == task.id).unwrap().insertion_id;
+            task.insertion_id = inner
+                .tasks
+                .iter()
+                .find(|stored| stored.id == task.id)
+                .unwrap()
+                .insertion_id;
         }
         let directory = inner.settings.download_directory.clone();
         let filename_template = inner.settings.filename_template.clone();
@@ -2026,7 +2388,10 @@ impl Core {
             .find(|t| t.id == id)
             .expect("active task exists")
             .clone();
-        if result.as_ref().is_err_and(|error| error.to_string() == "REDOWNLOAD_RESTORE_FAILED") {
+        if result
+            .as_ref()
+            .is_err_and(|error| error.to_string() == "REDOWNLOAD_RESTORE_FAILED")
+        {
             task.status = Status::Failed;
             task.error = Some("REDOWNLOAD_RESTORE_FAILED".into());
         } else if task.canceling {
@@ -2038,12 +2403,17 @@ impl Core {
         } else {
             match result {
                 Ok(video) if !downloading => {
-                    if let Some(progress) = &mut task.resolve_progress { progress.advance(ResolvePhase::Completed); }
+                    if let Some(progress) = &mut task.resolve_progress {
+                        progress.advance(ResolvePhase::Completed);
+                    }
                     task.error = None;
                     task.video = Some(video);
                     task.status = Status::Ready;
                 }
-                Ok(_) => { task.error = None; task.status = Status::Completed; },
+                Ok(_) => {
+                    task.error = None;
+                    task.status = Status::Completed;
+                }
                 Err(error) => {
                     task.status = Status::Failed;
                     task.error = Some(
@@ -2082,12 +2452,17 @@ impl Core {
         task.eta_seconds = None;
         task.merging = false;
         task.revision += 1;
-        let saved = if downloading && !inner.closing
+        let saved = if downloading
+            && !inner.closing
             && matches!(task.status, Status::Failed | Status::Canceled)
             && task.error.as_deref() != Some("REDOWNLOAD_RESTORE_FAILED")
         {
             restore_original_task(&mut inner, &task, &*self.emit).and_then(|restored| {
-                if restored { Ok(()) } else { publish(&mut inner, task.clone(), &*self.emit) }
+                if restored {
+                    Ok(())
+                } else {
+                    publish(&mut inner, task.clone(), &*self.emit)
+                }
             })
         } else {
             publish(&mut inner, task.clone(), &*self.emit)
@@ -2146,7 +2521,8 @@ impl Core {
     }
 
     pub fn download(self: &Arc<Self>, id: &str, confirm_duplicate: bool) -> Result<()> {
-        self.submit_download(id, confirm_duplicate, None).map(|_| ())
+        self.submit_download(id, confirm_duplicate, None)
+            .map(|_| ())
     }
 
     pub fn submit_download(
@@ -2174,21 +2550,32 @@ impl Core {
             bail!("INVALID_STATE");
         }
         let matches = |old: &&Task| {
-            old.id != task.id && old.video.as_ref().zip(task.video.as_ref())
-                .is_some_and(|(old, video)| same_download_variant(old, video))
+            old.id != task.id
+                && old
+                    .video
+                    .as_ref()
+                    .zip(task.video.as_ref())
+                    .is_some_and(|(old, video)| same_download_variant(old, video))
         };
         let in_progress = inner.tasks.iter().filter(matches).any(download_in_progress);
         let completed = |old: &&Task| old.status == Status::Completed && !file_missing(old);
         let replaceable = |old: &&Task| {
-            old.video.as_ref().zip(task.video.as_ref())
+            old.video
+                .as_ref()
+                .zip(task.video.as_ref())
                 .is_some_and(|(old, video)| same_replacement_variant(old, video))
         };
         let original = if let Some(replace_id) = replace_task_id {
             if !confirm_duplicate {
                 bail!("ALREADY_DOWNLOADED");
             }
-            let original = inner.tasks.iter().filter(completed).filter(replaceable)
-                .find(|old| old.id == replace_id).context("ALREADY_DOWNLOADED")?;
+            let original = inner
+                .tasks
+                .iter()
+                .filter(completed)
+                .filter(replaceable)
+                .find(|old| old.id == replace_id)
+                .context("ALREADY_DOWNLOADED")?;
             if inner.active.contains_key(replace_id)
                 || inner.transcription.as_ref().is_some_and(|active| {
                     active.snapshot.task_id == replace_id
@@ -2201,7 +2588,8 @@ impl Core {
         } else {
             let mut completed = inner.tasks.iter().filter(matches).filter(completed);
             if completed.clone().any(|old| replaceable(&old))
-                || (!confirm_duplicate && (in_progress || completed.next().is_some())) {
+                || (!confirm_duplicate && (in_progress || completed.next().is_some()))
+            {
                 bail!("ALREADY_DOWNLOADED");
             }
             None
@@ -2215,13 +2603,21 @@ impl Core {
         }
         task.duplicate_confirmed |= confirm_duplicate;
         let queued_id = task.id.clone();
-        self.queue_download(&mut inner, task, true, original.as_ref().map(|original| (original, id)))?;
+        self.queue_download(
+            &mut inner,
+            task,
+            true,
+            original.as_ref().map(|original| (original, id)),
+        )?;
         self.dispatch(&mut inner);
         Ok(queued_id)
     }
 
     fn queue_download(
-        self: &Arc<Self>, inner: &mut Inner, mut task: Task, new_request: bool,
+        self: &Arc<Self>,
+        inner: &mut Inner,
+        mut task: Task,
+        new_request: bool,
         replacing: Option<(&Task, &str)>,
     ) -> Result<()> {
         let deferred = task.video.is_none() && task.telegram_link.is_some();
@@ -2245,9 +2641,18 @@ impl Core {
             } else {
                 redownload::original(&inner.db, &task.id)?
             };
-            let directory = replacement.as_ref().map(|original| {
-                original.path.as_deref().and_then(Path::parent).map(Path::to_owned).context("FILE_MISSING")
-            }).transpose()?.unwrap_or_else(|| inner.settings.download_directory.clone());
+            let directory = replacement
+                .as_ref()
+                .map(|original| {
+                    original
+                        .path
+                        .as_deref()
+                        .and_then(Path::parent)
+                        .map(Path::to_owned)
+                        .context("FILE_MISSING")
+                })
+                .transpose()?
+                .unwrap_or_else(|| inner.settings.download_directory.clone());
             let filename_template = inner.settings.filename_template.clone();
             inner.active.insert(
                 task.id.clone(),
@@ -2263,7 +2668,11 @@ impl Core {
             );
         }
         let filename_template = inner.settings.filename_template.clone();
-        inner.active.get_mut(&task.id).context("INVALID_STATE")?.filename_template = filename_template;
+        inner
+            .active
+            .get_mut(&task.id)
+            .context("INVALID_STATE")?
+            .filename_template = filename_template;
         task.status = Status::Queued;
         task.error = None;
         task.bytes = 0;
@@ -2277,20 +2686,21 @@ impl Core {
         }
         if new_request || task.queue_order.is_none() {
             task.queue_order = Some(
-            inner
-                .tasks
-                .iter()
-                .filter_map(|t| t.queue_order)
-                .max()
-                .unwrap_or(0)
-                + 1,
+                inner
+                    .tasks
+                    .iter()
+                    .filter_map(|t| t.queue_order)
+                    .max()
+                    .unwrap_or(0)
+                    + 1,
             );
         }
         task.revision += 1;
         if let Some((original, preview_id)) = replacing {
             let saved = (|| {
                 let tx = inner.db.transaction().context("DATABASE_ERROR")?;
-                tx.execute("DELETE FROM commit_intents WHERE task_id=?", [&task.id]).context("DATABASE_ERROR")?;
+                tx.execute("DELETE FROM commit_intents WHERE task_id=?", [&task.id])
+                    .context("DATABASE_ERROR")?;
                 redownload::remember(&tx, original, preview_id)?;
                 persist(&tx, &task)?;
                 tx.commit().context("DATABASE_ERROR")
@@ -2305,17 +2715,27 @@ impl Core {
         } else {
             persist_new_attempt(&inner.db, &task)?;
         }
-        *inner.tasks.iter_mut().find(|stored| stored.id == task.id).context("TASK_NOT_FOUND")? = task.clone();
+        *inner
+            .tasks
+            .iter_mut()
+            .find(|stored| stored.id == task.id)
+            .context("TASK_NOT_FOUND")? = task.clone();
         (self.emit)(TaskEvent::Updated(Box::new(task)));
         Ok(())
     }
 
     fn restore_interrupted_downloads(self: &Arc<Self>, inner: &mut Inner) {
-        let mut pending: Vec<_> = inner.tasks.iter().filter(|task|
-            task.download_requested && task.status == Status::Failed
-                && task.error.as_deref() == Some("INTERRUPTED")
-                && (task.video.is_some() || task.telegram_link.is_some())
-        ).cloned().collect();
+        let mut pending: Vec<_> = inner
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.download_requested
+                    && task.status == Status::Failed
+                    && task.error.as_deref() == Some("INTERRUPTED")
+                    && (task.video.is_some() || task.telegram_link.is_some())
+            })
+            .cloned()
+            .collect();
         pending.sort_by_key(|task| (task.queue_order.unwrap_or(u64::MAX), task.insertion_id));
         for mut task in pending {
             if let Err(error) = self.queue_download(inner, task.clone(), false, None) {
@@ -2324,7 +2744,11 @@ impl Core {
                 task.error = Some(error.to_string());
                 task.revision += 1;
                 let _ = restore_original_task(inner, &task, &*self.emit).and_then(|restored| {
-                    if restored { Ok(()) } else { publish(inner, task, &*self.emit) }
+                    if restored {
+                        Ok(())
+                    } else {
+                        publish(inner, task, &*self.emit)
+                    }
                 });
                 eprintln!("startup_download event=queue_failed");
             }
@@ -2335,18 +2759,43 @@ impl Core {
     // This lock covers slot reservation and FIFO selection, including concurrent
     // submissions, settings changes, cancellation, and process completion.
     fn dispatch(self: &Arc<Self>, inner: &mut Inner) {
-        while !inner.closing && running_downloads(inner) < usize::from(inner.settings.max_downloads) {
-            let author_busy = inner.author_scan.is_some() || inner.tasks.iter().any(|task|
-                douyin_author::batch_id(task).is_some() && inner.downloads.contains(&task.id));
+        while !inner.closing && running_downloads(inner) < usize::from(inner.settings.max_downloads)
+        {
+            let author_busy = inner.author_scan.is_some()
+                || inner.tasks.iter().any(|task| {
+                    douyin_author::batch_id(task).is_some() && inner.downloads.contains(&task.id)
+                });
             let Some(id) = inner
                 .tasks
                 .iter()
                 .filter(|t| t.status == Status::Queued && !inner.downloads.contains(&t.id))
-                .filter(|t| douyin_author::batch_id(t).is_none_or(|id| !author_busy && !inner.author_paused.contains(id)))
-                .filter(|t| !(t.telegram_link.is_some() || t.video.as_ref().is_some_and(|v| v["platform"] == "telegram"))
-                    || !self.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download).session.reconnect.waiting()
-                    || !inner.tasks.iter().any(|other| inner.active.contains_key(&other.id) && other.error.as_deref() == Some("TELEGRAM_RECONNECTING")))
-                .filter(|t| t.video.is_some() || !inner.tasks.iter().any(|other| other.status == Status::Parsing))
+                .filter(|t| {
+                    douyin_author::batch_id(t)
+                        .is_none_or(|id| !author_busy && !inner.author_paused.contains(id))
+                })
+                .filter(|t| {
+                    !(t.telegram_link.is_some()
+                        || t.video
+                            .as_ref()
+                            .is_some_and(|v| v["platform"] == "telegram"))
+                        || !self
+                            .telegram_accounts
+                            .binding(crate::telegram_accounts::Purpose::Download)
+                            .session
+                            .reconnect
+                            .waiting()
+                        || !inner.tasks.iter().any(|other| {
+                            inner.active.contains_key(&other.id)
+                                && other.error.as_deref() == Some("TELEGRAM_RECONNECTING")
+                        })
+                })
+                .filter(|t| {
+                    t.video.is_some()
+                        || !inner
+                            .tasks
+                            .iter()
+                            .any(|other| other.status == Status::Parsing)
+                })
                 .min_by_key(|t| t.queue_order)
                 .map(|t| t.id.clone())
             else {
@@ -2364,7 +2813,11 @@ impl Core {
                 task.error = Some("DATABASE_ERROR".into());
                 task.revision += 1;
                 let saved = restore_original_task(inner, &task, &*self.emit).and_then(|restored| {
-                    if restored { Ok(()) } else { publish(inner, task.clone(), &*self.emit) }
+                    if restored {
+                        Ok(())
+                    } else {
+                        publish(inner, task.clone(), &*self.emit)
+                    }
                 });
                 if saved.is_err() {
                     *inner.tasks.iter_mut().find(|t| t.id == id).unwrap() = task.clone();
@@ -2376,31 +2829,59 @@ impl Core {
     }
 
     fn telegram_connection_progress(self: &Arc<Self>, id: &str, event: &Value) {
-        let Some(waiting) = event["reconnecting"].as_bool() else { return; };
+        let Some(waiting) = event["reconnecting"].as_bool() else {
+            return;
+        };
         let mut inner = self.inner.lock().unwrap();
-        let Some(task) = inner.tasks.iter_mut().find(|t| t.id == id) else { return; };
-        if task.canceling { return; }
+        let Some(task) = inner.tasks.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        if task.canceling {
+            return;
+        }
         let error = waiting.then(|| "TELEGRAM_RECONNECTING".to_owned());
-        if task.error == error { return; }
+        if task.error == error {
+            return;
+        }
         task.error = error;
-        if !waiting { task.bytes = 0; }
+        if !waiting {
+            task.bytes = 0;
+        }
         task.speed_bps = None;
         task.eta_seconds = None;
         task.revision += 1;
         (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
-        if waiting { self.dispatch(&mut inner); }
+        if waiting {
+            self.dispatch(&mut inner);
+        }
     }
 
-    pub(crate) async fn wait_telegram_slot(self: &Arc<Self>, id: &str, mut cancel: watch::Receiver<bool>) -> Result<()> {
+    pub(crate) async fn wait_telegram_slot(
+        self: &Arc<Self>,
+        id: &str,
+        mut cancel: watch::Receiver<bool>,
+    ) -> Result<()> {
         loop {
             {
                 let mut inner = self.inner.lock().unwrap();
-                if inner.closing || *cancel.borrow() { bail!("CANCELED"); }
-                let task = inner.tasks.iter().find(|t|t.id==id).context("TASK_NOT_FOUND")?;
-                if task.canceling { bail!("CANCELED"); }
-                if task.error.as_deref() != Some("TELEGRAM_RECONNECTING") { return Ok(()); }
-                if !inner.downloads.contains(id) || running_downloads(&inner) < inner.settings.max_downloads as usize {
-                    let task = inner.tasks.iter_mut().find(|t|t.id==id).unwrap();
+                if inner.closing || *cancel.borrow() {
+                    bail!("CANCELED");
+                }
+                let task = inner
+                    .tasks
+                    .iter()
+                    .find(|t| t.id == id)
+                    .context("TASK_NOT_FOUND")?;
+                if task.canceling {
+                    bail!("CANCELED");
+                }
+                if task.error.as_deref() != Some("TELEGRAM_RECONNECTING") {
+                    return Ok(());
+                }
+                if !inner.downloads.contains(id)
+                    || running_downloads(&inner) < inner.settings.max_downloads as usize
+                {
+                    let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
                     task.error = None;
                     task.bytes = 0;
                     task.speed_bps = None;
@@ -2424,16 +2905,39 @@ impl Core {
         id: &str,
         cancel: watch::Receiver<bool>,
     ) -> Result<Value> {
-        let previous = self.inner.lock().unwrap().tasks.iter().find(|task| task.id == id).and_then(|task|task.video.clone());
-        let outcome = telegram_download::operation(self, id, input, None, None, |event| {
-            if event["resolve_phase"].is_string() { self.resolve_event(id, &event); }
-            else { self.telegram_connection_progress(id, &event); }
-        }, cancel).await?;
+        let previous = self
+            .inner
+            .lock()
+            .unwrap()
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .and_then(|task| task.video.clone());
+        let outcome = telegram_download::operation(
+            self,
+            id,
+            input,
+            None,
+            None,
+            |event| {
+                if event["resolve_phase"].is_string() {
+                    self.resolve_event(id, &event);
+                } else {
+                    self.telegram_connection_progress(id, &event);
+                }
+            },
+            cancel,
+        )
+        .await?;
         self.resolve_progress(id, ResolvePhase::Finalizing);
         let video = outcome.value;
         if let Some(previous) = &previous {
             if previous["platform"] == "telegram" && previous["video_id"] != video["video_id"] {
-                parse_cache::forget_telegram_channel(&self.inner.lock().unwrap().db,input,previous)?;
+                parse_cache::forget_telegram_channel(
+                    &self.inner.lock().unwrap().db,
+                    input,
+                    previous,
+                )?;
                 bail!(telegram_download::ALIAS_IDENTITY_MISMATCH);
             }
         }
@@ -2441,7 +2945,8 @@ impl Core {
             serde_json::from_value(video.clone()).context("INVALID_ENGINE_RESULT")?;
         identity.validate()?;
         let mut inner = self.inner.lock().unwrap();
-        let mut cached = parse_cache::save(&mut inner.db, &video, Vec::new(), outcome.cover, now())?;
+        let mut cached =
+            parse_cache::save(&mut inner.db, &video, Vec::new(), outcome.cover, now())?;
         if let Some(body) = outcome.avatar {
             let _ = parse_cache::save_avatar(&inner.db, &cached.video, &body);
         }
@@ -2470,9 +2975,7 @@ impl Core {
         let id = id.to_owned();
         inner.workers.retain(|worker| !worker.is_finished());
         inner.workers.push(tokio::spawn(async move {
-            let result = core
-                .resolve_telegram(&input, &id, cancellation)
-                .await;
+            let result = core.resolve_telegram(&input, &id, cancellation).await;
             core.inner.lock().unwrap().downloads.remove(&id);
             core.finish(&id, result, false);
             let _ = done.send(true);
@@ -2912,22 +3415,47 @@ mod tests {
             let app = core(root.path());
             {
                 let mut inner = app.inner.lock().unwrap();
-                let profile = inner.settings.profiles.iter_mut().find(|p| p.platform == "telegram").unwrap();
+                let profile = inner
+                    .settings
+                    .profiles
+                    .iter_mut()
+                    .find(|p| p.platform == "telegram")
+                    .unwrap();
                 profile.proxy = Some("socks5://127.0.0.1:1080/".into());
                 // A new random, nonexistent proxy entry, never a real Telegram session.
-                profile.credential_ref = Some(format!("yingqu-transfer-test-{}", uuid::Uuid::new_v4()));
+                profile.credential_ref =
+                    Some(format!("yingqu-transfer-test-{}", uuid::Uuid::new_v4()));
             }
             assert!(app.proxy("telegram").is_err());
-            let result = app.save_profile_with_network(settings::ProfileUpdate {
-                platform: "telegram".into(), user_agent: "test".into(), cookie: None,
-                proxy: Some(replacement.into()), bypass_proxy: None, http_chunk_size: None,
-            }).await;
+            let result = app
+                .save_profile_with_network(settings::ProfileUpdate {
+                    platform: "telegram".into(),
+                    user_agent: "test".into(),
+                    cookie: None,
+                    proxy: Some(replacement.into()),
+                    bypass_proxy: None,
+                    http_chunk_size: None,
+                })
+                .await;
             if let Err(error) = result {
                 // The existing writer reports old-secret cleanup failures after persistence.
-                assert!(matches!(error.to_string().as_str(), "CREDENTIAL_CLEANUP_ERROR" | "CREDENTIAL_ERROR"));
+                assert!(matches!(
+                    error.to_string().as_str(),
+                    "CREDENTIAL_CLEANUP_ERROR" | "CREDENTIAL_ERROR"
+                ));
             }
-            assert_eq!(app.proxy("telegram").unwrap(), (!replacement.is_empty()).then(|| format!("{replacement}/")));
-            assert!(app.settings().profiles.iter().find(|p| p.platform == "telegram").unwrap().credential_ref.is_none());
+            assert_eq!(
+                app.proxy("telegram").unwrap(),
+                (!replacement.is_empty()).then(|| format!("{replacement}/"))
+            );
+            assert!(app
+                .settings()
+                .profiles
+                .iter()
+                .find(|p| p.platform == "telegram")
+                .unwrap()
+                .credential_ref
+                .is_none());
             drop(app.telegram_accounts.network_sessions().unwrap());
             app.shutdown().await;
         }
@@ -2938,21 +3466,44 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         let update = |proxy: &str| settings::ProfileUpdate {
-            platform: "telegram".into(), user_agent: "test".into(), cookie: None,
-            proxy: Some(proxy.into()), bypass_proxy: None, http_chunk_size: None,
+            platform: "telegram".into(),
+            user_agent: "test".into(),
+            cookie: None,
+            proxy: Some(proxy.into()),
+            bypass_proxy: None,
+            http_chunk_size: None,
         };
         app.save_profile(update("socks5://127.0.0.1:9")).unwrap();
-        let session = app.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session;
+        let session = app
+            .telegram_accounts
+            .binding(crate::telegram_accounts::Purpose::Backup)
+            .session;
         session.set_test_view(crate::backup::telegram_session::Phase::Ready, "123");
         app.backup_db(|db| {
             db.execute_batch("CREATE TEMP TRIGGER reject_proxy_save BEFORE INSERT ON platform_settings WHEN NEW.platform='telegram' BEGIN SELECT RAISE(ABORT,'synthetic settings failure'); END;")?;
             Ok(())
         }).unwrap();
-        assert_eq!(app.save_profile_with_network(update("socks5://127.0.0.1:10")).await.err().unwrap().to_string(), "DATABASE_ERROR");
-        assert_eq!(app.proxy("telegram").unwrap().as_deref(), Some("socks5://127.0.0.1:9/"));
-        assert!(matches!(session.status().phase, crate::backup::telegram_session::Phase::Ready));
+        assert_eq!(
+            app.save_profile_with_network(update("socks5://127.0.0.1:10"))
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "DATABASE_ERROR"
+        );
+        assert_eq!(
+            app.proxy("telegram").unwrap().as_deref(),
+            Some("socks5://127.0.0.1:9/")
+        );
+        assert!(matches!(
+            session.status().phase,
+            crate::backup::telegram_session::Phase::Ready
+        ));
         drop(app.telegram_accounts.network_sessions().unwrap());
-        let pause = tokio::time::timeout(Duration::from_secs(1), session.pause_network()).await.unwrap().unwrap();
+        let pause = tokio::time::timeout(Duration::from_secs(1), session.pause_network())
+            .await
+            .unwrap()
+            .unwrap();
         drop(pause);
         app.shutdown().await;
     }
@@ -2974,16 +3525,22 @@ mod tests {
                     // Pause at the second block boundary to make shutdown deterministic.
                     if checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
                         started.lock().unwrap().take().unwrap().send(()).unwrap();
-                        while !*cancel.borrow() { std::thread::yield_now(); }
+                        while !*cancel.borrow() {
+                            std::thread::yield_now();
+                        }
                     }
                     *cancel.borrow()
                 })
-            }).await.unwrap();
-            let _ = result.send(outcome.map(|_| ()).map_err(|e|e.to_string()));
+            })
+            .await
+            .unwrap();
+            let _ = result.send(outcome.map(|_| ()).map_err(|e| e.to_string()));
         });
         app.inner.lock().unwrap().workers.push(worker);
         ready.await.unwrap();
-        tokio::time::timeout(Duration::from_secs(2), app.shutdown()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), app.shutdown())
+            .await
+            .unwrap();
         assert_eq!(finished.await.unwrap().unwrap_err(), "CANCELED");
         drop(app);
         let reopened = core(root.path());
@@ -3006,7 +3563,10 @@ mod tests {
         assert!(cadence.should_emit(&merging, start + Duration::from_millis(2100)));
         assert!(!cadence.should_emit(&merging, start + Duration::from_millis(2200)));
         assert!(cadence.should_emit(&merging, start + Duration::from_millis(3100)));
-        assert!(DownloadProgressCadence::default().should_emit(&progress, start), "each task and retry starts independently");
+        assert!(
+            DownloadProgressCadence::default().should_emit(&progress, start),
+            "each task and retry starts independently"
+        );
     }
 
     #[test]
@@ -3014,7 +3574,8 @@ mod tests {
         let mut rate = YoutubeTransferRate::default();
         let start = Instant::now();
         let update = |rate: &mut YoutubeTransferRate, millis, count, speed| {
-            let mut event = json!({"bytes":count,"total_bytes":10000,"speed_bps":speed,"eta_seconds":1});
+            let mut event =
+                json!({"bytes":count,"total_bytes":10000,"speed_bps":speed,"eta_seconds":1});
             rate.update(&mut event, start + Duration::from_millis(millis));
             event
         };
@@ -3025,11 +3586,23 @@ mod tests {
         assert_eq!(sampled["eta_seconds"], 8.9);
         // Finished/chunk/next-stream hooks may omit or reset their speed while
         // the operation's aggregate byte count continues increasing.
-        assert_eq!(update(&mut rate, 1100, 1100, Value::Null)["speed_bps"], 1000.0);
-        assert_eq!(update(&mut rate, 1250, 1350, json!(999999999))["speed_bps"], 1000.0);
-        assert_eq!(update(&mut rate, 1500, 1600, Value::Null)["speed_bps"], 1000.0);
+        assert_eq!(
+            update(&mut rate, 1100, 1100, Value::Null)["speed_bps"],
+            1000.0
+        );
+        assert_eq!(
+            update(&mut rate, 1250, 1350, json!(999999999))["speed_bps"],
+            1000.0
+        );
+        assert_eq!(
+            update(&mut rate, 1500, 1600, Value::Null)["speed_bps"],
+            1000.0
+        );
         assert_eq!(update(&mut rate, 2000, 2100, json!(1))["speed_bps"], 1000.0);
-        assert_eq!(update(&mut rate, 3500, 2850, Value::Null)["speed_bps"], 500.0);
+        assert_eq!(
+            update(&mut rate, 3500, 2850, Value::Null)["speed_bps"],
+            500.0
+        );
         let stalled = update(&mut rate, 4500, 2850, Value::Null);
         assert_eq!(stalled["speed_bps"], 0.0);
         assert!(stalled["eta_seconds"].is_null());
@@ -3066,12 +3639,26 @@ mod tests {
     fn staging_cleanup_waits_for_transient_exclusive_handles_and_preserves_persistent_errors() {
         use std::os::windows::fs::OpenOptionsExt;
         for transient in [true, false] {
-            let stage = tempfile::Builder::new().prefix("yingqu-lock-test-").tempdir().unwrap();
+            let stage = tempfile::Builder::new()
+                .prefix("yingqu-lock-test-")
+                .tempdir()
+                .unwrap();
             let db = Connection::open_in_memory().unwrap();
-            db.execute_batch("CREATE TABLE task_staging(task_id TEXT PRIMARY KEY,path TEXT NOT NULL);").unwrap();
-            db.execute("INSERT INTO task_staging VALUES(?1,?2)", params!["lock-test", stage.path().to_string_lossy()]).unwrap();
-            let file = std::fs::OpenOptions::new().write(true).create_new(true).share_mode(0)
-                .open(stage.path().join("audio.wav")).unwrap();
+            db.execute_batch(
+                "CREATE TABLE task_staging(task_id TEXT PRIMARY KEY,path TEXT NOT NULL);",
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO task_staging VALUES(?1,?2)",
+                params!["lock-test", stage.path().to_string_lossy()],
+            )
+            .unwrap();
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .share_mode(0)
+                .open(stage.path().join("audio.wav"))
+                .unwrap();
             if transient {
                 let release = std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(60));
@@ -3080,13 +3667,28 @@ mod tests {
                 cleanup_staging(&db, "lock-test", stage.path()).unwrap();
                 release.join().unwrap();
             } else {
-                assert_eq!(cleanup_staging(&db, "lock-test", stage.path()).unwrap_err().to_string(), "IO_ERROR");
-                assert_eq!(db.query_row("SELECT count(*) FROM task_staging", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+                assert_eq!(
+                    cleanup_staging(&db, "lock-test", stage.path())
+                        .unwrap_err()
+                        .to_string(),
+                    "IO_ERROR"
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM task_staging", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
                 drop(file);
                 cleanup_staging(&db, "lock-test", stage.path()).unwrap();
             }
             assert!(!stage.path().exists());
-            assert_eq!(db.query_row("SELECT count(*) FROM task_staging", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM task_staging", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
         }
     }
     async fn transcript_done(app: &Core, id: &str) -> transcription::Snapshot {
@@ -3191,8 +3793,22 @@ mod tests {
     async fn transcription_cuda_vad_progress_and_model_identity_survive_restart() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        for (tool, variant) in [(None, Some("cuda")), (Some("ffmpeg"), Some("cuda")), (Some("fun-asr-nano"), Some("metal"))] {
-            assert_eq!(app.dependencies_variant(tool.map(str::to_owned), variant.map(str::to_owned), |_| {}).await.unwrap_err().to_string(), "INVALID_INPUT");
+        for (tool, variant) in [
+            (None, Some("cuda")),
+            (Some("ffmpeg"), Some("cuda")),
+            (Some("fun-asr-nano"), Some("metal")),
+        ] {
+            assert_eq!(
+                app.dependencies_variant(
+                    tool.map(str::to_owned),
+                    variant.map(str::to_owned),
+                    |_| {}
+                )
+                .await
+                .unwrap_err()
+                .to_string(),
+                "INVALID_INPUT"
+            );
         }
         let task = transcript_video(&app, "cuda-speech.mp4").await;
         app.start_transcription(&task.id, false).unwrap();
@@ -3200,12 +3816,27 @@ mod tests {
         assert_eq!(value.state, "completed", "{:?}", value.error_code);
         let result = value.result.unwrap();
         assert_eq!(result.backend.as_deref(), Some("cuda"));
-        assert_eq!(result.model_revision, "ce72677f84900f0dc57f498ace253bfb3c9155b6");
-        assert_eq!(result.pipeline_revision, "fun-asr-nano-audiocpp-50749561-fsmn-v1");
+        assert_eq!(
+            result.model_revision,
+            "ce72677f84900f0dc57f498ace253bfb3c9155b6"
+        );
+        assert_eq!(
+            result.pipeline_revision,
+            "fun-asr-nano-audiocpp-50749561-fsmn-v1"
+        );
         app.shutdown().await;
         drop(app);
         let app = core(root.path());
-        assert_eq!(app.transcript(&task.id).unwrap().unwrap().result.unwrap().backend.as_deref(), Some("cuda"));
+        assert_eq!(
+            app.transcript(&task.id)
+                .unwrap()
+                .unwrap()
+                .result
+                .unwrap()
+                .backend
+                .as_deref(),
+            Some("cuda")
+        );
         app.shutdown().await;
     }
     #[tokio::test]
@@ -3225,8 +3856,12 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.unwrap();
-        app.cancel_transcription(&task.id, &started.operation_id).await.unwrap();
+        })
+        .await
+        .unwrap();
+        app.cancel_transcription(&task.id, &started.operation_id)
+            .await
+            .unwrap();
         let canceled = transcript_done(&app, &task.id).await;
         assert!(canceled.completed_segments.is_none() && canceled.total_segments.is_none());
         for mode in ["backwards", "total", "overflow", "missing", "type"] {
@@ -3251,7 +3886,10 @@ mod tests {
         let result = value.result.as_ref().unwrap();
         assert_eq!(result.backend.as_deref(), Some("cpu"));
         assert_eq!(result.model_name.as_deref(), Some("Fun-ASR-Nano"));
-        assert_eq!(result.model_revision, "46e849502a867080d66d351b8dfb1018b607e509");
+        assert_eq!(
+            result.model_revision,
+            "46e849502a867080d66d351b8dfb1018b607e509"
+        );
         assert_eq!(result.pipeline_revision, "fun-asr-nano-cpu-fbbfe018-v1");
         app.shutdown().await;
         drop(app);
@@ -3264,8 +3902,15 @@ mod tests {
         old["result"]["model_revision"] = json!("90c1c61912018b70ada0fcc024ea24aca62f2e63");
         old["result"]["pipeline_revision"] = json!("sensevoice-cuda-fbbfe018-v1");
         old["result"].as_object_mut().unwrap().remove("model_name");
-        app.inner.lock().unwrap().db.execute("UPDATE video_transcripts SET snapshot=? WHERE task_id=?",
-            params![serde_json::to_string(&old).unwrap(), task.id]).unwrap();
+        app.inner
+            .lock()
+            .unwrap()
+            .db
+            .execute(
+                "UPDATE video_transcripts SET snapshot=? WHERE task_id=?",
+                params![serde_json::to_string(&old).unwrap(), task.id],
+            )
+            .unwrap();
         let legacy = app.transcript(&task.id).unwrap().unwrap().result.unwrap();
         assert_eq!(legacy.backend.as_deref(), Some("cuda"));
         assert!(legacy.model_name.is_none());
@@ -3525,26 +4170,49 @@ mod tests {
         let app = core(root.path());
         let task = app.resolve("album".into()).unwrap();
         wait(&app, &task.id, Status::Ready).await;
-        assert_eq!(app.album_video_path(&task.id, 0).unwrap_err().to_string(), "INVALID_STATE");
+        assert_eq!(
+            app.album_video_path(&task.id, 0).unwrap_err().to_string(),
+            "INVALID_STATE"
+        );
         app.download(&task.id, false).unwrap();
         let completed = wait(&app, &task.id, Status::Completed).await;
         let path = completed.path.unwrap().join("001.mp4");
         let body = std::fs::read(&path).unwrap();
         assert_eq!(app.album_video_path(&task.id, 0).unwrap(), path);
-        assert_eq!(app.album_video_path(&task.id, 1).unwrap_err().to_string(), "FILE_MISSING");
-        assert_eq!(app.album_video_path(&task.id, usize::MAX).unwrap_err().to_string(), "FILE_MISSING");
-        assert_eq!(app.album_video_path("missing", 0).unwrap_err().to_string(), "TASK_NOT_FOUND");
+        assert_eq!(
+            app.album_video_path(&task.id, 1).unwrap_err().to_string(),
+            "FILE_MISSING"
+        );
+        assert_eq!(
+            app.album_video_path(&task.id, usize::MAX)
+                .unwrap_err()
+                .to_string(),
+            "FILE_MISSING"
+        );
+        assert_eq!(
+            app.album_video_path("missing", 0).unwrap_err().to_string(),
+            "TASK_NOT_FOUND"
+        );
         app.shutdown().await;
         drop(app);
         let app = core(root.path());
         assert_eq!(app.album_video_path(&task.id, 0).unwrap(), path);
         assert_eq!(std::fs::read(&path).unwrap(), body);
         std::fs::write(&path, []).unwrap();
-        assert_eq!(app.album_video_path(&task.id, 0).unwrap_err().to_string(), "FILE_MISSING");
+        assert_eq!(
+            app.album_video_path(&task.id, 0).unwrap_err().to_string(),
+            "FILE_MISSING"
+        );
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(app.album_video_path(&task.id, 0).unwrap_err().to_string(), "FILE_MISSING");
+        assert_eq!(
+            app.album_video_path(&task.id, 0).unwrap_err().to_string(),
+            "FILE_MISSING"
+        );
         std::fs::create_dir(&path).unwrap();
-        assert_eq!(app.album_video_path(&task.id, 0).unwrap_err().to_string(), "FILE_MISSING");
+        assert_eq!(
+            app.album_video_path(&task.id, 0).unwrap_err().to_string(),
+            "FILE_MISSING"
+        );
         app.shutdown().await;
     }
 
@@ -3692,9 +4360,11 @@ mod tests {
                 parse_cache::cover(&inner.db, &retained_video).unwrap(),
                 cover
             );
-            assert!(parse_cache::find(&inner.db, "https://t.me/c/100/9", "grammers")
-                .unwrap()
-                .is_some());
+            assert!(
+                parse_cache::find(&inner.db, "https://t.me/c/100/9", "grammers")
+                    .unwrap()
+                    .is_some()
+            );
         }
         app.shutdown().await;
         drop(app);
@@ -3815,9 +4485,19 @@ mod tests {
             inner.telegram_recovery_epoch
         };
         app.stop_telegram_recovery(); // Account switch/logout begins before taking its task snapshot.
-        let error = app.resolve_task(task.telegram_link.clone().unwrap(), Some(&task.id), "grammers".into(), None, false, Some((task.revision,epoch))).err().unwrap();
+        let error = app
+            .resolve_task(
+                task.telegram_link.clone().unwrap(),
+                Some(&task.id),
+                "grammers".into(),
+                None,
+                false,
+                Some((task.revision, epoch)),
+            )
+            .err()
+            .unwrap();
         assert_eq!(error.to_string(), "TELEGRAM_ACCOUNT_MISMATCH");
-        let current = app.list().into_iter().find(|t|t.id==task.id).unwrap();
+        let current = app.list().into_iter().find(|t| t.id == task.id).unwrap();
         assert_eq!(current.status, Status::Failed);
         assert_eq!(current.revision, task.revision);
         assert!(!app.inner.lock().unwrap().active.contains_key(&task.id));
@@ -3866,30 +4546,70 @@ mod tests {
         let ready = wait(&app, &first.id, Status::Ready).await;
         let progress = ready.resolve_progress.as_ref().unwrap();
         assert_eq!(progress.phase, Completed);
-        assert_eq!(progress.steps, [CheckingLink, CheckingCache, StartingEngine, LoadingConfiguration,
-            FetchingMetadata, SelectingFormats, LoadingPreview, LoadingAuthor, Finalizing, Completed]);
+        assert_eq!(
+            progress.steps,
+            [
+                CheckingLink,
+                CheckingCache,
+                StartingEngine,
+                LoadingConfiguration,
+                FetchingMetadata,
+                SelectingFormats,
+                LoadingPreview,
+                LoadingAuthor,
+                Finalizing,
+                Completed
+            ]
+        );
         assert!(ready.revision > first.revision + 1);
         app.resolve_progress(&first.id, LoadingAuthor);
-        assert_eq!(app.list().iter().find(|task| task.id == first.id).unwrap().revision, ready.revision);
+        assert_eq!(
+            app.list()
+                .iter()
+                .find(|task| task.id == first.id)
+                .unwrap()
+                .revision,
+            ready.revision
+        );
 
-        let cached = app.resolve("https://www.douyin.com/video/123".into()).unwrap();
+        let cached = app
+            .resolve("https://www.douyin.com/video/123".into())
+            .unwrap();
         assert_eq!(cached.status, Status::Ready);
         assert!(cached.cache_hit);
-        assert_eq!(cached.resolve_progress.unwrap().steps, [CheckingLink, CheckingCache, CacheHit, Completed]);
+        assert_eq!(
+            cached.resolve_progress.unwrap().steps,
+            [CheckingLink, CheckingCache, CacheHit, Completed]
+        );
 
         let blocked = app.resolve("progress-block".into()).unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let task = app.list().into_iter().find(|task| task.id == blocked.id).unwrap();
+                let task = app
+                    .list()
+                    .into_iter()
+                    .find(|task| task.id == blocked.id)
+                    .unwrap();
                 assert_eq!(task.status, Status::Parsing);
-                if task.resolve_progress.is_some_and(|progress| progress.phase == FetchingMetadata) { break; }
+                if task
+                    .resolve_progress
+                    .is_some_and(|progress| progress.phase == FetchingMetadata)
+                {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         app.cancel(&blocked.id).await.unwrap();
         let canceled = wait(&app, &blocked.id, Status::Canceled).await;
         app.resolve_progress(&blocked.id, LoadingPreview);
-        let current = app.list().into_iter().find(|task| task.id == blocked.id).unwrap();
+        let current = app
+            .list()
+            .into_iter()
+            .find(|task| task.id == blocked.id)
+            .unwrap();
         assert_eq!(current.revision, canceled.revision);
         assert_eq!(current.resolve_progress.unwrap().phase, FetchingMetadata);
         app.shutdown().await;
@@ -3900,11 +4620,16 @@ mod tests {
         use ResolvePhase::*;
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        app.inner.lock().unwrap().db.execute_batch(
-            "CREATE TRIGGER reject_ready BEFORE UPDATE ON download_tasks
+        app.inner
+            .lock()
+            .unwrap()
+            .db
+            .execute_batch(
+                "CREATE TRIGGER reject_ready BEFORE UPDATE ON download_tasks
              WHEN json_extract(NEW.snapshot,'$.status') = 'ready'
-             BEGIN SELECT RAISE(ABORT, 'test'); END;"
-        ).unwrap();
+             BEGIN SELECT RAISE(ABORT, 'test'); END;",
+            )
+            .unwrap();
         let task = app.resolve("valid".into()).unwrap();
         let failed = wait(&app, &task.id, Status::Failed).await;
         assert_eq!(failed.error.as_deref(), Some("DATABASE_ERROR"));
@@ -3919,15 +4644,45 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         let mut phases = Vec::new();
-        let result = PythonBridge::operation(&app.program, &app.args, "phase-probe", "resolve_video",
+        let result = PythonBridge::operation(
+            &app.program,
+            &app.args,
+            "phase-probe",
+            "resolve_video",
             json!({"input":"valid","report_resolve_progress":true}),
-            |event| phases.push(event["resolve_phase"].clone())).await.unwrap();
+            |event| phases.push(event["resolve_phase"].clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(result["type"], "resolved");
-        assert_eq!(phases, [json!("loading_configuration"), json!("fetching_metadata"), json!("selecting_formats")]);
-        for input in ["progress-unknown", "progress-core-phase", "progress-duplicate", "progress-backwards"] {
-            let result = PythonBridge::operation(&app.program, &app.args, "phase-probe", "resolve_video",
-                json!({"input":input,"report_resolve_progress":true}), |_| {}).await;
-            assert_eq!(result.unwrap_err().to_string(), "ENGINE_PROTOCOL_ERROR", "{input}");
+        assert_eq!(
+            phases,
+            [
+                json!("loading_configuration"),
+                json!("fetching_metadata"),
+                json!("selecting_formats")
+            ]
+        );
+        for input in [
+            "progress-unknown",
+            "progress-core-phase",
+            "progress-duplicate",
+            "progress-backwards",
+        ] {
+            let result = PythonBridge::operation(
+                &app.program,
+                &app.args,
+                "phase-probe",
+                "resolve_video",
+                json!({"input":input,"report_resolve_progress":true}),
+                |_| {},
+            )
+            .await;
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "ENGINE_PROTOCOL_ERROR",
+                "{input}"
+            );
         }
         app.shutdown().await;
     }
@@ -3937,7 +4692,13 @@ mod tests {
         let app = core(root.path());
         let status = app.dependencies(None, |_| {}).await.unwrap();
         for tool in ["sensevoice", "sensevoice-cuda", "arbitrary-url"] {
-            assert_eq!(app.dependencies(Some(tool.into()), |_| {}).await.unwrap_err().to_string(), "INVALID_INPUT");
+            assert_eq!(
+                app.dependencies(Some(tool.into()), |_| {})
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                "INVALID_INPUT"
+            );
         }
         assert_eq!(
             status["directory"],
@@ -4005,36 +4766,61 @@ mod tests {
                     let app = core(root.path());
                     let runtime = root.path().join("runtime");
                     std::fs::create_dir_all(&runtime).unwrap();
-                    let name = if variant == "cuda" { "fun-asr-nano-cuda" } else { "fun-asr-nano" };
+                    let name = if variant == "cuda" {
+                        "fun-asr-nano-cuda"
+                    } else {
+                        "fun-asr-nano"
+                    };
                     let target = runtime.join(name);
                     if had_target {
                         std::fs::create_dir(&target).unwrap();
                         std::fs::write(target.join("old-model"), b"original").unwrap();
                     }
                     let selection = runtime.join("fun-asr-nano-backend.json");
-                    let original = (phase == "after-choice").then_some(b"{\"variant\":\"cpu\"}".to_vec());
-                    if let Some(bytes) = &original { std::fs::write(&selection, bytes).unwrap(); }
+                    let original =
+                        (phase == "after-choice").then_some(b"{\"variant\":\"cpu\"}".to_vec());
+                    if let Some(bytes) = &original {
+                        std::fs::write(&selection, bytes).unwrap();
+                    }
                     std::fs::write(root.path().join("dependency-commit-mode"), phase).unwrap();
                     let running = app.clone();
                     let worker = tokio::spawn(async move {
-                        running.dependencies_variant(Some("fun-asr-nano".into()), Some(variant.into()), |_| {}).await
+                        running
+                            .dependencies_variant(
+                                Some("fun-asr-nano".into()),
+                                Some(variant.into()),
+                                |_| {},
+                            )
+                            .await
                     });
                     tokio::time::timeout(Duration::from_secs(10), async {
                         while !root.path().join("dependency-commit-started").is_file() {
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
-                    }).await.unwrap();
+                    })
+                    .await
+                    .unwrap();
                     if phase == "after-choice" && variant == "cuda" && had_target {
                         app.shutdown().await;
-                    } else { app.cancel_dependency().unwrap(); }
+                    } else {
+                        app.cancel_dependency().unwrap();
+                    }
                     assert_eq!(worker.await.unwrap().unwrap_err().to_string(), "CANCELED");
                     assert_eq!(std::fs::read(&selection).ok(), original);
                     if had_target {
-                        assert_eq!(std::fs::read(target.join("old-model")).unwrap(), b"original");
+                        assert_eq!(
+                            std::fs::read(target.join("old-model")).unwrap(),
+                            b"original"
+                        );
                         assert!(!target.join("new-model").exists());
-                    } else { assert!(!target.exists()); }
-                    assert!(!std::fs::read_dir(&runtime).unwrap().any(|entry|
-                        entry.unwrap().file_name().to_string_lossy().starts_with(".install-")));
+                    } else {
+                        assert!(!target.exists());
+                    }
+                    assert!(!std::fs::read_dir(&runtime).unwrap().any(|entry| entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".install-")));
                     app.shutdown().await;
                 }
             }
@@ -4189,7 +4975,10 @@ mod tests {
         assert_eq!(completed.files.len(), 2);
         assert_eq!(completed.completed_items, Some(2));
         let path = completed.path.clone().unwrap();
-        assert_eq!(std::fs::read(path.join("001.mp4")).unwrap(), b"\0\0\0\x18ftypmp42live-fixture");
+        assert_eq!(
+            std::fs::read(path.join("001.mp4")).unwrap(),
+            b"\0\0\0\x18ftypmp42live-fixture"
+        );
         assert!(completed.files[0].video.is_some());
         assert_eq!(
             validate_album(&path, &completed.files).unwrap(),
@@ -4218,7 +5007,10 @@ mod tests {
         assert_eq!(recovered.files.len(), 2);
         assert_eq!(recovered.bytes, completed.bytes);
         assert_eq!(recovered.completed_items, Some(2));
-        assert_eq!(recovered.files[0].video.as_ref().unwrap().filename, "001.mp4");
+        assert_eq!(
+            recovered.files[0].video.as_ref().unwrap().filename,
+            "001.mp4"
+        );
         std::fs::rename(path.join("001.mp4"), path.join("missing.mp4")).unwrap();
         assert!(restored.list()[0].file_missing);
         std::fs::rename(path.join("missing.mp4"), path.join("001.mp4")).unwrap();
@@ -4364,7 +5156,11 @@ mod tests {
             drop(app);
             // No retry or sleep: shutdown must release every worker reference.
             let reopened = core(root.path());
-            let restored = reopened.list().into_iter().find(|t| t.id == task.id).unwrap();
+            let restored = reopened
+                .list()
+                .into_iter()
+                .find(|t| t.id == task.id)
+                .unwrap();
             assert_eq!(restored.status, Status::Completed);
             assert!(restored.path.unwrap().is_file());
         }
@@ -4528,9 +5324,13 @@ mod tests {
     async fn filename_rules_persist_snapshot_queue_and_suffix_collisions() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        assert_eq!(app.settings().filename_template, crate::naming::DEFAULT_TEMPLATE);
+        assert_eq!(
+            app.settings().filename_template,
+            crate::naming::DEFAULT_TEMPLATE
+        );
         app.set_max_downloads(1).unwrap();
-        app.set_filename_template("old/{link_id}-{quality}".into()).unwrap();
+        app.set_filename_template("old/{link_id}-{quality}".into())
+            .unwrap();
         let a = enqueue(&app, "9101").await;
         let b = enqueue(&app, "9102").await;
         app.set_filename_template("new/{link_id}".into()).unwrap();
@@ -4548,7 +5348,10 @@ mod tests {
         let original = std::fs::read(c.path.as_ref().unwrap()).unwrap();
         let repeat = app.resolve("hold:9103".into()).unwrap();
         wait(&app, &repeat.id, Status::Ready).await;
-        assert_eq!(app.submit_download(&repeat.id, true, Some(&c.id)).unwrap(), c.id);
+        assert_eq!(
+            app.submit_download(&repeat.id, true, Some(&c.id)).unwrap(),
+            c.id
+        );
         let repeat = wait(&app, &c.id, Status::Completed).await;
         assert_eq!(repeat.path, c.path);
         assert_eq!(std::fs::read(c.path.unwrap()).unwrap(), original);
@@ -4559,7 +5362,10 @@ mod tests {
         let app = core(root.path());
         assert_eq!(app.settings().filename_template, "new/{link_id}");
         assert_eq!(app.settings().max_downloads, 3);
-        assert_eq!(app.settings().download_directory, root.path().canonicalize().unwrap());
+        assert_eq!(
+            app.settings().download_directory,
+            root.path().canonicalize().unwrap()
+        );
         app.shutdown().await;
     }
 
@@ -4586,7 +5392,8 @@ mod tests {
     async fn filename_rules_name_album_directories_and_preserve_internal_filenames() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        app.set_filename_template("{platform}/{content}-{quality}".into()).unwrap();
+        app.set_filename_template("{platform}/{content}-{quality}".into())
+            .unwrap();
         let task = app.resolve("album".into()).unwrap();
         wait(&app, &task.id, Status::Ready).await;
         app.download(&task.id, false).unwrap();
@@ -4622,18 +5429,42 @@ mod tests {
         std::fs::create_dir(&source).unwrap();
         let staged_file = source.join("video.mp4");
         std::fs::write(&staged_file, b"old bytes").unwrap();
-        db.execute("INSERT INTO task_staging(task_id,path) VALUES(?1,?2)", params![task.id,source.to_string_lossy()]).unwrap();
-        db.execute("INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,9)",params![task.id,staged_file.to_string_lossy(),root.path().join("not-moved.mp4").to_string_lossy()]).unwrap();
+        db.execute(
+            "INSERT INTO task_staging(task_id,path) VALUES(?1,?2)",
+            params![task.id, source.to_string_lossy()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO commit_intents(task_id,source,target,size) VALUES(?1,?2,?3,9)",
+            params![
+                task.id,
+                staged_file.to_string_lossy(),
+                root.path().join("not-moved.mp4").to_string_lossy()
+            ],
+        )
+        .unwrap();
         drop(db);
         let app = core(root.path());
         assert!(!source.exists());
-        assert_eq!(app.list()[0].error.as_deref(),Some("INTERRUPTED"));
+        assert_eq!(app.list()[0].error.as_deref(), Some("INTERRUPTED"));
         app.start_backup_service();
-        assert_eq!(app.inner.lock().unwrap().db.query_row("SELECT count(*) FROM commit_intents WHERE task_id=?",[&task.id],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(
+            app.inner
+                .lock()
+                .unwrap()
+                .db
+                .query_row(
+                    "SELECT count(*) FROM commit_intents WHERE task_id=?",
+                    [&task.id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
         release(root.path(), "8609");
-        let done=wait(&app,&task.id,Status::Completed).await;
+        let done = wait(&app, &task.id, Status::Completed).await;
         assert!(done.path.unwrap().is_file());
-        assert_eq!(app.list().len(),1);
+        assert_eq!(app.list().len(), 1);
         app.shutdown().await;
     }
 
@@ -4642,37 +5473,50 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         app.set_max_downloads(1).unwrap();
-        let first = enqueue(&app,"8601").await;
-        started(root.path(),"8601").await;
-        let second = enqueue(&app,"8602").await;
+        let first = enqueue(&app, "8601").await;
+        started(root.path(), "8601").await;
+        let second = enqueue(&app, "8602").await;
         let original = app.list();
         app.shutdown().await;
         drop(app);
         std::fs::remove_file(root.path().join("started-8601")).unwrap();
         let app = core(root.path());
-        assert!(app.list().iter().all(|task| task.error.as_deref()==Some("INTERRUPTED")));
+        assert!(app
+            .list()
+            .iter()
+            .all(|task| task.error.as_deref() == Some("INTERRUPTED")));
         app.start_backup_service();
-        started(root.path(),"8601").await;
+        started(root.path(), "8601").await;
         assert!(!root.path().join("started-8602").exists());
-        let second_waiting = app.list().into_iter().find(|task|task.id==second.id).unwrap();
-        assert_eq!(second_waiting.status,Status::Queued);
-        assert_eq!(second_waiting.bytes,0);
+        let second_waiting = app
+            .list()
+            .into_iter()
+            .find(|task| task.id == second.id)
+            .unwrap();
+        assert_eq!(second_waiting.status, Status::Queued);
+        assert_eq!(second_waiting.bytes, 0);
         for task in app.list() {
-            let before = original.iter().find(|previous|previous.id==task.id).unwrap();
-            assert_eq!(task.insertion_id,before.insertion_id);
-            assert_eq!(task.queue_order,before.queue_order);
-            assert_eq!(task.download_requested_at,before.download_requested_at);
-            assert_eq!(task.video.as_ref().unwrap()["selected_format_id"],before.video.as_ref().unwrap()["selected_format_id"]);
+            let before = original
+                .iter()
+                .find(|previous| previous.id == task.id)
+                .unwrap();
+            assert_eq!(task.insertion_id, before.insertion_id);
+            assert_eq!(task.queue_order, before.queue_order);
+            assert_eq!(task.download_requested_at, before.download_requested_at);
+            assert_eq!(
+                task.video.as_ref().unwrap()["selected_format_id"],
+                before.video.as_ref().unwrap()["selected_format_id"]
+            );
         }
         let workers = app.inner.lock().unwrap().workers.len();
         app.start_backup_service();
-        assert_eq!(app.inner.lock().unwrap().workers.len(),workers);
-        release(root.path(),"8601");
-        wait(&app,&first.id,Status::Completed).await;
-        started(root.path(),"8602").await;
-        release(root.path(),"8602");
-        wait(&app,&second.id,Status::Completed).await;
-        assert_eq!(app.list().len(),2);
+        assert_eq!(app.inner.lock().unwrap().workers.len(), workers);
+        release(root.path(), "8601");
+        wait(&app, &first.id, Status::Completed).await;
+        started(root.path(), "8602").await;
+        release(root.path(), "8602");
+        wait(&app, &second.id, Status::Completed).await;
+        assert_eq!(app.list().len(), 2);
         app.shutdown().await;
     }
 
@@ -4680,24 +5524,32 @@ mod tests {
     async fn startup_skips_canceled_business_failures_and_unsubmitted_previews() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
-        let done = enqueue(&app,"9105").await;
-        wait(&app,&done.id,Status::Completed).await;
-        let failed = enqueue(&app,"7305").await;
-        started(root.path(),"7305").await;
-        release(root.path(),"7305");
-        wait(&app,&failed.id,Status::Failed).await;
-        let canceled = enqueue(&app,"8305").await;
-        started(root.path(),"8305").await;
+        let done = enqueue(&app, "9105").await;
+        wait(&app, &done.id, Status::Completed).await;
+        let failed = enqueue(&app, "7305").await;
+        started(root.path(), "7305").await;
+        release(root.path(), "7305");
+        wait(&app, &failed.id, Status::Failed).await;
+        let canceled = enqueue(&app, "8305").await;
+        started(root.path(), "8305").await;
         app.cancel(&canceled.id).await.unwrap();
         let draft = app.resolve("valid".into()).unwrap();
-        wait(&app,&draft.id,Status::Ready).await;
+        wait(&app, &draft.id, Status::Ready).await;
         app.shutdown().await;
         drop(app);
         let app = core(root.path());
-        let before: Vec<_> = app.list().into_iter().map(|task|(task.id,task.status,task.error,task.revision)).collect();
+        let before: Vec<_> = app
+            .list()
+            .into_iter()
+            .map(|task| (task.id, task.status, task.error, task.revision))
+            .collect();
         app.start_backup_service();
-        let after: Vec<_> = app.list().into_iter().map(|task|(task.id,task.status,task.error,task.revision)).collect();
-        assert_eq!(before,after);
+        let after: Vec<_> = app
+            .list()
+            .into_iter()
+            .map(|task| (task.id, task.status, task.error, task.revision))
+            .collect();
+        assert_eq!(before, after);
         assert!(app.inner.lock().unwrap().downloads.is_empty());
         assert!(app.inner.lock().unwrap().active.is_empty());
         app.shutdown().await;
@@ -4708,28 +5560,29 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
         app.set_filename_template("{link_id}".into()).unwrap();
-        let first = enqueue(&app,"8606").await;
-        started(root.path(),"8606").await;
-        release(root.path(),"8606");
-        let first = wait(&app,&first.id,Status::Completed).await;
+        let first = enqueue(&app, "8606").await;
+        started(root.path(), "8606").await;
+        release(root.path(), "8606");
+        let first = wait(&app, &first.id, Status::Completed).await;
         let original = std::fs::read(first.path.as_ref().unwrap()).unwrap();
         std::fs::remove_file(root.path().join("release-8606")).unwrap();
         std::fs::remove_file(root.path().join("started-8606")).unwrap();
         let repeat = app.resolve("hold:8606".into()).unwrap();
-        wait(&app,&repeat.id,Status::Ready).await;
-        app.submit_download(&repeat.id,true,Some(&first.id)).unwrap();
-        started(root.path(),"8606").await;
+        wait(&app, &repeat.id, Status::Ready).await;
+        app.submit_download(&repeat.id, true, Some(&first.id))
+            .unwrap();
+        started(root.path(), "8606").await;
         app.shutdown().await;
         drop(app);
         std::fs::remove_file(root.path().join("started-8606")).unwrap();
         let app = core(root.path());
         app.start_backup_service();
-        started(root.path(),"8606").await;
-        release(root.path(),"8606");
-        let repeat = wait(&app,&first.id,Status::Completed).await;
-        assert_eq!(first.path,repeat.path);
-        assert_eq!(std::fs::read(first.path.unwrap()).unwrap(),original);
-        assert_eq!(app.list().len(),1);
+        started(root.path(), "8606").await;
+        release(root.path(), "8606");
+        let repeat = wait(&app, &first.id, Status::Completed).await;
+        assert_eq!(first.path, repeat.path);
+        assert_eq!(std::fs::read(first.path.unwrap()).unwrap(), original);
+        assert_eq!(app.list().len(), 1);
         app.shutdown().await;
     }
 
@@ -4816,14 +5669,39 @@ mod tests {
             started(root.path(), &id.to_string()).await;
         }
         assert!(!root.path().join("started-8161").exists());
-        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 10);
+        assert_eq!(
+            app.list()
+                .iter()
+                .filter(|task| task.status == Status::Downloading)
+                .count(),
+            10
+        );
         app.set_max_downloads(9).unwrap();
-        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 10);
+        assert_eq!(
+            app.list()
+                .iter()
+                .filter(|task| task.status == Status::Downloading)
+                .count(),
+            10
+        );
         app.cancel(&tasks[0].id).await.unwrap();
-        assert_eq!(app.list().iter().find(|task| task.id == tasks[10].id).unwrap().status, Status::Queued);
+        assert_eq!(
+            app.list()
+                .iter()
+                .find(|task| task.id == tasks[10].id)
+                .unwrap()
+                .status,
+            Status::Queued
+        );
         app.cancel(&tasks[1].id).await.unwrap();
         started(root.path(), "8161").await;
-        assert_eq!(app.list().iter().filter(|task| task.status == Status::Downloading).count(), 9);
+        assert_eq!(
+            app.list()
+                .iter()
+                .filter(|task| task.status == Status::Downloading)
+                .count(),
+            9
+        );
         app.set_max_downloads(10).unwrap();
         app.shutdown().await;
         drop(app);
@@ -4881,7 +5759,10 @@ mod tests {
         assert_eq!(app.settings().max_downloads, 2);
         app.shutdown().await;
         for id in [&a.id, &b.id, &c.id] {
-            assert_eq!(app.list().iter().find(|t| &t.id == id).unwrap().status, Status::Canceled);
+            assert_eq!(
+                app.list().iter().find(|t| &t.id == id).unwrap().status,
+                Status::Canceled
+            );
         }
         let interrupted = app.list().into_iter().find(|t| t.id == d.id).unwrap();
         assert_eq!(interrupted.status, Status::Failed);
@@ -4905,14 +5786,16 @@ mod tests {
             user_agent: "youtube-fixture".into(),
             cookie: None,
             proxy: None,
-            bypass_proxy: None, http_chunk_size: Some(Some(10_485_760)),
+            bypass_proxy: None,
+            http_chunk_size: Some(Some(10_485_760)),
         })
         .unwrap();
         let a = enqueue(&app, "8201").await;
         let old = app.settings().profiles[0].user_agent.clone();
         let b = enqueue(&app, "8202").await;
         app.save_profile(settings::ProfileUpdate {
-            bypass_proxy: None, http_chunk_size: None,
+            bypass_proxy: None,
+            http_chunk_size: None,
             platform: "douyin".into(),
             user_agent: "new-agent".into(),
             cookie: None,
@@ -4924,7 +5807,8 @@ mod tests {
             user_agent: "youtube-fixture".into(),
             cookie: None,
             proxy: None,
-            bypass_proxy: None, http_chunk_size: Some(Some(0)),
+            bypass_proxy: None,
+            http_chunk_size: Some(Some(0)),
         })
         .unwrap();
         app.cancel(&a.id).await.unwrap();
@@ -4936,8 +5820,12 @@ mod tests {
         assert_eq!(captured["douyin"]["user_agent"], old);
         assert_eq!(captured["youtube"]["http_chunk_size"], 10_485_760);
         assert_eq!(
-            app.settings().profiles.iter().find(|profile| profile.platform == "youtube")
-                .unwrap().http_chunk_size,
+            app.settings()
+                .profiles
+                .iter()
+                .find(|profile| profile.platform == "youtube")
+                .unwrap()
+                .http_chunk_size,
             Some(0)
         );
         let c = enqueue(&app, "8203").await;
@@ -4997,7 +5885,12 @@ mod tests {
         started(root.path(), "8401").await;
         {
             let mut inner = app.inner.lock().unwrap();
-            let mut canceling = inner.tasks.iter().find(|t| t.id == task.id).unwrap().clone();
+            let mut canceling = inner
+                .tasks
+                .iter()
+                .find(|t| t.id == task.id)
+                .unwrap()
+                .clone();
             // User intent is already recorded; exit may now stop the worker.
             canceling.canceling = true;
             canceling.revision += 1;
@@ -5006,7 +5899,11 @@ mod tests {
         app.shutdown().await;
         drop(app);
         let reopened = core(root.path());
-        let canceled = reopened.list().into_iter().find(|t| t.id == task.id).unwrap();
+        let canceled = reopened
+            .list()
+            .into_iter()
+            .find(|t| t.id == task.id)
+            .unwrap();
         assert_eq!(canceled.status, Status::Canceled);
         assert!(canceled.error.is_none());
         assert!(!canceled.canceling);
@@ -5034,9 +5931,15 @@ mod tests {
         drop(app);
         let app = core(root.path());
         let tasks = app.list();
-        assert_eq!(tasks.iter().map(|task|task.id.as_str()).collect::<Vec<_>>(), vec![second.id.as_str(),first.id.as_str()]);
-        assert_eq!(tasks[0].insertion_id,second.insertion_id);
-        assert_eq!(tasks[1].insertion_id,first.insertion_id);
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![second.id.as_str(), first.id.as_str()]
+        );
+        assert_eq!(tasks[0].insertion_id, second.insertion_id);
+        assert_eq!(tasks[1].insertion_id, first.insertion_id);
         app.shutdown().await;
     }
 
@@ -5052,7 +5955,8 @@ mod tests {
         let canceled = app.list().into_iter().find(|t| t.id == old.id).unwrap();
         std::fs::remove_file(root.path().join("started-8301")).unwrap();
         app.save_profile(settings::ProfileUpdate {
-            bypass_proxy: None, http_chunk_size: None,
+            bypass_proxy: None,
+            http_chunk_size: None,
             platform: "douyin".into(),
             user_agent: "retry-agent".into(),
             cookie: None,
@@ -5692,8 +6596,12 @@ mod tests {
             app.download(&retry.id, false).err().unwrap().to_string(),
             "ALREADY_DOWNLOADED"
         );
-        assert_eq!(app.download(&retry.id, true).unwrap_err().to_string(), "ALREADY_DOWNLOADED");
-        app.submit_download(&retry.id, true, Some(&original.id)).unwrap();
+        assert_eq!(
+            app.download(&retry.id, true).unwrap_err().to_string(),
+            "ALREADY_DOWNLOADED"
+        );
+        app.submit_download(&retry.id, true, Some(&original.id))
+            .unwrap();
         let repeated = wait(&app, &original.id, Status::Completed).await;
         assert_eq!(original.path, repeated.path);
         assert_eq!(original.insertion_id, repeated.insertion_id);
@@ -5727,10 +6635,22 @@ mod tests {
     #[test]
     fn asset_deletion_finalization_retains_the_existing_busy_guard() {
         let root = tempfile::tempdir().unwrap();
-        let core = Core::open(&root.path().join("busy-delete.sqlite"), root.path().join("downloads"), "unused".into(), vec![], |_| {}).unwrap();
+        let core = Core::open(
+            &root.path().join("busy-delete.sqlite"),
+            root.path().join("downloads"),
+            "unused".into(),
+            vec![],
+            |_| {},
+        )
+        .unwrap();
         let task: Task = serde_json::from_value(json!({"id":"busy-task","asset_id":"busy-asset","revision":1,"status":"queued","video":null,"bytes":0,"total_bytes":null,"speed_bps":null,"error":null,"path":null,"created_at":1,"completed_at":null,"canceling":false})).unwrap();
         core.inner.lock().unwrap().tasks.push(task);
-        assert_eq!(core.finish_asset_deletion("busy-asset", "unstarted-operation").unwrap_err().to_string(), "TASK_BUSY");
+        assert_eq!(
+            core.finish_asset_deletion("busy-asset", "unstarted-operation")
+                .unwrap_err()
+                .to_string(),
+            "TASK_BUSY"
+        );
         assert_eq!(core.list().len(), 1);
     }
 
@@ -5739,7 +6659,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
-        let core = Core::open(&root.path().join("scoped-delete.sqlite"), root.path().join("downloads"), "unused".into(), vec![], move |event| captured.lock().unwrap().push(event)).unwrap();
+        let core = Core::open(
+            &root.path().join("scoped-delete.sqlite"),
+            root.path().join("downloads"),
+            "unused".into(),
+            vec![],
+            move |event| captured.lock().unwrap().push(event),
+        )
+        .unwrap();
         let task: Task = serde_json::from_value(json!({"id":"task","asset_id":"asset","revision":1,"status":"completed","video":null,"bytes":0,"total_bytes":null,"speed_bps":null,"error":null,"path":null,"created_at":1,"completed_at":2,"canceling":false})).unwrap();
         {
             let mut inner = core.inner.lock().unwrap();
@@ -5755,7 +6682,9 @@ mod tests {
         core.finish_asset_deletion("asset", "delete").unwrap();
         let captured = events.lock().unwrap();
         assert!(captured.iter().any(|event| matches!(event, TaskEvent::RemovedFromSpace { id, space_id } if id == "task" && space_id == "A")));
-        assert!(!captured.iter().any(|event| matches!(event, TaskEvent::Removed(_))));
+        assert!(!captured
+            .iter()
+            .any(|event| matches!(event, TaskEvent::Removed(_))));
         assert!(core.list().is_empty());
     }
 
@@ -5771,18 +6700,39 @@ mod tests {
         let running = wait(&app, &ready.id, Status::Downloading).await;
         let requested = running.download_requested_at.unwrap();
         assert!(requested >= before);
-        assert_eq!(app.list().iter().find(|t| t.id == ready.id).unwrap().download_requested_at, Some(requested));
+        assert_eq!(
+            app.list()
+                .iter()
+                .find(|t| t.id == ready.id)
+                .unwrap()
+                .download_requested_at,
+            Some(requested)
+        );
         app.cancel(&ready.id).await.unwrap();
-        let canceled = app.list().into_iter().find(|t|t.id==ready.id).unwrap();
+        let canceled = app.list().into_iter().find(|t| t.id == ready.id).unwrap();
         assert_eq!(canceled.status, Status::Canceled);
         assert_eq!(canceled.download_requested_at, Some(requested));
         let mut legacy = serde_json::to_value(&canceled).unwrap();
-        legacy.as_object_mut().unwrap().remove("download_requested_at");
-        assert!(serde_json::from_value::<Task>(legacy).unwrap().download_requested_at.is_none());
-        app.shutdown().await;drop(app);
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("download_requested_at");
+        assert!(serde_json::from_value::<Task>(legacy)
+            .unwrap()
+            .download_requested_at
+            .is_none());
+        app.shutdown().await;
+        drop(app);
         let reopened = core(root.path());
-        assert_eq!(reopened.list().iter().find(|t| t.id == ready.id).unwrap().download_requested_at, Some(requested));
+        assert_eq!(
+            reopened
+                .list()
+                .iter()
+                .find(|t| t.id == ready.id)
+                .unwrap()
+                .download_requested_at,
+            Some(requested)
+        );
         reopened.shutdown().await;
     }
-
 }

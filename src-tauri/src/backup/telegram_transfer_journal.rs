@@ -23,10 +23,16 @@ pub(super) struct Entry {
     pub last_error: Option<String>,
 }
 fn decode_entry(raw: &str) -> Result<Entry> {
-    let mut value: serde_json::Value = serde_json::from_str(raw).context("TELEGRAM_SEND_EVIDENCE_INVALID")?;
-    if let Some(flag) = value.as_object_mut().and_then(|v| v.remove("use_document_identity")) {
+    let mut value: serde_json::Value =
+        serde_json::from_str(raw).context("TELEGRAM_SEND_EVIDENCE_INVALID")?;
+    if let Some(flag) = value
+        .as_object_mut()
+        .and_then(|v| v.remove("use_document_identity"))
+    {
         // Only the known journal generation with document identity is compatible.
-        if flag != true { bail!("TELEGRAM_SEND_EVIDENCE_INVALID"); }
+        if flag != true {
+            bail!("TELEGRAM_SEND_EVIDENCE_INVALID");
+        }
     }
     serde_json::from_value(value).context("TELEGRAM_SEND_EVIDENCE_INVALID")
 }
@@ -65,8 +71,7 @@ pub(super) fn get(db: &Connection, operation: &str, kind: &str) -> Result<Option
             |r| r.get(0),
         )
         .optional()?;
-    raw.map(|value| decode_entry(&value))
-        .transpose()
+    raw.map(|value| decode_entry(&value)).transpose()
 }
 pub(super) fn reserve(db: &Connection, entry: Entry) -> Result<Entry> {
     let tx = db.unchecked_transaction()?;
@@ -132,11 +137,15 @@ mod compatibility_tests {
     use super::*;
     #[test]
     fn historical_identity_flag_preserves_send_state_and_nonce() {
-        let mut value=serde_json::json!({"target":{"scope":{"space_id":"space","library_id":"library","provider_type":"telegram","protocol":2},"account_id":"1","channel_id":"2"},"envelope":{"generation":null,"yingqu_media":2,"library_id":"library","asset_id":"asset","operation_id":"operation","device_id":"device","kind":"video","bytes":24,"sha256":"a".repeat(64),"container":"mp4"},"random_id":19,"state":"sending","document":null,"last_error":null,"use_document_identity":true});
-        let entry=decode_entry(&value.to_string()).unwrap();
-        assert_eq!(entry.state,SendState::Sending);assert_eq!(entry.random_id,19);
-        assert_eq!(entry.envelope.operation_id,"operation");
-        value["use_document_identity"]=false.into();assert!(decode_entry(&value.to_string()).is_err());
-        value["use_document_identity"]=true.into();value["unknown"]=true.into();assert!(decode_entry(&value.to_string()).is_err());
+        let mut value = serde_json::json!({"target":{"scope":{"space_id":"space","library_id":"library","provider_type":"telegram","protocol":2},"account_id":"1","channel_id":"2"},"envelope":{"generation":null,"yingqu_media":2,"library_id":"library","asset_id":"asset","operation_id":"operation","device_id":"device","kind":"video","bytes":24,"sha256":"a".repeat(64),"container":"mp4"},"random_id":19,"state":"sending","document":null,"last_error":null,"use_document_identity":true});
+        let entry = decode_entry(&value.to_string()).unwrap();
+        assert_eq!(entry.state, SendState::Sending);
+        assert_eq!(entry.random_id, 19);
+        assert_eq!(entry.envelope.operation_id, "operation");
+        value["use_document_identity"] = false.into();
+        assert!(decode_entry(&value.to_string()).is_err());
+        value["use_document_identity"] = true.into();
+        value["unknown"] = true.into();
+        assert!(decode_entry(&value.to_string()).is_err());
     }
 }

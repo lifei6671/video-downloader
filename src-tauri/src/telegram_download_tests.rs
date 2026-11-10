@@ -1,6 +1,6 @@
 use super::*;
-use grammers_client::media::Downloadable;
 use crate::desktop_core::{Core, Status, Task};
+use grammers_client::media::Downloadable;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -73,28 +73,44 @@ fn metadata_fill_preserves_native_values_and_newer_cache_identity() {
     let mut native = preview(&media(9), &link);
     native["width"] = 1080.into();
     native["height"] = 1920.into();
-    fill_missing_attributes(&mut native, &json!({"width":1920,"height":1080,"duration_ms":2500}));
-    assert_eq!((native["width"].as_u64(), native["height"].as_u64(), native["duration_ms"].as_u64()), (Some(1080),Some(1920),Some(2500)));
+    fill_missing_attributes(
+        &mut native,
+        &json!({"width":1920,"height":1080,"duration_ms":2500}),
+    );
+    assert_eq!(
+        (
+            native["width"].as_u64(),
+            native["height"].as_u64(),
+            native["duration_ms"].as_u64()
+        ),
+        (Some(1080), Some(1920), Some(2500))
+    );
     let mut db = rusqlite::Connection::open_in_memory().unwrap();
     crate::parse_cache::init(&db).unwrap();
     let mut fresh = preview(&media(9), &link);
     fresh["title"] = "new caption".into();
-    crate::parse_cache::save(&mut db, &fresh, vec![], Some(png([10,20,30])), 1).unwrap();
+    crate::parse_cache::save(&mut db, &fresh, vec![], Some(png([10, 20, 30])), 1).unwrap();
     crate::parse_cache::update_telegram_metadata(&db, &native).unwrap();
-    let cached: String = db.query_row("SELECT metadata FROM parse_cache", [], |row|row.get(0)).unwrap();
-    let cached:Value=serde_json::from_str(&cached).unwrap();
+    let cached: String = db
+        .query_row("SELECT metadata FROM parse_cache", [], |row| row.get(0))
+        .unwrap();
+    let cached: Value = serde_json::from_str(&cached).unwrap();
     assert_eq!(cached["title"], "new caption");
-    assert_eq!(cached["width"],1080);
+    assert_eq!(cached["width"], 1080);
     fresh["telegram_document_id"] = 99.into();
-    let new_cover=png([90,80,70]);
+    let new_cover = png([90, 80, 70]);
     crate::parse_cache::save(&mut db, &fresh, vec![], Some(new_cover.clone()), 2).unwrap();
     crate::parse_cache::update_telegram_metadata(&db, &native).unwrap();
-    let (cached,cover):(String,Vec<u8>)=db.query_row("SELECT metadata,cover FROM parse_cache", [], |row|Ok((row.get(0)?,row.get(1)?))).unwrap();
-    let cached:Value=serde_json::from_str(&cached).unwrap();
-    assert_eq!(cached["telegram_document_id"],99);
+    let (cached, cover): (String, Vec<u8>) = db
+        .query_row("SELECT metadata,cover FROM parse_cache", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    let cached: Value = serde_json::from_str(&cached).unwrap();
+    assert_eq!(cached["telegram_document_id"], 99);
     assert!(cached["width"].is_null());
-    assert_eq!(cached["title"],"new caption");
-    assert_eq!(cover,new_cover);
+    assert_eq!(cached["title"], "new caption");
+    assert_eq!(cover, new_cover);
 }
 
 #[test]
@@ -129,7 +145,10 @@ async fn channel_title_is_refreshed_on_download_and_persisted_without_renaming_t
     *fixture.channel_title.lock().unwrap() = Some("最初频道名".into());
     let app = app(root.path(), &fixture);
     let task = resolve(&app, 9).await;
-    assert_eq!(task.video.as_ref().unwrap()["author_profile"]["nickname"], "最初频道名");
+    assert_eq!(
+        task.video.as_ref().unwrap()["author_profile"]["nickname"],
+        "最初频道名"
+    );
     *fixture.channel_title.lock().unwrap() = Some("改名后的频道".into());
     app.download(&task.id, false).unwrap();
     let done = wait(&app, &task.id, Status::Completed).await;
@@ -139,14 +158,30 @@ async fn channel_title_is_refreshed_on_download_and_persisted_without_renaming_t
     assert_eq!(video["video_id"], "100_9");
     assert_eq!(std::fs::read(done.path.as_ref().unwrap()).unwrap(), body());
     let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
-    let raw: String = db.query_row("SELECT metadata FROM parse_cache WHERE platform='telegram'", [], |r| r.get(0)).unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&raw).unwrap()["author_profile"]["nickname"], "改名后的频道");
+    let raw: String = db
+        .query_row(
+            "SELECT metadata FROM parse_cache WHERE platform='telegram'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap()["author_profile"]["nickname"],
+        "改名后的频道"
+    );
     drop(db);
     app.shutdown().await;
     drop(app);
     let reopened = super::tests::app(root.path(), &fixture);
-    let stored = reopened.list().into_iter().find(|t| t.id == task.id).unwrap();
-    assert_eq!(stored.video.unwrap()["author_profile"]["nickname"], "改名后的频道");
+    let stored = reopened
+        .list()
+        .into_iter()
+        .find(|t| t.id == task.id)
+        .unwrap();
+    assert_eq!(
+        stored.video.unwrap()["author_profile"]["nickname"],
+        "改名后的频道"
+    );
     assert_eq!(stored.path, done.path);
     reopened.shutdown().await;
 }
@@ -162,10 +197,15 @@ async fn telegram_channel_avatar_survives_download_and_restart() {
     let application = app(root.path(), &fixture);
 
     let private = resolve(&application, 9).await;
-    let public = application.resolve("https://t.me/example_channel/10".into()).unwrap();
+    let public = application
+        .resolve("https://t.me/example_channel/10".into())
+        .unwrap();
     let public = wait(&application, &public.id, Status::Ready).await;
     for task in [&private, &public] {
-        assert_eq!(task.video.as_ref().unwrap()["author_profile"]["avatar_cached"], true);
+        assert_eq!(
+            task.video.as_ref().unwrap()["author_profile"]["avatar_cached"],
+            true
+        );
         assert_eq!(application.author_avatar(&task.id).unwrap(), avatar);
         assert_eq!(application.cover(&task.id).unwrap(), cover);
     }
@@ -178,8 +218,15 @@ async fn telegram_channel_avatar_survives_download_and_restart() {
     drop(application);
 
     let reopened = app(root.path(), &fixture);
-    let stored = reopened.list().into_iter().find(|task| task.id == private.id).unwrap();
-    assert_eq!(stored.video.unwrap()["author_profile"]["avatar_cached"], true);
+    let stored = reopened
+        .list()
+        .into_iter()
+        .find(|task| task.id == private.id)
+        .unwrap();
+    assert_eq!(
+        stored.video.unwrap()["author_profile"]["avatar_cached"],
+        true
+    );
     assert_eq!(reopened.author_avatar(&private.id).unwrap(), avatar);
     reopened.shutdown().await;
 }
@@ -189,11 +236,18 @@ async fn telegram_channel_avatar_is_optional_when_missing_unavailable_or_invalid
     let root = tempfile::tempdir().unwrap();
     let fixture = Arc::new(Fixture::default());
     let application = app(root.path(), &fixture);
-    let cases = [None, Some(Err("TELEGRAM_CONNECTION_ERROR")), Some(Ok(b"invalid image".to_vec()))];
+    let cases = [
+        None,
+        Some(Err("TELEGRAM_CONNECTION_ERROR")),
+        Some(Ok(b"invalid image".to_vec())),
+    ];
     for (message, avatar) in (9..).zip(cases) {
         *fixture.avatar.lock().unwrap() = avatar;
         let task = resolve(&application, message).await;
-        assert_eq!(task.video.unwrap()["author_profile"]["avatar_cached"], false);
+        assert_eq!(
+            task.video.unwrap()["author_profile"]["avatar_cached"],
+            false
+        );
         assert!(application.author_avatar(&task.id).is_err());
     }
     application.shutdown().await;
@@ -361,19 +415,31 @@ async fn downloaded_cover_survives_metadata_fill_and_restart_without_frame_extra
         )
     });
     assert_eq!(reopened.cover(&task.id).unwrap(), original);
-    reopened.backup_db(|db| {
-        let raw: String = db.query_row("SELECT metadata_json FROM media_assets WHERE asset_id=?",[asset],|r|r.get(0))?;
-        let metadata: serde_json::Value = serde_json::from_str(&raw)?;
-        assert_eq!(metadata["title"],"用户修改的标题");
-        assert_eq!(metadata["width"],1920);
-        assert_eq!(metadata["height"],1080);
-        assert!(metadata["duration_ms"].as_u64().unwrap()>0);
-        let raw: String=db.query_row("SELECT pending_json FROM backup_space_assets WHERE local_asset_id=?",[asset],|r|r.get(0))?;
-        let pending: crate::backup::sync_engine::PendingChanges=serde_json::from_str(&raw)?;
-        for field in ["width","height","duration_ms"] {assert_eq!(pending.fields[field].value,metadata[field]);}
-        assert_eq!(pending.fields.len(),3);
-        Ok(())
-    }).unwrap();
+    reopened
+        .backup_db(|db| {
+            let raw: String = db.query_row(
+                "SELECT metadata_json FROM media_assets WHERE asset_id=?",
+                [asset],
+                |r| r.get(0),
+            )?;
+            let metadata: serde_json::Value = serde_json::from_str(&raw)?;
+            assert_eq!(metadata["title"], "用户修改的标题");
+            assert_eq!(metadata["width"], 1920);
+            assert_eq!(metadata["height"], 1080);
+            assert!(metadata["duration_ms"].as_u64().unwrap() > 0);
+            let raw: String = db.query_row(
+                "SELECT pending_json FROM backup_space_assets WHERE local_asset_id=?",
+                [asset],
+                |r| r.get(0),
+            )?;
+            let pending: crate::backup::sync_engine::PendingChanges = serde_json::from_str(&raw)?;
+            for field in ["width", "height", "duration_ms"] {
+                assert_eq!(pending.fields[field].value, metadata[field]);
+            }
+            assert_eq!(pending.fields.len(), 3);
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
     reopened.shutdown().await;
 }
@@ -437,19 +503,43 @@ async fn native_attributes_keep_downloaded_cover_without_metadata_probe() {
 }
 
 impl Transport for Fake {
-    fn cover(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> { Box::pin(async { self.fixture.cover_reads.fetch_add(1, Ordering::SeqCst); Ok(self.fixture.cover.lock().unwrap().clone()) }) }
+    fn cover(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async {
+            self.fixture.cover_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(self.fixture.cover.lock().unwrap().clone())
+        })
+    }
     fn avatar(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> {
         Box::pin(async {
             self.fixture.avatar_reads.fetch_add(1, Ordering::SeqCst);
-            self.fixture.avatar.lock().unwrap().clone().transpose().map_err(anyhow::Error::msg)
+            self.fixture
+                .avatar
+                .lock()
+                .unwrap()
+                .clone()
+                .transpose()
+                .map_err(anyhow::Error::msg)
         })
     }
     fn inspect<'a>(&'a mut self, link: &'a MessageLink) -> ProviderFuture<'a, Media> {
         Box::pin(async move {
-            if self.fixture.auth_denied.load(Ordering::SeqCst) { bail!("TELEGRAM_AUTH_REQUIRED"); }
+            if self.fixture.auth_denied.load(Ordering::SeqCst) {
+                bail!("TELEGRAM_AUTH_REQUIRED");
+            }
             self.fixture.inspected.lock().unwrap().push(link.message);
-            if self.fixture.inspect_failures.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
-                bail!(self.fixture.inspect_error.lock().unwrap().clone().unwrap_or_else(|| "TELEGRAM_CONNECTION_ERROR".into()));
+            if self
+                .fixture
+                .inspect_failures
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                bail!(self
+                    .fixture
+                    .inspect_error
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| "TELEGRAM_CONNECTION_ERROR".into()));
             }
             if self.fixture.public_only.load(Ordering::SeqCst) && link.channel.is_some() {
                 bail!("TELEGRAM_CHANNEL_FORBIDDEN");
@@ -487,9 +577,19 @@ impl Transport for Fake {
             if let Some(gate) = gate {
                 let _permit = gate.acquire().await.unwrap();
             }
-            if self.fixture.next_failures.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() { bail!("TELEGRAM_CONNECTION_ERROR"); }
+            if self
+                .fixture
+                .next_failures
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                bail!("TELEGRAM_CONNECTION_ERROR");
+            }
             self.delivered = true;
-            Ok(Some(ReceivedPart {offset, bytes: body()}))
+            Ok(Some(ReceivedPart {
+                offset,
+                bytes: body(),
+            }))
         })
     }
 }
@@ -509,7 +609,12 @@ fn app_with_engine(root: &Path, fixture: &Arc<Fixture>, program: &str) -> Arc<Co
         |_| {},
     )
     .unwrap();
-    *app.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download).session.reconnect_probe.lock().unwrap() = Some(|| Ok(()));
+    *app.telegram_accounts
+        .binding(crate::telegram_accounts::Purpose::Download)
+        .session
+        .reconnect_probe
+        .lock()
+        .unwrap() = Some(|| Ok(()));
     let fixture_root = root.to_path_buf();
     *app.local_media_fixture.lock().unwrap() = Some(Arc::new(move |operation, source| {
         if operation == "probe" {
@@ -517,8 +622,8 @@ fn app_with_engine(root: &Path, fixture: &Arc<Fixture>, program: &str) -> Arc<Co
             Ok(json!({"width":1920,"height":1080,"duration_ms":2500}))
         } else {
             std::fs::write(fixture_root.join("cover-started"), "ready")?;
-            let body=b"\x89PNG\r\n\x1a\nfixture";
-            std::fs::write(source.parent().unwrap().join("cover"),body)?;
+            let body = b"\x89PNG\r\n\x1a\nfixture";
+            std::fs::write(source.parent().unwrap().join("cover"), body)?;
             Ok(json!({"cover_filename":"cover","cover_bytes":body.len()}))
         }
     }));
@@ -659,8 +764,12 @@ async fn metadata_parse_cancel_stops_retry_backoff_without_canceling_other_downl
     let downloading = resolve(&app, 1).await;
     app.download(&downloading.id, false).unwrap();
     timeout(Duration::from_secs(2), async {
-        while fixture.active.load(Ordering::SeqCst) != 1 { tokio::task::yield_now().await; }
-    }).await.unwrap();
+        while fixture.active.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     fixture.inspect_failures.store(9, Ordering::SeqCst);
     let task = app.resolve("https://t.me/c/100/9".into()).unwrap();
     timeout(Duration::from_secs(2), async {
@@ -726,7 +835,10 @@ async fn revoked_download_authorization_clears_the_shared_account_view() {
     let fixture = Arc::new(Fixture::default());
     fixture.auth_denied.store(true, Ordering::SeqCst);
     let app = app(root.path(), &fixture);
-    app.telegram_accounts.binding(Purpose::Download).session.set_test_view(Phase::Ready, "account-a");
+    app.telegram_accounts
+        .binding(Purpose::Download)
+        .session
+        .set_test_view(Phase::Ready, "account-a");
     let task = app.resolve("https://t.me/c/100/9".into()).unwrap();
     let failed = wait(&app, &task.id, Status::Failed).await;
     assert_eq!(failed.error.as_deref(), Some("TELEGRAM_AUTH_REQUIRED"));
@@ -742,7 +854,11 @@ async fn account_logout_cancels_download_and_queue_without_signing_out_backup() 
     use crate::{backup::telegram_session::Phase, telegram_accounts::Purpose};
     let root = tempfile::tempdir().unwrap();
     let fixture = Arc::new(Fixture::default());
-    fixture.gates.lock().unwrap().insert(1, Arc::new(Semaphore::new(0)));
+    fixture
+        .gates
+        .lock()
+        .unwrap()
+        .insert(1, Arc::new(Semaphore::new(0)));
     let app = app(root.path(), &fixture);
     app.set_max_downloads(1).unwrap();
     let binding = app.telegram_accounts.binding(Purpose::Download);
@@ -754,13 +870,31 @@ async fn account_logout_cancels_download_and_queue_without_signing_out_backup() 
     wait(&app, &a.id, Status::Downloading).await;
     wait(&app, &b.id, Status::Queued).await;
     timeout(Duration::from_secs(2), async {
-        while fixture.active.load(Ordering::SeqCst) != 1 { tokio::task::yield_now().await; }
-    }).await.unwrap();
-    app.telegram_accounts.logout(&app, Purpose::Download, binding.session.status().operation_id.as_deref().unwrap()).await.unwrap();
+        while fixture.active.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    app.telegram_accounts
+        .logout(
+            &app,
+            Purpose::Download,
+            binding.session.status().operation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
     wait(&app, &a.id, Status::Canceled).await;
     wait(&app, &b.id, Status::Canceled).await;
     assert_eq!(fixture.active.load(Ordering::SeqCst), 0);
-    assert_eq!(app.telegram_accounts.status(Purpose::Backup).account.unwrap().id, "account-a");
+    assert_eq!(
+        app.telegram_accounts
+            .status(Purpose::Backup)
+            .account
+            .unwrap()
+            .id,
+        "account-a"
+    );
     app.shutdown().await;
 }
 #[tokio::test]
@@ -776,17 +910,28 @@ async fn proxy_change_retries_same_download_and_user_cancel_still_stops_it() {
     let session = app.telegram_accounts.binding(Purpose::Download).session;
     for expected_inspections in [2, 3] {
         timeout(Duration::from_secs(3), async {
-            while fixture.active.load(Ordering::SeqCst) != 1 { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while fixture.active.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let pause = session.pause_network().await.unwrap();
         drop(pause);
         timeout(Duration::from_secs(3), async {
             while fixture.inspected.lock().unwrap().len() < expected_inspections + 1
-                || fixture.active.load(Ordering::SeqCst) != 1 {
+                || fixture.active.load(Ordering::SeqCst) != 1
+            {
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
-        let current = app.list().into_iter().find(|value| value.id == task.id).unwrap();
+        })
+        .await
+        .unwrap();
+        let current = app
+            .list()
+            .into_iter()
+            .find(|value| value.id == task.id)
+            .unwrap();
         assert_eq!(current.status, Status::Downloading);
         assert!(current.error.is_none());
     }
@@ -794,17 +939,29 @@ async fn proxy_change_retries_same_download_and_user_cancel_still_stops_it() {
     let done = wait(&app, &task.id, Status::Completed).await;
     assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
     let another = resolve(&app, 2).await;
-    fixture.gates.lock().unwrap().insert(2, Arc::new(Semaphore::new(0)));
+    fixture
+        .gates
+        .lock()
+        .unwrap()
+        .insert(2, Arc::new(Semaphore::new(0)));
     app.download(&another.id, false).unwrap();
     timeout(Duration::from_secs(3), async {
-        while fixture.active.load(Ordering::SeqCst) != 1 { tokio::task::yield_now().await; }
-    }).await.unwrap();
+        while fixture.active.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     let pause = session.pause_network().await.unwrap();
     app.cancel(&another.id).await.unwrap();
     drop(pause);
     wait(&app, &another.id, Status::Canceled).await;
     assert_eq!(fixture.active.load(Ordering::SeqCst), 0);
-    assert_eq!(app.list().len(), 2, "proxy retries cannot create extra tasks");
+    assert_eq!(
+        app.list().len(),
+        2,
+        "proxy retries cannot create extra tasks"
+    );
     app.shutdown().await;
 }
 #[tokio::test]
@@ -885,7 +1042,8 @@ async fn original_bytes_cover_cache_replacement_and_restart() {
         app.download(&again.id, false).unwrap_err().to_string(),
         "ALREADY_DOWNLOADED"
     );
-    app.submit_download(&again.id, true, Some(&done.id)).unwrap();
+    app.submit_download(&again.id, true, Some(&done.id))
+        .unwrap();
     let other = wait(&app, &done.id, Status::Completed).await;
     assert_eq!(done.path, other.path);
     assert_eq!(app.list().len(), 1);
@@ -1111,7 +1269,12 @@ impl Transport for Script {
         })
     }
     fn next(&mut self, offset: u64) -> ProviderFuture<'_, Option<ReceivedPart>> {
-        Box::pin(async move { self.parts.pop_front().unwrap_or(Ok(None)).map(|part|part.map(|bytes|ReceivedPart {offset, bytes})) })
+        Box::pin(async move {
+            self.parts
+                .pop_front()
+                .unwrap_or(Ok(None))
+                .map(|part| part.map(|bytes| ReceivedPart { offset, bytes }))
+        })
     }
 }
 #[tokio::test]
@@ -1157,12 +1320,35 @@ async fn interrupted_native_attempt_cleans_only_its_own_partial_before_retry() {
         refreshes: 0,
     };
     let expected = preview(&source.media, &link);
-    assert_eq!(transfer(&mut source, &link, Some(&expected), Some(root.path()), |_| {}).await.unwrap_err().to_string(), "TELEGRAM_NETWORK_CHANGED");
+    assert_eq!(
+        transfer(
+            &mut source,
+            &link,
+            Some(&expected),
+            Some(root.path()),
+            |_| {}
+        )
+        .await
+        .unwrap_err()
+        .to_string(),
+        "TELEGRAM_NETWORK_CHANGED"
+    );
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     source.parts = VecDeque::from([Ok(Some(body())), Ok(None)]);
-    transfer(&mut source, &link, Some(&expected), Some(root.path()), |_| {}).await.unwrap();
+    transfer(
+        &mut source,
+        &link,
+        Some(&expected),
+        Some(root.path()),
+        |_| {},
+    )
+    .await
+    .unwrap();
     assert_eq!(std::fs::read(&legacy).unwrap(), b"unowned previous part");
-    assert_eq!(std::fs::read(root.path().join("video.mp4")).unwrap(), body());
+    assert_eq!(
+        std::fs::read(root.path().join("video.mp4")).unwrap(),
+        body()
+    );
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
 }
 #[tokio::test]
@@ -1268,7 +1454,12 @@ async fn network_failure_auto_recovers_same_download_without_partial_files() {
     assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
     assert_eq!(application.list().len(), 1);
     let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
-    assert_eq!(db.query_row("SELECT count(*) FROM task_staging", [], |r|r.get::<_,i64>(0)).unwrap(), 0);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM task_staging", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     application.shutdown().await;
 }
 
@@ -1289,8 +1480,16 @@ async fn startup_recovers_old_network_failures_without_starting_parse_only_downl
     let application = app(root.path(), &fixture);
     application.start_backup_service();
     timeout(Duration::from_secs(2), async {
-        while application.list().iter().any(|t| t.id == task.id && t.status == Status::Failed) { tokio::task::yield_now().await; }
-    }).await.unwrap();
+        while application
+            .list()
+            .iter()
+            .any(|t| t.id == task.id && t.status == Status::Failed)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     let done = wait(&application, &task.id, Status::Ready).await;
     assert!(!done.download_requested);
     assert!(done.error.is_none());
@@ -1321,18 +1520,47 @@ async fn reconnect_releases_download_slot_for_other_platform_and_then_resumes() 
     let queued = resolve(&application, 10).await;
     let other = application.resolve("valid".into()).unwrap();
     wait(&application, &other.id, Status::Ready).await;
-    let session = application.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download).session;
-    *session.reconnect_probe.lock().unwrap() = Some(|| Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR")));
+    let session = application
+        .telegram_accounts
+        .binding(crate::telegram_accounts::Purpose::Download)
+        .session;
+    *session.reconnect_probe.lock().unwrap() =
+        Some(|| Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR")));
     fixture.next_failures.store(1, Ordering::SeqCst);
     application.download(&telegram.id, false).unwrap();
     timeout(Duration::from_secs(2), async {
-        while !application.list().iter().any(|t|t.id==telegram.id && t.error.as_deref()==Some("TELEGRAM_RECONNECTING")) { tokio::task::yield_now().await; }
-    }).await.unwrap();
+        while !application
+            .list()
+            .iter()
+            .any(|t| t.id == telegram.id && t.error.as_deref() == Some("TELEGRAM_RECONNECTING"))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     application.download(&queued.id, false).unwrap();
     application.download(&other.id, false).unwrap();
     wait(&application, &other.id, Status::Completed).await;
-    assert_eq!(application.list().iter().find(|t|t.id==queued.id).unwrap().status, Status::Queued);
-    assert_eq!(application.list().iter().find(|t|t.id==telegram.id).unwrap().error.as_deref(), Some("TELEGRAM_RECONNECTING"));
+    assert_eq!(
+        application
+            .list()
+            .iter()
+            .find(|t| t.id == queued.id)
+            .unwrap()
+            .status,
+        Status::Queued
+    );
+    assert_eq!(
+        application
+            .list()
+            .iter()
+            .find(|t| t.id == telegram.id)
+            .unwrap()
+            .error
+            .as_deref(),
+        Some("TELEGRAM_RECONNECTING")
+    );
     *session.reconnect_probe.lock().unwrap() = Some(|| Ok(()));
     let done = wait(&application, &telegram.id, Status::Completed).await;
     assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
@@ -1349,88 +1577,139 @@ async fn canceling_reconnect_owner_allows_queued_task_to_take_over_recovery() {
     application.set_max_downloads(1).unwrap();
     let first = resolve(&application, 9).await;
     let queued = resolve(&application, 10).await;
-    let session = application.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download).session;
-    *session.reconnect_probe.lock().unwrap() = Some(|| Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR")));
+    let session = application
+        .telegram_accounts
+        .binding(crate::telegram_accounts::Purpose::Download)
+        .session;
+    *session.reconnect_probe.lock().unwrap() =
+        Some(|| Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR")));
     fixture.next_failures.store(1, Ordering::SeqCst);
     application.download(&first.id, false).unwrap();
     timeout(Duration::from_secs(2), async {
-        while !session.reconnect.waiting() { tokio::task::yield_now().await; }
-    }).await.unwrap();
+        while !session.reconnect.waiting() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     application.download(&queued.id, false).unwrap();
     application.cancel(&first.id).await.unwrap();
     timeout(Duration::from_secs(2), async {
-        while !application.list().iter().any(|t|t.id==queued.id && t.error.as_deref()==Some("TELEGRAM_RECONNECTING")) { tokio::task::yield_now().await; }
-    }).await.unwrap();
+        while !application
+            .list()
+            .iter()
+            .any(|t| t.id == queued.id && t.error.as_deref() == Some("TELEGRAM_RECONNECTING"))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     *session.reconnect_probe.lock().unwrap() = Some(|| Ok(()));
     wait(&application, &queued.id, Status::Completed).await;
-    assert_eq!(application.list().iter().find(|t|t.id==first.id).unwrap().status,Status::Canceled);
-    assert_eq!(fixture.peak.load(Ordering::SeqCst),1);
+    assert_eq!(
+        application
+            .list()
+            .iter()
+            .find(|t| t.id == first.id)
+            .unwrap()
+            .status,
+        Status::Canceled
+    );
+    assert_eq!(fixture.peak.load(Ordering::SeqCst), 1);
     application.shutdown().await;
 }
 
 #[tokio::test]
 async fn startup_restores_interrupted_telegram_with_and_without_resolved_metadata() {
-    for deferred in [false,true] {
+    for deferred in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let fixture = Arc::new(Fixture::default());
-        fixture.gates.lock().unwrap().insert(9,Arc::new(Semaphore::new(0)));
-        let application = app(root.path(),&fixture);
-        let task = resolve(&application,9).await;
-        application.download(&task.id,false).unwrap();
-        timeout(Duration::from_secs(2),async {
-            while fixture.active.load(Ordering::SeqCst)==0 {tokio::task::yield_now().await;}
-        }).await.unwrap();
+        fixture
+            .gates
+            .lock()
+            .unwrap()
+            .insert(9, Arc::new(Semaphore::new(0)));
+        let application = app(root.path(), &fixture);
+        let task = resolve(&application, 9).await;
+        application.download(&task.id, false).unwrap();
+        timeout(Duration::from_secs(2), async {
+            while fixture.active.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         application.shutdown().await;
         drop(application);
         if deferred {
             let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
-            db.execute("UPDATE download_tasks SET snapshot=json_set(snapshot,'$.video',NULL) WHERE id=?",[&task.id]).unwrap();
+            db.execute(
+                "UPDATE download_tasks SET snapshot=json_set(snapshot,'$.video',NULL) WHERE id=?",
+                [&task.id],
+            )
+            .unwrap();
         }
         fixture.gates.lock().unwrap().clear();
-        let application = app(root.path(),&fixture);
+        let application = app(root.path(), &fixture);
         application.start_backup_service();
-        let done = wait(&application,&task.id,Status::Completed).await;
-        assert_eq!(done.insertion_id,task.insertion_id);
-        assert_eq!(std::fs::read(done.path.unwrap()).unwrap(),body());
-        assert_eq!(application.list().len(),1);
+        let done = wait(&application, &task.id, Status::Completed).await;
+        assert_eq!(done.insertion_id, task.insertion_id);
+        assert_eq!(std::fs::read(done.path.unwrap()).unwrap(), body());
+        assert_eq!(application.list().len(), 1);
         application.shutdown().await;
     }
 }
 
 #[tokio::test]
 async fn startup_keeps_legacy_duplicate_consent_for_deferred_telegram_recovery() {
-    for confirmed in [false,true] {
+    for confirmed in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let fixture = Arc::new(Fixture::default());
-        let application = app(root.path(),&fixture);
-        let first = resolve(&application,9).await;
-        application.download(&first.id,false).unwrap();
-        let first = wait(&application,&first.id,Status::Completed).await;
+        let application = app(root.path(), &fixture);
+        let first = resolve(&application, 9).await;
+        application.download(&first.id, false).unwrap();
+        let first = wait(&application, &first.id, Status::Completed).await;
         let original = std::fs::read(first.path.as_ref().unwrap()).unwrap();
-        let repeat = resolve(&application,9).await;
+        let repeat = resolve(&application, 9).await;
         application.shutdown().await;
         drop(application);
         let db = rusqlite::Connection::open(root.path().join("tasks.sqlite")).unwrap();
         db.execute("UPDATE download_tasks SET snapshot=json_set(snapshot,'$.video',NULL,'$.download_requested',json('true'),'$.status','failed','$.error','INTERRUPTED','$.duplicate_confirmed',json(?2)) WHERE id=?1",
             rusqlite::params![repeat.id, if confirmed { "true" } else { "false" }]).unwrap();
         drop(db);
-        let application = app(root.path(),&fixture);
+        let application = app(root.path(), &fixture);
         application.start_backup_service();
-        let status = if confirmed {Status::Completed} else {Status::Ready};
-        let resumed = wait(&application,&repeat.id,status).await;
-        assert_eq!(resumed.duplicate_confirmed,confirmed);
-        assert_eq!(resumed.insertion_id,repeat.insertion_id);
-        assert_eq!(std::fs::read(first.path.unwrap()).unwrap(),original);
-        assert_eq!(application.list().iter().filter(|task|task.status==Status::Completed).count(),if confirmed {2}else{1});
+        let status = if confirmed {
+            Status::Completed
+        } else {
+            Status::Ready
+        };
+        let resumed = wait(&application, &repeat.id, status).await;
+        assert_eq!(resumed.duplicate_confirmed, confirmed);
+        assert_eq!(resumed.insertion_id, repeat.insertion_id);
+        assert_eq!(std::fs::read(first.path.unwrap()).unwrap(), original);
+        assert_eq!(
+            application
+                .list()
+                .iter()
+                .filter(|task| task.status == Status::Completed)
+                .count(),
+            if confirmed { 2 } else { 1 }
+        );
         application.shutdown().await;
         drop(application);
         if !confirmed {
-            let application = app(root.path(),&fixture);
+            let application = app(root.path(), &fixture);
             application.start_backup_service();
-            let waiting = application.list().into_iter().find(|task|task.id==repeat.id).unwrap();
-            assert_eq!(waiting.status,Status::Ready);
+            let waiting = application
+                .list()
+                .into_iter()
+                .find(|task| task.id == repeat.id)
+                .unwrap();
+            assert_eq!(waiting.status, Status::Ready);
             assert!(!waiting.duplicate_confirmed);
-            assert_eq!(fixture.active.load(Ordering::SeqCst),0);
+            assert_eq!(fixture.active.load(Ordering::SeqCst), 0);
             application.shutdown().await;
         }
     }

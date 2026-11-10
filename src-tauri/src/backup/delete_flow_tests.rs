@@ -191,18 +191,39 @@ async fn delete_resumes_finalizing_without_repeating_remote_deletion() {
 #[tokio::test]
 async fn delete_finishes_while_another_asset_owns_the_restore_slot() {
     let (f, provider, engine) = sync_fixture().await;
-    engine.execute_upload(&claim(&engine, &f.core)).await.unwrap();
+    engine
+        .execute_upload(&claim(&engine, &f.core))
+        .await
+        .unwrap();
     let slot = f.core.backup_restore_lock.lock().await;
     let other_file = f.core.restore_file_guard("other").await;
     let same_file = f.core.restore_file_guard(&f.id).await;
-    let operation = sync_delete::delete(&f.core, &f.space.space_id, &f.id).await.unwrap();
+    let operation = sync_delete::delete(&f.core, &f.space.space_id, &f.id)
+        .await
+        .unwrap();
     let pass = delete_pass(&f.core, provider.as_ref(), &operation);
     tokio::pin!(pass);
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut pass).await.is_err(), "same-asset lease must delay remote and local deletion");
-    assert!(!provider.read_asset(&f.id).await.unwrap().unwrap().snapshot.deleted);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut pass)
+            .await
+            .is_err(),
+        "same-asset lease must delay remote and local deletion"
+    );
+    assert!(
+        !provider
+            .read_asset(&f.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .deleted
+    );
     assert!(f.root.path().join("video.mp4").is_file());
     drop(same_file);
-    tokio::time::timeout(std::time::Duration::from_secs(5), pass).await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), pass)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!f.root.path().join("video.mp4").exists());
     drop((other_file, slot));
 }

@@ -95,14 +95,25 @@ pub(crate) async fn reap_job(job: &std::os::windows::io::OwnedHandle) -> Result<
         loop {
             let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
             let queried = unsafe {
-                QueryInformationJobObject(job.as_raw_handle(), JobObjectBasicAccountingInformation,
-                    &mut info as *mut _ as *mut _, std::mem::size_of_val(&info) as u32, std::ptr::null_mut())
+                QueryInformationJobObject(
+                    job.as_raw_handle(),
+                    JobObjectBasicAccountingInformation,
+                    &mut info as *mut _ as *mut _,
+                    std::mem::size_of_val(&info) as u32,
+                    std::ptr::null_mut(),
+                )
             };
-            if queried == 0 { bail!("ENGINE_PROTOCOL_ERROR"); }
-            if info.ActiveProcesses == 0 { return Ok(()); }
+            if queried == 0 {
+                bail!("ENGINE_PROTOCOL_ERROR");
+            }
+            if info.ActiveProcesses == 0 {
+                return Ok(());
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.context("TIMEOUT")?
+    })
+    .await
+    .context("TIMEOUT")?
 }
 
 async fn read_message(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Result<Option<Value>> {
@@ -251,7 +262,13 @@ impl PythonBridge {
                     .saturating_duration_since(tokio::time::Instant::now())
                     .min(Duration::from_secs(65))
             } else {
-                Duration::from_secs(if merging { 600 } else if method == "scan_author_posts" { 120 } else { 65 })
+                Duration::from_secs(if merging {
+                    600
+                } else if method == "scan_author_posts" {
+                    120
+                } else {
+                    65
+                })
             };
             let value = timeout(wait, read_message(&mut self.output))
                 .await
@@ -268,13 +285,18 @@ impl PythonBridge {
                 continue;
             }
             if value["type"] == "resolve_progress" {
-                if !matches!(method, "identify_input" | "resolve_video") || params["report_resolve_progress"] != true {
+                if !matches!(method, "identify_input" | "resolve_video")
+                    || params["report_resolve_progress"] != true
+                {
                     bail!("ENGINE_PROTOCOL_ERROR");
                 }
-                let phase: crate::resolve_progress::ResolvePhase = serde_json::from_value(value["phase"].clone())
-                    .context("ENGINE_PROTOCOL_ERROR")?;
+                let phase: crate::resolve_progress::ResolvePhase =
+                    serde_json::from_value(value["phase"].clone())
+                        .context("ENGINE_PROTOCOL_ERROR")?;
                 let order = phase.engine_order().context("ENGINE_PROTOCOL_ERROR")?;
-                if resolve_order.is_some_and(|previous| order <= previous) || method == "identify_input" && order > 1 {
+                if resolve_order.is_some_and(|previous| order <= previous)
+                    || method == "identify_input" && order > 1
+                {
                     bail!("ENGINE_PROTOCOL_ERROR");
                 }
                 resolve_order = Some(order);
@@ -305,10 +327,15 @@ impl PythonBridge {
                 if !completed.is_null() || !total.is_null() {
                     let completed = completed.as_u64().context("ENGINE_PROTOCOL_ERROR")?;
                     let total = total.as_u64().context("ENGINE_PROTOCOL_ERROR")?;
-                    if completed > total || total > u32::MAX as u64
-                        || !matches!(value["phase"].as_str(), Some("loading_model" | "recognizing"))
+                    if completed > total
+                        || total > u32::MAX as u64
+                        || !matches!(
+                            value["phase"].as_str(),
+                            Some("loading_model" | "recognizing")
+                        )
                         || (value["phase"] == "loading_model" && completed != 0)
-                        || transcription_segments.is_some_and(|(old, size)| completed < old || total != size)
+                        || transcription_segments
+                            .is_some_and(|(old, size)| completed < old || total != size)
                     {
                         bail!("ENGINE_PROTOCOL_ERROR");
                     }

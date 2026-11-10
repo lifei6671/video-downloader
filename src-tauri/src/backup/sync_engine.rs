@@ -185,12 +185,12 @@ use super::{
 };
 use crate::desktop_core::Core;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::time::Duration;
-use tokio::time::Instant;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FieldEdit {
@@ -295,8 +295,8 @@ pub fn register_download(db: &Connection, local: &str) -> Result<()> {
     if existing {
         return Ok(());
     }
-    let asset = repository::asset(db, local)?
-        .ok_or_else(|| anyhow::anyhow!("BACKUP_ASSET_NOT_FOUND"))?;
+    let asset =
+        repository::asset(db, local)?.ok_or_else(|| anyhow::anyhow!("BACKUP_ASSET_NOT_FOUND"))?;
     join_asset(db, &space, &asset)
 }
 
@@ -415,7 +415,11 @@ pub(crate) struct DeferredPulls {
 
 impl DeferredPulls {
     fn mark(&self, space: &str) {
-        self.pending.lock().unwrap().entry(space.to_owned()).or_default();
+        self.pending
+            .lock()
+            .unwrap()
+            .entry(space.to_owned())
+            .or_default();
     }
 
     fn has(&self, space: &str) -> bool {
@@ -457,7 +461,10 @@ impl SyncEngine {
         })?;
         if let Some(result) = deferred {
             let mut cancel = self.core.backup_cancellation();
-            return scoped(self, &mut cancel, async { result.await.context("CANCELED")? }).await;
+            return scoped(self, &mut cancel, async {
+                result.await.context("CANCELED")?
+            })
+            .await;
         }
         self.pull().await
     }
@@ -489,7 +496,8 @@ impl SyncEngine {
             let result = self.provider.pull_changes(checkpoint).await;
             timing.finish(if result.is_ok() { "ok" } else { "error" });
             result
-        }).await?;
+        })
+        .await?;
         self.check_space()?;
         if !batch.complete {
             bail!("BACKUP_INCOMPLETE_DISCOVERY");
@@ -806,8 +814,10 @@ impl SyncEngine {
             checkpoint: Box::new(move |state| {
                 check_operation(&core, &scope, &id)?;
                 if is_video {
-                    let confirmed = serde_json::from_str::<Value>(&state.value).ok()
-                        .and_then(|value| value["completed_bytes"].as_u64()).unwrap_or(0);
+                    let confirmed = serde_json::from_str::<Value>(&state.value)
+                        .ok()
+                        .and_then(|value| value["completed_bytes"].as_u64())
+                        .unwrap_or(0);
                     checkpoint_bytes.store(confirmed, std::sync::atomic::Ordering::Relaxed);
                 }
                 core.backup_db(|db| {
@@ -900,7 +910,9 @@ pub fn import_asset(db: &Connection, scope: &Scope, remote: &RemoteAsset) -> Res
     let remote_json = serde_json::to_string(snapshot)?;
     let version_json = serde_json::to_string(&remote.version)?;
     let unchanged: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM backup_import_receipts r JOIN backup_space_assets m USING(space_id,remote_asset_id) WHERE r.space_id=?1 AND r.remote_asset_id=?2 AND r.remote_json=?3 AND r.version_json=?4 AND r.local_revision=m.local_revision AND r.pending_json=m.pending_json)", params![scope.space_id,snapshot.asset_id,remote_json,version_json], |r| r.get(0))?;
-    if unchanged { return Ok(local); }
+    if unchanged {
+        return Ok(local);
+    }
     let previous = previous
         .map(|v| serde_json::from_str::<AssetSnapshot>(&v))
         .transpose()?;
@@ -1009,15 +1021,34 @@ pub async fn run_with(
 ) {
     tokio::join!(
         discovery_loop(core.clone(), cancel.clone(), resolve.clone()),
-        queue_loop(core.clone(), cancel.clone(), resolve.clone(), QueueLane::Primary),
-        queue_loop(core.clone(), cancel.clone(), resolve.clone(), QueueLane::Upload),
-        queue_loop(core.clone(), cancel.clone(), resolve.clone(), QueueLane::Upload),
+        queue_loop(
+            core.clone(),
+            cancel.clone(),
+            resolve.clone(),
+            QueueLane::Primary
+        ),
+        queue_loop(
+            core.clone(),
+            cancel.clone(),
+            resolve.clone(),
+            QueueLane::Upload
+        ),
+        queue_loop(
+            core.clone(),
+            cancel.clone(),
+            resolve.clone(),
+            QueueLane::Upload
+        ),
         maintenance_loop(core, cancel, resolve)
     );
 }
 const FOREGROUND_SYNC_SECONDS: u32 = 30;
 
-async fn pause_until(core: &Core, cancel: &mut tokio::sync::watch::Receiver<bool>, deadline: Instant) -> Option<&'static str> {
+async fn pause_until(
+    core: &Core,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+    deadline: Instant,
+) -> Option<&'static str> {
     if *cancel.borrow() {
         return None;
     }
@@ -1111,17 +1142,30 @@ async fn discovery_loop(
             Err(error) if error.to_string() == "CANCELED" => return,
             Err(mut error) => {
                 if crate::telegram_reconnect::network_error(&error.to_string()) {
-                    if let Some(space) = attempted_space.as_deref().filter(|space|
-                        super::spaces::get(&core).ok().flatten().is_some_and(|settings| settings.space_id == *space && settings.provider_type == ProviderType::Telegram)
-                    ) {
+                    if let Some(space) = attempted_space.as_deref().filter(|space| {
+                        super::spaces::get(&core)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|settings| {
+                                settings.space_id == *space
+                                    && settings.provider_type == ProviderType::Telegram
+                            })
+                    }) {
                         let _ = core.backup_db(|db| {
                             db.execute("INSERT INTO backup_sync_checkpoints(space_id,last_error) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET last_error=excluded.last_error", params![space,error.to_string()])?;
                             Ok(())
                         });
                         match wait_backup_network(&core, space, cancel.clone()).await {
-                            Ok(()) => { failures = 0; trigger = "reconnected"; continue; }
+                            Ok(()) => {
+                                failures = 0;
+                                trigger = "reconnected";
+                                continue;
+                            }
                             Err(_) if *cancel.borrow() => return,
-                            Err(error) if error.to_string() == "BACKUP_SPACE_INACTIVE" => { failures = 0; continue; }
+                            Err(error) if error.to_string() == "BACKUP_SPACE_INACTIVE" => {
+                                failures = 0;
+                                continue;
+                            }
                             Err(recovery_error) => error = recovery_error,
                         }
                     }
@@ -1196,10 +1240,9 @@ async fn cleanup_one_upload(
     }
     engine.check_space()?;
     let space = &engine.provider.scope().space_id;
-    if engine
-        .core
-        .backup_db(|db| Ok(scheduler::foreground_delete_busy(db, space)? || scheduler::upload_running(db, space)?))?
-    {
+    if engine.core.backup_db(|db| {
+        Ok(scheduler::foreground_delete_busy(db, space)? || scheduler::upload_running(db, space)?)
+    })? {
         return Ok(false);
     }
     // Cleanup can physically delete owned temporary media. Keep it exclusive
@@ -1245,7 +1288,10 @@ async fn cleanup_one_upload(
     match result {
         Ok(()) => scheduler::finish_upload_cleanup(&engine.core, &op.operation_id)?,
         Err(error) if *cancel.borrow() || engine.check_space().is_err() => return Err(error),
-        Err(error) if engine.provider.scope().provider_type == ProviderType::Telegram && crate::telegram_reconnect::network_error(&error.to_string()) => {
+        Err(error)
+            if engine.provider.scope().provider_type == ProviderType::Telegram
+                && crate::telegram_reconnect::network_error(&error.to_string()) =>
+        {
             return Err(error);
         }
         Err(error) => {
@@ -1359,8 +1405,14 @@ async fn queue_loop(
         if matches!(result, Ok(true)) {
             continue;
         }
-        if result.as_ref().is_err_and(|e| crate::telegram_reconnect::network_error(&e.to_string()))
-            && super::spaces::get(&core).ok().flatten().is_some_and(|s| s.provider_type == ProviderType::Telegram) {
+        if result
+            .as_ref()
+            .is_err_and(|e| crate::telegram_reconnect::network_error(&e.to_string()))
+            && super::spaces::get(&core)
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.provider_type == ProviderType::Telegram)
+        {
             if let Some(space) = queue_space.as_deref() {
                 let _ = wait_backup_network(&core, space, cancel.clone()).await;
             }
@@ -1371,7 +1423,9 @@ async fn queue_loop(
                 .flatten()
                 .is_some_and(|s| s.connection_pending);
         if let Err(error) = result {
-            if let Some(space) = queue_space.or_else(|| super::spaces::current_id(&core).ok().flatten()) {
+            if let Some(space) =
+                queue_space.or_else(|| super::spaces::current_id(&core).ok().flatten())
+            {
                 core.deferred_pulls.fail_waiters(&space, &error);
             }
             if error.to_string() != "CANCELED" {
@@ -1384,11 +1438,23 @@ async fn queue_loop(
         }
     }
 }
-async fn wait_backup_network(core: &Core, space: &str, cancel: tokio::sync::watch::Receiver<bool>) -> Result<()> {
-    let work = crate::telegram_accounts::recover_network(core, crate::telegram_accounts::Purpose::Backup, cancel);
+async fn wait_backup_network(
+    core: &Core,
+    space: &str,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let work = crate::telegram_accounts::recover_network(
+        core,
+        crate::telegram_accounts::Purpose::Backup,
+        cancel,
+    );
     tokio::pin!(work);
     loop {
-        if !super::spaces::enabled(core)? || super::spaces::current_id(core)?.as_deref() != Some(space) { bail!("BACKUP_SPACE_INACTIVE"); }
+        if !super::spaces::enabled(core)?
+            || super::spaces::current_id(core)?.as_deref() != Some(space)
+        {
+            bail!("BACKUP_SPACE_INACTIVE");
+        }
         tokio::select! {
             result = &mut work => return result,
             _ = tokio::time::sleep(Duration::from_millis(100)) => {},
@@ -1538,23 +1604,103 @@ mod claim_timing_tests {
         db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,space_id TEXT,kind TEXT,state TEXT,phase TEXT,attempt INTEGER,payload_json TEXT,next_retry_at INTEGER,last_error TEXT)").unwrap();
         let evidence = json!({"video_receipt":{"message_id":123},"resume_video":{"phase":"Sending","random_id":42}}).to_string();
         for (id, space, kind, state, phase, error) in [
-            ("retry", "active", "upload", "blocked", "publishing", "TELEGRAM_CONNECTION_ERROR"),
-            ("delete", "active", "delete", "retry_wait", "objects", "TELEGRAM_RECONNECTING"),
-            ("canceled", "active", "upload", "canceled", "captured", "TELEGRAM_CONNECTION_ERROR"),
-            ("uncertain", "active", "upload", "blocked", "publishing", "TELEGRAM_SEND_UNCONFIRMED"),
-            ("other", "other", "upload", "blocked", "publishing", "TELEGRAM_CONNECTION_ERROR"),
-            ("stale", "active", "upload", "blocked", "superseded", "TELEGRAM_CONNECTION_ERROR"),
-            ("done", "active", "upload", "completed", "completed", "TELEGRAM_CONNECTION_ERROR"),
-            ("restore", "active", "restore", "blocked", "downloading", "TELEGRAM_CONNECTION_ERROR"),
+            (
+                "retry",
+                "active",
+                "upload",
+                "blocked",
+                "publishing",
+                "TELEGRAM_CONNECTION_ERROR",
+            ),
+            (
+                "delete",
+                "active",
+                "delete",
+                "retry_wait",
+                "objects",
+                "TELEGRAM_RECONNECTING",
+            ),
+            (
+                "canceled",
+                "active",
+                "upload",
+                "canceled",
+                "captured",
+                "TELEGRAM_CONNECTION_ERROR",
+            ),
+            (
+                "uncertain",
+                "active",
+                "upload",
+                "blocked",
+                "publishing",
+                "TELEGRAM_SEND_UNCONFIRMED",
+            ),
+            (
+                "other",
+                "other",
+                "upload",
+                "blocked",
+                "publishing",
+                "TELEGRAM_CONNECTION_ERROR",
+            ),
+            (
+                "stale",
+                "active",
+                "upload",
+                "blocked",
+                "superseded",
+                "TELEGRAM_CONNECTION_ERROR",
+            ),
+            (
+                "done",
+                "active",
+                "upload",
+                "completed",
+                "completed",
+                "TELEGRAM_CONNECTION_ERROR",
+            ),
+            (
+                "restore",
+                "active",
+                "restore",
+                "blocked",
+                "downloading",
+                "TELEGRAM_CONNECTION_ERROR",
+            ),
         ] {
-            db.execute("INSERT INTO backup_operations VALUES(?1,?2,?3,?4,?5,9,?6,9999999999,?7)", params![id,space,kind,state,phase,evidence,error]).unwrap();
+            db.execute(
+                "INSERT INTO backup_operations VALUES(?1,?2,?3,?4,?5,9,?6,9999999999,?7)",
+                params![id, space, kind, state, phase, evidence, error],
+            )
+            .unwrap();
         }
-        assert_eq!(db.execute(RECOVER_NETWORK_OPERATIONS_SQL, ["active"]).unwrap(), 2);
+        assert_eq!(
+            db.execute(RECOVER_NETWORK_OPERATIONS_SQL, ["active"])
+                .unwrap(),
+            2
+        );
         for id in ["retry", "delete"] {
             let (state, payload, attempt, error): (String,String,i64,Option<String>) = db.query_row("SELECT state,payload_json,attempt,last_error FROM backup_operations WHERE operation_id=?", [id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
-            assert_eq!((state,payload,attempt,error), ("retry_wait".into(),evidence.clone(),if id == "retry" {0} else {9},None));
+            assert_eq!(
+                (state, payload, attempt, error),
+                (
+                    "retry_wait".into(),
+                    evidence.clone(),
+                    if id == "retry" { 0 } else { 9 },
+                    None
+                )
+            );
         }
-        assert_eq!(db.query_row("SELECT count(*) FROM backup_operations WHERE attempt=9", [], |r|r.get::<_,i64>(0)).unwrap(), 7);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM backup_operations WHERE attempt=9",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            7
+        );
     }
 
     #[test]
@@ -1645,21 +1791,40 @@ mod claim_timing_tests {
     fn proxy_retry_preserves_evidence_budget_and_user_cancellation() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER,next_retry_at INTEGER,last_error TEXT)").unwrap();
-        let evidence = json!({"video_receipt":{"message_id":123},"capture":{"operation_id":"same-send"}}).to_string();
+        let evidence =
+            json!({"video_receipt":{"message_id":123},"capture":{"operation_id":"same-send"}})
+                .to_string();
         db.execute("INSERT INTO backup_operations VALUES('same-send','upload','running',5,?1,unixepoch(),NULL,'TELEGRAM_TRANSFER_CANCELED')", [&evidence]).unwrap();
         for _ in 0..6 {
             assert_eq!(db.execute(NETWORK_RETRY_SQL, ["same-send"]).unwrap(), 1);
-            let (attempt, error, payload): (i64, Option<String>, String) = db.query_row("SELECT attempt,last_error,payload_json FROM backup_operations", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            let (attempt, error, payload): (i64, Option<String>, String) = db
+                .query_row(
+                    "SELECT attempt,last_error,payload_json FROM backup_operations",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
             assert_eq!(attempt, 4);
             assert_eq!(error, None);
             assert_eq!(payload, evidence);
-            assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 0, "respect reconnect delay");
+            assert_eq!(
+                db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(),
+                0,
+                "respect reconnect delay"
+            );
             db.execute("UPDATE backup_operations SET next_retry_at=unixepoch()-1,last_error='TELEGRAM_TRANSFER_CANCELED'", []).unwrap();
             assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 1);
-            let (attempt, error, deadline): (i64, Option<String>, Option<i64>) = db.query_row("SELECT attempt,last_error,next_retry_at FROM backup_operations", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
-            assert_eq!((attempt,error,deadline), (5,None,None));
+            let (attempt, error, deadline): (i64, Option<String>, Option<i64>) = db
+                .query_row(
+                    "SELECT attempt,last_error,next_retry_at FROM backup_operations",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!((attempt, error, deadline), (5, None, None));
         }
-        db.execute("UPDATE backup_operations SET state='canceled'", []).unwrap();
+        db.execute("UPDATE backup_operations SET state='canceled'", [])
+            .unwrap();
         assert_eq!(db.execute(NETWORK_RETRY_SQL, ["same-send"]).unwrap(), 0);
         assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 0);
     }

@@ -24,19 +24,45 @@ pub(super) fn in_use(target: &Target, projected: &Projection, message: i32) -> b
         })
 }
 pub(super) trait OwnedMessageRemoval: Transport {
-    fn read_owned_ids(&self, groups: &[(i32, Vec<RemoteDocument>)], io: &Io)
-        -> impl std::future::Future<Output = Result<Vec<i32>>> + Send;
-    fn delete_verified_ids(&self, ids: &[i32]) -> impl std::future::Future<Output = Result<()>> + Send;
-    fn confirm_ids_gone(&self, ids: &[i32]) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn read_owned_ids(
+        &self,
+        groups: &[(i32, Vec<RemoteDocument>)],
+        io: &Io,
+    ) -> impl std::future::Future<Output = Result<Vec<i32>>> + Send;
+    fn delete_verified_ids(
+        &self,
+        ids: &[i32],
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn confirm_ids_gone(&self, ids: &[i32])
+        -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 #[cfg(test)]
 pub(super) async fn reconcile_snapshot(
-    transport: &impl OwnedMessageRemoval, target: &Target, asset: &str, io: &Io, projected: &Projection,
-    media: Vec<RemoteDocument>, archived: Vec<(i32, Vec<RemoteDocument>)>,
+    transport: &impl OwnedMessageRemoval,
+    target: &Target,
+    asset: &str,
+    io: &Io,
+    projected: &Projection,
+    media: Vec<RemoteDocument>,
+    archived: Vec<(i32, Vec<RemoteDocument>)>,
 ) -> Result<usize> {
-    let revision = projected.assets.get(asset).filter(|s| s.deleted).context("BACKUP_TOMBSTONE_REQUIRED")?.revision;
-    reconcile_deleted_messages(transport,target,&[(asset,revision)],io,projected,media,archived).await
+    let revision = projected
+        .assets
+        .get(asset)
+        .filter(|s| s.deleted)
+        .context("BACKUP_TOMBSTONE_REQUIRED")?
+        .revision;
+    reconcile_deleted_messages(
+        transport,
+        target,
+        &[(asset, revision)],
+        io,
+        projected,
+        media,
+        archived,
+    )
+    .await
 }
 
 /// Check ownership for every participating asset before deleting the first physical message.
@@ -53,7 +79,11 @@ pub(super) async fn reconcile_deleted_messages(
         bail!("BACKUP_DELETE_UNSUPPORTED");
     }
     for &(asset, revision) in deletions {
-        if !projected.assets.get(asset).is_some_and(|s| s.deleted && s.revision == revision) {
+        if !projected
+            .assets
+            .get(asset)
+            .is_some_and(|s| s.deleted && s.revision == revision)
+        {
             bail!("BACKUP_TOMBSTONE_REQUIRED");
         }
     }
@@ -61,8 +91,14 @@ pub(super) async fn reconcile_deleted_messages(
         archived.into_iter().collect();
     for document in media {
         io.check()?;
-        let envelope: Envelope = serde_json::from_str(&document.caption).context("TELEGRAM_MEDIA_CHANGED")?;
-        let Some(&(asset, deletion)) = deletions.iter().find(|(asset,_)| *asset == envelope.asset_id) else { continue };
+        let envelope: Envelope =
+            serde_json::from_str(&document.caption).context("TELEGRAM_MEDIA_CHANGED")?;
+        let Some(&(asset, deletion)) = deletions
+            .iter()
+            .find(|(asset, _)| *asset == envelope.asset_id)
+        else {
+            continue;
+        };
         let known = projected
             .references
             .get(asset)
@@ -72,7 +108,8 @@ pub(super) async fn reconcile_deleted_messages(
                 target.message_id(r).ok() == Some(document.message_id)
                     && r.document_id() == Some(document.document_id)
                     && r.bytes == document.bytes
-                    && envelope.sha256 == r.sha256 && envelope.container == r.container
+                    && envelope.sha256 == r.sha256
+                    && envelope.container == r.container
             });
         if candidate(target, asset, deletion, &document, known)?.is_none() {
             continue;
@@ -122,26 +159,28 @@ pub(super) async fn cancel(
         return Ok(());
     }
     let document = if let Some(original) = &entry.document {
-        let current = match io.run(transport.inspect_document(original.message_id,original.document_id)).await {
+        let current = match io
+            .run(transport.inspect_document(original.message_id, original.document_id))
+            .await
+        {
             Err(e) if e.to_string() == "TELEGRAM_MEDIA_MISSING" => return Ok(()),
             other => other?,
         };
         current
     } else if entry.state == SendState::Sending {
         io.run(transport.find(&entry.envelope, io))
-                .await?
-                .context("TELEGRAM_SEND_UNCONFIRMED")?
+            .await?
+            .context("TELEGRAM_SEND_UNCONFIRMED")?
     } else {
         return Ok(());
     };
-    if projected
-        .references
-        .values()
-        .flatten()
-        .any(|r| target.message_id(r).ok() == Some(document.message_id)
-            && r.document_id()==Some(document.document_id)
-            && r.bytes==entry.envelope.bytes && r.sha256==entry.envelope.sha256 && r.container==entry.envelope.container)
-    {
+    if projected.references.values().flatten().any(|r| {
+        target.message_id(r).ok() == Some(document.message_id)
+            && r.document_id() == Some(document.document_id)
+            && r.bytes == entry.envelope.bytes
+            && r.sha256 == entry.envelope.sha256
+            && r.container == entry.envelope.container
+    }) {
         return Ok(());
     }
     document.check(&entry.envelope)?;
@@ -193,13 +232,16 @@ pub(super) async fn verify(
 }
 
 async fn verify_body(
-    transport: &impl Transport, target: &Target, reference: &MediaRef, io: &Io,
+    transport: &impl Transport,
+    target: &Target,
+    reference: &MediaRef,
+    io: &Io,
     mut timing: Option<super::delete_timing::StepSpan>,
 ) -> Result<()> {
     for attempt in 0..2 {
         let result = async {
             let document = io
-                .run(transport.inspect_reference(target,reference))
+                .run(transport.inspect_reference(target, reference))
                 .await?;
             metadata(target, reference, &document)?;
             let mut reader = io.run(transport.download(document)).await?;
@@ -213,7 +255,9 @@ async fn verify_body(
                 if count == 0 {
                     break;
                 }
-                if let Some(span) = &mut timing { span.add_bytes(count); }
+                if let Some(span) = &mut timing {
+                    span.add_bytes(count);
+                }
                 bytes += count as u64;
                 if bytes > reference.bytes {
                     bail!("BACKUP_CHECKSUM_MISMATCH");
@@ -281,10 +325,7 @@ pub(super) async fn remove(
     if !transport.can_delete() {
         bail!("BACKUP_DELETE_UNSUPPORTED");
     }
-    let document = match io
-        .run(transport.inspect_reference(target,reference))
-        .await
-    {
+    let document = match io.run(transport.inspect_reference(target, reference)).await {
         Err(e) if e.to_string() == "TELEGRAM_MEDIA_MISSING" => return Ok(()),
         other => other?,
     };
