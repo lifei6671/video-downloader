@@ -65,7 +65,7 @@ def preview_images(ydl, choices, stage):
     return names
 
 
-def download_images(ydl, choices, platform, video_id, resolver, stage, emit):
+def download_images(ydl, choices, platform, video_id, resolver, stage, emit, *, metadata=None):
     from engine import EngineError
     album = stage / 'album'
     album.mkdir()
@@ -142,4 +142,5 @@ def download_images(ydl, choices, platform, video_id, resolver, stage, emit):
     emit('progress', downloaded_bytes=downloaded, total_bytes=downloaded, speed_bps=None,
          completed_items=len(files), total_items=len(files))
     emit('download_finished', platform=platform, video_id=video_id,
-         kind='image_album', resolver=resolver, files=files, bytes=downloaded)
+         kind='image_album', resolver=resolver, files=files, bytes=downloaded,
+         **({'metadata': metadata} if metadata is not None else {}))

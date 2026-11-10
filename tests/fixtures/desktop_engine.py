@@ -8,13 +8,31 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.5", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.6", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.buffer.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
 platform = 'youtube' if source.hostname == 'www.youtube.com' else 'tiktok' if source.hostname == 'www.tiktok.com' else 'douyin'
 def emit(event_type, **data):
     print(json.dumps(dict(protocol_version=3, id=request["id"], type=event_type, **data)), flush=True)
+if request['method'] == 'scan_author_posts':
+    author = 'fixture-author'
+    video = dict(video_id='501', kind='video', title='Video', author='Fixture', author_id=author, published_at=1)
+    album = dict(video_id='601', kind='image_album', title='Album', author='Fixture', author_id=author, published_at=2)
+    items = [video, album]
+    if params['input'] == 'new-video':
+        items.append({**video, 'video_id': '502', 'published_at': 0})
+    elif params['input'] == 'new-album':
+        items.append({**album, 'video_id': '602', 'published_at': 0})
+    emit('author_scan_page', author_id=author, page=1, items=items, skipped=0,
+         has_more=True, next_cursor='20')
+    if params['input'] == 'partial':
+        emit('error', error={'code': 'ACCESS_DENIED', 'stage': 'author_list'})
+        sys.exit(1)
+    emit('author_scan_page', author_id=author, page=2, items=[video], skipped=0,
+         has_more=False, next_cursor=None)
+    emit('author_scan_finished', result={'pages': 2})
+    sys.exit(0)
 if request['method'] in ('check_dependencies', 'install_dependency'):
     assert set(params).issubset({'runtime_directory', 'tool', 'staging_dir', 'variant'})
     assert Path(params['runtime_directory']).is_absolute()
@@ -144,6 +162,10 @@ if request["method"] == "resolve_video":
 else:
     stage = Path(params["staging_dir"])
     video_id = params["expected"]["video_id"]
+    batch_author = params['expected'].get('author_id')
+    metadata = dict(platform='douyin', video_id=video_id, kind=params['expected']['kind'],
+                    canonical_url=params['input'], resolver='dtk',
+                    author_profile=dict(id=batch_author), title='Batch fixture') if batch_author else None
     if params["expected"].get("kind") == "image_album":
         album=stage/"album"; album.mkdir()
         static = (stage.parent.parent.parent / "album-static").is_file()
@@ -159,7 +181,10 @@ else:
                 total += len(clip)
             emit("progress",downloaded_bytes=total,total_bytes=None,speed_bps=None,completed_items=index,total_items=2)
         emit("progress",downloaded_bytes=total,total_bytes=total,speed_bps=None,completed_items=2,total_items=2)
-        emit("download_finished",platform="douyin",video_id=video_id,kind="image_album",resolver="dtk",files=files,bytes=total)
+        if metadata is not None:
+            metadata['images'] = files
+        emit("download_finished",platform="douyin",video_id=video_id,kind="image_album",resolver="dtk",files=files,bytes=total,
+             **({'metadata': metadata} if metadata is not None else {}))
         sys.exit(0)
     if video_id.startswith(("8", "7")):
         root = stage.parent.parent.parent if stage.name == "media" else stage.parent.parent
@@ -184,11 +209,16 @@ else:
         (stage / "video.mp4").write_bytes(body)
         emit("progress", downloaded_bytes=len(body), total_bytes=len(body), speed_bps=None)
         cover = {}
-        if video_id in ("456", "fixture0001"):
+        if video_id in ("456", "fixture0001") or (batch_author and video_id == "501"):
             image = b"\x89PNG\r\n\x1a\ndownloaded-fixture"
             (stage / "cover").write_bytes(image)
             cover = dict(cover_filename="cover", cover_bytes=len(image))
+        format_id = params.get("format_id")
+        if metadata is not None:
+            format_id = '1' * 24
+            metadata['selected_format_id'] = format_id
         emit("download_finished", platform=params['expected']['platform'], video_id=video_id,
-            filename="video.mp4", container="mp4", bytes=len(body), format_id=params.get("format_id"),
+            filename="video.mp4", container="mp4", bytes=len(body), format_id=format_id,
+            **({'metadata': metadata} if metadata is not None else {}),
             **({'transferred_bytes':len(body)} if params['expected']['platform']=='youtube' else {}),
             width=720 if params.get("format_id")=="2"*24 else 1080,height=1280 if params.get("format_id")=="2"*24 else 1920, **cover)

@@ -64,17 +64,16 @@ def image_choices(content):
     return result
 
 
-def extract(ydl, platform, video_id, ua, cookies, proxy):
-    from datetime import UTC, datetime
+def request_json(ydl, adapter, endpoint, ua, cookies, proxy, **arguments):
     from engine import EngineError
-    adapter = DOUYIN if platform == 'douyin' else TIKTOK
     profile = adapter.profile_for(SimpleNamespace(
         user_agent=ua, platform='MacIntel' if 'Macintosh' in ua else 'Win32',
         screen='1920x1080', language='zh-CN', timezone='Asia/Shanghai',
         hardware_concurrency=8, device_memory=8))
-    request = adapter.build_request(platform + '.content_detail', profile=profile,
-        **({'aweme_id': video_id} if platform == 'douyin' else {'item_id': video_id}))
+    request = adapter.build_request(endpoint, profile=profile, **arguments)
     spec = RequestSpec(request['method'], request['url'], request['params'], request['headers'])
+    if cookies is None:
+        cookies = {cookie.name: cookie.value for cookie in ydl.cookiejar.get_cookies_for_url(spec.url)}
     signed = asyncio.run(NativeSigner(adapter.platform, fill_ms_token=False).sign(
         spec, StaticFingerprint(ua, profile.browser_platform, profile.screen_width, profile.screen_height),
         SigningSession(cookies=cookies, proxy_url=proxy)))
@@ -82,9 +81,18 @@ def extract(ydl, platform, video_id, ua, cookies, proxy):
     with ydl.urlopen(Request(spec.url + '?' + signed.query, headers=headers)) as response:
         body = response.read(4 * 1024 * 1024 + 1)
     if len(body) > 4 * 1024 * 1024:
-        raise EngineError('UPSTREAM_CHANGED', 'detail_size')
+        raise EngineError('UPSTREAM_CHANGED', 'dtk_response_size')
+    return json.loads(body)
+
+
+def extract(ydl, platform, video_id, ua, cookies, proxy):
+    from datetime import UTC, datetime
+    from engine import EngineError
+    adapter = DOUYIN if platform == 'douyin' else TIKTOK
     try:
-        content = adapter.parse_content(json.loads(body), fetched_at=datetime.now(UTC))
+        payload = request_json(ydl, adapter, platform + '.content_detail', ua, cookies, proxy,
+            **({'aweme_id': video_id} if platform == 'douyin' else {'item_id': video_id}))
+        content = adapter.parse_content(payload, fetched_at=datetime.now(UTC))
     except DtkError as error:
         code = {'UPSTREAM_RISK_CONTROL': 'RISK_CONTROL', 'CONTENT_PRIVATE': 'ACCESS_DENIED',
                 'NOT_FOUND': 'NOT_FOUND', 'UNSUPPORTED_CONTENT': 'UNSUPPORTED_CONTENT'}.get(

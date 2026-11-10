@@ -701,6 +701,50 @@ async fn resolve_video(
         .map_err(error)
 }
 #[tauri::command]
+async fn start_author_scan(
+    core: State<'_, AppCore>,
+    input: String,
+    mode: Option<yingqu_core::desktop_core::douyin_author::ScanMode>,
+) -> Result<yingqu_core::desktop_core::douyin_author::Scan, String> {
+    core.start_author_scan(input, mode.unwrap_or_default())
+        .map_err(error)
+}
+#[tauri::command]
+fn get_author_scan(
+    core: State<AppCore>,
+    scan_id: Option<String>,
+) -> Result<Option<yingqu_core::desktop_core::douyin_author::Scan>, String> {
+    match scan_id {
+        Some(id) => core.author_scan(&id).map(Some),
+        None => core.latest_author_scan(),
+    }
+    .map_err(error)
+}
+#[tauri::command]
+async fn cancel_author_scan(
+    core: State<'_, AppCore>,
+    scan_id: String,
+) -> Result<yingqu_core::desktop_core::douyin_author::Scan, String> {
+    core.cancel_author_scan(&scan_id).await.map_err(error)
+}
+#[tauri::command]
+async fn confirm_author_scan(
+    core: State<'_, AppCore>,
+    scan_id: String,
+    allow_partial: bool,
+    baseline_action: Option<yingqu_core::desktop_core::douyin_author::BaselineAction>,
+) -> Result<yingqu_core::desktop_core::douyin_author::Batch, String> {
+    core.confirm_author_scan(&scan_id, allow_partial, baseline_action)
+        .map_err(error)
+}
+#[tauri::command]
+async fn resume_author_batch(
+    core: State<'_, AppCore>,
+    scan_id: String,
+) -> Result<yingqu_core::desktop_core::douyin_author::Scan, String> {
+    core.resume_author_batch(&scan_id).map_err(error)
+}
+#[tauri::command]
 fn choose_video_format(
     core: State<AppCore>,
     task_id: String,
@@ -1139,6 +1183,11 @@ fn main() {
             set_filename_template,
             preview_filename,
             resolve_video,
+            start_author_scan,
+            get_author_scan,
+            cancel_author_scan,
+            confirm_author_scan,
+            resume_author_batch,
             start_download,
             choose_video_format,
             cancel_task,

@@ -21,6 +21,7 @@
 - [解析缓存验收](parse-cache-validation.md)：SQLite 元数据/图片缓存、链接别名、重启预览及下载重新解析。
 - [双引擎与图集验收](dual-engine-validation.md)：正式 macOS GUI、文件校验、重启及平台验收边界。
 - [DTK 双解析引擎方案与试验](dtk-dual-engine-plan.md)：正式底层切片、导入补丁、图集任务契约和上游升级流程。
+- [抖音作者作品批量下载技术方案](douyin-author-download-plan.md)：登录 Cookie、作者作品分页、下载队列接入与上游并发证据。
 
 - [技术方案](tauri-desktop-technical-plan.md)：双引擎架构、协议、阶段与验收标准。
 - [设置与封面验收](m2-cover-settings-validation.md)：Cookie 多行回显、等高设置卡、并发下拉与本地封面。

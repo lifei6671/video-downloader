@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.14.5";
+pub const ENGINE_VERSION: &str = "0.14.6";
 pub const YTDLP_VERSION: &str = "2026.10.26";
 
 async fn cancellation() -> Result<()> {
@@ -140,6 +140,11 @@ fn error_code(value: &Value) -> &'static str {
         Some("UNSUPPORTED_CONTENT") => "UNSUPPORTED_CONTENT",
         Some("CONFIG_INVALID") => "CONFIG_INVALID",
         Some("ACCESS_DENIED") => "ACCESS_DENIED",
+        Some("INVALID_AUTHOR_LINK") => "INVALID_AUTHOR_LINK",
+        Some("AUTHOR_LOGIN_REQUIRED") => "AUTHOR_LOGIN_REQUIRED",
+        Some("AUTHOR_API_LIMIT") => "AUTHOR_API_LIMIT",
+        Some("AUTHOR_CURSOR_INVALID") => "AUTHOR_CURSOR_INVALID",
+        Some("AUTHOR_SCAN_LIMIT") => "AUTHOR_SCAN_LIMIT",
         Some("NOT_FOUND") => "NOT_FOUND",
         Some("RISK_CONTROL") => "RISK_CONTROL",
         Some("NETWORK_ERROR") => "NETWORK_ERROR",
@@ -257,7 +262,13 @@ impl PythonBridge {
                     .saturating_duration_since(tokio::time::Instant::now())
                     .min(Duration::from_secs(65))
             } else {
-                Duration::from_secs(if merging { 600 } else { 65 })
+                Duration::from_secs(if merging {
+                    600
+                } else if method == "scan_author_posts" {
+                    120
+                } else {
+                    65
+                })
             };
             let value = timeout(wait, read_message(&mut self.output))
                 .await
@@ -265,6 +276,13 @@ impl PythonBridge {
                 .context("ENGINE_PROTOCOL_ERROR")?;
             if value["id"] != id || value["protocol_version"] != 3 {
                 bail!("ENGINE_PROTOCOL_ERROR");
+            }
+            if value["type"] == "author_scan_page" {
+                if method != "scan_author_posts" {
+                    bail!("ENGINE_PROTOCOL_ERROR");
+                }
+                progress(value);
+                continue;
             }
             if value["type"] == "resolve_progress" {
                 if !matches!(method, "identify_input" | "resolve_video")
@@ -418,6 +436,7 @@ impl PythonBridge {
                 && value["type"]
                     != match method {
                         "identify_input" => "identified",
+                        "scan_author_posts" => "author_scan_finished",
                         "resolve_video" => "resolved",
                         "check_dependencies" | "install_dependency" => "dependencies",
                         "extract_cover" => "cover_extracted",
@@ -491,7 +510,7 @@ impl PythonBridge {
         let mut bridge = Self::start(program, args)?;
         let result = tokio::select! {
             result = async {
-                if !matches!(method, "download_video" | "transcribe_video") {
+                if !matches!(method, "download_video" | "transcribe_video" | "scan_author_posts") {
                     let limit = match method { "install_dependency" if params["tool"] == "fun-asr-nano" => 2700, "install_dependency" => 600, "extract_cover" => 20, "probe_video" => 30, _ => 80 };
                     timeout(Duration::from_secs(limit), bridge.execute(id, method, params, progress))
                         .await.context("TIMEOUT")?

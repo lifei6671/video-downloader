@@ -4,11 +4,12 @@ import { toast } from 'sonner';
 import { InputGroupTextarea } from '@/components/ui/input-group';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
 
-export function ShareLinkInput({ value, onChange, inputRef, disabled = false }: {
+export function ShareLinkInput({ value, onChange, inputRef, disabled = false, placeholder = '粘贴作品分享链接或分享口令…' }: {
   value: string;
   onChange: (value: string) => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   disabled?: boolean;
+  placeholder?: string;
 }) {
   const [hasSelection, setHasSelection] = useState(false);
   const [clipboardBusy, setClipboardBusy] = useState(false);
@@ -53,7 +54,7 @@ export function ShareLinkInput({ value, onChange, inputRef, disabled = false }: 
       if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
         event.preventDefault(); event.currentTarget.form?.requestSubmit();
       }
-    }} placeholder="粘贴作品分享链接或分享口令…" /></ContextMenuTrigger>
+    }} placeholder={placeholder} /></ContextMenuTrigger>
     <ContextMenuContent aria-label="作品链接编辑" onCloseAutoFocus={event => { event.preventDefault(); inputRef.current?.focus(); }}>
       <ContextMenuItem disabled={disabled || clipboardBusy || !value} onSelect={() => void edit('selectAll')}>全选</ContextMenuItem>
       <ContextMenuSeparator />
