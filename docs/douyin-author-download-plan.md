@@ -1,0 +1,261 @@
+# 抖音作者作品全量归档与手动增量下载技术方案
+
+日期：2026-11-09  
+状态：待实施技术方案  
+代码基线：`master` / `93b4b72`  
+枚举及详情引擎：固定 DTK 5.1.10（`26299ef`）  
+媒体传输：现有 yt-dlp；任务和资产归属：现有 Rust 下载队列
+
+## 1. 目标、范围与术语
+
+在「下载作品」页识别抖音用户主页与分享文本，用户可手动选择 **全量归档** 或 **增量下载**。统一使用“作者枚举 → 作品索引 → 候选决策 → 用户确认 → 原下载队列”的流程。首版不运行后台定时检查，作者和作品索引保留后续增加定时触发的能力。
+
+- **全量归档**：遍历当前授权身份能够获取的作者发布作品列表，将本地尚未完整保存的可支持视频与图集加入下载候选集；已经有完整本地文件的作品跳过，不覆盖、不自动替换清晰度。
+- **增量下载**：以该作者、该访问身份作用域下已建立的作品基线为参考，下载后续新发现的作品，并补齐此前明确要求归档却未成功保存的作品（失败、取消、文件缺失）。**“新发现”不等于“新发布”**：旧作品此前未被接口返回，下一次首次出现时也算新发现。
+- **首次增量初始化**：没有已确认的基线时，必须先由用户选择“归档当前可见历史作品”或“仅建立基线，从后续新增开始下载”，不能默默把第一次扫描当作增量；仅建立基线要求本次扫描正常抵达合法末页，且不创建历史下载任务。
+- **已归档**：有完成记录且本地视频文件或图集清单通过现有完整性校验；仅有远端备份、仅有索引、任务状态为 Completed 但本地文件缺失，均不算本地已归档。
+- **完成一次枚举**：从第一页沿服务端有效游标读到结构合法的 `has_more=false`。这只能证明本次接口可见列表遍历完成，不保证平台返回作者全部历史作品。
+- **完成一次批量下载**：本批候选的所有有效任务均完成本地文件提交；与枚举完成分别统计。
+
+首版范围：作者本人发布且接口可见的视频、图集（含现有图集支持的实况图）。不含私密不可见作品、已删除作品、点赞/收藏、合集独立入口、直播和跨平台作者。首版不实现定时订阅，也不自动删除作者已下架的本地作品，不自动按新规格覆盖历史作品。
+
+**必要假设与阻塞点**：同一个访问身份可以稳定返回多页作品，`content_detail` 在批次执行时仍能解析该作品。2026-11-09 已保存 Cookie 实测前三页成功，尚未实测末页、媒体下载和持久化链路；先完成端到端验证再宣告可支持“全部”。
+
+现有 DTK 桌面切片包含 `douyin.author_posts` 的请求参数、签名及 `parse_author_posts`，现有适配器主要使用 `content_detail`。新增作者枚举操作复用 GuardedRH、DTK NativeSigner、CookieJar 和代理；Rust 负责扫描生命周期、持久化、调度和文件提交。DTK 上游的身份池、服务端调度器及 Go 下载器不并入桌面端。
+
+源码：[DTK 切片](../../../vendor/UPSTREAM.md) · [Python 适配器](../../../python-engine/dtk_adapter.py) · [下载队列](../../../src-tauri/src/desktop_core.rs) · [上游作者下载说明](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/documents/en/08-downloads-and-library.md#an-authors-recent-posts)
+
+## 2. 用户交互和模式契约
+
+1. 粘贴 `https://www.douyin.com/user/<sec_user_id>`、`https://www.iesdouyin.com/share/user/<sec_user_id>` 或 `https://v.douyin.com/...` 分享文本。输入识别为作者主页时展示作者扫描入口，单作品继续走原有下载链路。
+2. 作者页展示 **全量归档 / 增量下载** 两种模式。若首次选择增量且本身份作用域无基线，必须显式展示初始化方式：
+   - **归档当前历史作品**：本次枚举完成或取得明确可确认的部分结果后，进入候选确认；对本次确认的作品建立“需要归档”意图。完整基线只在成功抵达末页时更新。
+   - **仅建立基线**：本次完整扫描后把现有可见作品标记为 `baseline_only`；本次不下载。以后的增量只选择新发现作品和已标记为需要归档的待补作品；以后用户主动执行全量时仍可下载这些历史作品。
+3. 展示扫描页数、已发现的视频/图集、已去重、已归档、待补、首次发现、不可支持、扫描状态及失败阶段。作者接口没有可靠的全局作品总数时，只能显示“已发现 N 条”，不能用 N 宣称作品总量。
+4. 扫描返回完整或部分结果后显示预览与“确认下载”。部分结果需要明确原因，用户可以仅下载已验证作品；**部分扫描不能设置或覆盖完整基线**。仅建立基线不接受部分结果。
+5. 用户手动点击停止扫描、暂停/恢复本批下载、对失败任务重试。批次列表区分 `scanning`、`scan_completed`、`scan_partial`、`scan_canceled`、`queued`、`downloading`、`paused`、`finished`；前端分别显示枚举进度和媒体进度，不混为一个百分比。
+6. 重复点击同一结果的确认按钮返回既有批次和结果；再次手动扫描产生新 `scan_id`，但作品和下载任务沿全局去重规则复用。
+
+### 模式与待下载规则
+
+| 当前作品状态 | 全量归档 | 已建立基线后的增量 |
+| --- | --- | --- |
+| 第一次发现，且本地无有效文件 | 候选 | 候选 |
+| 已有完成任务和有效本地文件 | 跳过 | 跳过 |
+| 已要求归档但失败、取消或文件缺失 | 作为待补候选；复用/恢复有效任务 | 作为待补候选；复用/恢复有效任务 |
+| 任务已排队、执行中或因身份被暂停 | 关联既有任务，不重复创建 | 关联既有任务，不重复创建 |
+| 首次建基线时标记为 `baseline_only` 的历史作品 | 候选，并将本次确认作品改为 `wanted` | 跳过；不因本地无文件而补下 |
+| 用户显式忽略的作品（后续扩展） | 保持忽略，需用户显式解除 | 保持忽略 |
+
+候选规则中的“需要归档”由单独的 `archive_intent` 表示（`wanted / baseline_only / ignored`），不从作品发现时间或下载任务状态反推。完整扫描只表示枚举完整，不代表全部媒体下载成功。
+
+### 同步基线示例
+
+作者已有 500 条可见作品：450 条本地保存成功，20 条明确要求归档但下载失败，30 条明确要求归档但未入队。作者后来新增 5 条。再次增量应产生 **55 条待处理候选**（20 + 30 + 5），而不是只下载 5 条。若首次仅建立基线，这 500 条应是 `baseline_only`，下次增量只会下载新发现的 5 条；手动切到全量才会对历史 500 条创建候选。
+
+## 3. 作者身份、链接识别和访问作用域
+
+1. 只接受上述白名单 HTTPS 主机与严格主页路径，从最终主页 URL 路径提取 `sec_user_id`；不从分享查询参数中的账号、设备标识推断作者。短链使用现有 GuardedRH 逐跳校验，拒绝非白名单跳转、内网/非法目的地址及异常路径。当前 `python-engine/engine.py` 的 `parse_input` 仅支持单作品路径；作者主页使用**独立的输入识别函数**，不放宽普通单作品入口。
+2. 作品身份的主键统一为 `(platform, aweme_id)`；作者键为 `(platform, sec_user_id)`。DTK 的抖音作者 `sec_uid` 可以用于作者一致性校验，不把昵称、可变数字 `uid` 或分享参数当作永久身份。
+3. **作品下载去重全局共享**：同一作品在普通下载、其他作者扫描批次或备份登记中只需一个有效本地文件，不因身份作用域改变而重复保存。
+4. **枚举可见性基线按身份隔离**：`author_targets` 以 `(platform, sec_user_id, identity_scope_id)` 唯一标识。`identity_scope_id` 是本机随机生成、与凭据配置版本绑定的不透明标识，不保存 Cookie 派生摘要。手动 Cookie 实质变化或显式换号产生新作用域；UA/代理与身份指纹的变更需要重新验证基线可复用性。默认浏览器会话若无法可靠确认仍是同一登录账号，提示用户确认是否继续使用原基线，不自动把另一账号的可见列表并入已确认基线。
+5. 同一身份作用域下全量和增量共用一份 `author_posts` 索引；不能跨不同登录身份拼接第一页与后续页面。身份变化后重新从第一页扫描。
+
+## 4. 作品枚举：DTK 请求与分页协议
+
+1. 首次调用 `DOUYIN.build_request("douyin.author_posts", sec_user_id=..., cursor=None, count=20)`，对应 `GET /aweme/v1/web/aweme/post/`、`max_cursor=0`；每页沿用抖音 UA、代理和同一个 CookieJar。`NativeSigner(fill_ms_token=False)` 保留当前单作品基线行为，签名必须基于该 API 实际可发送的 Cookie，而不是无作用域的全量 Cookie 字典。
+2. 每页调用 `parse_author_posts`，对返回的作品进行严格白名单提取：`platform`、`sec_user_id`、`aweme_id`、`kind`、`title`、`publish_time`、规范作品 URL。作者身份不匹配、作品 ID 无效、异常类型及破坏页面可信度的解析错误使本次扫描成为部分结果。明确私密、删除或不支持的作品按类型记录，不泄露原始媒体链接。
+3. 对每个 `aweme_id` 在本次扫描去重，置顶作品重复不算新的下载任务。**单页实际返回条数不以请求的 20 条为上限**：2026-11-09 已观察到 `count=20` 但首屏返回 23 条，必须完整保留和统计。
+4. `has_more=true` 时，原样使用上页有效 `max_cursor`；缺失游标、与历史游标重复、游标循环或非法值均停止并标为部分结果。`has_more=false` 且 `aweme_list` 结构有效才可正常结束。缺失 `aweme_list`、`has_more` 类型非法或未知、只有 `status_code=0` 的空壳、结构不合法的 JSON，均不得视作末页。
+5. DTK 当前 `parse_author_posts` 使用 `optional_bool` 读取 `has_more`，未知值可能按 `false` 处理。**在调用解析器之前额外严格验证响应中 `has_more` 只为可识别的布尔/0/1 值**，保留 `aweme_list` 字段完整性检查；避免错误宣告已扫完。
+6. 响应 `status_code`、验证码/验证页、HTTP 401/403/429、`Retry-After`、请求签名拒绝及网络中断按阶段分类。HTTP 403 本身不能推断 Cookie 失效；`ArgusSecurityPlugin` 的签名拒绝须与身份过期分开。遇明确限流或访问拒绝停止本次探测，保留此前可信页面。网络瞬断仅在同一身份和游标上退避重试一次。
+7. 每页请求启动间隔初值不少于 **8.5 秒**；完整遍历以有效末页为准，不采用 DTK 控制台 40 页/800 条界面上限。出于资源安全，可采用可配置的扫描保护阈值（请求次数/最长运行时间/内存），触发时必须报告 `scan_partial:resource_limit`，不能报告完成。
+8. 全量和增量首版均遵循完整游标翻页。不能以“连续遇到已知作品”或发布时间早于上次扫描作为末页依据。后续优化的快速扫描必须单列为 `range_scan`，不能更新“完整扫描”基线，也不能用来判断历史作品消失。
+
+参考：[分页参数](../../../vendor/dtk/upstream/src/dtk/platforms/douyin/params.py) · [分页解析](../../../vendor/dtk/upstream/src/dtk/platforms/douyin/parser.py) · [DTK 节流说明](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/documents/en/14-troubleshooting.md#throughput-is-capped-and-the-cap-is-per-identity-per-endpoint)
+
+## 5. Python 桥接、扫描状态与取消
+
+一次扫描使用一个可取消的 Python 子进程，逐页通过有界 JSONL 协议向 Rust 发送事件，扫描结束发送唯一终态事件。Rust 为扫描的权威状态机，校验 `scan_id`、页序、游标连续性、作品键、作者一致性以及终态唯一性。
+
+建议新增协议方法和事件：
+
+| 操作或事件 | 来源 | 内容 |
+| --- | --- | --- |
+| `scan_author_posts` | Rust → Python | 作者 ID、平台配置运行快照、扫描 ID；不传前端候选作品列表 |
+| `author_scan_page` | Python → Rust | 页序、该页白名单作品、页内跳过分类、`has_more`、下一游标 |
+| `author_scan_finished` | Python → Rust | 结束原因 `completed / partial`、总页数、游标终态、脱敏错误分类 |
+| `author_scan_error` | Python → Rust | 请求阶段、稳定错误码、可选安全的重试提示；不包含凭据和原始响应 |
+
+保持现有“终态消息 + EOF + 子进程成功退出”验证。异常退出、协议错误、取消均以 Rust 已持久化的可信页为准；不把半个 JSONL 消息或未验证页面加入候选集。
+
+- 现有 `python-engine/bridge.py` 方法白名单和 `src-tauri/src/python_bridge.rs` 终态类型分派均需添加 `scan_author_posts`，并为 `author_scan_page` 新增专用验证分支。
+- 单请求沿用 30 秒 socket 超时和有界响应；扫描使用独立的**无协议进展超时**，必须覆盖一次网络超时、退避和重试的最大跨度（建议首版 120 秒起，通过测试确认）；扫描总运行时间不套用普通解析的 80 秒限制。不能用每 65 秒必有一条页面事件作为假设。
+- 取消先中断请求和退避，再等待 Python 进程及 Windows Job 对象子进程退出；Rust 确认退出后才公布取消完成。Python 输出为纯 JSONL，普通日志不得写 stdout。
+- Rust 按每页小事务提交 `author_scan_items`，以降低进程崩溃时的丢失范围；网络请求和长时间等待不得持有 SQLite 事务或全局队列互斥锁。
+- 首版同一时间只执行一个作者枚举。取消、异常、应用退出后的扫描状态进入可恢复的已终止状态；下次扫描**从第一页重新开始**，不复用跨会话游标，不跨 Cookie 拼接页面。
+
+参考：[Rust 桥接](../../../src-tauri/src/python_bridge.rs) · [Python 协议入口](../../../python-engine/bridge.py)
+
+## 6. 登录、Cookie 与请求安全
+
+| 凭据场景 | 行为 |
+| --- | --- |
+| 手动配置抖音 Cookie | 优先使用；单次扫描冻结对应 UA、代理、CookieJar 及身份作用域 |
+| 未配置手动 Cookie | 沿用默认 HTTPS 浏览器 Cookie 读取，仅复制抖音域、未过期且必要的 Cookie |
+| 仅有游客 Cookie | 不启动声称完整的全量或增量扫描；提示登录 |
+| Cookie 标记存在但会话不可用 | 以真实列表响应判断，按具体错误展示；不得仅凭标记判断登录成功 |
+| HTTP 403 或签名拒绝 | 分离 `signature_refused`、`access_denied`、`login_required` 和未知错误，不自动替换身份、不清空设置 |
+| 下载过程中登录失效 | 记录当前任务的失败阶段，暂停同身份批次尚未开始的 API 请求，用户修复后恢复 |
+
+登录候选可参考 DTK 现有标记，如 `sessionid`、`sessionid_ss`、`sid_tt`、`sid_guard`；应核对固定切片对应实现。`/aweme/v1/web/query/user/` 游客也可能返回 `user_uid`，不得据此确认登录。
+
+- Cookie 仅由现有平台设置保存；浏览器 Cookie 不回写 SQLite。子进程运行凭据仅经 JSONL stdin 传入内存。`author_targets`、`author_posts`、`author_scans`、批次记录、任务快照、前端事件和普通日志只保存非凭据数据及不透明身份作用域 ID。
+- 保持 Cookie 的域、路径、HTTPS 和过期时间约束。抖音 API 可用的 Cookie 不得自动带到 `iesdouyin.com` 跳转页或媒体 CDN；不得把 Cookie 值、签名 URL、完整请求头、代理密码和上游原始响应写入诊断日志。
+- 已有配置快照中的手动 Cookie 只驻留活动任务内存，不能随着批次持久化。浏览器模式下载时按现有任务契约重新读取默认浏览器；应用重启后重建配置并重新校验可用性。Cookie 改动后旧身份的基线不自动合并到新作用域。
+- 采集失败按层分类：`author_list`、`content_detail`、`media_cdn`、`local_commit`；CDN 单个 403 不等于整个账号失效。`Retry-After` 仅对来源可信、语义明确的限流响应展示建议重试时间。
+
+参考：[浏览器读取](../../../python-engine/browser_cookies.py) · [平台设置与快照](../../../src-tauri/src/settings.rs) · [DTK 登录标记](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/src/dtk/identity/marks.py) · [反馈 #782](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/782) · [反馈 #783](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/783)
+
+## 7. SQLite 数据模型与事务边界
+
+新表沿用桌面端现有 SQLite 和迁移体系。作者扫描索引是**发现记录**，本地媒体和备份资产仍由现有下载/资产体系管理。
+
+| 表 | 关键字段 | 唯一性与用途 |
+| --- | --- | --- |
+| `author_targets` | `id`、`platform`、`sec_user_id`、`identity_scope_id`、`baseline_state`、`last_completed_scan_id`、`created_at`、`updated_at` | `UNIQUE(platform, sec_user_id, identity_scope_id)`；作者在一个访问身份下的归档目标 |
+| `author_scans` | `id`、`target_id`、`mode`、`status`、`baseline_action`、`pages`、`found_count`、`error_stage`、`error_code`、`started_at`、`ended_at` | 保存完整/部分/取消扫描的边界及统计，`scan_id` 为提交凭证 |
+| `author_scan_items` | `scan_id`、`platform`、`aweme_id`、`ordinal`、`kind`、`title`、`published_at`、`canonical_url`、`skip_reason` | `PRIMARY KEY(scan_id, platform, aweme_id)`；固定本次扫描看到的候选集与顺序 |
+| `author_posts` | `target_id`、`platform`、`aweme_id`、`first_seen_at`、`last_seen_at`、`archive_intent`、`last_seen_scan_id` | `UNIQUE(target_id, platform, aweme_id)`；跨扫描作者作品索引和归档意图 |
+| `author_batches` | `id`、`scan_id`、`mode`、`status`、`confirmed_at`、`created_at`、`updated_at` | 同一 `scan_id` 的确认操作幂等；批次暂停和统计独立持久化 |
+| `author_batch_items` | `batch_id`、`platform`、`aweme_id`、`task_id`（可空）、`decision` | `UNIQUE(batch_id, platform, aweme_id)`；记录入队/已下载/已有任务/忽略/不支持的决策，避免重复统计 |
+
+建议索引：`author_scans(target_id, started_at)`、`author_posts(target_id, archive_intent, last_seen_at)`、`author_scan_items(scan_id, ordinal)`、`author_batch_items(task_id)`。所有标识、计数、时间戳由 Rust 做输入约束；标题和规范链接长度有界。
+
+**状态与事务规则：**
+
+1. 扫描每页先完成解析、作者/游标/类型验证，再在短事务中写入 `author_scan_items` 和扫描统计。扫描部分失败仍保留已验证页；本阶段不创建下载任务。
+2. 只有合法抵达末页，才能在同一数据库事务中确认 `author_scans.status=completed`、写入本次可见作品的 `author_posts` 索引并更新 `author_targets.last_completed_scan_id`。部分扫描可将可信作品作为“新发现线索”持久化，但绝不能更新完整基线水位或把历史未返回作品标记为删除。
+3. 首次“仅建立基线”只在 `completed` 的事务内把本次作品标记为 `baseline_only`，不建批次下载任务；以后新发现作品默认 `wanted`。**重复扫描不能把已有 `wanted` 降级为 `baseline_only`**。
+4. 全量确认时，本次选择的 `baseline_only` 作品可升级为 `wanted`；增量确认时优先选择新发现和已有 `wanted` 且本地缺失的作品。后续需要显式忽略时使用独立 `ignored` 状态，不以“跳过已下载”模拟忽略。
+5. 确认下载按 `scan_id` 读取 Rust/SQLite 已保存的候选集，前端只提交 `scan_id`、模式和确认意图，不能直接上传未经校验的作品身份列表。事务内创建/复用批次、建立 `author_batch_items`、按全局作品索引做幂等任务入队；事务提交后统一发布任务事件。
+6. 如果某个旧任务已经执行中或本地文件有效，复用任务或写入跳过决策。**同一任务可能属于多个批次**，所以批次和任务用 `author_batch_items` 关联，不通过覆盖任务上的单个 `batch_id` 表示归属。
+7. 按 `(platform, aweme_id)` 为候选构建内存哈希索引，批次去重复杂度按已知任务数与候选数线性增长；本地文件校验仅对命中的完成记录执行，不允许逐作品遍历所有旧任务形成平方级比较。
+8. 持久化失败保持 DB 与任务事件一致；任务无覆盖文件提交继续使用现有 `commit_intents`。下载记录删除或本地文件缺失时，不能凭 `author_posts` 的发现记录判断媒体仍然存在。
+9. 重启时 `scanning` 且未终结的扫描标记 `interrupted/partial`；已确认的批次与下载任务依照既有中断恢复契约重建，`paused` 或身份失效暂停不得被重启恢复自动唤醒。原扫描游标不会恢复。
+10. 作品从后续完整扫描消失只表示“本次未返回”，不触发本地删除、远端备份墓碑或资产清理。
+
+## 8. 下载任务与现有队列接入
+
+现有 `Task.video`、`start_download`、`retry`、`restore_interrupted_downloads`、`same_download_variant` 假设作品已经解析过。首版需要显式支持 **已知作品身份、详情待解析** 的抖音批量来源；不能照搬当前仅为 Telegram 使用的 `video=None` 延迟解析分支。
+
+- **入队阶段**：存储经 Rust `Video::validate` 检验的最小作品身份：`platform=douyin`、`video_id=aweme_id`、`kind`、`resolver=dtk`、规范作品 URL、作者 `sec_user_id` 和展示字段；额外标记 `source_kind=author_batch` 与 `detail_pending=true`。这些均不包含可过期的 CDN 签名地址。普通任务仍使用当前已经完整解析的元数据。
+- **开始阶段**：批量任务在取得抖音身份 API 调度许可后，使用 DTK 请求一次 `content_detail`，严格校验作品 ID、作者 `sec_uid`、平台和类型，选择当次可用默认视频规格或原图优先图集集合，然后立即用现有 yt-dlp 传输。待解析任务从这里取得图集真实图片数和已验证规格。
+- **图集契约**：当前 `python-engine/engine.py` 对普通预览下载检查 `len(album) == expected.image_count`；批量任务此前没有 `image_count`，必须走单独的 `resolve_on_download` 分支。在该分支中，以本次详情返回的图集数量作为原始可信数量，完整校验图集清单和实际文件；普通单作品的规格和张数一致性校验保持原样。
+- **下载终态**：由 Python 发送白名单化且经过身份校验的元数据和媒体结果；Rust 在文件提交前验证作品身份及下载文件、更新 `task.video` 的完整规格/图集字段，再交给现有 `finalize_to` / `finalize_album`、SQLite 提交意图、备份资产登记和历史记录。不能让暂缺的 `selected_format_id`、`images` 导致失败或悄悄丢失图集信息。
+- **去重规则**：批次下载先按作品身份检查正在解析、排队、下载、暂停或本地已完成任务，再判断是否应补齐；不以清晰度规格差异创建重复批量任务。用户手动单作品仍可按不同规格下载，保留现有“确认替换/覆盖”的独立交互。
+- **失败规则**：作品删除、私密或单作品解析失败只影响该项；明确会话失效、签名拒绝或上游 API 风控暂停相同身份的批次待开始请求，用户修复后恢复。单个 CDN 403 按媒体错误处理；不得推断账号登录失败。
+- **恢复规则**：重启后依据最小身份与 `source_kind` 重建延迟解析任务，按原队列中断恢复顺序执行；恢复时重新取得配置和详情，禁止读取持久化的 Cookie 快照或已过期媒体 URL。
+- **批次统计**：状态来自 `author_batch_items` 对关联任务当前状态的聚合，已完成、失败、跳过、排队、暂停分别计算；任务被其他批次复用时不增加第二个物理下载。
+- **备份影响**：继续按现有已完成任务登记本地资产，云端备份调度使用原有契约。媒体本地缺失但云端存在时，不视为本地已归档；未来可新增“从备份恢复”作为候选决策，首版不引入。
+
+参考：[队列及持久化](../../../src-tauri/src/desktop_core.rs) · [视频与图集文件校验](../../../src-tauri/src/files.rs) · [Python 媒体执行](../../../python-engine/engine.py) · [技术契约](tauri-desktop-technical-plan.md)
+
+## 9. 请求调度、性能和资源治理
+
+1. **身份级调度**：全局抖音 API 调度器按 `identity_scope_id` 串行处理列表和详情请求（同身份最多一个在途）；按端点分别限速，首版列表相邻请求启动间隔 ≥8.5 秒，详情 ≥3.5 秒。手动抖音单作品请求与作者批次共享同一身份约束，避免批次外调用绕过限流。
+2. **槽位归属**：枚举不占媒体下载槽位；详情请求等身份许可时不应长期占用全局媒体下载槽位。完成身份 API 解析后才进入媒体传输槽位；如需改动现有 `start_download` 调度，必须保持 FIFO 公平与取消传播。媒体 CDN 与抖音 API 是不同调度维度。
+3. **媒体并发**：首版同一批次默认一条媒体任务执行，其他平台继续使用全局配置的并发槽位。批次并发只影响该批媒体，不作为账号 API 安全阈值。扫描和既有批次同时存在时，调度器仍须维持身份级串行。
+4. **突发与重试**：上述间隔取自 DTK 上游节流参数的保守初值，并非平台官方保证。验证码/签名拒绝不是提速或自动换账号的信号；禁止无限重试。详情和媒体分别记录实际延迟、401/403/429、超时、重试与最终失败原因。
+5. **数据规模**：至少覆盖 1,000 条作品和超过 40 页的扫描测试；大列表按页事件与批量 SQL 处理，限制单页 JSONL 大小、作品字段长度、前端展示数量与查询分页，避免一次性在界面渲染数万行。
+6. **下载空间**：已有元数据不足以准确计算视频总大小时显示“预计空间未知”；下载前检查目标目录写入与合理的可用空间余量，保留既有磁盘耗尽处理，不承诺预先准确估算总媒体大小。
+7. **性能指标**：分开统计枚举页延迟、详情请求耗时、等待调度时间、媒体速度、总完成时间以及完整率，避免把 API 等待误判为媒体下载慢。
+
+DTK 上游每身份/端点令牌桶持续速率：列表 `0.12/s`，详情 `0.30/s`，单身份并发 1。上游 Go 下载器默认的 4 任务×4 文件是媒体并发容量，与可接受的抖音带身份 API 请求频率无关。旧 issue #500 讨论过媒体下载 403，不能据此推断是并发导致。
+
+参考：[DTK 速率限制](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/documents/en/14-troubleshooting.md#throughput-is-capped-and-the-cap-is-per-identity-per-endpoint) · [上游下载器](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/documents/en/08-downloads-and-library.md#the-media-downloader-is-optional) · [媒体 403 反馈 #500](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/500)
+
+## 10. Rust 指令与前端接口
+
+新增指令（最终命名遵循项目既有 Tauri 命名规则）：
+
+| 指令 | 输入 | 输出/动作 |
+| --- | --- | --- |
+| `start_author_scan` | 作者主页/分享文本、`mode`、可选首次基线动作 | 创建 `scan_id`，返回作者目标及扫描状态；异步发出受校验的扫描事件 |
+| `get_author_scan` | `scan_id`、分页参数 | 查询本次扫描进度、错误、候选分类及已验证作品 |
+| `cancel_author_scan` | `scan_id` | 等待对应扫描子进程退出并记录取消状态 |
+| `confirm_author_scan` | `scan_id`、用户确认意图 | 幂等创建/返回批次；首次仅建基线在完成扫描后提交基线而不建下载任务 |
+| `list_author_targets` | 分页参数 | 返回已建立的作者归档目标、最近完整扫描和批次汇总 |
+| `get_author_batch` | `batch_id` | 聚合下载任务与跳过原因；查询可分页 |
+| `pause_author_batch` / `resume_author_batch` | `batch_id` | 持久化暂停标志；暂停阻止未启动任务，运行中的任务使用现有单项取消/完成语义 |
+
+用户提交的模式和首次基线动作只影响候选决策；服务端重新检查当前 `scan_id` 的模式、身份作用域和扫描终态。不得由前端上传未经验证的作者 ID、任意作品数组、媒体下载地址或任意本地目标路径。
+
+UI 保留现有「下载作品」入口。作者解析成功后展示作者信息、模式、首次基线初始化选择、已发现/已归档/新增/待补/跳过统计、扫描阶段和确认按钮。区分“已扫描到当前接口末页”与“已下载完本批作品”；部分扫描必须持续显示状态和错误阶段。提供“再次全量扫描”“再次增量扫描”的手动入口。
+
+## 11. 验证证据、门槛和验收场景
+
+### 11.1 已完成的只读探测（2026-11-09）
+
+样本：[用户主页短链](https://v.douyin.com/TJKkwePMqgg/)。
+
+| 检查项 | 实测结果 |
+| --- | --- |
+| 短链展开 | HTTP 302 到 `www.iesdouyin.com/share/user/<sec_user_id>`，GuardedRH 逐跳跟随后主页 HTTP 200，作者标识可从路径提取 |
+| 匿名首屏 | 无手动或浏览器登录 Cookie；固定 DTK NativeSigner 与 GuardedRH 的 `max_cursor=0,count=20` 请求返回 HTTP 403；仅凭状态码不能判定根因 |
+| 已保存 Cookie 前三页 | 沿用当前保存的抖音 Cookie、UA 和直连配置；首、二、三页均 HTTP 200、`status_code=0`，作者身份一致；分别返回 23、19、20 条作品，共 62 条无重复作品（首屏 20 视频 + 3 图集），三页均有下一游标 |
+| 最后有效页 | **未验证**。第三页 `has_more=true`，62 条只是三页样本数 |
+| 真实媒体、队列和重启 | **未验证**。本次探测未请求媒体文件，也未运行批次提交 |
+| 并发与限流对照 | **未验证**。当前数据只支持登录身份下三页连续请求的结论 |
+
+### 11.2 开发前验证关口
+
+1. 使用已授权的相同身份、UA 和代理，从第一页读到合法末页；记录总页数、去重作品数、最后有效游标结束原因及与网页可见置顶/最新作品的差异。若平台阻止访问，报告精确失败阶段与部分结果，不写成功结论。
+2. 分别验证一条视频和一条图集的 `content_detail` 身份一致性及 yt-dlp 媒体下载。重点验证图片数延迟解析、原图优先和实况图文件清单。
+3. 对比原生签名与可合法使用的授权浏览器会话在相同身份环境下的结果。仅在原生 HTTP 路线不稳定时评估浏览器会话枚举适配器；不引入新的独立下载队列。签名拒绝与登录过期需有可区分证据。
+4. 以上验证为实际集成的依据，不要求用户提供 Cookie 到日志、测试报告或代码仓库。
+
+### 11.3 离线与集成验收清单
+
+| 类别 | 必测场景 | 验收标准 |
+| --- | --- | --- |
+| 分页 | 23/19/20 非固定页数、超过 40 页、重复置顶、空列表末页、无效/重复游标、空壳、无效 `has_more` | 逐页不遗漏；只有合法终态才标记完成 |
+| 登录与网络 | 401、403、429、签名拒绝、验证码、身份过期、网络瞬断、退避/超时 | 分类正确；前页可用；不误判完整；凭据不外泄 |
+| 取消与重启 | 扫描取消、扫描进程崩溃、下载中断、身份暂停后的重启 | 无遗留子进程、无半成品完成记录、批次与任务状态可恢复 |
+| 首次增量 | 首次归档历史、首次仅建基线、部分扫描首次初始化 | 两种基线语义正确；仅建基线不下载历史；部分扫描不能建完整基线 |
+| 再次增量 | 新增 5、失败 20、待补 30、历史 baseline_only、重复点击确认 | 产生 55 个待处理候选（按示例），不下载 baseline_only，不重复物理任务 |
+| 全量/增量交叉 | 先建基线再全量、先全量再增量、同作品不同批次 | 归档意图升级正确；文件不覆盖；批次与任务多对多关联正确 |
+| 资产一致性 | 同作品手动下载、不同视频规格、删除本地文件、仅有云端备份 | 按作品身份去重；本地缺失可补；不误删备份；手动规格路径兼容 |
+| 媒体提交 | 视频、图集、实况图、签名 URL 过期、作品下架、文件不完整 | 下载时重取详情、作者校验、原有文件提交事务和图集校验全部通过 |
+| 规模和调度 | ≥1,000 作品、≥41 页、已有大量任务、手动与批次并发、跨平台媒体 | 避免平方级去重；同身份 API 串行；其他平台媒体任务可推进 |
+| 安全与数据库 | 非白名单跳转、超大输入/响应、非法路径、Cookie 改动、重复提交 | 无凭据持久化到批次/日志；OCC/事务与幂等约束有效 |
+
+**可观测统计**：`scan_completed`、`scan_partial`、`found_posts`、`deduplicated_posts`、`already_local`、`newly_discovered`、`retry_candidates`、`batch_queued`、`batch_completed`、`batch_failed`、`blocked_by_identity`；按照 `author_list / content_detail / media_cdn / local_commit` 分类失败。
+
+## 12. 实施顺序与交付边界
+
+**阶段 A：接口能力验证**  
+建立独立只读探针/测试入口，完成登录环境下末页、异常响应和至少一条视频/图集的详情与媒体链路验证。产出脱敏报告，明确当前固定 DTK 是否满足端到端能力。
+
+**阶段 B：统一作者枚举**  
+加入作者主页识别、`scan_author_posts` 桥接、逐页验证、扫描记录与前端预览。完成单次扫描的取消、部分结果和末页判定。
+
+**阶段 C：全量归档**  
+创建作者/作品/批次 SQLite 结构；实现确认幂等、全局作品去重、`detail_pending` 下载来源、图集延迟解析、任务恢复和聚合统计。完成 Windows 真实视频/图集回归。
+
+**阶段 D：手动增量**  
+补齐首次基线两种初始化方式、`archive_intent` 状态迁移、增量候选选择、失败补齐、部分扫描保护和模式交叉回归。继续只允许用户手动触发。
+
+**阶段 E：资源与稳定性**  
+整合手动和批次的抖音 API 身份级节流；执行大账号、多批次、跨平台并发、重启、配置变化及备份资产一致性验收。
+
+开发修改限定于作者扫描/协议/队列/相关数据库迁移/页面/测试，复用已有文件提交和备份通路。不引入独立服务端，不把 DTK 整套身份池或 Go 下载器接入桌面，不改变既有单作品手动规格选择行为。
+
+### 参考实现
+
+- [Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)：固定切片直接复用，重点参考作者枚举、分页与风险分类。
+- [Johnserf-Seed/f2](https://github.com/Johnserf-Seed/f2)：参考 `fetch_user_post_videos`、作者 ID 提取和分页对照；不作为当前默认引擎。
+- [JoeanAmier/TikTokDownloader](https://github.com/JoeanAmier/TikTokDownloader)：参考作者作品批量下载、已下载作品记录、手动增量和文件管理，避免引入第二套下载任务系统。
+- [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader)：参考请求环境差异、浏览器会话路径和采集失败处理；其公开说明指出部分作者列表/详情请求在普通客户端可能受到 `ArgusSecurityPlugin` 验证限制。
+
+具体性能和可用性仍以当前 DTK 固定切片、Windows 实测与本地任务队列的验证结果为准。
