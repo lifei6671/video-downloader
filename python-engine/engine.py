@@ -34,7 +34,7 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.14.6'
+ENGINE_VERSION = '0.14.7'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.10.26'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -356,9 +356,10 @@ def input_identity(platform, url, resolver, source_url):
 def operate(method, params, emit):
     if not isinstance(params, dict):
         raise EngineError('ENGINE_PROTOCOL_ERROR', 'protocol')
-    if method == 'scan_author_posts':
+    if method in ('identify_douyin_link', 'scan_author_posts'):
         import douyin_author
-        douyin_author.scan(params, emit)
+        operation = douyin_author.identify_link if method == 'identify_douyin_link' else douyin_author.scan
+        operation(params, emit)
         return
     try:
         runtime_dependencies.configure(params.get('runtime_directory'))
@@ -512,6 +513,7 @@ def operate(method, params, emit):
             content = None
             album = None
             avatar = None
+            fetch_batch_avatar = bool(batch_author) and params.get('fetch_author_avatar') is True
             if note is None:
                 phase('fetching_metadata')
             if actual_resolver == 'dtk':
@@ -536,7 +538,8 @@ def operate(method, params, emit):
                 if str(content.kind) == 'image_album':
                     result = dtk_adapter.metadata(content)
                     album = dtk_adapter.image_choices(content)
-                    avatar = content.author.avatar.url if preview and content.author.avatar else None
+                    if (preview or fetch_batch_avatar) and content.author.avatar:
+                        avatar = content.author.avatar.url
                 else:
                     info = ydl.process_ie_result(dtk_adapter.video_info(content), download=False)
             elif note is not None:
@@ -563,7 +566,7 @@ def operate(method, params, emit):
                     ydl.params['retries'] = 0
                     media_album.download_images(
                         ydl, album, platform, result['video_id'], actual_resolver, stage, emit,
-                        **({'metadata': result} if batch_author else {}))
+                        **({'metadata': result, 'avatar_url': avatar} if batch_author else {}))
                 else:
                     if preview:
                         phase('loading_preview')
@@ -621,11 +624,14 @@ def operate(method, params, emit):
             file = Path(ydl.prepare_filename(info))
             if file.parent != stage or file.is_symlink() or not file.is_file() or file.stat().st_size == 0:
                 raise EngineError('IO_ERROR', 'output')
+            if fetch_batch_avatar:
+                avatar = author_profile.avatar_url(ydl, info, platform)
             emit('download_finished', platform=platform, video_id=result['video_id'],
                  filename=file.name, bytes=file.stat().st_size, container=info['ext'],
                  format_id=result['selected_format_id'], width=result['width'], height=result['height'],
                  **({'metadata': result} if batch_author else {}),
                  **({'transferred_bytes': progress.transferred} if platform == 'youtube' else {}),
+                 **(author_profile.download_avatar(ydl, avatar, stage) if avatar else {}),
                  **download_cover(ydl, info, stage))
     except DtkError as error:
         raise EngineError('UPSTREAM_CHANGED', 'dtk_signing') from None

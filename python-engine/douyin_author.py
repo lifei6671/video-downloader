@@ -1,5 +1,6 @@
 """Read the signed author feed, emitting bounded metadata pages."""
 import functools
+import random
 import re
 import time
 from datetime import UTC, datetime
@@ -43,6 +44,51 @@ def profile_link(text):
 def has_login(jar):
     return any(cookie.name in LOGIN_MARKERS and cookie.value
                for cookie in jar.get_cookies_for_url(API_URL))
+
+
+def guarded_client(proxy):
+    from engine import SafeLogger
+    ydl = YoutubeDL(dict(quiet=True, logger=SafeLogger(), proxy=proxy or '',
+                         socket_timeout=30, cachedir=False, allowed_extractors=[], js_runtimes={}))
+    ydl._request_director = ydl.build_request_director([
+        functools.partial(GuardedRH, platform='douyin')])
+    return ydl
+
+
+def expand_share(ydl, url, ua):
+    from engine import EngineError, error_code
+    try:
+        with ydl.urlopen(Request(url, headers={'User-Agent': ua})) as response:
+            return response.url
+    except (RequestError, TargetError) as error:
+        raise EngineError(error_code(error), 'author_link') from None
+
+
+def identify_link(params, emit):
+    from engine import EngineError, parse_input, profile_config
+    text = params.get('input')
+    try:
+        url, author_id = profile_link(text)
+    except EngineError as error:
+        platform, url, short = parse_input(text)
+        if platform != 'douyin' or not short:
+            raise error
+        author_id = None
+    if author_id is None:
+        ua, _, proxy = profile_config(params.get('profile', {}))
+        with guarded_client(proxy) as ydl:
+            url = expand_share(ydl, url, ua)
+        try:
+            _, author_id = profile_link(url)
+        except EngineError:
+            platform, canonical, short = parse_input(url)
+            if platform != 'douyin' or short:
+                raise EngineError('UNSUPPORTED_CONTENT', 'short_link')
+            emit('identified', result=dict(kind='work', canonical_url=canonical))
+            return
+        if author_id is None:
+            raise EngineError('UNSUPPORTED_CONTENT', 'short_link')
+    emit('identified', result=dict(kind='author', author_id=author_id))
 
 
 def parse_page(payload, author_id):
@@ -89,26 +135,18 @@ def parse_page(payload, author_id):
 
 
 def scan(params, emit):
-    from engine import EngineError, SafeLogger, add_cookies, error_code, profile_config
+    from engine import EngineError, add_cookies, error_code, profile_config
     url, author_id = profile_link(params.get('input'))
     ua, cookies, proxy = profile_config(params['profile'])
-    logger = SafeLogger()
-    with YoutubeDL(dict(quiet=True, logger=logger, proxy=proxy or '', socket_timeout=30,
-                        cachedir=False, allowed_extractors=[], js_runtimes={})) as ydl:
-        ydl._request_director = ydl.build_request_director([
-            functools.partial(GuardedRH, platform='douyin')])
+    with guarded_client(proxy) as ydl:
         if author_id is None:
-            try:
-                with ydl.urlopen(Request(url, headers={'User-Agent': ua})) as response:
-                    _, author_id = profile_link(response.url)
-            except (RequestError, TargetError) as error:
-                raise EngineError(error_code(error), 'author_link') from None
+            _, author_id = profile_link(expand_share(ydl, url, ua))
             if author_id is None:
                 raise EngineError('INVALID_AUTHOR_LINK', 'author_link')
         if cookies:
             add_cookies(ydl.cookiejar, cookies, 'douyin')
         else:
-            load_default_cookies(ydl.cookiejar, 'douyin', logger)
+            load_default_cookies(ydl.cookiejar, 'douyin', ydl.params['logger'])
         if not has_login(ydl.cookiejar):
             raise EngineError('AUTHOR_LOGIN_REQUIRED', 'author_list')
 
@@ -117,7 +155,10 @@ def scan(params, emit):
         for number in range(1, MAX_PAGES + 1):
             for attempt in range(2):
                 if started is not None:
-                    time.sleep(max(0, 8.5 - (time.monotonic() - started)))
+                    wait = max(0, 8.5 - (time.monotonic() - started))
+                    if attempt == 0:
+                        wait += random.randint(500, 1200) / 1000
+                    time.sleep(wait)
                 started = time.monotonic()
                 try:
                     payload = dtk_adapter.request_json(

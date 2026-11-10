@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.14.6";
+pub const ENGINE_VERSION: &str = "0.14.7";
 pub const YTDLP_VERSION: &str = "2026.10.26";
 
 async fn cancellation() -> Result<()> {
@@ -435,7 +435,7 @@ impl PythonBridge {
             if !failed
                 && value["type"]
                     != match method {
-                        "identify_input" => "identified",
+                        "identify_input" | "identify_douyin_link" => "identified",
                         "scan_author_posts" => "author_scan_finished",
                         "resolve_video" => "resolved",
                         "check_dependencies" | "install_dependency" => "dependencies",

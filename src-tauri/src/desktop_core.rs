@@ -253,6 +253,20 @@ fn running_downloads(inner: &Inner) -> usize {
         .count()
 }
 
+struct ResolveInput {
+    original: String,
+    verified_url: Option<String>,
+}
+
+impl From<String> for ResolveInput {
+    fn from(original: String) -> Self {
+        Self {
+            original,
+            verified_url: None,
+        }
+    }
+}
+
 struct Inner {
     author_scan: Option<douyin_author::ActiveScan>,
     author_paused: HashSet<String>,
@@ -1051,7 +1065,7 @@ impl Core {
                         .and_then(|v| v["selected_format_id"].as_str())
                         .map(str::to_owned);
                     let _ = recovery_core.resolve_task(
-                        task.telegram_link.unwrap(),
+                        task.telegram_link.unwrap().into(),
                         Some(&task.id),
                         "grammers".into(),
                         format,
@@ -1516,6 +1530,13 @@ impl Core {
             .video
             .as_ref()
             .context("FILE_MISSING")?;
+        if let Some(author) = douyin_author::batch_author_id(video) {
+            if video["author_profile"]["id"] == author {
+                if let Ok(body) = douyin_author::avatar(&inner.db, author) {
+                    return Ok(body);
+                }
+            }
+        }
         parse_cache::avatar(&inner.db, video)
     }
     pub fn export_cover(&self, id: &str) -> Result<(String, Vec<u8>)> {
@@ -1649,7 +1670,7 @@ impl Core {
     }
 
     pub fn resolve(self: &Arc<Self>, input: String) -> Result<Task> {
-        self.resolve_task(input, None, "auto".into(), None, false, None)
+        self.resolve_task(input.into(), None, "auto".into(), None, false, None)
     }
 
     pub(crate) fn resolve_progress(&self, id: &str, phase: ResolvePhase) {
@@ -1688,6 +1709,10 @@ impl Core {
         input: String,
         resolver: String,
     ) -> Result<Task> {
+        self.resolve_work(input.into(), resolver)
+    }
+
+    fn resolve_work(self: &Arc<Self>, input: ResolveInput, resolver: String) -> Result<Task> {
         if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk" | "grammers") {
             bail!("CONFIG_INVALID");
         }
@@ -1780,7 +1805,7 @@ impl Core {
                     .map(str::to_owned),
             )
         };
-        self.resolve_task(input, Some(id), resolver, format_id, true, None)
+        self.resolve_task(input.into(), Some(id), resolver, format_id, true, None)
     }
 
     pub fn remove_history(&self, id: &str) -> Result<()> {
@@ -1895,6 +1920,17 @@ impl Core {
         update: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>,
     ) -> Result<Vec<String>> {
         let removing: HashSet<_> = ids.iter().map(String::as_str).collect();
+        let mut removed_authors = HashSet::new();
+        let mut retained_authors = HashSet::new();
+        for task in &inner.tasks {
+            if let Some(author) = task.video.as_ref().and_then(douyin_author::batch_author_id) {
+                if removing.contains(task.id.as_str()) {
+                    removed_authors.insert(author);
+                } else {
+                    retained_authors.insert(author);
+                }
+            }
+        }
         let retained: HashSet<_> = inner
             .tasks
             .iter()
@@ -1948,6 +1984,13 @@ impl Core {
         }
         for video in release_covers {
             parse_cache::clear_cover(&tx, &video)?;
+        }
+        for author in removed_authors.difference(&retained_authors) {
+            tx.execute(
+                "DELETE FROM douyin_author_avatars WHERE author_id=?",
+                [author],
+            )
+            .context("DATABASE_ERROR")?;
         }
         update(&tx)?;
         tx.commit().context("DATABASE_ERROR")?;
@@ -2100,13 +2143,17 @@ impl Core {
 
     fn resolve_task(
         self: &Arc<Self>,
-        input: String,
+        source: ResolveInput,
         retry_id: Option<&str>,
         resolver: String,
         requested_format: Option<String>,
         download_after_resolve: bool,
         recovery_revision: Option<(u64, u64)>,
     ) -> Result<Task> {
+        let ResolveInput {
+            original: input,
+            verified_url,
+        } = source;
         if input.trim().is_empty() || input.len() > 8192 {
             bail!("INVALID_INPUT");
         }
@@ -2159,10 +2206,17 @@ impl Core {
         let mut cached = if telegram {
             None
         } else {
-            parse_cache::find(&inner.db, &input, &resolver)?
+            parse_cache::find(
+                &inner.db,
+                verified_url.as_deref().unwrap_or(&input),
+                &resolver,
+            )?
         };
         if let (Some(cached), Some(format_id)) = (&mut cached, &requested_format) {
             apply_video_format(&mut cached.video, format_id)?;
+        }
+        if let (Some(cached), Some(_)) = (&cached, &verified_url) {
+            parse_cache::remember(&inner.db, &input, &cached.video)?;
         }
         let profiles = if telegram {
             json!({})
@@ -2275,7 +2329,9 @@ impl Core {
                 if telegram {
                     return core.resolve_telegram(&input, &id, cancellation.clone()).await;
                 }
-                if parse_cache::share_url(&input).is_some() {
+                let engine_input = verified_url.as_deref().unwrap_or(&input);
+                let verified_identity = verified_url.as_deref().map(|url| url.trim_end_matches('/'));
+                if parse_cache::share_url(engine_input).is_some() {
                     let has_cache: bool = core.inner.lock().unwrap().db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM parse_cache)", [], |r| r.get(0),
                     ).context("DATABASE_ERROR")?;
@@ -2283,12 +2339,15 @@ impl Core {
                         core.resolve_progress(&id, ResolvePhase::StartingEngine);
                         let identified = PythonBridge::operation_cancellable(
                             &core.program, &core.args, &id, "identify_input",
-                            json!({"input":input,"profiles":profiles,"resolver":resolver,"runtime_directory":core.runtime_directory,"report_resolve_progress":true}),
+                            json!({"input":engine_input,"profiles":profiles,"resolver":resolver,"runtime_directory":core.runtime_directory,"report_resolve_progress":true}),
                             |event| core.resolve_event(&id, &event), async { let _ = cancellation.wait_for(|v| *v).await; },
                         ).await?;
                         let identity: Video = serde_json::from_value(identified["result"].clone())
                             .context("INVALID_ENGINE_RESULT")?;
                         identity.validate()?;
+                        if verified_identity.is_some_and(|url| identity.canonical_url.trim_end_matches('/') != url) {
+                            bail!("INVALID_ENGINE_RESULT");
+                        }
                         core.resolve_progress(&id, ResolvePhase::CheckingCache);
                         let mut inner = core.inner.lock().unwrap();
                         if inner.closing || *cancellation.borrow() { bail!("CANCELED"); }
@@ -2316,13 +2375,16 @@ impl Core {
                 core.resolve_progress(&id, ResolvePhase::StartingEngine);
                 let result = PythonBridge::operation_cancellable(
                     &core.program, &core.args, &id, "resolve_video",
-                    json!({"input":input,"profiles":profiles,"resolver":resolver,"format_id":requested_format,"preview_dir":stage.path(),"runtime_directory":core.runtime_directory,"report_resolve_progress":true}),
+                    json!({"input":engine_input,"profiles":profiles,"resolver":resolver,"format_id":requested_format,"preview_dir":stage.path(),"runtime_directory":core.runtime_directory,"report_resolve_progress":true}),
                     |event| core.resolve_event(&id, &event), async { let _ = cancellation.wait_for(|v| *v).await; },
                 ).await.and_then(|result| {
                     core.resolve_progress(&id, ResolvePhase::Finalizing);
                     let video: Video = serde_json::from_value(result["result"].clone())
                         .context("INVALID_ENGINE_RESULT")?;
                     video.validate()?;
+                    if verified_identity.is_some_and(|url| video.canonical_url.trim_end_matches('/') != url) {
+                        bail!("INVALID_ENGINE_RESULT");
+                    }
                     Ok(result["result"].clone())
                 });
                 let result = result.and_then(|video| {
@@ -2999,6 +3061,8 @@ impl Core {
         let naming_time = crate::naming::current_time();
         let video = task.video.clone().context("INVALID_STATE")?;
         let author_batch = douyin_author::batch_id(&task).map(str::to_owned);
+        let fetch_author_avatar = douyin_author::batch_author_id(&video)
+            .is_some_and(|author| !douyin_author::has_avatar(&inner.db, author).unwrap_or(false));
         let telegram_input = if telegram {
             Some(parse_cache::telegram_source(&inner.db, &video)?)
         } else {
@@ -3097,6 +3161,7 @@ impl Core {
                     PythonBridge::operation_cancellable(&core.program, &core.args, &id, "download_video",
                     json!({"input":video["canonical_url"],"profiles":profiles.as_ref(),"runtime_directory":core.runtime_directory,
                         "resolver":video["resolver"].as_str().unwrap_or("yt-dlp"),
+                        "fetch_author_avatar":fetch_author_avatar,
                         "format_id":if author_batch.is_some() { &Value::Null } else { &video["selected_format_id"] },
                         "expected":{"platform":video["platform"],"video_id":video["video_id"],"kind":video["kind"].as_str().unwrap_or("video"),
                             "image_count":video["images"].as_array().map(Vec::len),
@@ -3232,6 +3297,15 @@ impl Core {
                             }
                             video["filesize"] = file.bytes.into();
                             video["filesize_approx"] = Value::Null;
+                        }
+                    }
+                    if author_batch.is_some() {
+                        if let Some(video) = task.video.as_mut() {
+                            if let Some(author) = douyin_author::batch_author_id(video) {
+                                // The validated detail supplies the author ID for both videos and albums.
+                                let _ = douyin_author::save_staged_avatar(&inner.db, author, &result, &media);
+                                video["author_profile"]["avatar_cached"] = douyin_author::has_avatar(&inner.db, author).unwrap_or(false).into();
+                            }
                         }
                     }
                     task.path = Some(file.path);
@@ -4492,7 +4566,7 @@ mod tests {
         app.stop_telegram_recovery(); // Account switch/logout begins before taking its task snapshot.
         let error = app
             .resolve_task(
-                task.telegram_link.clone().unwrap(),
+                task.telegram_link.clone().unwrap().into(),
                 Some(&task.id),
                 "grammers".into(),
                 None,
@@ -5101,6 +5175,27 @@ mod tests {
         let ready = wait(&app, &short.id, Status::Ready).await;
         assert!(ready.cache_hit);
         assert_eq!(ready.video.as_ref().unwrap()["video_id"], "601");
+
+        let douyin_short = "https://v.douyin.com/fixture-work/";
+        let douyin_alias = "https://v.douyin.com/fixture-work-alias/";
+        let douyin_author::DownloadLink::Work(work) = app
+            .resolve_download_link(douyin_short.into(), "auto".into())
+            .await
+            .unwrap()
+        else {
+            panic!("expected a single work");
+        };
+        let ready = wait(&app, &work.id, Status::Ready).await;
+        assert!(!ready.cache_hit);
+        let douyin_author::DownloadLink::Work(alias) = app
+            .resolve_download_link(douyin_alias.into(), "auto".into())
+            .await
+            .unwrap()
+        else {
+            panic!("expected a single work");
+        };
+        assert!(alias.cache_hit);
+
         app.shutdown().await;
         drop(app);
         let restarted = Core::open(
@@ -5111,11 +5206,22 @@ mod tests {
             |_| {},
         )
         .unwrap();
-        let cached = restarted
-            .resolve("7.10 share https://v.douyin.com/share_album/ 复制".into())
-            .unwrap();
-        assert_eq!(cached.status, Status::Ready);
-        assert!(cached.cache_hit);
+        for (url, id) in [
+            ("7.10 share https://v.douyin.com/share_album/ 复制", "601"),
+            (douyin_short, "123"),
+            (douyin_alias, "123"),
+        ] {
+            let douyin_author::DownloadLink::Work(cached) = restarted
+                .resolve_download_link(url.into(), "auto".into())
+                .await
+                .unwrap()
+            else {
+                panic!("expected a single work");
+            };
+            assert_eq!(cached.status, Status::Ready);
+            assert!(cached.cache_hit);
+            assert_eq!(cached.video.as_ref().unwrap()["video_id"], id);
+        }
     }
 
     #[tokio::test]

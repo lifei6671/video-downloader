@@ -7,6 +7,8 @@ from PIL import Image
 from yt_dlp.downloader.http import HttpFD
 from yt_dlp.networking.exceptions import HTTPError
 
+from author_profile import download_avatar
+
 
 MAX_IMAGES = 64
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
@@ -65,7 +67,7 @@ def preview_images(ydl, choices, stage):
     return names
 
 
-def download_images(ydl, choices, platform, video_id, resolver, stage, emit, *, metadata=None):
+def download_images(ydl, choices, platform, video_id, resolver, stage, emit, *, metadata=None, avatar_url=None):
     from engine import EngineError
     album = stage / 'album'
     album.mkdir()
@@ -143,4 +145,5 @@ def download_images(ydl, choices, platform, video_id, resolver, stage, emit, *, 
          completed_items=len(files), total_items=len(files))
     emit('download_finished', platform=platform, video_id=video_id,
          kind='image_album', resolver=resolver, files=files, bytes=downloaded,
+         **(download_avatar(ydl, avatar_url, stage) if avatar_url else {}),
          **({'metadata': metadata} if metadata is not None else {}))

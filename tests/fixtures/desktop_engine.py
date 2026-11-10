@@ -8,13 +8,24 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.6", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.7", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.buffer.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
 platform = 'youtube' if source.hostname == 'www.youtube.com' else 'tiktok' if source.hostname == 'www.tiktok.com' else 'douyin'
 def emit(event_type, **data):
     print(json.dumps(dict(protocol_version=3, id=request["id"], type=event_type, **data)), flush=True)
+if request['method'] == 'identify_douyin_link':
+    assert set(params['profile']) <= {'user_agent', 'proxy'}
+    if source.path == '/fixture-block/':
+        time.sleep(120)
+    if source.path in ('/fixture-work/', '/fixture-work-alias/'):
+        canonical = 'https://www.douyin.com/video/123'
+        result = dict(kind='work', canonical_url=canonical + ('/' if source.path == '/fixture-work/' else ''))
+    else:
+        result = dict(kind='author', author_id='fixture-author')
+    emit('identified', result=result)
+    sys.exit(0)
 if request['method'] == 'scan_author_posts':
     author = 'fixture-author'
     video = dict(video_id='501', kind='video', title='Video', author='Fixture', author_id=author, published_at=1)
@@ -140,7 +151,7 @@ if request["method"] == "resolve_video":
         if params.get('report_resolve_progress'): emit('resolve_progress', phase='selecting_formats')
         video_id = params["input"].split(":", 1)[1] if params["input"].startswith("hold:") else "999" if params["input"] == "slow" else "123"
         if params["input"].startswith("https://www.douyin.com/video/"):
-            video_id = params["input"].rsplit("/", 1)[1]
+            video_id = params["input"].rstrip("/").rsplit("/", 1)[1]
         elif platform == 'tiktok': video_id=source.path.rsplit('/',1)[1]
         elif platform == 'youtube': video_id=parse_qs(source.query)['v'][0]
         cover={}
@@ -166,6 +177,12 @@ else:
     metadata = dict(platform='douyin', video_id=video_id, kind=params['expected']['kind'],
                     canonical_url=params['input'], resolver='dtk',
                     author_profile=dict(id=batch_author), title='Batch fixture') if batch_author else None
+    avatar = {}
+    if batch_author and params.get('fetch_author_avatar'):
+        body = b"\x89PNG\r\n\x1a\nbatch-author-fixture"
+        (stage / "author-avatar").write_bytes(body)
+        (stage.parent.parent.parent / f"avatar-requested-{video_id}").touch()
+        avatar = dict(author_avatar_filename='author-avatar', author_avatar_bytes=len(body))
     if params["expected"].get("kind") == "image_album":
         album=stage/"album"; album.mkdir()
         static = (stage.parent.parent.parent / "album-static").is_file()
@@ -184,7 +201,7 @@ else:
         if metadata is not None:
             metadata['images'] = files
         emit("download_finished",platform="douyin",video_id=video_id,kind="image_album",resolver="dtk",files=files,bytes=total,
-             **({'metadata': metadata} if metadata is not None else {}))
+             **({'metadata': metadata} if metadata is not None else {}), **avatar)
         sys.exit(0)
     if video_id.startswith(("8", "7")):
         root = stage.parent.parent.parent if stage.name == "media" else stage.parent.parent
@@ -221,4 +238,4 @@ else:
             filename="video.mp4", container="mp4", bytes=len(body), format_id=format_id,
             **({'metadata': metadata} if metadata is not None else {}),
             **({'transferred_bytes':len(body)} if params['expected']['platform']=='youtube' else {}),
-            width=720 if params.get("format_id")=="2"*24 else 1080,height=1280 if params.get("format_id")=="2"*24 else 1920, **cover)
+            width=720 if params.get("format_id")=="2"*24 else 1080,height=1280 if params.get("format_id")=="2"*24 else 1920, **cover, **avatar)

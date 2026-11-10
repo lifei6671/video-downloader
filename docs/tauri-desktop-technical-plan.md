@@ -12,8 +12,8 @@
 
 | 能力 | 首版行为 |
 | --- | --- |
-| 输入 | 每次单个作品，支持长链、短链或包含一条链接的分享文案；多链接拒绝 |
-| 抖音作者 | 「抖音主页」入口使用 DTK 按游标扫描。用户确认后，视频与图集进入现有队列。见[抖音作者作品方案](douyin-author-download-plan.md)。 |
+| 输入 | 统一输入一个作品链接或抖音主页链接，支持长链、短链和包含一条链接的分享文案 |
+| 抖音作者 | 识别抖音主页后选择全量归档或增量下载，确认扫描后使用 DTK 按游标读取。用户确认后，视频与图集进入现有队列。见[抖音作者作品方案](douyin-author-download-plan.md)。 |
 | 预览 | 标题、作者、封面、时长；可选字段缺失不阻止下载 |
 | 平台设置 | 抖音、小红书、TikTok、YouTube 各自独立 Cookie、User-Agent、可选 HTTP/SOCKS5 代理 |
 | 下载 | 实际下载字节、速度；总大小未知时显示不确定进度 |
@@ -121,6 +121,7 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 | --- | --- |
 | `ready` | `protocol_version=3`、`engine_version`、`yt_dlp_version`、`dtk_version`、`dtk_commit`；Rust 校验与分发版本一致 |
 | `identify_input` 请求/`identified` | 识别平台、作品 ID、规范链接、类型和实际 resolver；长链接纯本地识别，短链只经 GuardedRH 展开，不请求详情或媒体 |
+| `identify_douyin_link` 请求/`identified` | 区分抖音主页和作品。主页返回作者 ID，作品返回已验证的规范链接。短链通过 GuardedRH 展开，已缓存的作品短链沿用 SQLite 预览。 |
 | `resolve_video` 请求 | `id`、单条 `input`、`resolver`（auto/yt-dlp/dtk）、可选 Rust 专属 `preview_dir`、两平台配置快照；凭据只经 stdin |
 | `download_video` 请求 | `id`、规范作品链接、预期 platform/video_id/kind/image_count、实际 resolver、原任务配置快照、Rust 创建的专属 staging 目录 |
 | `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、可选 author_profile（id/nickname/handle/kind）、cover_url、duration_ms、width、height、filesize、filesize_approx、kind/resolver、images（尺寸/来源/本地相对预览名）、music（title/author）；可选字段可空。头像只返回暂存文件标识和字节数，详见下文作者资料 |
@@ -148,6 +149,7 @@ YouTube 请求被重定向至 `https://www.google.com/sorry/index` 或 `/sorry/`
 
 | Tauri 命令 | 行为 |
 | --- | --- |
+| `resolve_download_link` | 识别统一入口的分享文本，返回单作品解析任务或抖音主页下载选项 |
 | `resolve_video` | 输入分享文本及 resolver，创建 task_id，异步解析并发出快照 |
 | `open_project_page` | 接收 source / issues / releases / license / credits，以及 credit-ytdlp / credit-dtk / credit-tauri / credit-react / credit-shadcn / credit-lucide 固定标识，后六项打开对应组件 GitHub 仓库；仅 releases 可附 release_tag（经正式 SemVer 标签校验），打开本项目对应 Release 详情页；失败返回 OPEN_LINK_FAILED，不接受任意 URL |
 | `check_for_updates` | 无前端参数；Rust 以实际应用版本请求本项目 GitHub 最新正式 Release，返回 current_version、latest_version、release_tag、has_update、release_notes、published_at；15 秒总超时，网络、限流、无正式版及异常响应均明确失败，不伪报已是最新 |
@@ -204,7 +206,7 @@ Cookie 按 2026-10-13 用户决定直接存 SQLite 的平台设置表，普通�
 
 ## 8. 网络和凭据边界
 
-- 自有输入边界只接受两平台单作品链接；短链由 bridge 经受控网络展开。禁用通用站点、用户主页、合集、直播、搜索和 playlist 路径，不把支持整个 yt-dlp 站点库作为产品能力。
+- 自有输入边界接受受支持平台的单作品链接和抖音作者主页。短链由 bridge 经受控网络展开。通用站点、其他平台主页、合集、直播、搜索和 playlist 路径禁用。
 - 代理按平台设置；显式直连不继承环境代理。每个平台持久化 `bypass_proxy`（默认 false），开启时任务快照的有效代理为 null，跳过代理凭据读取，但保留已保存的代理地址及凭据引用；关闭后恢复原代理。旧设置迁移默认关闭，保存请求省略此字段时保留原值。HTTP/SOCKS5 与绕过代理都覆盖解析与媒体下载，设置修改不改变已有任务快照。该开关由用户在 TUN／透明代理接管网络时手动启用，不检测系统 TUN 状态。Telegram 沿用共享平台网络配置，修改有效代理时通过既有网络切换流程回收下载与备份连接，重新连接使用新配置；账号绑定和代理凭据不变。
 - Cookie 仅发送到其所属平台的 HTTPS 域，跨域重定向不能携带不适用的 Cookie/Authorization。日志和前端事件不包含代理密码、Cookie、媒体 URL 或自由文本异常。
 - 媒体目标与重定向边界仍是迁移验收要求；按当前用户 TUN 决策，DNS 解析后的 IP 不作公网属性判断。移除旧 Rust HTTP 层后，检查必须覆盖 yt-dlp 的实际网络调用，不能仅保留 Rust 侧一个不再被使用的 URL 校验器。

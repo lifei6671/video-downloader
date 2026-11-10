@@ -43,7 +43,7 @@ async (page) => {
       if(command==='telegram_storage_logout') {
         window.accounts[purpose]=signedOut();return structuredClone(shown());
       }
-      if(command==='resolve_video') {
+      if(command==='resolve_download_link') {
         if(args.resolver!=='grammers')throw 'Wrong resolver';
         const video={platform:'telegram',resolver:'grammers',kind:'video',video_id:'100_9',canonical_url:'https://t.me/c/100/9',title:'测试原始视频',original_filename:'original.mp4',mime_type:'video/mp4',filesize:4096,selected_format_id:'original',formats:[{format_id:'original',container:'mp4',filesize:4096}],author_profile:{id:'100',nickname:null,handle:null,kind:'channel',avatar_cached:false}};
         const task={id:'tg-1',revision:1,status:'ready',video,bytes:0,total_bytes:null,speed_bps:null,error:null,path:null,created_at:1,completed_at:null,canceling:false,file_missing:false,queue_order:null,download_requested:false,cover_path:null,cover_cached:false,files:[],telegram_link:'https://t.me/c/100/9'};

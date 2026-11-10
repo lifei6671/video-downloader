@@ -17,6 +17,7 @@ export type AuthorBaselineAction = 'archive_history' | 'baseline_only';
 export interface AuthorBatch { queued: number; skipped: number; baseline_only: boolean }
 export interface AuthorScan {
   id: string;
+  author_id: string | null;
   author_name: string | null;
   status: 'scanning' | 'completed' | 'partial';
   pages: number;
@@ -35,8 +36,14 @@ export interface AuthorScan {
   retry_posts: number;
   already_local: number;
 }
+export interface AuthorLink {
+  author_id: string;
+  canonical_url: string;
+  default_mode: AuthorScanMode;
+  scan: AuthorScan | null;
+}
 export interface AuthorProfile { id?: string | null; nickname?: string | null; handle?: string | null; kind: 'user' | 'channel'; avatar_cached?: boolean }
-export interface Video { author_profile?: AuthorProfile; cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
+export interface Video { author_scan_id?: string; author_profile?: AuthorProfile; cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
 export type ResolvePhase = 'checking_link' | 'checking_cache' | 'starting_engine' | 'loading_configuration' | 'resolving_link' | 'connecting_account' | 'fetching_metadata' | 'selecting_formats' | 'loading_preview' | 'loading_author' | 'finalizing' | 'cache_hit' | 'completed';
 export interface ResolveProgress { phase: ResolvePhase; steps: ResolvePhase[] }
 export interface Task { resolve_progress?: ResolveProgress | null; insertion_id?: number; asset_id?: string | null; total_bytes_estimate?: number | null; telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; download_requested_at?: number | null; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; duplicate_confirmed?: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
@@ -133,7 +140,7 @@ export const api = {
   copyCover: (image: ImageData) => invoke<void>('copy_cover_image', { rgba: Array.from(image.data), width: image.width, height: image.height }),
   tasks: () => invoke<Task[]>('list_tasks'),
   settings: () => invoke<Settings>('get_settings'),
-  resolve: (input: string, resolver: Resolver = 'auto') => invoke<Task>('resolve_video', { input, resolver }),
+  resolve: (input: string, resolver: Resolver = 'auto') => invoke<Task | AuthorLink>('resolve_download_link', { input, resolver }),
   startAuthorScan: (input: string, mode: AuthorScanMode) => invoke<AuthorScan>('start_author_scan', { input, mode }),
   authorScan: (scanId?: string) => invoke<AuthorScan | null>('get_author_scan', { scanId }),
   cancelAuthorScan: (scanId: string) => invoke<AuthorScan>('cancel_author_scan', { scanId }),

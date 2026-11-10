@@ -79,6 +79,24 @@ async page => {
     }
     results.push(platform);
   }
+  await page.goto(`${base}/tests/fixtures/background-download.html?scenario=author-missing`);
+  await page.waitForFunction(() => window.backgroundTest.loaded);
+  await page.evaluate(async () => {
+    const { api } = await import('/src/api.ts');
+    const tasks = await api.tasks();
+    const legacyBatch = tasks.find(task => task.download_requested);
+    legacyBatch.revision++;
+    legacyBatch.video.author_scan_id = 'old-batch';
+    delete legacyBatch.video.author_profile.avatar_cached;
+    api.tasks = async () => structuredClone(tasks);
+    window.dispatchEvent(new Event('focus'));
+  });
+  await page.getByRole('button', {name: '下载任务', exact: true}).click();
+  const cached = page.getByRole('img', {name: '作者昵称的头像', exact: true});
+  await cached.waitFor();
+  await cached.evaluate(image => image.decode());
+  check((await cached.getAttribute('src')).startsWith('blob:'), 'legacy batch did not load the shared avatar');
+  results.push('legacy-batch');
   check(errors.length === 0, errors.join('\n'));
   return {passed: results, viewports: ['1440x900', '1280x800', '1024x680'], errors};
 }

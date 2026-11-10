@@ -142,13 +142,14 @@ def test_dtk_video_uses_same_guarded_single_file_downloader(monkeypatch, tmp_pat
     assert events[-1][0]=='download_finished' and events[-1][1]['bytes']==len(BODY)
 
 
-def live_album():
+def live_album(avatar_url=None):
     from datetime import UTC, datetime
     # Real vendored parser, with a mixed live/still album. Post-level video is
     # intentionally unrelated; only the per-slide clip may be downloaded.
     return dtk_adapter.DOUYIN.parse_content({'aweme_detail': {
         'aweme_id': '123', 'desc': 'live fixture', 'status': {}, 'statistics': {},
-        'author': {'sec_uid': 'fixture-author', 'nickname': 'fixture'},
+        'author': {'sec_uid': 'fixture-author', 'nickname': 'fixture',
+                   'avatar_thumb': {'url_list': [avatar_url]} if avatar_url else None},
         'video': {'play_addr': {'url_list': ['http://v.fixture.douyinvod.com/music.mp4']}},
         'images': [
             {'url_list': ['http://v.fixture.douyinvod.com/image.webp'], 'width': 1080, 'height': 1920,
@@ -156,6 +157,59 @@ def live_album():
                  'play_addr': {'url_list': ['http://v.fixture.douyinvod.com/live.mp4']}}},
             {'url_list': ['http://v.fixture.douyinvod.com/image.webp'], 'width': 1080, 'height': 1920}]}},
         fetched_at=datetime.now(UTC))
+
+
+@pytest.mark.parametrize('kind', ['video', 'image_album'])
+@pytest.mark.parametrize(('fetch', 'valid'), [(True, True), (True, False), (False, True)])
+def test_batch_download_stages_optional_avatar_without_adding_to_media(
+        kind, fetch, valid, monkeypatch, tmp_path, media_proxy):
+    import io
+    from conftest import BODY
+    from yt_dlp.networking import Response
+
+    proxy, _, _, _ = media_proxy
+    avatar_url = 'https://p.douyinpic.com/fixture-avatar?token=fixture'
+    body = b'\x89PNG\r\n\x1a\nfixture' if valid else b'<html>unavailable</html>'
+    if kind == 'image_album':
+        item = live_album(avatar_url)
+    else:
+        stream = SimpleNamespace(url='http://v.fixture.douyinvod.com/good.mp4', watermark=False,
+                                 width=1280, height=720, size_bytes=len(BODY), bitrate=None)
+        item = SimpleNamespace(platform='douyin', content_id='123', kind=kind, raw={},
+            web_url='https://www.douyin.com/video/123', title='fixture', duration_ms=1000, music=None,
+            author=SimpleNamespace(uid='fixture-author', sec_uid='fixture-author',
+                                   unique_id='fixture', nickname='fixture',
+                                   avatar=SimpleNamespace(url=avatar_url)),
+            media=SimpleNamespace(video=stream, streams=[], covers=[]))
+    monkeypatch.setattr(dtk_adapter, 'extract', lambda *_args: item)
+    urlopen = YoutubeDL.urlopen
+    avatar_requests = []
+
+    def open_url(self, request):
+        if getattr(request, 'url', None) == avatar_url:
+            avatar_requests.append(request.url)
+            return Response(io.BytesIO(body), avatar_url, {})
+        return urlopen(self, request)
+
+    monkeypatch.setattr(YoutubeDL, 'urlopen', open_url)
+    events = []
+    engine.operate('download_video', dict(input=item.web_url, resolver='dtk',
+        profiles={'douyin': {'proxy': proxy, 'cookie': 'sessionid=fixture'}},
+        expected={'platform': 'douyin', 'video_id': '123', 'kind': kind, 'author_id': 'fixture-author'},
+        fetch_author_avatar=fetch, staging_dir=str(tmp_path)),
+        lambda event, **value: events.append((event, value)))
+    event, result = events[-1]
+    assert event == 'download_finished' and avatar_url not in str(result)
+    assert avatar_requests == ([avatar_url] if fetch else [])
+    if fetch and valid:
+        assert result['author_avatar_filename'] == 'author-avatar'
+        assert result['author_avatar_bytes'] == len(body)
+        assert (tmp_path / 'author-avatar').read_bytes() == body
+    else:
+        assert 'author_avatar_filename' not in result
+        assert not (tmp_path / 'author-avatar').exists()
+    media = (tmp_path / 'album').iterdir() if kind == 'image_album' else [tmp_path / 'video.mp4']
+    assert result['bytes'] == sum(path.stat().st_size for path in media)
 
 
 def test_live_album_preserves_stills_and_original_clips(monkeypatch, tmp_path, media_proxy, media_bodies):

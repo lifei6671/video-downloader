@@ -25,12 +25,12 @@ async page => {
     });
     await page.locator('#video-input').fill('   ');
     await page.locator('.share-card button[type="submit"], .share-card button:not([type])').filter({ hasText: /解析/ }).click();
-    await page.locator('[data-sonner-toast]').getByText('请输入视频分享链接', { exact: true }).waitFor();
+    await page.locator('[data-sonner-toast]').getByText('请输入分享链接', { exact: true }).waitFor();
     check(await page.locator('#video-input').evaluate(n => n === document.activeElement), 'empty input did not regain focus');
-    check(await page.locator('[data-slot="page-content"] [data-slot="alert"]').filter({ hasText: '请输入视频分享链接' }).count() === 0, 'empty input rendered persistent error');
+    check(await page.locator('[data-slot="page-content"] [data-slot="alert"]').filter({ hasText: '请输入分享链接' }).count() === 0, 'empty input rendered persistent error');
     check(!await page.evaluate(() => window.unexpectedResolve), 'empty input invoked resolve');
     await page.locator('#video-input').press('Enter');
-    check(await page.locator('[data-sonner-toast]').filter({ hasText: '请输入视频分享链接' }).count() === 1, 'repeated submit duplicated toast');
+    check(await page.locator('[data-sonner-toast]').filter({ hasText: '请输入分享链接' }).count() === 1, 'repeated submit duplicated toast');
     await page.waitForFunction(() => {
       const toast = document.querySelector('[data-sonner-toast]');
       return toast && toast.getBoundingClientRect().top >= 24 && getComputedStyle(toast).opacity === '1';

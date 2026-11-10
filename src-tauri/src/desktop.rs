@@ -701,6 +701,16 @@ async fn resolve_video(
         .map_err(error)
 }
 #[tauri::command]
+async fn resolve_download_link(
+    core: State<'_, AppCore>,
+    input: String,
+    resolver: Option<String>,
+) -> Result<yingqu_core::desktop_core::douyin_author::DownloadLink, String> {
+    core.resolve_download_link(input, resolver.unwrap_or_else(|| "auto".into()))
+        .await
+        .map_err(error)
+}
+#[tauri::command]
 async fn start_author_scan(
     core: State<'_, AppCore>,
     input: String,
@@ -1184,6 +1194,7 @@ fn main() {
             preview_filename,
             resolve_video,
             start_author_scan,
+            resolve_download_link,
             get_author_scan,
             cancel_author_scan,
             confirm_author_scan,

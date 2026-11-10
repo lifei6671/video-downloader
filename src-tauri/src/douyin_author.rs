@@ -38,6 +38,28 @@ pub enum ScanMode {
     Incremental,
 }
 
+#[derive(Serialize)]
+pub struct AuthorLink {
+    author_id: String,
+    canonical_url: String,
+    default_mode: ScanMode,
+    scan: Option<Scan>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum DownloadLink {
+    Work(Box<Task>),
+    Author(Box<AuthorLink>),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum IdentifiedLink {
+    Work { canonical_url: String },
+    Author { author_id: String },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BaselineAction {
@@ -120,6 +142,8 @@ pub(super) fn init(db: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS author_batch_items(
             scan_id TEXT NOT NULL REFERENCES author_scans(id) ON DELETE CASCADE,
             task_id TEXT NOT NULL, PRIMARY KEY(scan_id,task_id));
+         CREATE TABLE IF NOT EXISTS douyin_author_avatars(
+            author_id TEXT PRIMARY KEY, body BLOB NOT NULL CHECK(length(body) BETWEEN 1 AND 2097152));
          UPDATE author_scans SET status='partial', error='INTERRUPTED' WHERE status='scanning';",
     ).context("DATABASE_ERROR")
 }
@@ -397,6 +421,58 @@ pub(super) fn batch_id(task: &Task) -> Option<&str> {
     task.video.as_ref()?["author_scan_id"].as_str()
 }
 
+pub(super) fn batch_author_id(video: &Value) -> Option<&str> {
+    let author = video["batch_author_id"].as_str()?;
+    (video["platform"] == "douyin" && valid_author(author)).then_some(author)
+}
+
+pub(super) fn has_avatar(db: &Connection, author: &str) -> Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM douyin_author_avatars WHERE author_id=?)",
+        [author],
+        |row| row.get(0),
+    )
+    .context("DATABASE_ERROR")
+}
+
+pub(super) fn avatar(db: &Connection, author: &str) -> Result<Vec<u8>> {
+    db.query_row(
+        "SELECT body FROM douyin_author_avatars WHERE author_id=?",
+        [author],
+        |row| row.get(0),
+    )
+    .optional()
+    .context("DATABASE_ERROR")?
+    .context("FILE_MISSING")
+}
+
+pub(super) fn save_staged_avatar(
+    db: &Connection,
+    author: &str,
+    result: &Value,
+    stage: &Path,
+) -> Result<()> {
+    if result["author_avatar_filename"] != "author-avatar" {
+        return Ok(());
+    }
+    let expected = result["author_avatar_bytes"]
+        .as_u64()
+        .context("INVALID_ENGINE_RESULT")?;
+    if !(1..=parse_cache::MAX_AVATAR_BYTES as u64).contains(&expected) {
+        bail!("INVALID_MEDIA_CONTENT");
+    }
+    let body = crate::files::read_cover(&stage.join("author-avatar"))?;
+    if expected != body.len() as u64 {
+        bail!("INCOMPLETE_MEDIA");
+    }
+    db.execute(
+        "INSERT INTO douyin_author_avatars(author_id,body) VALUES(?,?) ON CONFLICT(author_id) DO UPDATE SET body=excluded.body",
+        params![author, body],
+    )
+    .context("DATABASE_ERROR")?;
+    Ok(())
+}
+
 fn archived(task: &Task) -> bool {
     task.status == Status::Completed
         && task.path.as_deref().is_some_and(|path| {
@@ -451,6 +527,129 @@ pub(super) fn downloaded_metadata(previous: &Value, result: &Value) -> Result<Va
 }
 
 impl Core {
+    pub async fn resolve_download_link(
+        self: &Arc<Self>,
+        input: String,
+        resolver: String,
+    ) -> Result<DownloadLink> {
+        if input.trim().is_empty() || input.len() > 8192 {
+            bail!("INVALID_INPUT");
+        }
+        let route = parse_cache::share_url(&input)
+            .and_then(|url| url::Url::parse(&url).ok())
+            .filter(|url| match url.host_str() {
+                Some("v.douyin.com") => true,
+                Some("douyin.com" | "www.douyin.com") => url.path().starts_with("/user/"),
+                Some("www.iesdouyin.com") => url.path().starts_with("/share/user/"),
+                _ => false,
+            });
+        if let Some(url) = route {
+            let short = url.host_str() == Some("v.douyin.com");
+            if short {
+                let cached = parse_cache::find(&self.inner.lock().unwrap().db, &input, &resolver)?;
+                if cached.is_some() {
+                    return self
+                        .resolve_with_resolver(input, resolver)
+                        .map(|task| DownloadLink::Work(Box::new(task)));
+                }
+            }
+            let (send, receive) = tokio::sync::oneshot::channel();
+            {
+                let mut inner = self.inner.lock().unwrap();
+                if inner.closing {
+                    bail!("CANCELED");
+                }
+                let profile = if short {
+                    let profile = settings::douyin_snapshot(&inner.settings)?;
+                    json!({
+                        "user_agent": profile["douyin"]["user_agent"],
+                        "proxy": profile["douyin"]["proxy"],
+                    })
+                } else {
+                    json!({})
+                };
+                let params = json!({"input": input, "profile": profile});
+                let mut cancel = inner.backup_cancel.subscribe();
+                let core = self.clone();
+                inner.workers.retain(|worker| !worker.is_finished());
+                inner.workers.push(tokio::spawn(async move {
+                    let result = PythonBridge::operation_cancellable(
+                        &core.program,
+                        &core.args,
+                        &Uuid::new_v4().to_string(),
+                        "identify_douyin_link",
+                        params,
+                        |_| {},
+                        async {
+                            let _ = cancel.wait_for(|value| *value).await;
+                        },
+                    )
+                    .await;
+                    let _ = send.send(result);
+                }));
+            }
+            let result = receive.await.context("CANCELED")??;
+            match serde_json::from_value(result["result"].clone())
+                .context("INVALID_ENGINE_RESULT")?
+            {
+                IdentifiedLink::Work { canonical_url } => {
+                    return self
+                        .resolve_work(
+                            ResolveInput {
+                                original: input,
+                                verified_url: Some(canonical_url),
+                            },
+                            resolver,
+                        )
+                        .map(|task| DownloadLink::Work(Box::new(task)));
+                }
+                IdentifiedLink::Author { author_id } => {
+                    if !valid_author(&author_id) {
+                        bail!("INVALID_ENGINE_RESULT");
+                    }
+                    let inner = self.inner.lock().unwrap();
+                    if inner.closing {
+                        bail!("CANCELED");
+                    }
+                    let scope = inner
+                        .settings
+                        .profiles
+                        .iter()
+                        .any(|profile| profile.platform == "douyin" && profile.cookie_configured)
+                        .then(|| current_scope(&inner.db))
+                        .transpose()?;
+                    let default_mode =
+                        if completed_baseline(&inner.db, scope.as_deref(), &author_id)?.is_some() {
+                            ScanMode::Incremental
+                        } else {
+                            ScanMode::Full
+                        };
+                    let scan_id: Option<String> = inner
+                        .db
+                        .query_row(
+                            "SELECT s.id FROM author_scans s
+                         LEFT JOIN author_scan_options o ON o.scan_id=s.id
+                         WHERE s.author_id=?1 AND o.scope IS ?2
+                         ORDER BY s.rowid DESC LIMIT 1",
+                            params![author_id, scope],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .context("DATABASE_ERROR")?;
+                    let scan = scan_id.map(|id| read_with_tasks(&inner, &id)).transpose()?;
+                    return Ok(DownloadLink::Author(Box::new(AuthorLink {
+                        canonical_url: format!("https://www.douyin.com/user/{author_id}"),
+                        author_id,
+                        default_mode,
+                        scan,
+                    })));
+                }
+            }
+        }
+        self.resolve_with_resolver(input, resolver)
+            .map(|task| DownloadLink::Work(Box::new(task)))
+    }
+
     pub fn start_author_scan(self: &Arc<Self>, input: String, mode: ScanMode) -> Result<Scan> {
         if input.trim().is_empty() || input.len() > 4096 {
             bail!("INVALID_AUTHOR_LINK");
@@ -967,6 +1166,86 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    async fn author_link_is_identified_before_scanning_and_defaults_to_existing_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        let core = open(root.path(), "tests/fixtures/desktop_engine.py");
+        set_cookie(&core, "sessionid=fixture");
+        let link = "https://v.douyin.com/fixture-author/";
+        let DownloadLink::Author(author) = core
+            .resolve_download_link(link.into(), "yt-dlp".into())
+            .await
+            .unwrap()
+        else {
+            panic!("expected author");
+        };
+        assert_eq!(
+            author.canonical_url,
+            "https://www.douyin.com/user/fixture-author"
+        );
+        assert!(matches!(author.default_mode, ScanMode::Full));
+        assert!(author.scan.is_none());
+        let scan = scan_mode_ready(&core, &author.canonical_url, ScanMode::Incremental, 10).await;
+        core.confirm_author_scan(&scan.id, false, Some(BaselineAction::BaselineOnly))
+            .unwrap();
+        let DownloadLink::Author(author) = core
+            .resolve_download_link(link.into(), "yt-dlp".into())
+            .await
+            .unwrap()
+        else {
+            panic!("expected author");
+        };
+        assert!(matches!(author.default_mode, ScanMode::Incremental));
+        assert_eq!(author.scan.unwrap().id, scan.id);
+
+        set_cookie(&core, "sessionid=other-fixture");
+        let DownloadLink::Author(author) = core
+            .resolve_download_link(link.into(), "yt-dlp".into())
+            .await
+            .unwrap()
+        else {
+            panic!("expected author");
+        };
+        assert!(matches!(author.default_mode, ScanMode::Full));
+        assert!(author.scan.is_none());
+
+        assert!(matches!(
+            core.resolve_download_link(
+                "https://v.douyin.com/fixture-work/".into(),
+                "yt-dlp".into(),
+            )
+            .await
+            .unwrap(),
+            DownloadLink::Work(_)
+        ));
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_pending_douyin_link_identification() {
+        let root = tempfile::tempdir().unwrap();
+        let core = open(root.path(), "tests/fixtures/desktop_engine.py");
+        let app = core.clone();
+        let pending = tokio::spawn(async move {
+            app.resolve_download_link("https://v.douyin.com/fixture-block/".into(), "auto".into())
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while core.inner.lock().unwrap().workers.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        core.shutdown().await;
+        let error = pending
+            .await
+            .unwrap()
+            .err()
+            .expect("canceled identification");
+        assert_eq!(error.to_string(), "CANCELED");
+    }
+
     async fn wait_for_failure(core: &Core, id: &str) -> String {
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
@@ -1167,6 +1446,18 @@ mod tests {
         assert!(album.files[0].video.is_some());
         assert!(tasks.iter().all(archived));
         let video = tasks.iter().find(|task| task.files.is_empty()).unwrap();
+        let video_task_id = video.id.clone();
+        let album_task_id = album.id.clone();
+        let avatar_body = b"\x89PNG\r\n\x1a\nbatch-author-fixture";
+        for task in &tasks {
+            assert_eq!(
+                task.video.as_ref().unwrap()["author_profile"]["avatar_cached"],
+                true
+            );
+            assert_eq!(app.author_avatar(&task.id).unwrap(), avatar_body);
+        }
+        assert!(root.path().join("avatar-requested-501").is_file());
+        assert!(!root.path().join("avatar-requested-601").exists());
         assert!(video.video.as_ref().unwrap()["selected_format_id"].is_string());
         assert!(video.cover_cached && video.cover_error.is_none());
         assert_eq!(
@@ -1187,6 +1478,16 @@ mod tests {
         let result = app.confirm_author_scan(&repeat.id, false, None).unwrap();
         assert_eq!((result.queued, result.skipped), (0, 2));
         app.shutdown().await;
+        drop(app);
+
+        let reopened = open(root.path(), "tests/fixtures/desktop_engine.py");
+        assert_eq!(reopened.author_avatar(&video_task_id).unwrap(), avatar_body);
+        assert_eq!(reopened.author_avatar(&album_task_id).unwrap(), avatar_body);
+        reopened.remove_history(&video_task_id).unwrap();
+        assert_eq!(reopened.author_avatar(&album_task_id).unwrap(), avatar_body);
+        reopened.remove_history(&album_task_id).unwrap();
+        assert!(!has_avatar(&reopened.inner.lock().unwrap().db, "fixture-author").unwrap());
+        reopened.shutdown().await;
     }
 
     #[tokio::test]
