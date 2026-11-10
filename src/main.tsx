@@ -964,10 +964,10 @@ function App() {
     }
   }, [tasks, connected, selectedTask]);
   useEffect(() => {
-    if (current?.status !== 'ready' || promptedDuplicates.current.has(duplicatePromptKey(current))) return;
+    if (downloadMode !== 'post' || current?.status !== 'ready' || promptedDuplicates.current.has(duplicatePromptKey(current))) return;
     const previous = previousDownload(tasks, current);
     if (previous) { promptedDuplicates.current.add(duplicatePromptKey(current)); setDuplicate({task: current, previous}); }
-  }, [current, tasks]);
+  }, [current, downloadMode, tasks]);
   async function download(task: Task, background = false, consent?: Task) {
     const latest = tasksRef.current.find(t => t.id === task.id) ?? task;
     const confirmDuplicate = !!consent && !!task.video && !!latest.video && sameDownloadVariant(task.video, latest.video);
@@ -980,11 +980,14 @@ function App() {
       const replaced = replaceTaskId ? tasksRef.current.find(t => t.id === replaceTaskId) ?? consent : undefined;
       const submitted = submittedInput.current;
       const source = submitted?.taskId === task.id ? submitted.value : task.video?.canonical_url ?? task.telegram_link ?? '';
+      const field = inputRef.current;
       const queuedId = await api.download(task.id, confirmDuplicate, replaceTaskId);
       if (background) {
         setDismissedPreviewIds(old => new Set(old).add(task.id));
-        setSelected(null); setPreviewReset(true); setInput(''); submittedInput.current = null;
-        requestAnimationFrame(() => inputRef.current?.focus());
+        setSelected(null); setPreviewReset(true);
+        setInput(value => value === source ? '' : value);
+        submittedInput.current = null;
+        requestAnimationFrame(() => { if (inputRef.current === field) field?.focus(); });
         toast.success('已加入下载任务');
         // Fill the task list from Rust without waiting for its queued event.
         void api.tasks().then(snapshot => setTasks(old => mergeTasks(old, snapshot, removedIds.current))).catch(() => {});
@@ -1095,11 +1098,12 @@ function App() {
   }
   async function pasteLink() {
     const field = inputRef.current;
-    if (pasting || busy || parsing || !field || field.disabled) return;
+    if (pasting || !field || field.disabled || (downloadMode === 'post' && (busy || parsing))) return;
+    const before = field.value;
     setPasting(true);
     try {
       const text = await api.readClipboardText();
-      if (inputRef.current !== field || field.disabled) return;
+      if (inputRef.current !== field || field.disabled || field.value !== before) return;
       if (!text.trim()) { toast.info('剪贴板中没有文本内容'); return; }
       setInput(text); inputRef.current?.focus();
     } catch { toast.error('无法读取剪贴板，请使用 Ctrl / ⌘ + V 粘贴。'); }

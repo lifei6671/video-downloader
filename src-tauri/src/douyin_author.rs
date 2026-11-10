@@ -907,6 +907,7 @@ impl Core {
         }) {
             bail!("ALREADY_DOWNLOADED");
         }
+        super::cleanup_task_staging(&inner.db, id)?;
         if let Err(error) = self.queue_download(&mut inner, task, true, None) {
             inner.active.remove(id);
             return Err(error);
@@ -1185,6 +1186,49 @@ mod tests {
         let repeat = scan_ready(&app, "full").await;
         let result = app.confirm_author_scan(&repeat.id, false, None).unwrap();
         assert_eq!((result.queued, result.skipped), (0, 2));
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn author_retry_cleans_old_staging_before_reusing_task() {
+        let root = tempfile::tempdir().unwrap();
+        let app = open(root.path(), "tests/fixtures/desktop_engine.py");
+        let blocker = root.path().join("not-a-directory");
+        std::fs::write(&blocker, b"fixture").unwrap();
+        app.inner.lock().unwrap().settings.download_directory = blocker;
+
+        let scan = scan_ready(&app, "full").await;
+        app.confirm_author_scan(&scan.id, false, None).unwrap();
+        let id = wait_for_failure(&app, &scan.id).await;
+        let downloads = root.path().join("downloads");
+        let stale = downloads.join(format!("yingqu-{id}-previous"));
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("video.mp4.part"), b"partial").unwrap();
+        {
+            let mut inner = app.inner.lock().unwrap();
+            inner.settings.download_directory = downloads;
+            inner
+                .db
+                .execute(
+                    "INSERT INTO task_staging VALUES(?1,?2)",
+                    params![id, stale.to_string_lossy()],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(app.retry(&id).unwrap().id, id);
+        assert!(!stale.exists());
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !app
+                .list()
+                .iter()
+                .any(|task| task.id == id && archived(task))
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
         app.shutdown().await;
     }
 

@@ -356,6 +356,17 @@ fn cleanup_staging(db: &Connection, id: &str, path: &Path) -> Result<()> {
         .context("DATABASE_ERROR")?;
     Ok(())
 }
+fn cleanup_task_staging(db: &Connection, id: &str) -> Result<()> {
+    match db.query_row(
+        "SELECT path FROM task_staging WHERE task_id=?",
+        [id],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(path) => cleanup_staging(db, id, Path::new(&path)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
+        Err(error) => Err(error).context("DATABASE_ERROR"),
+    }
+}
 fn persist(db: &Connection, task: &Task) -> Result<()> {
     let mut stored = task.clone();
     // Covers may carry short-lived query tokens. Keep them only in memory.
@@ -2211,16 +2222,7 @@ impl Core {
         let (cancel, mut cancellation) = watch::channel(false);
         let (done, done_rx) = watch::channel(cached.is_some());
         if previous.is_some() {
-            let staging = inner.db.query_row(
-                "SELECT path FROM task_staging WHERE task_id=?",
-                [&task.id],
-                |r| r.get::<_, String>(0),
-            );
-            match staging {
-                Ok(path) => cleanup_staging(&inner.db, &task.id, Path::new(&path))?,
-                Err(rusqlite::Error::QueryReturnedNoRows) => {}
-                Err(_) => bail!("DATABASE_ERROR"),
-            }
+            cleanup_task_staging(&inner.db, &task.id)?;
             // Old commit evidence must never complete a new attempt on restart.
             persist_new_attempt(&inner.db, &task)?;
             *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
@@ -3275,11 +3277,14 @@ impl Core {
                 }
             }
             // Preserve an already committed success, including when staging cleanup fails.
-            if !core
-                .list()
+            let completed = core
+                .inner
+                .lock()
+                .unwrap()
+                .tasks
                 .iter()
-                .any(|t| t.id == id && t.status == Status::Completed)
-            {
+                .any(|task| task.id == id && task.status == Status::Completed);
+            if !completed {
                 core.finish(&id, result, true);
             }
             {

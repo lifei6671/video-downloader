@@ -29,6 +29,7 @@ export function AuthorDownload({ input, onChange, inputRef, paste, pasting, conn
   const scanId = scan?.id;
   const incremental = scan?.mode === 'incremental';
   const selectedMode = mode ?? scan?.mode ?? 'full';
+  const scanMatchesMode = scan?.mode === selectedMode;
 
   useEffect(() => {
     if (!connected || (!loading && !watching) || action) return;
@@ -114,6 +115,7 @@ export function AuthorDownload({ input, onChange, inputRef, paste, pasting, conn
       <CardHeader><CardTitle>{scan.author_name || '作品扫描'}</CardTitle></CardHeader>
       <CardContent className="space-y-3">
         <p role="status" className="text-sm">
+          {!scanMatchesMode && (incremental ? '增量下载，' : '全量归档，')}
           {scanning ? '正在扫描' : scan.status === 'completed' ? '已扫描到末页' : '扫描未完成'}
           {scan.pages > 0 && `，已读 ${scan.pages} 页，发现 ${scan.videos} 条视频、${scan.albums} 条图集`}
           {scan.skipped > 0 && `，跳过 ${scan.skipped} 条`}
@@ -121,7 +123,7 @@ export function AuthorDownload({ input, onChange, inputRef, paste, pasting, conn
         {scan.error && <p role="alert" className="text-xs text-destructive">
           {scan.error === 'CANCELED' ? '扫描已停止' : errorText(scan.error)}
         </p>}
-        {!scanning && incremental && !scan.batch && scan.needs_baseline &&
+        {!scanning && scanMatchesMode && incremental && !scan.batch && scan.needs_baseline &&
           <p className="text-sm">{scan.status === 'completed' ? '首次增量扫描，请选择如何处理已找到的历史作品' : '扫描到末页后才能建立基线'}</p>}
         {!scanning && incremental && !scan.batch && !scan.needs_baseline && (scan.status === 'completed' || scan.pages > 0) &&
           <p className="text-sm">新增待下载 {scan.new_posts} 条，待补下载 {scan.retry_posts} 条，已有本地文件 {scan.already_local} 条</p>}
@@ -134,7 +136,7 @@ export function AuthorDownload({ input, onChange, inputRef, paste, pasting, conn
             onClick={() => void run('cancel', () => api.cancelAuthorScan(scan.id))}>
             {action === 'cancel' ? '正在停止…' : '停止扫描'}
           </Button>}
-          {!scanning && !scan.batch && (scan.status === 'completed' || scan.videos + scan.albums > 0) &&
+          {!scanning && scanMatchesMode && !scan.batch && (scan.status === 'completed' || scan.videos + scan.albums > 0) &&
             (scan.needs_baseline ? <>
               <Button disabled={!!action} onClick={() => confirm(scan, 'archive_history')}>
                 {action === 'submit' ? '正在保存…' : '归档当前历史作品'}
