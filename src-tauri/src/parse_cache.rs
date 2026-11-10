@@ -30,9 +30,12 @@ pub fn init(db: &Connection) -> Result<bool> {
            url TEXT PRIMARY KEY, platform TEXT NOT NULL, video_id TEXT NOT NULL);",
     )
     .context("DATABASE_ERROR")?;
-    let has_avatar: bool = db.prepare("PRAGMA table_info(parse_cache)")?
+    let has_avatar: bool = db
+        .prepare("PRAGMA table_info(parse_cache)")?
         .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|name| name == "author_avatar");
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "author_avatar");
     if !has_avatar {
         db.execute("ALTER TABLE parse_cache ADD COLUMN author_avatar BLOB", [])
             .context("DATABASE_ERROR")?;
@@ -88,8 +91,17 @@ pub fn share_url(input: &str) -> Option<String> {
         return None;
     }
     // Resolve the current share token instead of reusing a previous token from an alias.
-    if matches!(url.host_str(), Some("xiaohongshu.com" | "www.xiaohongshu.com"
-        | "xhslink.cn" | "www.xhslink.cn" | "xhslink.com" | "www.xhslink.com")) {
+    if matches!(
+        url.host_str(),
+        Some(
+            "xiaohongshu.com"
+                | "www.xiaohongshu.com"
+                | "xhslink.cn"
+                | "www.xhslink.cn"
+                | "xhslink.com"
+                | "www.xhslink.com"
+        )
+    ) {
         return None;
     }
     url.set_scheme("https").ok()?;
@@ -252,7 +264,8 @@ pub fn remember(db: &Connection, input: &str, video: &Value) -> Result<()> {
 }
 
 pub fn forget_telegram_channel(db: &Connection, input: &str, video: &Value) -> Result<()> {
-    let peer = crate::telegram_download::public_peer(&crate::telegram_download::message_link(input)?);
+    let peer =
+        crate::telegram_download::public_peer(&crate::telegram_download::message_link(input)?);
     let channel = crate::telegram_download::message_link(
         video["canonical_url"]
             .as_str()
@@ -415,19 +428,36 @@ pub fn image(db: &Connection, video: &Value, index: usize) -> Result<Vec<u8>> {
 pub(crate) fn update_telegram_metadata(db: &Connection, video: &Value) -> Result<()> {
     anyhow::ensure!(video["platform"] == "telegram", "INVALID_ENGINE_RESULT");
     let cache_key = key(video)?;
-    let cached: Option<String> = db.query_row(
-        "SELECT metadata FROM parse_cache WHERE cache_key=?1 AND revision=?2",
-        params![cache_key, revision("grammers")], |row| row.get(0),
-    ).optional().context("DATABASE_ERROR")?;
-    let Some(cached) = cached else { return Ok(()); };
+    let cached: Option<String> = db
+        .query_row(
+            "SELECT metadata FROM parse_cache WHERE cache_key=?1 AND revision=?2",
+            params![cache_key, revision("grammers")],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("DATABASE_ERROR")?;
+    let Some(cached) = cached else {
+        return Ok(());
+    };
     let mut cached: Value = serde_json::from_str(&cached).context("DATABASE_ERROR")?;
     if video["telegram_document_id"].as_i64().is_none()
-        || ["telegram_document_id", "filesize", "mime_type", "original_filename"]
-            .iter().any(|field| cached[*field] != video[*field]) {
+        || [
+            "telegram_document_id",
+            "filesize",
+            "mime_type",
+            "original_filename",
+        ]
+        .iter()
+        .any(|field| cached[*field] != video[*field])
+    {
         return Ok(());
     }
     crate::telegram_download::fill_missing_attributes(&mut cached, video);
-    db.execute("UPDATE parse_cache SET metadata=?2 WHERE cache_key=?1", params![cache_key, serde_json::to_string(&cached)?]).context("DATABASE_ERROR")?;
+    db.execute(
+        "UPDATE parse_cache SET metadata=?2 WHERE cache_key=?1",
+        params![cache_key, serde_json::to_string(&cached)?],
+    )
+    .context("DATABASE_ERROR")?;
     Ok(())
 }
 
@@ -439,10 +469,21 @@ pub fn save_cover(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {
     {
         bail!("INVALID_MEDIA_CONTENT");
     }
-    Ok(db.execute(
-        "UPDATE parse_cache SET cover=?1 WHERE cache_key=?2 AND revision=?3",
-        params![body, key(video)?, revision(video["resolver"].as_str().context("INVALID_ENGINE_RESULT")?)],
-    ).context("DATABASE_ERROR")? != 0)
+    Ok(db
+        .execute(
+            "UPDATE parse_cache SET cover=?1 WHERE cache_key=?2 AND revision=?3",
+            params![
+                body,
+                key(video)?,
+                revision(
+                    video["resolver"]
+                        .as_str()
+                        .context("INVALID_ENGINE_RESULT")?
+                )
+            ],
+        )
+        .context("DATABASE_ERROR")?
+        != 0)
 }
 
 // Task removal can release shared cover/avatar bytes while preserving reusable
@@ -457,38 +498,48 @@ pub fn clear_cover(db: &Connection, video: &Value) -> Result<()> {
 }
 
 pub fn cover(db: &Connection, video: &Value) -> Result<Vec<u8>> {
-    cached_image(db, video, "SELECT cover FROM parse_cache WHERE cache_key=?", 10 * 1024 * 1024)
+    cached_image(
+        db,
+        video,
+        "SELECT cover FROM parse_cache WHERE cache_key=?",
+        10 * 1024 * 1024,
+    )
 }
 
 pub(crate) const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 
 pub fn save_avatar(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {
     if body.len() > MAX_AVATAR_BYTES
-        || !matches!(image_extension(body), Some("jpeg" | "png" | "webp")) {
+        || !matches!(image_extension(body), Some("jpeg" | "png" | "webp"))
+    {
         bail!("INVALID_MEDIA_CONTENT");
     }
-    Ok(db.execute("UPDATE parse_cache SET author_avatar=?1 WHERE cache_key=?2",
-        params![body, key(video)?]).context("DATABASE_ERROR")? != 0)
+    Ok(db
+        .execute(
+            "UPDATE parse_cache SET author_avatar=?1 WHERE cache_key=?2",
+            params![body, key(video)?],
+        )
+        .context("DATABASE_ERROR")?
+        != 0)
 }
 
 pub fn avatar(db: &Connection, video: &Value) -> Result<Vec<u8>> {
-    cached_image(db, video, "SELECT author_avatar FROM parse_cache WHERE cache_key=?", MAX_AVATAR_BYTES)
+    cached_image(
+        db,
+        video,
+        "SELECT author_avatar FROM parse_cache WHERE cache_key=?",
+        MAX_AVATAR_BYTES,
+    )
 }
 
 fn cached_image(db: &Connection, video: &Value, query: &str, limit: usize) -> Result<Vec<u8>> {
     let body: Option<Vec<u8>> = db
-        .query_row(
-            query,
-            [key(video)?],
-            |r| r.get(0),
-        )
+        .query_row(query, [key(video)?], |r| r.get(0))
         .optional()
         .context("DATABASE_ERROR")?
         .flatten();
     let body = body.context("FILE_MISSING")?;
-    if body.len() > limit
-        || !matches!(image_extension(&body), Some("jpeg" | "png" | "webp"))
-    {
+    if body.len() > limit || !matches!(image_extension(&body), Some("jpeg" | "png" | "webp")) {
         bail!("INVALID_MEDIA_CONTENT");
     }
     Ok(body)
@@ -552,13 +603,20 @@ mod tests {
             .is_none());
         drop(db);
         let db = Connection::open(&path).unwrap();
-        assert_eq!(telegram_source(&db, &video).unwrap(), "https://telegram.me/Public_Channel/9");
+        assert_eq!(
+            telegram_source(&db, &video).unwrap(),
+            "https://telegram.me/Public_Channel/9"
+        );
         forget_telegram_channel(&db, "https://t.me/public_channel/9", &video).unwrap();
-        assert_eq!(telegram_source(&db, &video).unwrap(), "https://t.me/c/100/9");
+        assert_eq!(
+            telegram_source(&db, &video).unwrap(),
+            "https://t.me/c/100/9"
+        );
         assert!(get(&db, "telegram", "100_9", "grammers").unwrap().is_some());
         remember(&db, "https://t.me/public_channel/9", &video).unwrap();
-        db.execute("UPDATE parse_cache SET revision='obsolete'", []).unwrap();
-        assert!(get(&db,"telegram","100_9","grammers").unwrap().is_none());
+        db.execute("UPDATE parse_cache SET revision='obsolete'", [])
+            .unwrap();
+        assert!(get(&db, "telegram", "100_9", "grammers").unwrap().is_none());
     }
 
     #[test]
@@ -575,8 +633,16 @@ mod tests {
             remember(&db, &format!("https://t.me/channel/{message}"), &video).unwrap();
         }
         assert!(get(&db, "telegram", "100_9", "grammers").unwrap().is_some());
-        assert!(find(&db,"https://t.me/channel/9","grammers").unwrap().is_none());
-        assert_eq!(find(&db,"https://t.me/channel/10","grammers").unwrap().unwrap().video["video_id"],"101_10");
+        assert!(find(&db, "https://t.me/channel/9", "grammers")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            find(&db, "https://t.me/channel/10", "grammers")
+                .unwrap()
+                .unwrap()
+                .video["video_id"],
+            "101_10"
+        );
     }
 
     #[test]
@@ -592,7 +658,9 @@ mod tests {
         let mut stale = video.clone();
         stale["title"] = "old".into();
         assert!(save_cover(&db, &stale, body).unwrap());
-        let hit = find(&db, "https://t.me/c/100/9", "grammers").unwrap().unwrap();
+        let hit = find(&db, "https://t.me/c/100/9", "grammers")
+            .unwrap()
+            .unwrap();
         assert_eq!(hit.video["title"], "current");
         assert_eq!(hit.saved_at, 100);
         assert!(hit.has_cover);

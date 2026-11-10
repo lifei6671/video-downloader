@@ -43,7 +43,13 @@ impl<'a> Catalog<'a> {
                 serde_json::from_slice(body).context("TELEGRAM_INDEX_INVALID")?;
             library.validate(target, &envelope)?;
             let mut records = vec![];
-            library.append_archived_events_resolved(target, doc.message_id, &mut 0, &mut records, &snapshot.media)?;
+            library.append_archived_events_resolved(
+                target,
+                doc.message_id,
+                &mut 0,
+                &mut records,
+                &snapshot.media,
+            )?;
             let segment = Segment {
                 doc,
                 body,

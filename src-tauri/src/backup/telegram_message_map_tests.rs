@@ -19,7 +19,11 @@ struct HeldChannel {
 impl HeldChannel {
     async fn wait(&self, io: &Io) -> Result<()> {
         self.started.notify_one();
-        io.run(async { self.release.acquire().await?.forget(); Ok(()) }).await
+        io.run(async {
+            self.release.acquire().await?.forget();
+            Ok(())
+        })
+        .await
     }
 }
 impl MessageSource for HeldChannel {
@@ -31,8 +35,12 @@ impl MessageSource for HeldChannel {
         self.wait(io).await?;
         self.inner.changes(pts, io).await
     }
-    async fn read_body(&self, index: &IndexDocument, io: &Io) -> Result<Vec<u8>> { self.inner.read_body(index, io).await }
-    async fn by_id(&self, ids: &BTreeSet<i32>, io: &Io) -> Result<ChannelSnapshot> { self.inner.by_id(ids, io).await }
+    async fn read_body(&self, index: &IndexDocument, io: &Io) -> Result<Vec<u8>> {
+        self.inner.read_body(index, io).await
+    }
+    async fn by_id(&self, ids: &BTreeSet<i32>, io: &Io) -> Result<ChannelSnapshot> {
+        self.inner.by_id(ids, io).await
+    }
 }
 impl Channel {
     fn take(&self) -> Step {
@@ -135,8 +143,13 @@ async fn concurrent_full_and_incremental_refreshes_admit_before_reading_the_curs
         }
         let older = HeldChannel {
             inner: Channel(Mutex::new(if incremental {
-                VecDeque::from([Step::Changes(12, Some((15, vec![1, 3]))), Step::Read(vec![1, 3], Ok(image(3, &[])))])
-            } else { VecDeque::from([Step::Full(15, image(3, &[2]))]) })),
+                VecDeque::from([
+                    Step::Changes(12, Some((15, vec![1, 3]))),
+                    Step::Read(vec![1, 3], Ok(image(3, &[]))),
+                ])
+            } else {
+                VecDeque::from([Step::Full(15, image(3, &[2]))])
+            })),
             started: tokio::sync::Notify::new(),
             release: tokio::sync::Semaphore::new(0),
         };
@@ -149,18 +162,46 @@ async fn concurrent_full_and_incremental_refreshes_admit_before_reading_the_curs
             tokio::select! { _ = older.started.notified() => {}, _ = &mut first => panic!("old scan ended early") }
         }).await.unwrap();
         let mut second = Box::pin(refresh(&core, &target, &io, &newer));
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut second).await.is_err());
-        assert_eq!(newer.0.lock().unwrap().len(), 2, "waiting refresh read a stale cursor or started network work");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut second)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            newer.0.lock().unwrap().len(),
+            2,
+            "waiting refresh read a stale cursor or started network work"
+        );
         older.release.add_permits(1);
         let (first, second) = tokio::join!(first, second);
         first.unwrap();
-        assert_eq!(second.unwrap().media.iter().map(|d| d.message_id).collect::<Vec<_>>(), vec![5]);
+        assert_eq!(
+            second
+                .unwrap()
+                .media
+                .iter()
+                .map(|d| d.message_id)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
         core.backup_db(|db| {
-            let cursor: (i32, i64) = db.query_row("SELECT pts,high_water FROM telegram_message_map WHERE space_id=?", [&target.scope.space_id], |r| Ok((r.get(0)?,r.get(1)?)))?;
+            let cursor: (i32, i64) = db.query_row(
+                "SELECT pts,high_water FROM telegram_message_map WHERE space_id=?",
+                [&target.scope.space_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
             assert_eq!(cursor, (20, 4));
-            assert_eq!(load(db, &target.scope.space_id, cursor.1)?.media.iter().map(|d| d.message_id).collect::<Vec<_>>(), vec![5]);
+            assert_eq!(
+                load(db, &target.scope.space_id, cursor.1)?
+                    .media
+                    .iter()
+                    .map(|d| d.message_id)
+                    .collect::<Vec<_>>(),
+                vec![5]
+            );
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         core.shutdown().await;
     }
 }
@@ -174,14 +215,30 @@ async fn canceling_a_waiting_map_refresh_does_not_cancel_the_active_scan() {
     let (stop, cancel) = tokio::sync::watch::channel(false);
     let first_io = Io::new(login.clone(), login.clone(), None);
     let second_io = Io::new(cancel, login, None);
-    let older = HeldChannel { inner: Channel(Mutex::new(VecDeque::from([Step::Full(15, image(3, &[2]))]))), started: tokio::sync::Notify::new(), release: tokio::sync::Semaphore::new(0) };
+    let older = HeldChannel {
+        inner: Channel(Mutex::new(VecDeque::from([Step::Full(15, image(3, &[2]))]))),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    };
     let newer = Channel(Mutex::new(VecDeque::new()));
     let mut first = Box::pin(refresh(&core, &target, &first_io, &older));
     tokio::select! { _ = older.started.notified() => {}, _ = &mut first => panic!("scan ended early") }
     let mut second = Box::pin(refresh(&core, &target, &second_io, &newer));
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut second).await.is_err());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut second)
+            .await
+            .is_err()
+    );
     stop.send_replace(true);
-    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(1), &mut second).await.unwrap().err().unwrap().to_string(), "TELEGRAM_TRANSFER_CANCELED");
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut second)
+            .await
+            .unwrap()
+            .err()
+            .unwrap()
+            .to_string(),
+        "TELEGRAM_TRANSFER_CANCELED"
+    );
     older.release.add_permits(1);
     assert_eq!(first.await.unwrap().high, 3);
     assert!(core.telegram_map_refresh.try_lock().is_ok());
@@ -210,25 +267,58 @@ async fn a_slow_projection_observation_finishes_before_the_next_refresh() {
             // Model CPU projection on another runtime worker. Bound the gate so
             // even a failing assertion cannot leave a blocked test thread.
             held.recv_timeout(std::time::Duration::from_secs(3))?;
-            TelegramProvider::observe(&observe_core, &observe_space,
-                &Cursor {high_water:1,evidence:std::collections::BTreeMap::from([(1,"old".into())])})
-        }).await
+            TelegramProvider::observe(
+                &observe_core,
+                &observe_space,
+                &Cursor {
+                    high_water: 1,
+                    evidence: std::collections::BTreeMap::from([(1, "old".into())]),
+                },
+            )
+        })
+        .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(1), entered).await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), entered)
+        .await
+        .unwrap()
+        .unwrap();
     let io = Io::new(login.clone(), login, None);
     let channel = Channel(Mutex::new(VecDeque::from([
-        Step::Changes(12, Some((15, vec![1, 2]))), Step::Read(vec![1, 2], Ok(image(2, &[]))),
+        Step::Changes(12, Some((15, vec![1, 2]))),
+        Step::Read(vec![1, 2], Ok(image(2, &[]))),
     ])));
     let mut second = Box::pin(refresh_with(&core, &target, &io, &channel, |_| {
-        TelegramProvider::observe(&core, &target.scope.space_id,
-            &Cursor {high_water:2,evidence:std::collections::BTreeMap::from([(1,"old".into()),(2,"new".into())])})
+        TelegramProvider::observe(
+            &core,
+            &target.scope.space_id,
+            &Cursor {
+                high_water: 2,
+                evidence: std::collections::BTreeMap::from([(1, "old".into()), (2, "new".into())]),
+            },
+        )
     }));
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut second).await.is_err());
-    assert_eq!(channel.0.lock().unwrap().len(), 2, "new observation overtook a slow old projection");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut second)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        channel.0.lock().unwrap().len(),
+        2,
+        "new observation overtook a slow old projection"
+    );
     release.send(()).unwrap();
     first.await.unwrap().unwrap();
     second.await.unwrap();
-    let saved: String = core.backup_db(|db| Ok(db.query_row("SELECT cursor_json FROM telegram_observed_prefix WHERE space_id=?", [&target.scope.space_id], |r| r.get(0))?)).unwrap();
+    let saved: String = core
+        .backup_db(|db| {
+            Ok(db.query_row(
+                "SELECT cursor_json FROM telegram_observed_prefix WHERE space_id=?",
+                [&target.scope.space_id],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
     let saved: Cursor = serde_json::from_str(&saved).unwrap();
     assert_eq!(saved.high_water, 2);
     assert_eq!(saved.evidence.len(), 2);
@@ -526,9 +616,17 @@ async fn paginated_channel_refresh_retries_from_saved_pts_and_reads_each_changed
     let target = setup_target(&core);
     let (_stop, rx) = tokio::sync::watch::channel(false);
     let io = Io::new(rx.clone(), rx, None);
-    let first = || Step::Page(12, Ok(DifferencePage::Changes {
-        pts: 14, ids: BTreeSet::new(), deleted: [42, 43].into(), complete: false,
-    }));
+    let first = || {
+        Step::Page(
+            12,
+            Ok(DifferencePage::Changes {
+                pts: 14,
+                ids: BTreeSet::new(),
+                deleted: [42, 43].into(),
+                complete: false,
+            }),
+        )
+    };
     let second = || page(14, 15, [43, 44], false);
     let channel = Channel(Mutex::new(VecDeque::from([
         Step::Full(12, image(1, &[42, 43, 44, 45])),
@@ -542,9 +640,15 @@ async fn paginated_channel_refresh_retries_from_saved_pts_and_reads_each_changed
         second(),
         page(15, 15, [], true),
         Step::Read(vec![43, 44], Ok(ChannelSnapshot::default())),
-        Step::Page(15, Ok(DifferencePage::Changes {
-            pts: 16, ids: BTreeSet::new(), deleted: [45].into(), complete: true,
-        })),
+        Step::Page(
+            15,
+            Ok(DifferencePage::Changes {
+                pts: 16,
+                ids: BTreeSet::new(),
+                deleted: [45].into(),
+                complete: true,
+            }),
+        ),
     ])));
     refresh(&core, &target, &io, &channel).await?;
     for expected in ["TELEGRAM_CONNECTION_ERROR", "CANCELED"] {
@@ -563,8 +667,14 @@ async fn paginated_channel_refresh_retries_from_saved_pts_and_reads_each_changed
             4
         );
     }
-    assert_eq!(refresh(&core, &target, &io, &channel).await?.media, vec![doc(45, "video")]);
-    assert!(refresh(&core, &target, &io, &channel).await?.media.is_empty());
+    assert_eq!(
+        refresh(&core, &target, &io, &channel).await?.media,
+        vec![doc(45, "video")]
+    );
+    assert!(refresh(&core, &target, &io, &channel)
+        .await?
+        .media
+        .is_empty());
     assert!(channel.0.lock().unwrap().is_empty());
     core.shutdown().await;
     Ok(())
@@ -616,7 +726,7 @@ async fn paginated_refresh_falls_back_on_invalid_or_excessive_pages() -> Result<
         ("too_many_pages", "difference_page_limit", 5, 16, 1),
     ] {
         assert_eq!(
-            delete_timing::IndexTiming::new(&core,"d",stage)
+            delete_timing::IndexTiming::new(&core, "d", stage)
                 .refresh(refresh(&core, &target, &io, &channel))
                 .await?
                 .media,
@@ -737,9 +847,13 @@ async fn full_refresh_reuses_only_verified_matching_bodies_from_this_target() {
     other.channel_id = "3".into();
     // This is a new attempt against a different channel. Same-attempt metrics accumulate.
     core.backup_db(|db| {
-        db.execute("UPDATE backup_operations SET attempt=attempt+1 WHERE operation_id='d'", [])?;
+        db.execute(
+            "UPDATE backup_operations SET attempt=attempt+1 WHERE operation_id='d'",
+            [],
+        )?;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     timing
         .refresh(refresh(&core, &other, &io, &channel))
         .await
@@ -765,8 +879,11 @@ async fn incremental_edit_reuses_only_unchanged_verified_attachments() -> Result
     let mut edited = scanned(vec![first.clone(), replaced.clone()]);
     edited.indexes[0].revision += 2; // Membership and revision must come from the live edit.
     let channel = Channel(Mutex::new(VecDeque::from([
-        Step::Full(1, original), Step::Body(10), Step::Body(10),
-        Step::Changes(1, Some((2, vec![10]))), Step::Read(vec![10], Ok(edited)),
+        Step::Full(1, original),
+        Step::Body(10),
+        Step::Body(10),
+        Step::Changes(1, Some((2, vec![10]))),
+        Step::Read(vec![10], Ok(edited)),
         Step::Body(10), // Only the replacement requires a download.
     ])));
     refresh(&core, &target, &io, &channel).await?;
@@ -827,7 +944,14 @@ async fn segmented_delete_rotates_legacy_archive_recovers_lost_reply_and_rebuild
     exercise_archive_upgrade(true).await
 }
 
-fn index(id: i32, kind: &str, asset: &str, operation: &str, device: &str, body: Vec<u8>) -> IndexDocument {
+fn index(
+    id: i32,
+    kind: &str,
+    asset: &str,
+    operation: &str,
+    device: &str,
+    body: Vec<u8>,
+) -> IndexDocument {
     use sha2::{Digest, Sha256};
     let mut document = doc(id, kind);
     let mut envelope: Envelope = serde_json::from_str(&document.caption).unwrap();
@@ -838,8 +962,15 @@ fn index(id: i32, kind: &str, asset: &str, operation: &str, device: &str, body: 
     envelope.bytes = body.len() as u64;
     document.bytes = envelope.bytes;
     document.caption = envelope.caption().unwrap();
-    IndexDocument { revision: if kind == "event" { (i64::from(id)<<32)|1 } else { i64::from(id) },
-        document, source: IndexSource::Verified(body.into()) }
+    IndexDocument {
+        revision: if kind == "event" {
+            (i64::from(id) << 32) | 1
+        } else {
+            i64::from(id)
+        },
+        document,
+        source: IndexSource::Verified(body.into()),
+    }
 }
 
 #[tokio::test]
@@ -863,19 +994,36 @@ async fn complete_delete_deltas_preserve_projection_across_history_sizes() -> Re
         // Eleven live assets share the original descriptor. Ten will be deleted, one must survive.
         for document in media.iter_mut().take(11) {
             let mut envelope: Envelope = serde_json::from_str(&document.caption)?;
-            envelope.asset_id = uuid::Uuid::from_u128(3000 + document.message_id as u128).to_string();
+            envelope.asset_id =
+                uuid::Uuid::from_u128(3000 + document.message_id as u128).to_string();
             envelope.device_id.clone_from(&device);
             envelope.container = "mp4".into();
             document.caption = envelope.caption()?;
             let change = AssetChange {
-                asset_id: envelope.asset_id, operation_id: envelope.operation_id, device_id: device.clone(),
-                base: None, delete: false, recreate: false, fields: [("original_filename".into(), "video.mp4".into())].into(),
-                media: Some(MediaRef { scope: target.scope.clone(), location: MediaLocation::TelegramMessage {
-                    account_id: target.account_id.clone(), channel_id: target.channel_id.clone(),
-                    message_id: i64::from(document.message_id), document_id: document.document_id,
-                }, bytes: document.bytes, sha256: envelope.sha256, container: "mp4".into() }),
-                cover: ReferenceChange::Unchanged, transcript: ReferenceChange::Unchanged,
-                conflicts: vec![], resolved_conflicts: vec![], field_bases: Default::default(),
+                asset_id: envelope.asset_id,
+                operation_id: envelope.operation_id,
+                device_id: device.clone(),
+                base: None,
+                delete: false,
+                recreate: false,
+                fields: [("original_filename".into(), "video.mp4".into())].into(),
+                media: Some(MediaRef {
+                    scope: target.scope.clone(),
+                    location: MediaLocation::TelegramMessage {
+                        account_id: target.account_id.clone(),
+                        channel_id: target.channel_id.clone(),
+                        message_id: i64::from(document.message_id),
+                        document_id: document.document_id,
+                    },
+                    bytes: document.bytes,
+                    sha256: envelope.sha256,
+                    container: "mp4".into(),
+                }),
+                cover: ReferenceChange::Unchanged,
+                transcript: ReferenceChange::Unchanged,
+                conflicts: vec![],
+                resolved_conflicts: vec![],
+                field_bases: Default::default(),
             };
             history.push(serde_json::json!({
                 "revision": (i64::from(document.message_id) << 32) | 1, "body": Event::encode(&target,&change)?,
@@ -887,7 +1035,8 @@ async fn complete_delete_deltas_preserve_projection_across_history_sizes() -> Re
             "account_id": target.account_id, "channel_id": target.channel_id, "archived_events": history,
         }))?;
         let initial = ChannelSnapshot {
-            high: i64::from(count), media: media.clone(),
+            high: i64::from(count),
+            media: media.clone(),
             indexes: vec![index(count, "library", library, library, &device, body)],
         };
         let channel = Channel(Mutex::new([Step::Full(100, initial)].into()));
@@ -901,16 +1050,39 @@ async fn complete_delete_deltas_preserve_projection_across_history_sizes() -> Re
             let old_head = count + offset;
             let new_head = old_head + 1;
             let change = AssetChange {
-                base: Some(expected[&create.asset_id].clone()), delete: true, media: None, fields: Default::default(),
-                operation_id: uuid::Uuid::from_u128(6000 + offset as u128).to_string(), ..create
+                base: Some(expected[&create.asset_id].clone()),
+                delete: true,
+                media: None,
+                fields: Default::default(),
+                operation_id: uuid::Uuid::from_u128(6000 + offset as u128).to_string(),
+                ..create
             };
-            let body = Provider::direct_archive_body(&io, &target, &change.asset_id, &mapped, Event::encode(&target, &change)?)?;
-            let head = index(new_head, "library", library, &change.operation_id, &device, body);
+            let body = Provider::direct_archive_body(
+                &io,
+                &target,
+                &change.asset_id,
+                &mapped,
+                Event::encode(&target, &change)?,
+            )?;
+            let head = index(
+                new_head,
+                "library",
+                library,
+                &change.operation_id,
+                &device,
+                body,
+            );
             let ids = vec![video, old_head, new_head];
             let pts = 100 + offset * 3;
             channel.0.lock().unwrap().extend([
                 Step::Changes(pts, Some((pts + 3, ids.clone()))),
-                Step::Read(ids, Ok(ChannelSnapshot { indexes: vec![head.clone()], ..Default::default() })),
+                Step::Read(
+                    ids,
+                    Ok(ChannelSnapshot {
+                        indexes: vec![head.clone()],
+                        ..Default::default()
+                    }),
+                ),
             ]);
             let started = std::time::Instant::now();
             mapped = refresh(&core, &target, &io, &channel).await?;
@@ -920,7 +1092,8 @@ async fn complete_delete_deltas_preserve_projection_across_history_sizes() -> Re
             assert_eq!(mapped.indexes.len(), 1);
             assert_eq!(mapped.indexes[0].document, head.document);
             assert_eq!(mapped.indexes[0].verified_body()?, head.verified_body()?);
-            projection = Provider::project_snapshot(&core, &target, &io, Some(&projection.cursor), &mapped)?;
+            projection =
+                Provider::project_snapshot(&core, &target, &io, Some(&projection.cursor), &mapped)?;
             let tombstone = expected.get_mut(&change.asset_id).unwrap();
             tombstone.deleted = true;
             tombstone.operation_id = change.operation_id;
@@ -940,12 +1113,16 @@ async fn complete_delete_deltas_preserve_projection_across_history_sizes() -> Re
 async fn exercise_archive_upgrade(rollover: bool) -> Result<()> {
     use crate::backup::{
         provider::{AssetChange, Checkpoint, MediaLocation, MediaRef, ReferenceChange},
-        telegram_provider::{segments::Catalog, TelegramProvider as Provider}, telegram_replay::{Cursor, Event},
+        telegram_provider::{segments::Catalog, TelegramProvider as Provider},
+        telegram_replay::{Cursor, Event},
         telegram_transfer::tests::send_archive_losing_reply,
         telegram_transfer_journal::{CoreJournal, Journal, SendState},
     };
     fn snapshot(indexes: Vec<IndexDocument>) -> ChannelSnapshot {
-        let mut snapshot = ChannelSnapshot { indexes, ..Default::default() };
+        let mut snapshot = ChannelSnapshot {
+            indexes,
+            ..Default::default()
+        };
         snapshot.order();
         snapshot
     }
@@ -957,14 +1134,32 @@ async fn exercise_archive_upgrade(rollover: bool) -> Result<()> {
     let asset = uuid::Uuid::new_v4().to_string();
     let (_stop, rx) = tokio::sync::watch::channel(false);
     let io = Io::new(rx.clone(), rx, None);
-    let create = AssetChange { recreate:false,asset_id:asset.clone(),base:None,
-        fields: [("original_filename".into(),serde_json::json!("fixture.mp4"))].into(),
-        media:Some(MediaRef { scope:target.scope.clone(), location:MediaLocation::TelegramMessage {
-            account_id:target.account_id.clone(), channel_id:target.channel_id.clone(), message_id:10, document_id:100 },
-            bytes:32,sha256:"ab".repeat(32),container:"mp4".into()}),
-        cover:ReferenceChange::Unchanged,transcript:ReferenceChange::Unchanged,delete:false,
-        operation_id:uuid::Uuid::new_v4().to_string(),device_id:device.clone(),
-        conflicts:vec![],resolved_conflicts:vec![],field_bases:Default::default() };
+    let create = AssetChange {
+        recreate: false,
+        asset_id: asset.clone(),
+        base: None,
+        fields: [("original_filename".into(), serde_json::json!("fixture.mp4"))].into(),
+        media: Some(MediaRef {
+            scope: target.scope.clone(),
+            location: MediaLocation::TelegramMessage {
+                account_id: target.account_id.clone(),
+                channel_id: target.channel_id.clone(),
+                message_id: 10,
+                document_id: 100,
+            },
+            bytes: 32,
+            sha256: "ab".repeat(32),
+            container: "mp4".into(),
+        }),
+        cover: ReferenceChange::Unchanged,
+        transcript: ReferenceChange::Unchanged,
+        delete: false,
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        device_id: device.clone(),
+        conflicts: vec![],
+        resolved_conflicts: vec![],
+        field_bases: Default::default(),
+    };
     let mut descriptor = serde_json::json!({"schema_version":2,"library_id":library,
         "provider_type":"telegram","mode":"single_writer","account_id":target.account_id,"channel_id":target.channel_id});
     let mut sealed_peer = None;
@@ -973,88 +1168,201 @@ async fn exercise_archive_upgrade(rollover: bool) -> Result<()> {
         let mut history = vec![];
         let mut bytes = 0;
         while bytes < 1024 * 1024 {
-            let peer = AssetChange { asset_id:uuid::Uuid::new_v4().to_string(), operation_id:uuid::Uuid::new_v4().to_string(),
-                delete:true,media:None,fields:Default::default(),..create.clone() };
+            let peer = AssetChange {
+                asset_id: uuid::Uuid::new_v4().to_string(),
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                delete: true,
+                media: None,
+                fields: Default::default(),
+                ..create.clone()
+            };
             let revision = (2_i64 << 32) + 1 + history.len() as i64;
-            let record = serde_json::json!({"revision":revision,"body":Event::encode(&target,&peer)?});
+            let record =
+                serde_json::json!({"revision":revision,"body":Event::encode(&target,&peer)?});
             bytes += serde_json::to_vec(&record)?.len();
             history.push(record);
             sealed_peer = Some((peer.asset_id, revision as u64));
         }
         descriptor["archived_events"] = history.into();
     }
-    let legacy = index(5,"library",library,library,&device,serde_json::to_vec(&descriptor)?);
-    let initial = snapshot(vec![legacy.clone(),
-        index(10,"event",&asset,&create.operation_id,&device,Event::encode(&target,&create)?)]);
-    let old = refresh(&core,&target,&io,&Channel(Mutex::new([Step::Full(50,initial)].into()))).await?;
-    let before = Provider::project_snapshot(&core,&target,&io,None,&old)?;
-    let checkpoint = Checkpoint {scope:target.scope.clone(),value:serde_json::to_string(&before.cursor)?};
+    let legacy = index(
+        5,
+        "library",
+        library,
+        library,
+        &device,
+        serde_json::to_vec(&descriptor)?,
+    );
+    let initial = snapshot(vec![
+        legacy.clone(),
+        index(
+            10,
+            "event",
+            &asset,
+            &create.operation_id,
+            &device,
+            Event::encode(&target, &create)?,
+        ),
+    ]);
+    let old = refresh(
+        &core,
+        &target,
+        &io,
+        &Channel(Mutex::new([Step::Full(50, initial)].into())),
+    )
+    .await?;
+    let before = Provider::project_snapshot(&core, &target, &io, None, &old)?;
+    let checkpoint = Checkpoint {
+        scope: target.scope.clone(),
+        value: serde_json::to_string(&before.cursor)?,
+    };
     core.backup_db(|db| {
-        db.execute("INSERT INTO backup_sync_checkpoints(space_id,checkpoint_json) VALUES(?1,?2)",
-            params![target.scope.space_id,serde_json::to_string(&checkpoint)?])?;
+        db.execute(
+            "INSERT INTO backup_sync_checkpoints(space_id,checkpoint_json) VALUES(?1,?2)",
+            params![target.scope.space_id, serde_json::to_string(&checkpoint)?],
+        )?;
         Ok(())
     })?;
-    let change = AssetChange { delete:true, media:None, fields:Default::default(), base:Some(before.assets[&asset].clone()),
-        operation_id:uuid::Uuid::new_v4().to_string(), ..create };
-    let event = Event::encode(&target,&change)?;
-    let body = Provider::direct_archive_body(&io,&target,&asset,&old,event.clone())?;
+    let change = AssetChange {
+        delete: true,
+        media: None,
+        fields: Default::default(),
+        base: Some(before.assets[&asset].clone()),
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        ..create
+    };
+    let event = Event::encode(&target, &change)?;
+    let body = Provider::direct_archive_body(&io, &target, &asset, &old, event.clone())?;
     let wire: serde_json::Value = serde_json::from_slice(&body)?;
     if rollover {
-        assert_eq!(wire["previous_segment"]["message_id"],5);
-        assert_eq!(wire["archived_events"].as_array().unwrap().len(),1,"only this asset moves into the new segment");
+        assert_eq!(wire["previous_segment"]["message_id"], 5);
+        assert_eq!(
+            wire["archived_events"].as_array().unwrap().len(),
+            1,
+            "only this asset moves into the new segment"
+        );
         assert!(body.len() < legacy.document.bytes as usize / 50);
-    } else { assert!(wire.get("previous_segment").is_none()); }
-    let (carrier, committed_bytes) = send_archive_losing_reply(root.path(),&CoreJournal(&core),&target,
-        &change.operation_id,&device,&body,&io).await;
-    assert_eq!(body,committed_bytes);
-    let uncertain = CoreJournal(&core).get(&change.operation_id,"library")?.unwrap();
-    assert_eq!(Provider::prepare_archive_retry(&core,&target,&change,b"changed library history").unwrap_err().to_string(),
-        "TELEGRAM_SEND_UNCONFIRMED");
-    assert_eq!(CoreJournal(&core).get(&change.operation_id,"library")?.unwrap().random_id,uncertain.random_id);
+    } else {
+        assert!(wire.get("previous_segment").is_none());
+    }
+    let (carrier, committed_bytes) = send_archive_losing_reply(
+        root.path(),
+        &CoreJournal(&core),
+        &target,
+        &change.operation_id,
+        &device,
+        &body,
+        &io,
+    )
+    .await;
+    assert_eq!(body, committed_bytes);
+    let uncertain = CoreJournal(&core)
+        .get(&change.operation_id, "library")?
+        .unwrap();
+    assert_eq!(
+        Provider::prepare_archive_retry(&core, &target, &change, b"changed library history")
+            .unwrap_err()
+            .to_string(),
+        "TELEGRAM_SEND_UNCONFIRMED"
+    );
+    assert_eq!(
+        CoreJournal(&core)
+            .get(&change.operation_id, "library")?
+            .unwrap()
+            .random_id,
+        uncertain.random_id
+    );
     // A different operation that did not reach send may safely rebuild its draft after history changes.
     let mut waiting = change.clone();
     waiting.operation_id = uuid::Uuid::new_v4().to_string();
     let mut prepared = uncertain.clone();
-    prepared.envelope.operation_id.clone_from(&waiting.operation_id);
+    prepared
+        .envelope
+        .operation_id
+        .clone_from(&waiting.operation_id);
     prepared.state = SendState::Prepared;
     prepared.last_error = Some("TELEGRAM_FLOOD_WAIT:2".into());
     CoreJournal(&core).reserve(prepared)?;
-    Provider::prepare_archive_retry(&core,&target,&waiting,&body)?;
-    assert!(CoreJournal(&core).get(&waiting.operation_id,"library")?.is_some());
-    Provider::prepare_archive_retry(&core,&target,&waiting,b"changed library history")?;
-    assert!(CoreJournal(&core).get(&waiting.operation_id,"library")?.is_none());
-    assert_eq!(CoreJournal(&core).get(&change.operation_id,"library")?.unwrap().state,SendState::Sending);
+    Provider::prepare_archive_retry(&core, &target, &waiting, &body)?;
+    assert!(CoreJournal(&core)
+        .get(&waiting.operation_id, "library")?
+        .is_some());
+    Provider::prepare_archive_retry(&core, &target, &waiting, b"changed library history")?;
+    assert!(CoreJournal(&core)
+        .get(&waiting.operation_id, "library")?
+        .is_none());
+    assert_eq!(
+        CoreJournal(&core)
+            .get(&change.operation_id, "library")?
+            .unwrap()
+            .state,
+        SendState::Sending
+    );
     core.shutdown().await;
     drop(core);
 
     // Restart with the old mapping/checkpoint. Only the newly added archive ID is requested.
     let core = open(root.path());
-    let raw:String = core.backup_db(|db| Ok(db.query_row("SELECT checkpoint_json FROM backup_sync_checkpoints WHERE space_id=?",
-        [&target.scope.space_id],|r| r.get(0))?))?;
-    let cursor:Cursor = serde_json::from_str(&serde_json::from_str::<Checkpoint>(&raw)?.value)?;
-    let direct = IndexDocument { revision:30, document:carrier.clone(), source:IndexSource::Verified(committed_bytes.into()) };
-    let delta = Channel(Mutex::new([Step::Changes(50,Some((51,vec![30]))),
-        Step::Read(vec![30],Ok(snapshot(vec![direct.clone()])))].into()));
-    let both = refresh(&core,&target,&io,&delta).await?;
-    let applied = Provider::project_snapshot(&core,&target,&io,Some(&cursor),&both)?;
-    assert!(Provider::publication_exists(&CoreJournal(&core),&target,&change,&event,&applied,&both)?);
-    let receipt = CoreJournal(&core).get(&change.operation_id,"library")?.unwrap();
-    assert_eq!(receipt.state,SendState::Confirmed);
-    assert_eq!(receipt.document,Some(carrier));
-    let revision = (30_u64<<32)|1;
+    let raw: String = core.backup_db(|db| {
+        Ok(db.query_row(
+            "SELECT checkpoint_json FROM backup_sync_checkpoints WHERE space_id=?",
+            [&target.scope.space_id],
+            |r| r.get(0),
+        )?)
+    })?;
+    let cursor: Cursor = serde_json::from_str(&serde_json::from_str::<Checkpoint>(&raw)?.value)?;
+    let direct = IndexDocument {
+        revision: 30,
+        document: carrier.clone(),
+        source: IndexSource::Verified(committed_bytes.into()),
+    };
+    let delta = Channel(Mutex::new(
+        [
+            Step::Changes(50, Some((51, vec![30]))),
+            Step::Read(vec![30], Ok(snapshot(vec![direct.clone()]))),
+        ]
+        .into(),
+    ));
+    let both = refresh(&core, &target, &io, &delta).await?;
+    let applied = Provider::project_snapshot(&core, &target, &io, Some(&cursor), &both)?;
+    assert!(Provider::publication_exists(
+        &CoreJournal(&core),
+        &target,
+        &change,
+        &event,
+        &applied,
+        &both
+    )?);
+    let receipt = CoreJournal(&core)
+        .get(&change.operation_id, "library")?
+        .unwrap();
+    assert_eq!(receipt.state, SendState::Confirmed);
+    assert_eq!(receipt.document, Some(carrier));
+    let revision = (30_u64 << 32) | 1;
     assert!(applied.assets[&asset].deleted);
-    assert_eq!(applied.assets[&asset].revision,revision);
-    let catalog = Catalog::read(&target,&both,&io)?;
+    assert_eq!(applied.assets[&asset].revision, revision);
+    let catalog = Catalog::read(&target, &both, &io)?;
     assert!(!catalog.superseded(30));
-    assert_eq!(catalog.superseded(5),!rollover);
-    let mut removed_ids:Vec<_> = both.indexes.iter().map(|i| i.document.message_id).filter(|id| catalog.superseded(*id)).collect();
+    assert_eq!(catalog.superseded(5), !rollover);
+    let mut removed_ids: Vec<_> = both
+        .indexes
+        .iter()
+        .map(|i| i.document.message_id)
+        .filter(|id| catalog.superseded(*id))
+        .collect();
     removed_ids.push(10);
-    let removals = Channel(Mutex::new([Step::Changes(51,Some((52,removed_ids.clone()))),
-        Step::Read(removed_ids,Ok(snapshot(vec![])))].into()));
-    let only = refresh(&core,&target,&io,&removals).await?;
-    assert_eq!(only.indexes.len(),if rollover {2} else {1});
-    let final_state = Provider::project_snapshot(&core,&target,&io,Some(&applied.cursor),&only)?;
-    assert_eq!(applied.cursor.evidence,final_state.cursor.evidence);
+    let removals = Channel(Mutex::new(
+        [
+            Step::Changes(51, Some((52, removed_ids.clone()))),
+            Step::Read(removed_ids, Ok(snapshot(vec![]))),
+        ]
+        .into(),
+    ));
+    let only = refresh(&core, &target, &io, &removals).await?;
+    assert_eq!(only.indexes.len(), if rollover { 2 } else { 1 });
+    let final_state =
+        Provider::project_snapshot(&core, &target, &io, Some(&applied.cursor), &only)?;
+    assert_eq!(applied.cursor.evidence, final_state.cursor.evidence);
 
     // A new SQLite database with no mapping or cursor sees only the surviving library.
     let fresh_root = tempfile::tempdir()?;
@@ -1062,42 +1370,97 @@ async fn exercise_archive_upgrade(rollover: bool) -> Result<()> {
     let mut fresh_target = setup_target(&fresh);
     fresh_target.scope.library_id = uuid::Uuid::new_v4().to_string();
     let envelope: Envelope = serde_json::from_str(&direct.document.caption)?;
-    let discovered = Provider::descriptor_library_id(&fresh_target,&envelope,direct.verified_body()?)?;
-    assert_eq!(discovered,target.scope.library_id);
+    let discovered =
+        Provider::descriptor_library_id(&fresh_target, &envelope, direct.verified_body()?)?;
+    assert_eq!(discovered, target.scope.library_id);
     fresh_target.scope.library_id = discovered;
     if rollover {
         let missing = snapshot(vec![direct.clone()]);
-        assert_eq!(Provider::project_snapshot(&fresh,&fresh_target,&io,None,&missing).err().unwrap().to_string(),"TELEGRAM_INDEX_CHANGED");
+        assert_eq!(
+            Provider::project_snapshot(&fresh, &fresh_target, &io, None, &missing)
+                .err()
+                .unwrap()
+                .to_string(),
+            "TELEGRAM_INDEX_CHANGED"
+        );
         let mut altered = descriptor.clone();
         altered["archived_events"].as_array_mut().unwrap().pop();
-        let replaced = index(5,"library",library,library,&device,serde_json::to_vec(&altered)?);
-        assert_eq!(Provider::project_snapshot(&fresh,&fresh_target,&io,None,&snapshot(vec![replaced,direct.clone()])).err().unwrap().to_string(),"TELEGRAM_INDEX_CHANGED");
+        let replaced = index(
+            5,
+            "library",
+            library,
+            library,
+            &device,
+            serde_json::to_vec(&altered)?,
+        );
+        assert_eq!(
+            Provider::project_snapshot(
+                &fresh,
+                &fresh_target,
+                &io,
+                None,
+                &snapshot(vec![replaced, direct.clone()])
+            )
+            .err()
+            .unwrap()
+            .to_string(),
+            "TELEGRAM_INDEX_CHANGED"
+        );
     }
-    let kept = if rollover {vec![legacy.clone(), direct]} else {vec![direct]};
-    let scan = Channel(Mutex::new([Step::Full(52,snapshot(kept))].into()));
-    let only = refresh(&fresh,&fresh_target,&io,&scan).await?;
-    let restored = Provider::project_snapshot(&fresh,&fresh_target,&io,None,&only)?;
+    let kept = if rollover {
+        vec![legacy.clone(), direct]
+    } else {
+        vec![direct]
+    };
+    let scan = Channel(Mutex::new([Step::Full(52, snapshot(kept))].into()));
+    let only = refresh(&fresh, &fresh_target, &io, &scan).await?;
+    let restored = Provider::project_snapshot(&fresh, &fresh_target, &io, None, &only)?;
     assert!(restored.assets[&asset].deleted);
-    assert_eq!(restored.assets[&asset].revision,revision);
-    assert_eq!(restored.cursor.evidence,applied.cursor.evidence);
+    assert_eq!(restored.assets[&asset].revision, revision);
+    assert_eq!(restored.cursor.evidence, applied.cursor.evidence);
 
     // A later archive freezes the first deletion at the original carrier revision.
-    let second = AssetChange {asset_id:uuid::Uuid::new_v4().to_string(),operation_id:uuid::Uuid::new_v4().to_string(),base:None,..change};
-    let next = Provider::direct_archive_body(&io,&target,&second.asset_id,&only,Event::encode(&target,&second)?)?;
-    let both = [(asset.as_str(),revision),(second.asset_id.as_str(),(39_u64<<32)|1)];
+    let second = AssetChange {
+        asset_id: uuid::Uuid::new_v4().to_string(),
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        base: None,
+        ..change
+    };
+    let next = Provider::direct_archive_body(
+        &io,
+        &target,
+        &second.asset_id,
+        &only,
+        Event::encode(&target, &second)?,
+    )?;
+    let both = [
+        (asset.as_str(), revision),
+        (second.asset_id.as_str(), (39_u64 << 32) | 1),
+    ];
     let updated: serde_json::Value = serde_json::from_slice(&next)?;
-    assert_eq!(updated.get("previous_segment"),wire.get("previous_segment"),"updating the active segment keeps its immutable predecessor");
-    let head = index(39,"library",library,&second.operation_id,&device,next);
-    let next = snapshot(if rollover {vec![legacy,head]} else {vec![head]});
-    let catalog = Catalog::read(&target,&next,&io)?;
-    catalog.confirm_deletions(&target,&both)?;
-    assert!(catalog.confirm_deletions(&target,&[(asset.as_str(),revision+1)]).is_err());
-    let rolled = Provider::project_snapshot(&fresh,&fresh_target,&io,Some(&restored.cursor),&next)?;
-    assert_eq!(rolled.assets[&asset].revision,revision);
-    assert_eq!(rolled.assets[&second.asset_id].revision,(39_u64<<32)|1);
+    assert_eq!(
+        updated.get("previous_segment"),
+        wire.get("previous_segment"),
+        "updating the active segment keeps its immutable predecessor"
+    );
+    let head = index(39, "library", library, &second.operation_id, &device, next);
+    let next = snapshot(if rollover {
+        vec![legacy, head]
+    } else {
+        vec![head]
+    });
+    let catalog = Catalog::read(&target, &next, &io)?;
+    catalog.confirm_deletions(&target, &both)?;
+    assert!(catalog
+        .confirm_deletions(&target, &[(asset.as_str(), revision + 1)])
+        .is_err());
+    let rolled =
+        Provider::project_snapshot(&fresh, &fresh_target, &io, Some(&restored.cursor), &next)?;
+    assert_eq!(rolled.assets[&asset].revision, revision);
+    assert_eq!(rolled.assets[&second.asset_id].revision, (39_u64 << 32) | 1);
     if let Some((peer, peer_revision)) = sealed_peer {
-        assert_eq!(rolled.assets[&peer].revision,peer_revision);
-        catalog.confirm_deletions(&fresh_target,&[(peer.as_str(),peer_revision),both[1]])?;
+        assert_eq!(rolled.assets[&peer].revision, peer_revision);
+        catalog.confirm_deletions(&fresh_target, &[(peer.as_str(), peer_revision), both[1]])?;
     }
     core.shutdown().await;
     fresh.shutdown().await;

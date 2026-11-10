@@ -209,7 +209,8 @@ async fn deleting_one_membership_keeps_other_space_visible_and_restorable_after_
         drop(core);
         if development {
             let db = rusqlite::Connection::open(root.path().join("app.sqlite")).unwrap();
-            db.execute("UPDATE backup_schema SET version=9", []).unwrap();
+            db.execute("UPDATE backup_schema SET version=9", [])
+                .unwrap();
         }
         let reopened = Core::open(
             &root.path().join("app.sqlite"),

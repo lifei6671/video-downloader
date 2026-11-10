@@ -24,18 +24,37 @@ pub(crate) struct WireRecord {
 fn legacy_object_kind<'a>(prefix: &str, key: &'a str, asset: &str) -> Option<&'a str> {
     let parts: Vec<_> = key.strip_prefix(prefix)?.split('/').collect();
     let (kind, _) = parts.last()?.split_once('.')?;
-    let root = if kind == "transcript" { "transcripts" } else { "media" };
+    let root = if kind == "transcript" {
+        "transcripts"
+    } else {
+        "media"
+    };
     let hash = |s: &str| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit());
-    if !matches!(kind, "video" | "cover" | "transcript") || parts.get(1)? != &asset || parts.first()? != &root { return None; }
+    if !matches!(kind, "video" | "cover" | "transcript")
+        || parts.get(1)? != &asset
+        || parts.first()? != &root
+    {
+        return None;
+    }
     match parts.as_slice() {
         [_, _, source, _] if kind == "video" && hash(source) => Some(kind),
-        [_, _, source, content, _] if kind != "video" && hash(source) && hash(content) => Some(kind),
-        [_, _, source, device, operation, _] if hash(source) && uuid::Uuid::parse_str(device).is_ok() && uuid::Uuid::parse_str(operation).is_ok() => Some(kind),
+        [_, _, source, content, _] if kind != "video" && hash(source) && hash(content) => {
+            Some(kind)
+        }
+        [_, _, source, device, operation, _]
+            if hash(source)
+                && uuid::Uuid::parse_str(device).is_ok()
+                && uuid::Uuid::parse_str(operation).is_ok() =>
+        {
+            Some(kind)
+        }
         _ => None,
     }
 }
 fn object_generation(prefix: &str, key: &str, asset: &str) -> Result<Option<u64>> {
-    if legacy_object_kind(prefix, key, asset).is_some() { return Ok(None); }
+    if legacy_object_kind(prefix, key, asset).is_some() {
+        return Ok(None);
+    }
     let name = key
         .strip_prefix(&format!("{prefix}media/{asset}/"))
         .filter(|s| !s.contains('/'))
@@ -75,9 +94,22 @@ fn validate_object(reference: &ObjectRef, prefix: &str, asset: &str, kind: &str)
         bail!("BACKUP_METADATA_TOO_LARGE");
     }
     if legacy_object_kind(prefix, &reference.key, asset) == Some(kind) {
-        let parts: Vec<_> = reference.key.strip_prefix(prefix).context("BACKUP_INVALID_KEY")?.split('/').collect();
-        let named_hash = if kind == "video" { Some(parts[2]) } else if parts.len() == 5 { Some(parts[3]) } else { None };
-        if named_hash.is_some_and(|hash| hash != reference.sha256) || parts.last().copied() != Some(format!("{kind}.{}",reference.container).as_str()) {
+        let parts: Vec<_> = reference
+            .key
+            .strip_prefix(prefix)
+            .context("BACKUP_INVALID_KEY")?
+            .split('/')
+            .collect();
+        let named_hash = if kind == "video" {
+            Some(parts[2])
+        } else if parts.len() == 5 {
+            Some(parts[3])
+        } else {
+            None
+        };
+        if named_hash.is_some_and(|hash| hash != reference.sha256)
+            || parts.last().copied() != Some(format!("{kind}.{}", reference.container).as_str())
+        {
             bail!("BACKUP_INVALID_KEY");
         }
         return Ok(());
@@ -146,24 +178,55 @@ mod compatibility_tests {
         let source = "b".repeat(64);
         for (kind, container, key) in [
             ("video", "mp4", format!("p/media/{asset}/{hash}/video.mp4")),
-            ("cover", "png", format!("p/media/{asset}/{source}/{hash}/cover.png")),
-            ("transcript", "json", format!("p/transcripts/{asset}/{source}/{hash}/transcript.json")),
-            ("video", "mp4", format!("p/media/{asset}/{hash}/{device}/{operation}/video.mp4")),
-            ("cover", "png", format!("p/media/{asset}/{source}/{device}/{operation}/cover.png")),
-            ("transcript", "json", format!("p/transcripts/{asset}/{source}/{device}/{operation}/transcript.json")),
+            (
+                "cover",
+                "png",
+                format!("p/media/{asset}/{source}/{hash}/cover.png"),
+            ),
+            (
+                "transcript",
+                "json",
+                format!("p/transcripts/{asset}/{source}/{hash}/transcript.json"),
+            ),
+            (
+                "video",
+                "mp4",
+                format!("p/media/{asset}/{hash}/{device}/{operation}/video.mp4"),
+            ),
+            (
+                "cover",
+                "png",
+                format!("p/media/{asset}/{source}/{device}/{operation}/cover.png"),
+            ),
+            (
+                "transcript",
+                "json",
+                format!("p/transcripts/{asset}/{source}/{device}/{operation}/transcript.json"),
+            ),
         ] {
-            let reference = ObjectRef { key, bytes: 100, sha256: hash.clone(), container: container.into() };
+            let reference = ObjectRef {
+                key,
+                bytes: 100,
+                sha256: hash.clone(),
+                container: container.into(),
+            };
             validate_object(&reference, "p/", asset, kind).unwrap();
-            assert_eq!(object_generation("p/", &reference.key, asset).unwrap(), None);
+            assert_eq!(
+                object_generation("p/", &reference.key, asset).unwrap(),
+                None
+            );
             assert!(validate_object(&reference, "other/", asset, kind).is_err());
             assert!(validate_object(&reference, "p/", device, kind).is_err());
-            let mut changed = reference.clone(); changed.container = "webm".into();
+            let mut changed = reference.clone();
+            changed.container = "webm".into();
             assert!(validate_object(&changed, "p/", asset, kind).is_err());
             if kind == "video" || reference.key.split('/').count() == 6 {
-                changed = reference.clone(); changed.sha256 = source.clone();
+                changed = reference.clone();
+                changed.sha256 = source.clone();
                 assert!(validate_object(&changed, "p/", asset, kind).is_err());
             }
-            changed = reference.clone(); changed.key = changed.key.replace(asset, "../escape");
+            changed = reference.clone();
+            changed.key = changed.key.replace(asset, "../escape");
             assert!(validate_object(&changed, "p/", asset, kind).is_err());
         }
     }
@@ -176,13 +239,15 @@ mod compatibility_tests {
     }
     #[test]
     fn only_known_historical_paths_allow_an_unattributed_writer() {
-        let asset="00000000-0000-4000-8000-000000000001";
-        let hash="a".repeat(64);
-        let mut value=serde_json::json!({"schema_version":2,"library_id":asset,"asset_id":asset,"record_revision":1,"state":"active","deleted_at":null,"fields":{"source":{"platform":"youtube","video_id":"fixture","canonical_url":null},"original_filename":"fixture.mp4"},"media":{"key":format!("p/media/{asset}/{hash}/video.mp4"),"bytes":24,"sha256":hash,"container":"mp4"},"cover":null,"transcript":null,"conflicts":[],"device_id":"","operation_id":asset});
-        let record=validate_wire(&serde_json::to_vec(&value).unwrap(),asset,asset,"p/").unwrap();
+        let asset = "00000000-0000-4000-8000-000000000001";
+        let hash = "a".repeat(64);
+        let mut value = serde_json::json!({"schema_version":2,"library_id":asset,"asset_id":asset,"record_revision":1,"state":"active","deleted_at":null,"fields":{"source":{"platform":"youtube","video_id":"fixture","canonical_url":null},"original_filename":"fixture.mp4"},"media":{"key":format!("p/media/{asset}/{hash}/video.mp4"),"bytes":24,"sha256":hash,"container":"mp4"},"cover":null,"transcript":null,"conflicts":[],"device_id":"","operation_id":asset});
+        let record =
+            validate_wire(&serde_json::to_vec(&value).unwrap(), asset, asset, "p/").unwrap();
         assert!(record.device_id.is_empty());
-        value["media"]["key"]=format!("p/media/{asset}/video-{}.mp4",record.media.unwrap().sha256).into();
-        assert!(validate_wire(&serde_json::to_vec(&value).unwrap(),asset,asset,"p/").is_err());
+        value["media"]["key"] =
+            format!("p/media/{asset}/video-{}.mp4", record.media.unwrap().sha256).into();
+        assert!(validate_wire(&serde_json::to_vec(&value).unwrap(), asset, asset, "p/").is_err());
     }
 }
 
@@ -286,8 +351,14 @@ pub(crate) fn validate_wire(
             .context("BACKUP_INVALID_SOURCE")?;
         validate_source(source)?;
     }
-    let legacy_unattributed = record.device_id.is_empty() && record.media.as_ref().is_some_and(|r|legacy_object_kind(prefix,&r.key,asset).is_some());
-    if !legacy_unattributed { uuid::Uuid::parse_str(&record.device_id).context("BACKUP_INVALID_RECORD")?; }
+    let legacy_unattributed = record.device_id.is_empty()
+        && record
+            .media
+            .as_ref()
+            .is_some_and(|r| legacy_object_kind(prefix, &r.key, asset).is_some());
+    if !legacy_unattributed {
+        uuid::Uuid::parse_str(&record.device_id).context("BACKUP_INVALID_RECORD")?;
+    }
     if record.conflicts.len() > 1024 {
         bail!("BACKUP_INVALID_RECORD");
     }
@@ -1143,14 +1214,25 @@ pub(super) async fn upload_part_with_retry(
     part: Write,
     check: &(impl Fn() -> Result<()> + Sync),
 ) -> Result<String> {
-    let Write::UploadFilePart { progress, .. } = &part else { bail!("BACKUP_INVALID_PART"); };
+    let Write::UploadFilePart { progress, .. } = &part else {
+        bail!("BACKUP_INVALID_PART");
+    };
     for attempt in 0..3 {
         check()?;
-        if let Some(progress) = progress { progress.store(0, Ordering::Relaxed); }
+        if let Some(progress) = progress {
+            progress.store(0, Ordering::Relaxed);
+        }
         match store.write(part.clone()).await {
             Ok(etag) => return Ok(etag),
-            Err(error) if attempt < 2 && matches!(error.to_string().as_str(),
-                "BACKUP_NETWORK_ERROR" | "BACKUP_SERVICE_UNAVAILABLE" | "BACKUP_RATE_LIMITED") => {
+            Err(error)
+                if attempt < 2
+                    && matches!(
+                        error.to_string().as_str(),
+                        "BACKUP_NETWORK_ERROR"
+                            | "BACKUP_SERVICE_UNAVAILABLE"
+                            | "BACKUP_RATE_LIMITED"
+                    ) =>
+            {
                 for _ in 0..(10 * (attempt + 1)) {
                     check()?;
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1352,10 +1434,20 @@ impl<S: ObjectStore> S3Provider<S> {
                     }
                     state.completed_bytes = parts.iter().map(|p| p.bytes).sum();
                     checkpoint(&state)?;
-                    let etag = upload_part_with_retry(&self.store, Write::UploadFilePart {
-                        key: key.clone(), upload_id: upload_id.clone(), part: number as u32,
-                        path: source.path.clone(), offset, bytes, progress: progress.clone(),
-                    }, &check).await?;
+                    let etag = upload_part_with_retry(
+                        &self.store,
+                        Write::UploadFilePart {
+                            key: key.clone(),
+                            upload_id: upload_id.clone(),
+                            part: number as u32,
+                            path: source.path.clone(),
+                            offset,
+                            bytes,
+                            progress: progress.clone(),
+                        },
+                        &check,
+                    )
+                    .await?;
                     parts.retain(|p| p.number != number as u32);
                     parts.push(super::store::Part {
                         number: number as u32,

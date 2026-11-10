@@ -60,7 +60,11 @@ struct Measured<'a> {
 impl Transport for Measured<'_> {
     type Uploaded = PreparedUpload;
     type Prepared = <GrammersTransport as Transport>::Prepared;
-    fn prepare<'a>(&'a self, envelope: &'a Envelope, io: &'a Io) -> ProviderFuture<'a, Self::Prepared> {
+    fn prepare<'a>(
+        &'a self,
+        envelope: &'a Envelope,
+        io: &'a Io,
+    ) -> ProviderFuture<'a, Self::Prepared> {
         self.inner.prepare(envelope, io)
     }
     fn max_bytes(&self) -> u64 {
@@ -114,7 +118,8 @@ impl Transport for Measured<'_> {
         io: &'a Io,
         before_publish: &'a mut (dyn FnMut() -> Result<()> + Send),
     ) -> ProviderFuture<'a, Option<i32>> {
-        self.inner.send(uploaded, caption, random, video, io, before_publish)
+        self.inner
+            .send(uploaded, caption, random, video, io, before_publish)
     }
     fn inspect(&self, id: i32) -> ProviderFuture<'_, RemoteDocument> {
         self.inner.inspect(id)

@@ -24,34 +24,57 @@ const SECOND: &[u8] = b"\x89PNG\r\n\x1a\nsecond cover";
 async fn historical_deep_objects_can_be_read_but_never_deleted_or_aborted() {
     use tokio::io::AsyncReadExt;
     let (f, provider, engine) = sync_fixture().await;
-    engine.execute_upload(&claim(&engine,&f.core)).await.unwrap();
+    engine
+        .execute_upload(&claim(&engine, &f.core))
+        .await
+        .unwrap();
     let remote = provider.read_asset(&f.id).await.unwrap().unwrap();
     let mut old = remote.snapshot.media.unwrap();
     let original = key(&old).to_owned();
-    let legacy = format!("test/media/{}/{}/video.mp4",f.id,old.sha256);
+    let legacy = format!("test/media/{}/{}/video.mp4", f.id, old.sha256);
     {
-        let mut state=f.store.0.lock().unwrap();
-        let object=state.objects[&original].clone();
-        state.objects.insert(legacy.clone(),object);
+        let mut state = f.store.0.lock().unwrap();
+        let object = state.objects[&original].clone();
+        state.objects.insert(legacy.clone(), object);
     }
-    old.location=MediaLocation::S3Object {locator:legacy};
-    let mut stream=provider.download_media(old.clone(),0).await.unwrap();
-    let mut bytes=vec![];stream.reader.read_to_end(&mut bytes).await.unwrap();
-    assert_eq!(tag(&bytes),old.sha256);
-    let writes=f.store.0.lock().unwrap().writes;
-    assert_eq!(provider.delete_media(old,&uuid::Uuid::new_v4().to_string()).await.unwrap_err().to_string(),"BACKUP_LEGACY_READ_ONLY");
+    old.location = MediaLocation::S3Object { locator: legacy };
+    let mut stream = provider.download_media(old.clone(), 0).await.unwrap();
+    let mut bytes = vec![];
+    stream.reader.read_to_end(&mut bytes).await.unwrap();
+    assert_eq!(tag(&bytes), old.sha256);
+    let writes = f.store.0.lock().unwrap().writes;
+    assert_eq!(
+        provider
+            .delete_media(old, &uuid::Uuid::new_v4().to_string())
+            .await
+            .unwrap_err()
+            .to_string(),
+        "BACKUP_LEGACY_READ_ONLY"
+    );
     {
-        let mut state=f.store.0.lock().unwrap();
-        let record=state.objects.get_mut(&format!("test/records/{}.json",f.id)).unwrap();
-        let mut raw:serde_json::Value=serde_json::from_slice(&record.0).unwrap();
-        raw["state"]="deleted".into();raw["deleted_at"]=1.into();
-        record.0=serde_json::to_vec(&raw).unwrap();
+        let mut state = f.store.0.lock().unwrap();
+        let record = state
+            .objects
+            .get_mut(&format!("test/records/{}.json", f.id))
+            .unwrap();
+        let mut raw: serde_json::Value = serde_json::from_slice(&record.0).unwrap();
+        raw["state"] = "deleted".into();
+        raw["deleted_at"] = 1.into();
+        record.0 = serde_json::to_vec(&raw).unwrap();
     }
-    let objects=f.store.0.lock().unwrap().objects.clone();
-    assert_eq!(provider.reconcile_deleted_asset(&f.id,&uuid::Uuid::new_v4().to_string()).await.err().unwrap().to_string(),"BACKUP_LEGACY_READ_ONLY");
-    let state=f.store.0.lock().unwrap();
-    assert_eq!(state.writes,writes);
-    assert_eq!(state.objects,objects);
+    let objects = f.store.0.lock().unwrap().objects.clone();
+    assert_eq!(
+        provider
+            .reconcile_deleted_asset(&f.id, &uuid::Uuid::new_v4().to_string())
+            .await
+            .err()
+            .unwrap()
+            .to_string(),
+        "BACKUP_LEGACY_READ_ONLY"
+    );
+    let state = f.store.0.lock().unwrap();
+    assert_eq!(state.writes, writes);
+    assert_eq!(state.objects, objects);
     assert!(state.uploads.is_empty());
 }
 

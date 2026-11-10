@@ -630,10 +630,20 @@ mod tests {
                     "sha256":format!("{:x}",Sha256::digest(clip))}}]});
         let files: Vec<AlbumFile> = serde_json::from_value(result["files"].clone()).unwrap();
         let target = root.path().join("saved");
-        assert!(finalize_album(&identity, &result, &stage, &target, |_, _, _| panic!("must not commit missing clip")).is_err());
+        assert!(
+            finalize_album(&identity, &result, &stage, &target, |_, _, _| panic!(
+                "must not commit missing clip"
+            ))
+            .is_err()
+        );
         assert!(!target.exists());
         fs::write(album.join("001.mp4"), b"\0\0\0\x18ftypmp42bad!-fixture").unwrap();
-        assert!(finalize_album(&identity, &result, &stage, &target, |_, _, _| panic!("must not commit corrupt clip")).is_err());
+        assert!(
+            finalize_album(&identity, &result, &stage, &target, |_, _, _| panic!(
+                "must not commit corrupt clip"
+            ))
+            .is_err()
+        );
         fs::write(album.join("001.mp4"), clip).unwrap();
         let mut invalid = files.clone();
         invalid[0].video.as_mut().unwrap().filename = "../outside.mp4".into();
@@ -650,7 +660,8 @@ mod tests {
             assert_eq!(bytes, total);
             assert!(manifest[0].video.is_some());
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(validate_album(&saved.path, &files).unwrap(), total);
         fs::remove_file(saved.path.join("001.mp4")).unwrap();
         assert!(validate_album(&saved.path, &files).is_err());

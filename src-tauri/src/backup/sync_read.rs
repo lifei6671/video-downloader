@@ -48,11 +48,21 @@ pub async fn latest(
     })?;
     Ok(remote)
 }
-pub async fn small(core:&Core,provider:&dyn BackupProvider,reference:&MediaRef)->Result<Vec<u8>> {
+pub async fn small(
+    core: &Core,
+    provider: &dyn BackupProvider,
+    reference: &MediaRef,
+) -> Result<Vec<u8>> {
     for attempt in 0..2 {
-        match small_once(core,provider,reference).await {
-            Err(error) if attempt==0 && provider.scope().provider_type==ProviderType::Telegram && error.to_string()=="TELEGRAM_FILE_REFERENCE_EXPIRED"=>continue,
-            result=>return result,
+        match small_once(core, provider, reference).await {
+            Err(error)
+                if attempt == 0
+                    && provider.scope().provider_type == ProviderType::Telegram
+                    && error.to_string() == "TELEGRAM_FILE_REFERENCE_EXPIRED" =>
+            {
+                continue
+            }
+            result => return result,
         }
     }
     unreachable!("bounded small-object refresh always returns")
@@ -78,7 +88,9 @@ async fn small_once(
             _ = shutdown.changed() => bail!("CANCELED"),
             result = tokio::time::timeout(provider.media_read_timeout(), limited.read(&mut buffer)) => result.context("BACKUP_NETWORK_ERROR")??,
         };
-        if count == 0 { break; }
+        if count == 0 {
+            break;
+        }
         body.extend_from_slice(&buffer[..count]);
     }
     if body.len() as u64 != reference.bytes
@@ -101,7 +113,9 @@ pub async fn transcript(
         Ok((state, raw, deleted))
     })?;
     let existing = previous.body.clone();
-    if deleted || previous.dirty { return Ok(existing); }
+    if deleted || previous.dirty {
+        return Ok(existing);
+    }
     let record: AssetSnapshot = serde_json::from_str(&raw)?;
     if record.deleted {
         return Ok(existing);
@@ -139,7 +153,6 @@ pub async fn transcript(
         tx.commit()?;
         Ok(Some(value))
     })
-
 }
 struct TranscriptState {
     body: Option<AssetTranscript>,
@@ -151,12 +164,18 @@ fn local_transcript(db: &rusqlite::Connection, local: &str) -> Result<Transcript
     let mut dirty = false;
     let mut revisions = Vec::new();
     let mut query = db.prepare("SELECT space_id,local_revision,pending_json FROM backup_space_assets WHERE local_asset_id=? ORDER BY space_id")?;
-    for row in query.query_map([local], |r| Ok((r.get(0)?,r.get(1)?,r.get::<_,String>(2)?)))? {
+    for row in query.query_map([local], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?))
+    })? {
         let (space, revision, pending) = row?;
         dirty |= serde_json::from_str::<PendingChanges>(&pending)?.transcript_dirty();
         revisions.push((space, revision));
     }
-    Ok(TranscriptState {body,dirty,revisions})
+    Ok(TranscriptState {
+        body,
+        dirty,
+        revisions,
+    })
 }
 // Covers are shared by all memberships of a local asset. A lazy read from one
 // space must not replace a choice or local edit waiting to publish in another.
@@ -166,14 +185,24 @@ struct CoverState {
     revisions: Vec<(String, i64)>,
 }
 fn local_cover(db: &rusqlite::Connection, local: &str) -> Result<CoverState> {
-    let body = db.query_row("SELECT body FROM asset_covers WHERE asset_id=?", [local], |r| r.get(0)).optional()?;
+    let body = db
+        .query_row(
+            "SELECT body FROM asset_covers WHERE asset_id=?",
+            [local],
+            |r| r.get(0),
+        )
+        .optional()?;
     let dirty = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM backup_space_assets m WHERE m.local_asset_id=?1 AND (json_extract(m.pending_json,'$.cover') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(m.pending_json,'$.choices') c WHERE json_extract(c.value,'$.adopt')=1 AND json_extract(c.value,'$.conflict.field')='cover')))",
         [local], |r| r.get(0),
     )?;
     let revisions = db.prepare("SELECT space_id,local_revision FROM backup_space_assets WHERE local_asset_id=? ORDER BY space_id")?
         .query_map([local], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
-    Ok(CoverState { body, dirty, revisions })
+    Ok(CoverState {
+        body,
+        dirty,
+        revisions,
+    })
 }
 
 pub async fn cover(core: &Core, provider: &dyn BackupProvider, local: &str) -> Result<Vec<u8>> {
@@ -187,7 +216,11 @@ pub async fn cover(core: &Core, provider: &dyn BackupProvider, local: &str) -> R
     }
     let record = cached(core, &provider.scope().space_id, local)?;
     let reference = record.cover.context("COVER_UNAVAILABLE")?;
-    if let Some(body) = previous.body.as_ref().filter(|b| format!("{:x}", Sha256::digest(b)) == reference.sha256) {
+    if let Some(body) = previous
+        .body
+        .as_ref()
+        .filter(|b| format!("{:x}", Sha256::digest(b)) == reference.sha256)
+    {
         return Ok(body.clone());
     }
     let body = small(core, provider, &reference).await?;
@@ -234,12 +267,26 @@ fn checkpoint(
     })
 }
 
-async fn recover_restore_network(core: &Core, scope: &Scope, cancel: tokio::sync::watch::Receiver<bool>) -> Result<()> {
-    let work = crate::telegram_accounts::recover_network(core, crate::telegram_accounts::Purpose::Backup, cancel);
+async fn recover_restore_network(
+    core: &Core,
+    scope: &Scope,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let work = crate::telegram_accounts::recover_network(
+        core,
+        crate::telegram_accounts::Purpose::Backup,
+        cancel,
+    );
     tokio::pin!(work);
     loop {
         let current = super::spaces::get(core)?.context("BACKUP_SPACE_INACTIVE")?;
-        if !super::spaces::enabled(core)? || !current.enabled || current.space_id != scope.space_id || current.library_id != scope.library_id { bail!("CANCELED"); }
+        if !super::spaces::enabled(core)?
+            || !current.enabled
+            || current.space_id != scope.space_id
+            || current.library_id != scope.library_id
+        {
+            bail!("CANCELED");
+        }
         tokio::select! {
             result = &mut work => return result,
             _ = tokio::time::sleep(Duration::from_millis(100)) => {},
@@ -266,45 +313,49 @@ pub async fn ensure(
     let (operation, mut payload) = existing
         .map(|o| (o.operation_id, o.payload))
         .unwrap_or_else(|| (uuid::Uuid::new_v4().to_string(), json!({"scope":scope})));
-    let owned: Scope = serde_json::from_value(payload["scope"].clone())
-        .context("BACKUP_INVALID_OPERATION")?;
+    let owned: Scope =
+        serde_json::from_value(payload["scope"].clone()).context("BACKUP_INVALID_OPERATION")?;
     scope.check(&owned)?;
     core.backup_db(|db|{let tx=db.unchecked_transaction()?;tx.execute("INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES(?1,?2,?3,'restore','running','preparing',?4) ON CONFLICT(operation_id) DO UPDATE SET state='running',last_error=NULL",params![operation,scope.space_id,local,payload.to_string()])?;tx.execute("UPDATE asset_local_files SET local_state='restoring' WHERE asset_id=?",[local])?;tx.commit()?;Ok(())})?;
     let preparation_stop = shutdown.clone();
     let mut work = Box::pin(async {
-    let remote = loop {
-        match latest(core, provider, local).await {
-            Err(error) if scope.provider_type == ProviderType::Telegram && crate::telegram_reconnect::network_error(&error.to_string()) => {
-                checkpoint(core, scope, &operation, "reconnecting", &payload)?;
-                recover_restore_network(core, scope, preparation_stop.clone()).await?;
+        let remote = loop {
+            match latest(core, provider, local).await {
+                Err(error)
+                    if scope.provider_type == ProviderType::Telegram
+                        && crate::telegram_reconnect::network_error(&error.to_string()) =>
+                {
+                    checkpoint(core, scope, &operation, "reconnecting", &payload)?;
+                    recover_restore_network(core, scope, preparation_stop.clone()).await?;
+                }
+                result => break result?,
             }
-            result => break result?,
+        };
+        if remote.snapshot.deleted {
+            if let Some(path) = restore::local(core, local).await? {
+                core.backup_db(|db| { db.execute("UPDATE backup_operations SET state='completed',phase='completed',last_error=NULL WHERE operation_id=?", [&operation])?; Ok(()) })?;
+                return Ok(path);
+            }
+            super::sync_delete::confirm_on_read(core, provider, local, &remote).await?;
+            bail!("BACKUP_ASSET_DELETED");
         }
-    };
-    if remote.snapshot.deleted {
-        if let Some(path) = restore::local(core, local).await? {
-            core.backup_db(|db| { db.execute("UPDATE backup_operations SET state='completed',phase='completed',last_error=NULL WHERE operation_id=?", [&operation])?; Ok(()) })?;
-            return Ok(path);
-        }
-        super::sync_delete::confirm_on_read(core, provider, local, &remote).await?;
-        bail!("BACKUP_ASSET_DELETED");
-    }
-    let reference = remote
-        .snapshot
-        .media
-        .clone()
-        .context("BACKUP_RECORD_UNAVAILABLE")?;
-    let (_stop, cancel) = tokio::sync::watch::channel(false);
-    Box::pin(transfer(
-        core,
-        provider,
-        local,
-        &remote.snapshot,
-        &reference,
-        &operation,
-        &mut payload,
-        cancel,
-    )).await
+        let reference = remote
+            .snapshot
+            .media
+            .clone()
+            .context("BACKUP_RECORD_UNAVAILABLE")?;
+        let (_stop, cancel) = tokio::sync::watch::channel(false);
+        Box::pin(transfer(
+            core,
+            provider,
+            local,
+            &remote.snapshot,
+            &reference,
+            &operation,
+            &mut payload,
+            cancel,
+        ))
+        .await
     });
     let result = loop {
         tokio::select! {result=&mut work=>break result,_=shutdown.changed()=>break Err(anyhow::anyhow!("CANCELED")),_=tokio::time::sleep(Duration::from_millis(100))=>{if let Err(error)=active(core,scope,&operation) {break Err(error);}}}
@@ -316,26 +367,62 @@ pub async fn ensure(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn transfer(core:&Arc<Core>,provider:&dyn BackupProvider,local:&str,record:&AssetSnapshot,reference:&MediaRef,operation:&str,payload:&mut Value,cancel:tokio::sync::watch::Receiver<bool>)->Result<PathBuf> {
+async fn transfer(
+    core: &Arc<Core>,
+    provider: &dyn BackupProvider,
+    local: &str,
+    record: &AssetSnapshot,
+    reference: &MediaRef,
+    operation: &str,
+    payload: &mut Value,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<PathBuf> {
     let mut refreshed = false;
     loop {
-        match transfer_once(core,provider,local,record,reference,operation,payload,cancel.clone()).await {
-            Err(error) if !refreshed && provider.scope().provider_type==ProviderType::Telegram && error.to_string()=="TELEGRAM_FILE_REFERENCE_EXPIRED"=>{
+        match transfer_once(
+            core,
+            provider,
+            local,
+            record,
+            reference,
+            operation,
+            payload,
+            cancel.clone(),
+        )
+        .await
+        {
+            Err(error)
+                if !refreshed
+                    && provider.scope().provider_type == ProviderType::Telegram
+                    && error.to_string() == "TELEGRAM_FILE_REFERENCE_EXPIRED" =>
+            {
                 // Refresh the request token while preserving the validated content prefix.
                 refreshed = true;
-                checkpoint(core,provider.scope(),operation,"refreshing_reference",payload)?;
-            },
-            Err(error) if provider.scope().provider_type == ProviderType::Telegram && crate::telegram_reconnect::network_error(&error.to_string()) => {
+                checkpoint(
+                    core,
+                    provider.scope(),
+                    operation,
+                    "refreshing_reference",
+                    payload,
+                )?;
+            }
+            Err(error)
+                if provider.scope().provider_type == ProviderType::Telegram
+                    && crate::telegram_reconnect::network_error(&error.to_string()) =>
+            {
                 active(core, provider.scope(), operation)?;
                 checkpoint(core, provider.scope(), operation, "reconnecting", payload)?;
                 recover_restore_network(core, provider.scope(), cancel.clone()).await?;
-            },
-            Err(error) if provider.scope().provider_type==ProviderType::Telegram && error.to_string()=="TELEGRAM_NETWORK_CHANGED"=>{
-                active(core,provider.scope(),operation)?;
-                checkpoint(core,provider.scope(),operation,"reconnecting",payload)?;
+            }
+            Err(error)
+                if provider.scope().provider_type == ProviderType::Telegram
+                    && error.to_string() == "TELEGRAM_NETWORK_CHANGED" =>
+            {
+                active(core, provider.scope(), operation)?;
+                checkpoint(core, provider.scope(), operation, "reconnecting", payload)?;
                 tokio::time::sleep(Duration::from_millis(500)).await;
-            },
-            result=>return result,
+            }
+            result => return result,
         }
     }
 }
@@ -414,10 +501,14 @@ async fn transfer_once(
             .await
             {
                 Ok(Ok(n)) => n,
-                Ok(Err(error)) if scope.provider_type == ProviderType::Telegram && error.to_string().starts_with("TELEGRAM_")=>{
-                    file.flush().await?;file.sync_all().await?;
+                Ok(Err(error))
+                    if scope.provider_type == ProviderType::Telegram
+                        && error.to_string().starts_with("TELEGRAM_") =>
+                {
+                    file.flush().await?;
+                    file.sync_all().await?;
                     return Err(error.into());
-                },
+                }
                 _ => {
                     file.flush().await?;
                     file.sync_all().await?;
@@ -521,7 +612,11 @@ pub fn list(core: &Core, space: &str) -> Result<Vec<super::reconcile::Entry>> {
     })
 }
 
-pub(super) fn list_in(db: &rusqlite::Connection, space: &str, assets: Vec<super::model::Asset>) -> Result<Vec<super::reconcile::Entry>> {
+pub(super) fn list_in(
+    db: &rusqlite::Connection,
+    space: &str,
+    assets: Vec<super::model::Asset>,
+) -> Result<Vec<super::reconcile::Entry>> {
     let mut query = db.prepare("SELECT m.local_asset_id,m.remote_deleted,m.pending_json,
         (SELECT COUNT(*) FROM backup_conflicts c WHERE c.space_id=m.space_id AND c.remote_asset_id=m.remote_asset_id),
         h.asset_id IS NOT NULL,d.asset_id IS NOT NULL,o.remote_state,r.record_json,
@@ -533,25 +628,70 @@ pub(super) fn list_in(db: &rusqlite::Connection, space: &str, assets: Vec<super:
         LEFT JOIN asset_remote_records r ON r.space_id=m.space_id AND r.asset_id=m.local_asset_id
         LEFT JOIN asset_covers c ON c.asset_id=m.local_asset_id
         LEFT JOIN asset_transcripts t ON t.asset_id=m.local_asset_id WHERE m.space_id=?1")?;
-    let mut members = query.query_map([space], |r| Ok((r.get::<_,String>(0)?, (
-        r.get::<_,bool>(1)?, r.get::<_,String>(2)?, r.get::<_,i64>(3)? as usize, r.get::<_,bool>(4)?,
-        r.get::<_,bool>(5)?, r.get::<_,Option<String>>(6)?, r.get::<_,Option<String>>(7)?,
-        r.get::<_,bool>(8)?,r.get::<_,bool>(9)?,
-    ))))?.collect::<rusqlite::Result<std::collections::HashMap<_,_>>>()?;
+    let mut members = query
+        .query_map([space], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (
+                    r.get::<_, bool>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)? as usize,
+                    r.get::<_, bool>(4)?,
+                    r.get::<_, bool>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, bool>(8)?,
+                    r.get::<_, bool>(9)?,
+                ),
+            ))
+        })?
+        .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
     let mut entries = Vec::new();
     for asset in assets {
-        let Some((deleted, pending, conflicts, hidden, deletion_hidden, remote_state, raw, local_cover, local_text)) = members.remove(&asset.asset_id) else { continue; };
+        let Some((
+            deleted,
+            pending,
+            conflicts,
+            hidden,
+            deletion_hidden,
+            remote_state,
+            raw,
+            local_cover,
+            local_text,
+        )) = members.remove(&asset.asset_id)
+        else {
+            continue;
+        };
         let pending = !serde_json::from_str::<PendingChanges>(&pending)?.is_empty();
         let deleting = remote_state.as_deref() == Some("pending_delete");
-        if (hidden || deletion_hidden) && !deleting { continue; }
-        if deleted && asset.path.is_none() && !pending && conflicts == 0 && !deleting { continue; }
-        let snapshot = raw.map(|v| serde_json::from_str::<AssetSnapshot>(&v)).transpose().context("BACKUP_RECORD_UNAVAILABLE")?;
+        if (hidden || deletion_hidden) && !deleting {
+            continue;
+        }
+        if deleted && asset.path.is_none() && !pending && conflicts == 0 && !deleting {
+            continue;
+        }
+        let snapshot = raw
+            .map(|v| serde_json::from_str::<AssetSnapshot>(&v))
+            .transpose()
+            .context("BACKUP_RECORD_UNAVAILABLE")?;
         entries.push(super::reconcile::Entry {
             has_cover: local_cover || snapshot.as_ref().is_some_and(|r| r.cover.is_some()),
             has_transcript: local_text || snapshot.as_ref().is_some_and(|r| r.transcript.is_some()),
-            asset, space_id: space.into(),
-            remote_state: if deleting { "pending_delete" } else if deleted { "deleted" } else if pending { "pending" } else { "backed_up" }.into(),
-            remote_deleted: deleted, has_pending_local_changes: pending, conflict_count: conflicts,
+            asset,
+            space_id: space.into(),
+            remote_state: if deleting {
+                "pending_delete"
+            } else if deleted {
+                "deleted"
+            } else if pending {
+                "pending"
+            } else {
+                "backed_up"
+            }
+            .into(),
+            remote_deleted: deleted,
+            has_pending_local_changes: pending,
+            conflict_count: conflicts,
             remote_revision: snapshot.as_ref().map_or(0, |r| r.revision),
         });
     }

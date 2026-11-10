@@ -283,7 +283,11 @@ impl Drop for Stage<'_> {
         let elapsed = self.start.elapsed().as_millis().min(i64::MAX as u128) as i64;
         eprintln!(
             "backup_delete operation={} phase={} elapsed_ms={} outcome={} at_ms={} bucket={}",
-            self.operation, self.phase, elapsed, self.outcome, chrono::Utc::now().timestamp_millis(),
+            self.operation,
+            self.phase,
+            elapsed,
+            self.outcome,
+            chrono::Utc::now().timestamp_millis(),
             self.bucket.unwrap_or("unknown")
         );
         let Some(bucket) = self.bucket else {
@@ -493,10 +497,18 @@ mod tests {
                 BEGIN UPDATE timing_writes SET n=n+1; END;")?;
             Ok(())
         }).unwrap();
-        track_delete(&core, "timing", timed_refresh(&core, "timing", "bulk", async {
-            for _ in 0..100 { drop(refresh_span("by_id")); }
-            Ok(())
-        })).await.unwrap();
+        track_delete(
+            &core,
+            "timing",
+            timed_refresh(&core, "timing", "bulk", async {
+                for _ in 0..100 {
+                    drop(refresh_span("by_id"));
+                }
+                Ok(())
+            }),
+        )
+        .await
+        .unwrap();
         let (writes, calls): (u32, u32) = core.backup_db(|db| Ok(db.query_row(
             "SELECT n,json_extract(payload_json,'$.timings.foreground.bulk.details.steps.by_id.calls')
              FROM timing_writes,backup_operations WHERE operation_id='timing'", [], |r| Ok((r.get(0)?, r.get(1)?))

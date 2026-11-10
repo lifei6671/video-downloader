@@ -32,7 +32,11 @@ pub(crate) fn init_in_transaction(
     // Reclaim captures left by older terminal paths, preserving uncertain/canceled work.
     tx.execute("DELETE FROM backup_operation_captures WHERE operation_id IN (SELECT operation_id FROM backup_operations WHERE kind='upload' AND state='completed')", [])?;
     // History tasks exist in the desktop database, but not in standalone backup stores.
-    if tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='download_tasks')", [], |r| r.get::<_,bool>(0))? {
+    if tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='download_tasks')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
         tx.execute_batch(include_str!("history-generation.sql"))?;
     }
     super::spaces::select_initial_default(tx)?;
@@ -172,7 +176,11 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
     db.execute("INSERT INTO media_assets(asset_id,task_id,metadata_json,original_filename,content_bytes,asset_state) VALUES(?1,?2,?3,?4,?5,'active') ON CONFLICT(asset_id) DO UPDATE SET task_id=excluded.task_id",
         params![asset_id,task.id,Value::Object(metadata).to_string(),filename,i64::try_from(file.len())?])?;
     if !is_new && video["platform"] == "telegram" {
-        let raw: String = db.query_row("SELECT metadata_json FROM media_assets WHERE asset_id=?", [&asset_id], |r| r.get(0))?;
+        let raw: String = db.query_row(
+            "SELECT metadata_json FROM media_assets WHERE asset_id=?",
+            [&asset_id],
+            |r| r.get(0),
+        )?;
         let mut metadata: Value = serde_json::from_str(&raw)?;
         let mut patch = super::provider::FieldPatch::new();
         for field in ["width", "height", "duration_ms"] {
@@ -184,7 +192,10 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
             }
         }
         if !patch.is_empty() {
-            db.execute("UPDATE media_assets SET metadata_json=?2 WHERE asset_id=?1", params![asset_id, metadata.to_string()])?;
+            db.execute(
+                "UPDATE media_assets SET metadata_json=?2 WHERE asset_id=?1",
+                params![asset_id, metadata.to_string()],
+            )?;
             super::sync_engine::mark_local(db, &asset_id, patch, false)?;
         }
     }
@@ -340,19 +351,37 @@ const ASSET_SELECT: &str = "SELECT a.asset_id,a.task_id,a.metadata_json,a.origin
 
 fn asset_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
     let raw: String = r.get(2)?;
-    let metadata = serde_json::from_str(&raw).map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e)))?;
-    Ok(Asset { asset_id: r.get(0)?, task_id: r.get(1)?, metadata,
-        original_filename: r.get(3)?, content_sha256: r.get(4)?, content_bytes: sql_u64(r, 5)?,
-        asset_state: r.get(6)?, path: r.get::<_, Option<String>>(7)?.map(Into::into), local_state: r.get(8)? })
+    let metadata = serde_json::from_str(&raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    Ok(Asset {
+        asset_id: r.get(0)?,
+        task_id: r.get(1)?,
+        metadata,
+        original_filename: r.get(3)?,
+        content_sha256: r.get(4)?,
+        content_bytes: sql_u64(r, 5)?,
+        asset_state: r.get(6)?,
+        path: r.get::<_, Option<String>>(7)?.map(Into::into),
+        local_state: r.get(8)?,
+    })
 }
 
 pub fn asset(db: &Connection, id: &str) -> Result<Option<Asset>> {
-    Ok(db.query_row(&format!("{ASSET_SELECT} WHERE a.asset_id=?"), [id], asset_row).optional()?)
+    Ok(db
+        .query_row(
+            &format!("{ASSET_SELECT} WHERE a.asset_id=?"),
+            [id],
+            asset_row,
+        )
+        .optional()?)
 }
 
 pub fn list_assets(db: &Connection) -> Result<Vec<Asset>> {
     let mut q = db.prepare(&format!("{ASSET_SELECT} ORDER BY a.rowid DESC"))?;
-    let rows = q.query_map([], asset_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = q
+        .query_map([], asset_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 

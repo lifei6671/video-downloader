@@ -57,9 +57,7 @@ pub(crate) async fn fingerprint(
 }
 
 pub async fn local(core: &Core, id: &str) -> Result<Option<PathBuf>> {
-    let asset = core
-        .backup_asset(id)?
-        .context("BACKUP_ASSET_NOT_FOUND")?;
+    let asset = core.backup_asset(id)?.context("BACKUP_ASSET_NOT_FOUND")?;
     let Some(path) = asset.path else {
         return Ok(None);
     };

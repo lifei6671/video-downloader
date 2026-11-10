@@ -112,7 +112,6 @@ pub async fn detail(
     Ok(result)
 }
 
-
 pub async fn resolve(
     core: &Arc<Core>,
     provider: &dyn BackupProvider,
@@ -151,7 +150,9 @@ pub async fn resolve(
         let body = sync_read::small(core, provider, &reference).await?;
         crate::files::image_extension(&body).context("INVALID_MEDIA_CONTENT")?;
         Some(body)
-    } else { None };
+    } else {
+        None
+    };
     core.backup_db(|db|{
         let tx=db.unchecked_transaction()?;
         let (raw,revision,deleted):(String,i64,bool)=tx.query_row("SELECT pending_json,local_revision,remote_deleted FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![scope.space_id,local],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;

@@ -1,22 +1,22 @@
-#[path = "review_followup_tests.rs"]
-mod review_followup_tests;
-#[path = "flat_upload_tests.rs"]
-mod flat_upload_tests;
-#[path = "retention_tests.rs"]
-mod retention_tests;
-#[path = "delete_flow_tests.rs"]
-mod delete_flow_tests;
-#[path = "history_registration_tests.rs"]
-mod history_registration_tests;
 #[path = "cleanup_isolation_tests.rs"]
 mod cleanup_isolation_tests;
+#[path = "delete_flow_tests.rs"]
+mod delete_flow_tests;
+#[path = "flat_upload_tests.rs"]
+mod flat_upload_tests;
+#[path = "history_registration_tests.rs"]
+mod history_registration_tests;
 #[path = "parallel_upload_tests.rs"]
 mod parallel_upload_tests;
+#[path = "retention_tests.rs"]
+mod retention_tests;
+#[path = "review_followup_tests.rs"]
+mod review_followup_tests;
 #[path = "review_regression_tests.rs"]
 mod review_regression_tests;
 use super::*;
-use crate::backup::{conflicts, sync_read};
 use crate::backup::spaces;
+use crate::backup::{conflicts, sync_read};
 
 fn stored_fixture_credentials(f: &Fixture, vault: &Vault) {
     vault.0.lock().unwrap().insert(
@@ -456,7 +456,10 @@ async fn single_protocol_readding_the_only_configuration_keeps_identity_and_defa
         .unwrap();
     assert_eq!(saved.protocol, 2);
     assert!(saved.enabled);
-    assert_eq!(spaces::get(&f.core).unwrap().unwrap().space_id, saved.space_id);
+    assert_eq!(
+        spaces::get(&f.core).unwrap().unwrap().space_id,
+        saved.space_id
+    );
     assert_eq!(saved.space_id, f.space.space_id);
     let chosen = spaces::select_with(&f.core, &saved.space_id, &vault, |_, _, _, _| {
         Ok(f.store.clone())
@@ -754,7 +757,10 @@ async fn settings_actions_empty_configuration_can_be_removed_and_explicitly_read
     assert_eq!(restored.space_id, saved.space_id);
     assert_eq!(restored.library_id, saved.library_id);
     assert!(restored.enabled);
-    assert_eq!(spaces::get(&core).unwrap().unwrap().space_id, restored.space_id);
+    assert_eq!(
+        spaces::get(&core).unwrap().unwrap().space_id,
+        restored.space_id
+    );
 }
 
 #[tokio::test]
@@ -928,11 +934,16 @@ impl BackupProvider for ReceiptProvider {
     fn cancel_upload(&self, r: ResumeState, o: &str) -> ProviderFuture<'_, ()> {
         if let Some(error) = self.cleanup_error {
             if error == "HANG" {
-                let activity = self.cleanup_activity.clone().expect("hanging fixture activity");
+                let activity = self
+                    .cleanup_activity
+                    .clone()
+                    .expect("hanging fixture activity");
                 return Box::pin(async move {
                     struct Held(Arc<std::sync::atomic::AtomicUsize>);
                     impl Drop for Held {
-                        fn drop(&mut self) { self.0.fetch_add(1000, std::sync::atomic::Ordering::SeqCst); }
+                        fn drop(&mut self) {
+                            self.0.fetch_add(1000, std::sync::atomic::Ordering::SeqCst);
+                        }
                     }
                     activity.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let _held = Held(activity);
@@ -1826,7 +1837,9 @@ async fn flat_multipart_retry_restarts_and_cancel_cleans_its_session() {
         store.part_writes[0].0, store.part_writes[1].0,
         "retry reused the previous multipart session"
     );
-    assert!(store.part_writes[1..].iter().all(|(id, _)| id == &store.part_writes[1].0));
+    assert!(store.part_writes[1..]
+        .iter()
+        .all(|(id, _)| id == &store.part_writes[1].0));
 }
 
 #[tokio::test]
@@ -1835,7 +1848,10 @@ async fn multipart_retry_is_bounded_and_cancel_interrupts_backoff() {
     for cancel in [false, true] {
         let (f, provider, _) = sync_fixture().await;
         let path = f.root.path().join("retry.mp4");
-        std::fs::File::create(&path).unwrap().set_len(100*1024*1024).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(100 * 1024 * 1024)
+            .unwrap();
         f.store.0.lock().unwrap().fail_part_remaining = Some((2, 10));
         let stopped = Arc::new(AtomicBool::new(false));
         let check = stopped.clone();
@@ -1843,35 +1859,73 @@ async fn multipart_retry_is_bounded_and_cancel_interrupts_backoff() {
         let checkpoint = evidence.clone();
         let operation = uuid::Uuid::new_v4().to_string();
         let source = MediaSource {
-            video: None, base_revision: None, recreate_revision: None,
-            asset_id: f.id.clone(), kind: "video".into(), path, bytes: 100*1024*1024,
-            sha256: "a".repeat(64), container: "mp4".into(), operation_id: operation.clone(),
+            video: None,
+            base_revision: None,
+            recreate_revision: None,
+            asset_id: f.id.clone(),
+            kind: "video".into(),
+            path,
+            bytes: 100 * 1024 * 1024,
+            sha256: "a".repeat(64),
+            container: "mp4".into(),
+            operation_id: operation.clone(),
             device_id: f.core.backup_db(repository::device_id).unwrap(),
             control: Some(Arc::new(TransferControl {
-                check: Box::new(move || { if check.load(Ordering::Relaxed) { bail!("CANCELED"); } Ok(()) }),
-                checkpoint: Box::new(move |state| { *checkpoint.lock().unwrap() = Some(state); Ok(()) }),
+                check: Box::new(move || {
+                    if check.load(Ordering::Relaxed) {
+                        bail!("CANCELED");
+                    }
+                    Ok(())
+                }),
+                checkpoint: Box::new(move |state| {
+                    *checkpoint.lock().unwrap() = Some(state);
+                    Ok(())
+                }),
                 progress: Default::default(),
             })),
         };
         let watcher = if cancel {
             let store = f.store.clone();
             Some(tokio::spawn(async move {
-                while store.0.lock().unwrap().part_writes.len() < 2 { tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
+                while store.0.lock().unwrap().part_writes.len() < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 stopped.store(true, Ordering::Relaxed);
             }))
-        } else { None };
+        } else {
+            None
+        };
         let error = provider.upload_media(source, None).await.unwrap_err();
-        if let Some(watcher) = watcher { watcher.await.unwrap(); }
-        assert_eq!(error.to_string(), if cancel { "CANCELED" } else { "BACKUP_SERVICE_UNAVAILABLE" });
+        if let Some(watcher) = watcher {
+            watcher.await.unwrap();
+        }
+        assert_eq!(
+            error.to_string(),
+            if cancel {
+                "CANCELED"
+            } else {
+                "BACKUP_SERVICE_UNAVAILABLE"
+            }
+        );
         {
             let state = f.store.0.lock().unwrap();
-            assert_eq!(state.part_writes.iter().map(|(_,part)| *part).collect::<Vec<_>>(), if cancel { vec![1,2] } else { vec![1,2,2,2] });
-            assert_eq!(state.uploads.len(),1);
-            assert!(state.part_writes.iter().all(|(id,_)| id == &state.part_writes[0].0));
+            assert_eq!(
+                state
+                    .part_writes
+                    .iter()
+                    .map(|(_, part)| *part)
+                    .collect::<Vec<_>>(),
+                if cancel { vec![1, 2] } else { vec![1, 2, 2, 2] }
+            );
+            assert_eq!(state.uploads.len(), 1);
+            assert!(state
+                .part_writes
+                .iter()
+                .all(|(id, _)| id == &state.part_writes[0].0));
         }
         let resume = evidence.lock().unwrap().clone().unwrap();
-        provider.cancel_upload(resume,&operation).await.unwrap();
+        provider.cancel_upload(resume, &operation).await.unwrap();
         assert!(f.store.0.lock().unwrap().uploads.is_empty());
     }
 }
@@ -2859,7 +2913,10 @@ async fn p4_tombstone_keeps_other_device_local_video_and_blocks_revival() {
     sync_delete::delete(&f.core, &f.space.space_id, &f.id)
         .await
         .unwrap();
-    assert!(f.root.path().join("video.mp4").is_file(), "remote deletion must precede local cleanup");
+    assert!(
+        f.root.path().join("video.mp4").is_file(),
+        "remote deletion must precede local cleanup"
+    );
     let deletion = deletion_operation(&f.core);
     delete_pass(&f.core, a.as_ref(), &deletion).await.unwrap();
     assert!(!f.root.path().join("video.mp4").exists());
@@ -3469,7 +3526,11 @@ fn deletion_queue_prioritizes_foreground_work_and_preserves_retry_deadlines() {
         Some(("later".into(), true)),
         "due deletion failures retain foreground priority"
     );
-    db.execute("UPDATE backup_operations SET state='running' WHERE operation_id='later'", []).unwrap();
+    db.execute(
+        "UPDATE backup_operations SET state='running' WHERE operation_id='later'",
+        [],
+    )
+    .unwrap();
     assert!(scheduler::foreground_delete_busy(&db, "space").unwrap());
     db.execute(
         "UPDATE backup_operations SET state='completed' WHERE operation_id='later'",
@@ -3568,13 +3629,13 @@ async fn current_wire_record_enforces_metadata_identity_and_canonical_object_key
             4 => wire["media"]["container"] = "exe".into(),
             5 => wire["media"]["key"] = "foreign/media/file.mp4".into(),
             6 => {
-                let wrong_hash = if wire["media"]["sha256"].as_str().unwrap().starts_with('a') { "b".repeat(64) } else { "a".repeat(64) };
-                wire["media"]["key"] = format!(
-                    "test/media/{}/{}/video.mp4",
-                    f.id,
-                    wrong_hash
-                )
-                .into()
+                let wrong_hash = if wire["media"]["sha256"].as_str().unwrap().starts_with('a') {
+                    "b".repeat(64)
+                } else {
+                    "a".repeat(64)
+                };
+                wire["media"]["key"] =
+                    format!("test/media/{}/{}/video.mp4", f.id, wrong_hash).into()
             }
             7 => wire["fields"]["source"]["platform"] = "unknown".into(),
             8 => wire["fields"]["source"]["video_id"] = "".into(),
@@ -3668,30 +3729,54 @@ async fn current_restore_rejects_corruption_and_preserves_user_file_then_recover
 #[tokio::test]
 async fn telegram_reconnect_blocks_queue_claims_and_shutdown_drops_probe() {
     let (f, _, _) = sync_fixture().await;
-    f.core.backup_db(|db| {
-        db.execute("UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?", [&f.space.space_id])?;
-        Ok(())
-    }).unwrap();
-    let session = f.core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session;
-    *session.reconnect_probe.lock().unwrap() = Some(|| Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR")));
+    f.core
+        .backup_db(|db| {
+            db.execute(
+                "UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?",
+                [&f.space.space_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let session = f
+        .core
+        .telegram_accounts
+        .binding(crate::telegram_accounts::Purpose::Backup)
+        .session;
+    *session.reconnect_probe.lock().unwrap() =
+        Some(|| Err(anyhow::anyhow!("TELEGRAM_CONNECTION_ERROR")));
     let (stop, cancel) = tokio::sync::watch::channel(false);
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = attempts.clone();
-    let worker = tokio::spawn(sync_engine::run_with(f.core.clone(), cancel, Arc::new(move |_,_| {
-        observed.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
-        bail!("TELEGRAM_CONNECTION_ERROR")
-    })));
-    tokio::time::timeout(std::time::Duration::from_secs(2),async {
-        while !session.reconnect.waiting() { tokio::task::yield_now().await; }
-    }).await.unwrap();
+    let worker = tokio::spawn(sync_engine::run_with(
+        f.core.clone(),
+        cancel,
+        Arc::new(move |_, _| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            bail!("TELEGRAM_CONNECTION_ERROR")
+        }),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !session.reconnect.waiting() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(scheduler::operations(&f.core).unwrap().iter().all(|op|op.attempt==0 && op.state=="pending"));
+    assert!(scheduler::operations(&f.core)
+        .unwrap()
+        .iter()
+        .all(|op| op.attempt == 0 && op.state == "pending"));
     stop.send_replace(true);
-    tokio::time::timeout(std::time::Duration::from_secs(1),worker).await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+        .await
+        .unwrap()
+        .unwrap();
     let count = attempts.load(std::sync::atomic::Ordering::SeqCst);
     assert!(count > 0);
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst),count);
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), count);
     f.core.shutdown().await;
 }
 
@@ -3705,23 +3790,57 @@ struct TelegramReadFixture {
     pull_failures: std::sync::atomic::AtomicUsize,
 }
 impl BackupProvider for TelegramReadFixture {
-    fn scope(&self) -> &Scope { &self.scope }
-    fn media_read_timeout(&self) -> std::time::Duration {
-        if self.scope.provider_type == ProviderType::Telegram { crate::telegram_transfer_engine::FILE_IO_TIMEOUT } else { std::time::Duration::from_secs(30) }
+    fn scope(&self) -> &Scope {
+        &self.scope
     }
-    fn capabilities(&self) -> ProviderCapabilities { self.inner.capabilities() }
-    fn open_library(&self, _: bool) -> ProviderFuture<'_, LibraryDescriptor> { panic!("unexpected write/setup") }
+    fn media_read_timeout(&self) -> std::time::Duration {
+        if self.scope.provider_type == ProviderType::Telegram {
+            crate::telegram_transfer_engine::FILE_IO_TIMEOUT
+        } else {
+            std::time::Duration::from_secs(30)
+        }
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.inner.capabilities()
+    }
+    fn open_library(&self, _: bool) -> ProviderFuture<'_, LibraryDescriptor> {
+        panic!("unexpected write/setup")
+    }
     fn pull_changes(&self, checkpoint: Option<Checkpoint>) -> ProviderFuture<'_, ChangeBatch> {
         Box::pin(async move {
-            if self.pull_failures.try_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|n.checked_sub(1)).is_ok() { bail!("TELEGRAM_TRANSFER_TIMEOUT"); }
-            let checkpoint = checkpoint.map(|mut value| { value.scope = self.inner.scope().clone(); value });
+            if self
+                .pull_failures
+                .try_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok()
+            {
+                bail!("TELEGRAM_TRANSFER_TIMEOUT");
+            }
+            let checkpoint = checkpoint.map(|mut value| {
+                value.scope = self.inner.scope().clone();
+                value
+            });
             let mut batch = self.inner.pull_changes(checkpoint).await?;
             batch.checkpoint.scope = self.scope.clone();
             for remote in &mut batch.assets {
                 remote.version.scope = self.scope.clone();
-                for reference in remote.snapshot.media.iter_mut().chain(remote.snapshot.cover.iter_mut()).chain(remote.snapshot.transcript.iter_mut()) {
+                for reference in remote
+                    .snapshot
+                    .media
+                    .iter_mut()
+                    .chain(remote.snapshot.cover.iter_mut())
+                    .chain(remote.snapshot.transcript.iter_mut())
+                {
                     reference.scope = self.scope.clone();
-                    reference.location = MediaLocation::TelegramMessage { account_id:"fixture".into(),channel_id:"fixture".into(),message_id:1,document_id:1 };
+                    reference.location = MediaLocation::TelegramMessage {
+                        account_id: "fixture".into(),
+                        channel_id: "fixture".into(),
+                        message_id: 1,
+                        document_id: 1,
+                    };
                 }
             }
             Ok(batch)
@@ -3730,67 +3849,155 @@ impl BackupProvider for TelegramReadFixture {
     fn read_asset(&self, id: &str) -> ProviderFuture<'_, Option<RemoteAsset>> {
         let id = id.to_owned();
         Box::pin(async move {
-            if self.read_failures.try_update(std::sync::atomic::Ordering::SeqCst,std::sync::atomic::Ordering::SeqCst,|n|n.checked_sub(1)).is_ok() { bail!("TELEGRAM_CONNECTION_ERROR"); }
+            if self
+                .read_failures
+                .try_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok()
+            {
+                bail!("TELEGRAM_CONNECTION_ERROR");
+            }
             let mut remote = self.inner.read_asset(&id).await?;
             if let Some(remote) = &mut remote {
                 remote.version.scope = self.scope.clone();
-                for reference in remote.snapshot.media.iter_mut().chain(remote.snapshot.cover.iter_mut()).chain(remote.snapshot.transcript.iter_mut()) {
+                for reference in remote
+                    .snapshot
+                    .media
+                    .iter_mut()
+                    .chain(remote.snapshot.cover.iter_mut())
+                    .chain(remote.snapshot.transcript.iter_mut())
+                {
                     reference.scope = self.scope.clone();
-                    reference.location = MediaLocation::TelegramMessage { account_id:"fixture".into(),channel_id:"fixture".into(),message_id:1,document_id:1 };
+                    reference.location = MediaLocation::TelegramMessage {
+                        account_id: "fixture".into(),
+                        channel_id: "fixture".into(),
+                        message_id: 1,
+                        document_id: 1,
+                    };
                 }
             }
             Ok(remote)
         })
     }
-    fn publish_change(&self, _: AssetChange, _: Option<VersionToken>) -> ProviderFuture<'_, PublishReceipt> { panic!("unexpected write") }
-    fn upload_media(&self, _: MediaSource, _: Option<ResumeState>) -> ProviderFuture<'_, UploadReceipt> { panic!("unexpected upload") }
-    fn cancel_upload(&self, _: ResumeState, _: &str) -> ProviderFuture<'_, ()> { panic!("unexpected cleanup") }
+    fn publish_change(
+        &self,
+        _: AssetChange,
+        _: Option<VersionToken>,
+    ) -> ProviderFuture<'_, PublishReceipt> {
+        panic!("unexpected write")
+    }
+    fn upload_media(
+        &self,
+        _: MediaSource,
+        _: Option<ResumeState>,
+    ) -> ProviderFuture<'_, UploadReceipt> {
+        panic!("unexpected upload")
+    }
+    fn cancel_upload(&self, _: ResumeState, _: &str) -> ProviderFuture<'_, ()> {
+        panic!("unexpected cleanup")
+    }
     fn download_media(&self, reference: MediaRef, offset: u64) -> ProviderFuture<'_, MediaStream> {
         reference.validate_scope(&self.scope).unwrap();
-        assert_eq!(reference.sha256,self.source.sha256);
+        assert_eq!(reference.sha256, self.source.sha256);
         Box::pin(async move {
-            let mut stream = self.inner.download_media(self.source.clone(),offset).await?;
-            if let Some(delay) = self.delay { stream.reader = Box::new(review_followup_tests::SlowReader::new(stream.reader, delay)); }
+            let mut stream = self
+                .inner
+                .download_media(self.source.clone(), offset)
+                .await?;
+            if let Some(delay) = self.delay {
+                stream.reader =
+                    Box::new(review_followup_tests::SlowReader::new(stream.reader, delay));
+            }
             Ok(stream)
         })
     }
-    fn verify_media(&self, _: MediaRef) -> ProviderFuture<'_, ()> { panic!("unexpected verify") }
-    fn delete_media(&self, _: MediaRef, _: &str) -> ProviderFuture<'_, ()> { panic!("unexpected delete") }
-    fn reconcile_deleted_asset(&self, _: &str, _: &str) -> ProviderFuture<'_, DeleteCleanup> { panic!("unexpected reconcile") }
+    fn verify_media(&self, _: MediaRef) -> ProviderFuture<'_, ()> {
+        panic!("unexpected verify")
+    }
+    fn delete_media(&self, _: MediaRef, _: &str) -> ProviderFuture<'_, ()> {
+        panic!("unexpected delete")
+    }
+    fn reconcile_deleted_asset(&self, _: &str, _: &str) -> ProviderFuture<'_, DeleteCleanup> {
+        panic!("unexpected reconcile")
+    }
 }
 
 #[tokio::test]
 async fn telegram_restore_recovers_midstream_disconnect_with_same_operation_and_offset() {
     let (f, _, engine) = sync_fixture().await;
-    engine.execute_upload(&claim(&engine,&f.core)).await.unwrap();
+    engine
+        .execute_upload(&claim(&engine, &f.core))
+        .await
+        .unwrap();
     let (_root, core, inner, _) = second_device(&f).await;
     let id = core.backup_assets().unwrap()[0].asset_id.clone();
-    let remote_id = sync_read::remote_id(&core,&inner.scope().space_id,&id).unwrap();
-    let source = inner.read_asset(&remote_id).await.unwrap().unwrap().snapshot.media.unwrap();
+    let remote_id = sync_read::remote_id(&core, &inner.scope().space_id, &id).unwrap();
+    let source = inner
+        .read_asset(&remote_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .snapshot
+        .media
+        .unwrap();
     let mut scope = inner.scope().clone();
     scope.provider_type = ProviderType::Telegram;
     core.backup_db(|db| {
-        db.execute("UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?", [&scope.space_id])?;
+        db.execute(
+            "UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?",
+            [&scope.space_id],
+        )?;
         Ok(())
-    }).unwrap();
-    *core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session.reconnect_probe.lock().unwrap() = Some(||Ok(()));
-    let provider = TelegramReadFixture { delay:None,inner,scope,source:source.clone(),read_failures:std::sync::atomic::AtomicUsize::new(1),pull_failures:std::sync::atomic::AtomicUsize::new(0) };
+    })
+    .unwrap();
+    *core
+        .telegram_accounts
+        .binding(crate::telegram_accounts::Purpose::Backup)
+        .session
+        .reconnect_probe
+        .lock()
+        .unwrap() = Some(|| Ok(()));
+    let provider = TelegramReadFixture {
+        delay: None,
+        inner,
+        scope,
+        source: source.clone(),
+        read_failures: std::sync::atomic::AtomicUsize::new(1),
+        pull_failures: std::sync::atomic::AtomicUsize::new(0),
+    };
     f.store.0.lock().unwrap().break_stream = Some(8);
-    let work = sync_read::ensure(&core,&provider,&id);
+    let work = sync_read::ensure(&core, &provider, &id);
     tokio::pin!(work);
     tokio::select! {
         result = &mut work => panic!("restore returned before reconnect: {result:?}"),
         _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
     }
-    let waiting = scheduler::operations(&core).unwrap().into_iter().find(|op|op.kind=="restore").unwrap();
-    assert_eq!((waiting.state.as_str(),waiting.phase.as_str()),("running","reconnecting"));
-    let path = tokio::time::timeout(std::time::Duration::from_secs(4),&mut work).await.unwrap().unwrap();
-    assert_eq!(tag(&std::fs::read(path).unwrap()),source.sha256);
+    let waiting = scheduler::operations(&core)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.kind == "restore")
+        .unwrap();
+    assert_eq!(
+        (waiting.state.as_str(), waiting.phase.as_str()),
+        ("running", "reconnecting")
+    );
+    let path = tokio::time::timeout(std::time::Duration::from_secs(4), &mut work)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tag(&std::fs::read(path).unwrap()), source.sha256);
     assert!(f.store.0.lock().unwrap().stream_offsets.contains(&8));
-    let operations: Vec<_> = scheduler::operations(&core).unwrap().into_iter().filter(|op|op.kind=="restore").collect();
-    assert_eq!(operations.len(),1);
-    assert_eq!(operations[0].state,"completed");
-    assert_eq!(operations[0].operation_id,waiting.operation_id);
+    let operations: Vec<_> = scheduler::operations(&core)
+        .unwrap()
+        .into_iter()
+        .filter(|op| op.kind == "restore")
+        .collect();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].state, "completed");
+    assert_eq!(operations[0].operation_id, waiting.operation_id);
     core.shutdown().await;
     f.core.shutdown().await;
 }
@@ -3799,28 +4006,81 @@ async fn telegram_restore_recovers_midstream_disconnect_with_same_operation_and_
 async fn telegram_discovery_timeout_reconnects_and_clears_settings_error() {
     for terminal_auth in [false, true] {
         let (f, inner, engine) = sync_fixture().await;
-        engine.execute_upload(&claim(&engine,&f.core)).await.unwrap();
-        let source = inner.read_asset(&f.id).await.unwrap().unwrap().snapshot.media.unwrap();
-        let mut scope = inner.scope().clone(); scope.provider_type = ProviderType::Telegram;
-        f.core.backup_db(|db| { db.execute("UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?", [&scope.space_id])?; Ok(()) }).unwrap();
-        let session = f.core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup).session;
-        session.set_test_view(crate::backup::telegram_session::Phase::Ready,"fixture");
-        *session.reconnect_probe.lock().unwrap() = Some(if terminal_auth { ||Err(anyhow::anyhow!("TELEGRAM_AUTH_REQUIRED")) } else { ||Ok(()) });
-        let provider = Arc::new(TelegramReadFixture {delay:None,inner,scope,source,read_failures:std::sync::atomic::AtomicUsize::new(0),pull_failures:std::sync::atomic::AtomicUsize::new(2)});
-        let (stop,cancel) = tokio::sync::watch::channel(false);
-        let worker = tokio::spawn(sync_engine::run_with(f.core.clone(),cancel,Arc::new(move |_,_|Ok(provider.clone()))));
-        tokio::time::timeout(std::time::Duration::from_secs(2),async {
-            while spaces::get(&f.core).unwrap().unwrap().last_error.as_deref()!=Some("TELEGRAM_RECONNECTING") { tokio::task::yield_now().await; }
-        }).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5),async {
-            loop {
-                let error = spaces::get(&f.core).unwrap().unwrap().last_error;
-                if terminal_auth && error.as_deref()==Some("TELEGRAM_AUTH_REQUIRED") || !terminal_auth && error.is_none() {break;}
+        engine
+            .execute_upload(&claim(&engine, &f.core))
+            .await
+            .unwrap();
+        let source = inner
+            .read_asset(&f.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .media
+            .unwrap();
+        let mut scope = inner.scope().clone();
+        scope.provider_type = ProviderType::Telegram;
+        f.core
+            .backup_db(|db| {
+                db.execute(
+                    "UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?",
+                    [&scope.space_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let session = f
+            .core
+            .telegram_accounts
+            .binding(crate::telegram_accounts::Purpose::Backup)
+            .session;
+        session.set_test_view(crate::backup::telegram_session::Phase::Ready, "fixture");
+        *session.reconnect_probe.lock().unwrap() = Some(if terminal_auth {
+            || Err(anyhow::anyhow!("TELEGRAM_AUTH_REQUIRED"))
+        } else {
+            || Ok(())
+        });
+        let provider = Arc::new(TelegramReadFixture {
+            delay: None,
+            inner,
+            scope,
+            source,
+            read_failures: std::sync::atomic::AtomicUsize::new(0),
+            pull_failures: std::sync::atomic::AtomicUsize::new(2),
+        });
+        let (stop, cancel) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(sync_engine::run_with(
+            f.core.clone(),
+            cancel,
+            Arc::new(move |_, _| Ok(provider.clone())),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while spaces::get(&f.core).unwrap().unwrap().last_error.as_deref()
+                != Some("TELEGRAM_RECONNECTING")
+            {
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let error = spaces::get(&f.core).unwrap().unwrap().last_error;
+                if terminal_auth && error.as_deref() == Some("TELEGRAM_AUTH_REQUIRED")
+                    || !terminal_auth && error.is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         stop.send_replace(true);
-        tokio::time::timeout(std::time::Duration::from_secs(1),worker).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap();
         f.core.shutdown().await;
     }
 }
@@ -3828,14 +4088,45 @@ async fn telegram_discovery_timeout_reconnects_and_clears_settings_error() {
 #[tokio::test]
 async fn telegram_space_summary_maps_only_active_network_errors_to_reconnecting() {
     let (f, _, _) = sync_fixture().await;
-    f.core.backup_db(|db| {db.execute("UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?",[&f.space.space_id])?; Ok(())}).unwrap();
-    for reason in ["TELEGRAM_TRANSFER_TIMEOUT","TELEGRAM_AUTH_REQUIRED","TELEGRAM_INDEX_CHANGED"] {
+    f.core
+        .backup_db(|db| {
+            db.execute(
+                "UPDATE backup_provider_config SET provider_type='telegram' WHERE space_id=?",
+                [&f.space.space_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for reason in [
+        "TELEGRAM_TRANSFER_TIMEOUT",
+        "TELEGRAM_AUTH_REQUIRED",
+        "TELEGRAM_INDEX_CHANGED",
+    ] {
         f.core.backup_db(|db| {db.execute("INSERT INTO backup_sync_checkpoints(space_id,last_error) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET last_error=excluded.last_error",params![f.space.space_id,reason])?;Ok(())}).unwrap();
-        let expected = if crate::telegram_reconnect::network_error(reason) {"TELEGRAM_RECONNECTING"} else {reason};
-        assert_eq!(spaces::get(&f.core).unwrap().unwrap().last_error.as_deref(),Some(expected));
-        spaces::set_enabled(&f.core,false).await.unwrap();
-        assert_eq!(spaces::get(&f.core).unwrap().unwrap().last_error.as_deref(),Some(reason));
-        f.core.backup_db(|db| {db.execute("UPDATE backup_sync_preference SET enabled=1",[])?; db.execute("UPDATE backup_spaces SET enabled=1 WHERE space_id=?",[&f.space.space_id])?;Ok(())}).unwrap();
+        let expected = if crate::telegram_reconnect::network_error(reason) {
+            "TELEGRAM_RECONNECTING"
+        } else {
+            reason
+        };
+        assert_eq!(
+            spaces::get(&f.core).unwrap().unwrap().last_error.as_deref(),
+            Some(expected)
+        );
+        spaces::set_enabled(&f.core, false).await.unwrap();
+        assert_eq!(
+            spaces::get(&f.core).unwrap().unwrap().last_error.as_deref(),
+            Some(reason)
+        );
+        f.core
+            .backup_db(|db| {
+                db.execute("UPDATE backup_sync_preference SET enabled=1", [])?;
+                db.execute(
+                    "UPDATE backup_spaces SET enabled=1 WHERE space_id=?",
+                    [&f.space.space_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
     }
     f.core.shutdown().await;
 }
@@ -3843,8 +4134,13 @@ async fn telegram_space_summary_maps_only_active_network_errors_to_reconnecting(
 #[tokio::test]
 async fn display_batches_multiple_spaces_without_waiting_for_task_lock() {
     let (f, _, engine) = sync_fixture().await;
-    engine.execute_upload(&claim(&engine, &f.core)).await.unwrap();
-    let mut other = f.space.clone(); other.space_id = uuid::Uuid::new_v4().to_string(); other.prefix = "other/".into();
+    engine
+        .execute_upload(&claim(&engine, &f.core))
+        .await
+        .unwrap();
+    let mut other = f.space.clone();
+    other.space_id = uuid::Uuid::new_v4().to_string();
+    other.prefix = "other/".into();
     f.core.backup_db(|db| {
         let tx = db.unchecked_transaction()?;
         repository::save_space(&tx, &other)?;
@@ -3861,28 +4157,57 @@ async fn display_batches_multiple_spaces_without_waiting_for_task_lock() {
     let start = std::time::Instant::now();
     let list = crate::backup::reconcile::list_for_display(&f.core, &other.space_id).unwrap();
     assert_eq!(list.len(), 501);
-    for entry in list.iter().filter(|e| e.entry.asset.asset_id.starts_with("display-")) {
+    for entry in list
+        .iter()
+        .filter(|e| e.entry.asset.asset_id.starts_with("display-"))
+    {
         assert!(entry.in_current_space);
         assert_eq!(entry.backup_locations.len(), 2);
     }
-    eprintln!("asset_display assets=501 spaces=2 first_ms={:.3}", start.elapsed().as_secs_f64()*1000.0);
+    eprintln!(
+        "asset_display assets=501 spaces=2 first_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
     let start = std::time::Instant::now();
-    assert_eq!(crate::backup::reconcile::list_for_display_cached(&f.core, &other.space_id, false).unwrap().len(), 501);
-    eprintln!("asset_display assets=501 spaces=2 polling_ms={:.3}", start.elapsed().as_secs_f64()*1000.0);
+    assert_eq!(
+        crate::backup::reconcile::list_for_display_cached(&f.core, &other.space_id, false)
+            .unwrap()
+            .len(),
+        501
+    );
+    eprintln!(
+        "asset_display assets=501 spaces=2 polling_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let owner = f.core.clone();
-    let holder = std::thread::spawn(move || owner.backup_db(|_| {
-        locked_tx.send(()).unwrap(); release_rx.recv().unwrap(); Ok(())
-    }).unwrap());
+    let holder = std::thread::spawn(move || {
+        owner
+            .backup_db(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap()
+    });
     locked_rx.recv().unwrap();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let reader = f.core.clone(); let space = other.space_id;
+    let reader = f.core.clone();
+    let space = other.space_id;
     let worker = std::thread::spawn(move || {
-        let result = crate::backup::reconcile::list_for_display_cached(&reader, &space, false).map(|v| v.len());
+        let result = crate::backup::reconcile::list_for_display_cached(&reader, &space, false)
+            .map(|v| v.len());
         done_tx.send(result).unwrap();
     });
     let result = done_rx.recv_timeout(std::time::Duration::from_secs(2));
-    release_tx.send(()).unwrap(); holder.join().unwrap(); worker.join().unwrap();
-    assert_eq!(result.expect("asset display waited for main task lock").unwrap(), 501);
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    worker.join().unwrap();
+    assert_eq!(
+        result
+            .expect("asset display waited for main task lock")
+            .unwrap(),
+        501
+    );
 }

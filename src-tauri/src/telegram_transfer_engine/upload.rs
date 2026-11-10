@@ -221,9 +221,7 @@ mod tests {
             let fail = self.fail_first && calls.len() == 1;
             Box::pin(async move {
                 if fail {
-                    Err(InvocationError::Io(std::io::Error::from(
-                        self.failure_kind,
-                    )))
+                    Err(InvocationError::Io(std::io::Error::from(self.failure_kind)))
                 } else {
                     Ok(!self.reject)
                 }
@@ -289,31 +287,62 @@ mod tests {
             let budget = Budget::account(&id);
             let stats = Stats::default();
             let mock = RpcMock {
-                calls: Mutex::default(), fail_first: true,
-                failure_kind: std::io::ErrorKind::TimedOut, reject: false,
+                calls: Mutex::default(),
+                fail_first: true,
+                failure_kind: std::io::ErrorKind::TimedOut,
+                reject: false,
             };
             // Small files have at most 20 standard parts. Cross the 32-success
             // threshold using two file ids and the same retained account budget.
             let parts = if big { 21 } else { 16 };
-            let first = TelegramSink {client:&mock,budget:&budget,stats:&stats,file_id:101,parts,big};
+            let first = TelegramSink {
+                client: &mock,
+                budget: &budget,
+                stats: &stats,
+                file_id: 101,
+                parts,
+                big,
+            };
             first.save(0, vec![7; UPLOAD_PART as usize]).await.unwrap();
             assert_eq!(budget.window.lock().unwrap().weight, 2);
             assert_eq!(budget.window.lock().unwrap().successes, 1);
             tokio::time::advance(Duration::from_secs(30)).await;
-            for index in 1..parts { first.save(index, vec![7; UPLOAD_PART as usize]).await.unwrap(); }
+            for index in 1..parts {
+                first
+                    .save(index, vec![7; UPLOAD_PART as usize])
+                    .await
+                    .unwrap();
+            }
             let next_budget = Budget::account(&id);
             assert!(Arc::ptr_eq(&budget, &next_budget));
-            let next = TelegramSink {client:&mock,budget:&next_budget,stats:&stats,file_id:102,parts,big};
-            for index in 0..(31-parts) { next.save(index, vec![7; UPLOAD_PART as usize]).await.unwrap(); }
+            let next = TelegramSink {
+                client: &mock,
+                budget: &next_budget,
+                stats: &stats,
+                file_id: 102,
+                parts,
+                big,
+            };
+            for index in 0..(31 - parts) {
+                next.save(index, vec![7; UPLOAD_PART as usize])
+                    .await
+                    .unwrap();
+            }
             assert_eq!(budget.window.lock().unwrap().weight, 2);
             assert_eq!(budget.window.lock().unwrap().successes, 31);
             // Control traffic cannot provide the missing file confirmation.
             for _ in 0..32 {
-                rpc(&budget, &stats, Route::Main, None, || Box::pin(async { Ok(()) })).await.unwrap();
+                rpc(&budget, &stats, Route::Main, None, || {
+                    Box::pin(async { Ok(()) })
+                })
+                .await
+                .unwrap();
             }
             assert_eq!(budget.window.lock().unwrap().weight, 2);
             assert_eq!(budget.window.lock().unwrap().successes, 31);
-            next.save(31-parts, vec![7; UPLOAD_PART as usize]).await.unwrap();
+            next.save(31 - parts, vec![7; UPLOAD_PART as usize])
+                .await
+                .unwrap();
             assert_eq!(budget.window.lock().unwrap().weight, 1);
             assert_eq!(stats.retries.load(Ordering::Relaxed), 1);
             let calls = mock.calls.lock().unwrap();
@@ -330,17 +359,61 @@ mod tests {
         for big in [false, true] {
             let budget = Budget::account(&uuid::Uuid::new_v4().to_string());
             let stats = Stats::default();
-            let accepted = RpcMock {calls:Mutex::default(),fail_first:true,failure_kind:std::io::ErrorKind::TimedOut,reject:false};
+            let accepted = RpcMock {
+                calls: Mutex::default(),
+                fail_first: true,
+                failure_kind: std::io::ErrorKind::TimedOut,
+                reject: false,
+            };
             let parts = if big { 21 } else { 16 };
-            let first = TelegramSink {client:&accepted,budget:&budget,stats:&stats,file_id:201,parts,big};
+            let first = TelegramSink {
+                client: &accepted,
+                budget: &budget,
+                stats: &stats,
+                file_id: 201,
+                parts,
+                big,
+            };
             first.save(0, vec![7; UPLOAD_PART as usize]).await.unwrap();
             tokio::time::advance(Duration::from_secs(30)).await;
-            for index in 1..parts { first.save(index, vec![7; UPLOAD_PART as usize]).await.unwrap(); }
-            let second = TelegramSink {client:&accepted,budget:&budget,stats:&stats,file_id:202,parts,big};
-            for index in 0..(31-parts) { second.save(index, vec![7; UPLOAD_PART as usize]).await.unwrap(); }
-            let rejected = RpcMock {calls:Mutex::default(),fail_first:false,failure_kind:std::io::ErrorKind::TimedOut,reject:true};
-            let sink = TelegramSink {client:&rejected,budget:&budget,stats:&stats,file_id:203,parts,big};
-            assert_eq!(sink.save(0, vec![7]).await.unwrap_err().to_string(), "TELEGRAM_UPLOAD_PART_REJECTED");
+            for index in 1..parts {
+                first
+                    .save(index, vec![7; UPLOAD_PART as usize])
+                    .await
+                    .unwrap();
+            }
+            let second = TelegramSink {
+                client: &accepted,
+                budget: &budget,
+                stats: &stats,
+                file_id: 202,
+                parts,
+                big,
+            };
+            for index in 0..(31 - parts) {
+                second
+                    .save(index, vec![7; UPLOAD_PART as usize])
+                    .await
+                    .unwrap();
+            }
+            let rejected = RpcMock {
+                calls: Mutex::default(),
+                fail_first: false,
+                failure_kind: std::io::ErrorKind::TimedOut,
+                reject: true,
+            };
+            let sink = TelegramSink {
+                client: &rejected,
+                budget: &budget,
+                stats: &stats,
+                file_id: 203,
+                parts,
+                big,
+            };
+            assert_eq!(
+                sink.save(0, vec![7]).await.unwrap_err().to_string(),
+                "TELEGRAM_UPLOAD_PART_REJECTED"
+            );
             assert_eq!(budget.window.lock().unwrap().weight, 2);
             assert_eq!(budget.window.lock().unwrap().successes, 0);
             assert_eq!(stats.recent_parts().last().unwrap().status, "failed");
@@ -361,8 +434,12 @@ mod tests {
         }
     }
     impl PartClient for DelayedClient {
-        fn small<'a>(&'a self, _: &'a tl::functions::upload::SaveFilePart) -> RpcWork<'a, bool> { self.reply() }
-        fn big<'a>(&'a self, _: &'a tl::functions::upload::SaveBigFilePart) -> RpcWork<'a, bool> { self.reply() }
+        fn small<'a>(&'a self, _: &'a tl::functions::upload::SaveFilePart) -> RpcWork<'a, bool> {
+            self.reply()
+        }
+        fn big<'a>(&'a self, _: &'a tl::functions::upload::SaveBigFilePart) -> RpcWork<'a, bool> {
+            self.reply()
+        }
     }
     #[tokio::test]
     async fn delayed_upload_confirmation_cannot_recover_a_newer_generation() {
@@ -370,13 +447,25 @@ mod tests {
         for big in [false, true] {
             let budget = Budget::account(&uuid::Uuid::new_v4().to_string());
             let stats = Stats::default();
-            let client = DelayedClient {entered:Semaphore::new(0),release:Semaphore::new(0)};
-            let sink = TelegramSink {client:&client,budget:&budget,stats:&stats,file_id:301,parts:if big {21} else {2},big};
+            let client = DelayedClient {
+                entered: Semaphore::new(0),
+                release: Semaphore::new(0),
+            };
+            let sink = TelegramSink {
+                client: &client,
+                budget: &budget,
+                stats: &stats,
+                file_id: 301,
+                parts: if big { 21 } else { 2 },
+                big,
+            };
             let (result, ()) = tokio::join!(sink.save(0, vec![7; UPLOAD_PART as usize]), async {
                 client.entered.acquire().await.unwrap().forget();
                 let generation = budget.window.lock().unwrap().generation;
                 budget.failed(generation, true);
-                for _ in 0..31 { cover_chunk(&budget, async { Ok(()) }).await.unwrap(); }
+                for _ in 0..31 {
+                    cover_chunk(&budget, async { Ok(()) }).await.unwrap();
+                }
                 tokio::time::advance(Duration::from_secs(30)).await;
                 client.release.add_permits(1);
             });

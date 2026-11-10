@@ -170,10 +170,17 @@ async fn file_sink_rejects_bad_and_replayed_chunks_and_reclaims_requests() {
     file.next().await.unwrap().unwrap();
     assert!(source.active.load(Ordering::Relaxed) > 0);
     drop(file);
-    assert_eq!(source.active.load(Ordering::Relaxed), 0, "cancel drops outstanding requests");
+    assert_eq!(
+        source.active.load(Ordering::Relaxed),
+        0,
+        "cancel drops outstanding requests"
+    );
     let mut missing = FileDownload::new(source, plan);
     missing.scheduled = plan.parts;
-    assert_eq!(missing.next().await.unwrap_err().to_string(), "INCOMPLETE_MEDIA");
+    assert_eq!(
+        missing.next().await.unwrap_err().to_string(),
+        "INCOMPLETE_MEDIA"
+    );
 }
 
 #[tokio::test]
@@ -227,16 +234,24 @@ async fn duplicate_or_missing_completions_never_emit_duplicate_or_partial_succes
         let chunk = plan.chunk(1 - emitted);
         // Duplicate an out-of-order completion, or replay a previously emitted chunk.
         for _ in 0..2 {
-            download.pending.push(Box::pin(async move { Ok((chunk, vec![7; chunk.length])) }));
+            download
+                .pending
+                .push(Box::pin(async move { Ok((chunk, vec![7; chunk.length])) }));
         }
-        assert_eq!(download.next().await.unwrap_err().to_string(), "INCOMPLETE_MEDIA");
+        assert_eq!(
+            download.next().await.unwrap_err().to_string(),
+            "INCOMPLETE_MEDIA"
+        );
         assert_eq!(download.emitted, emitted);
         assert!(download.pending.is_empty() && download.ready.is_empty());
     }
     let plan = Plan::new(2 * DOWNLOAD_PART, DOWNLOAD_PART, 2).unwrap();
     let mut missing = Download::new(mock(None), plan);
     missing.scheduled = plan.parts;
-    assert_eq!(missing.next().await.unwrap_err().to_string(), "INCOMPLETE_MEDIA");
+    assert_eq!(
+        missing.next().await.unwrap_err().to_string(),
+        "INCOMPLETE_MEDIA"
+    );
 }
 
 #[tokio::test]
@@ -455,16 +470,24 @@ impl FileClient for FileMock {
                 .push((dc, request.offset, location.file_reference.clone()));
             assert!(!request.cdn_supported);
             assert_eq!(request.limit, DOWNLOAD_PART as i32);
-            let unauthorized = self.authorized_dcs.as_ref().is_some_and(|dcs| !dcs.lock().unwrap().contains(&dc));
-            let reply = if unauthorized { Some(Reply::Error(401, "AUTH_KEY_UNREGISTERED")) }
-                else { self.replies.lock().unwrap().pop_front() };
+            let unauthorized = self
+                .authorized_dcs
+                .as_ref()
+                .is_some_and(|dcs| !dcs.lock().unwrap().contains(&dc));
+            let reply = if unauthorized {
+                Some(Reply::Error(401, "AUTH_KEY_UNREGISTERED"))
+            } else {
+                self.replies.lock().unwrap().pop_front()
+            };
             match reply {
                 Some(Reply::Error(code, message)) => {
                     if message == "AUTH_KEY_UNREGISTERED" {
-                        if let Some(barrier) = &self.auth_barrier { barrier.wait().await; }
+                        if let Some(barrier) = &self.auth_barrier {
+                            barrier.wait().await;
+                        }
                     }
                     Err(protocol_error(code, message))
-                },
+                }
                 Some(Reply::Disconnect) => Err(InvocationError::Io(std::io::Error::from(
                     std::io::ErrorKind::ConnectionReset,
                 ))),
@@ -516,13 +539,19 @@ impl FileClient for FileMock {
         Box::pin(async move {
             self.authorizations.fetch_add(1, Ordering::Relaxed);
             if dc == 2 {
-                if let Some(started) = &self.auth_started { started.add_permits(1); }
-                if let Some(release) = &self.auth_release { release.acquire().await.unwrap().forget(); }
+                if let Some(started) = &self.auth_started {
+                    started.add_permits(1);
+                }
+                if let Some(release) = &self.auth_release {
+                    release.acquire().await.unwrap().forget();
+                }
             }
             if self.fail_auth {
                 Err(protocol_error(401, "AUTH_KEY_UNREGISTERED"))
             } else {
-                if let Some(dcs) = &self.authorized_dcs { dcs.lock().unwrap().insert(dc); }
+                if let Some(dcs) = &self.authorized_dcs {
+                    dcs.lock().unwrap().insert(dc);
+                }
                 Ok(())
             }
         })
@@ -711,47 +740,92 @@ async fn timeout_reduces_shared_actual_rpc_concurrency_including_existing_waiter
     let budget = Budget::account(&uuid::Uuid::new_v4().to_string());
     let other = Budget::account(&uuid::Uuid::new_v4().to_string());
     let mut held = vec![];
-    for _ in 0..GLOBAL_REQUESTS { held.push(budget.acquire().await.unwrap()); }
-    let queued = budget.acquire(); tokio::pin!(queued);
-    assert!(tokio::time::timeout(Duration::from_millis(10), &mut queued).await.is_err());
+    for _ in 0..GLOBAL_REQUESTS {
+        held.push(budget.acquire().await.unwrap());
+    }
+    let queued = budget.acquire();
+    tokio::pin!(queued);
+    assert!(tokio::time::timeout(Duration::from_millis(10), &mut queued)
+        .await
+        .is_err());
     budget.failed(held[0].generation, true);
     drop(held);
     let first = queued.await.unwrap();
     let mut held = vec![first];
-    for _ in 1..GLOBAL_REQUESTS/2 { held.push(budget.acquire().await.unwrap()); }
-    assert!(tokio::time::timeout(Duration::from_millis(10), budget.acquire()).await.is_err());
-    assert!(tokio::time::timeout(Duration::from_millis(10), other.acquire()).await.is_ok());
+    for _ in 1..GLOBAL_REQUESTS / 2 {
+        held.push(budget.acquire().await.unwrap());
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), budget.acquire())
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), other.acquire())
+            .await
+            .is_ok()
+    );
     drop(held);
-    let stats = Stats::default(); let calls = AtomicUsize::new(0);
-    rpc(&budget, &stats, Route::File, None, || Box::pin(async {
-        if calls.fetch_add(1, Ordering::Relaxed) == 0 {
-            Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
-        } else { Ok(()) }
-    })).await.unwrap();
+    let stats = Stats::default();
+    let calls = AtomicUsize::new(0);
+    rpc(&budget, &stats, Route::File, None, || {
+        Box::pin(async {
+            if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
+            } else {
+                Ok(())
+            }
+        })
+    })
+    .await
+    .unwrap();
     let mut held = vec![];
-    for _ in 0..GLOBAL_REQUESTS/4 { held.push(budget.acquire().await.unwrap()); }
-    assert!(tokio::time::timeout(Duration::from_millis(10), budget.acquire()).await.is_err());
+    for _ in 0..GLOBAL_REQUESTS / 4 {
+        held.push(budget.acquire().await.unwrap());
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), budget.acquire())
+            .await
+            .is_err()
+    );
     assert_eq!(stats.retries.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
 async fn concurrent_dc_auth_failures_share_one_export_import() {
     let mock = Arc::new(FileMock {
-        replies: Mutex::new((0..8).map(|_| Reply::Error(401, "AUTH_KEY_UNREGISTERED")).collect()),
-        home: 1, auth_barrier: Some(Arc::new(tokio::sync::Barrier::new(8))), ..Default::default()
+        replies: Mutex::new(
+            (0..8)
+                .map(|_| Reply::Error(401, "AUTH_KEY_UNREGISTERED"))
+                .collect(),
+        ),
+        home: 1,
+        auth_barrier: Some(Arc::new(tokio::sync::Barrier::new(8))),
+        ..Default::default()
     });
     let source = Arc::new(adapter(mock.clone(), document()));
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..8 {
         let source = source.clone();
-        tasks.spawn(async move { source.fetch(Chunk { index:0,offset:0,length:DOWNLOAD_PART as usize }).await });
+        tasks.spawn(async move {
+            source
+                .fetch(Chunk {
+                    index: 0,
+                    offset: 0,
+                    length: DOWNLOAD_PART as usize,
+                })
+                .await
+        });
     }
     tokio::time::timeout(Duration::from_secs(3), async {
-        while let Some(result) = tasks.join_next().await { assert_eq!(result.unwrap().unwrap().len(), DOWNLOAD_PART as usize); }
-    }).await.unwrap();
+        while let Some(result) = tasks.join_next().await {
+            assert_eq!(result.unwrap().unwrap().len(), DOWNLOAD_PART as usize);
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(mock.authorizations.load(Ordering::Relaxed), 1);
 }
-
 
 #[tokio::test]
 async fn broadcast_timeout_reduces_one_generation_only_and_recovers_across_files() {
@@ -760,29 +834,42 @@ async fn broadcast_timeout_reduces_one_generation_only_and_recovers_across_files
     let barrier = Arc::new(tokio::sync::Barrier::new(4));
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..4 {
-        let budget = budget.clone(); let barrier = barrier.clone();
+        let budget = budget.clone();
+        let barrier = barrier.clone();
         tasks.spawn(async move {
-            let stats = Stats::default(); let mut calls = 0;
+            let stats = Stats::default();
+            let mut calls = 0;
             rpc(&budget, &stats, Route::File, None, || {
-                calls += 1; let first = calls == 1; let barrier = barrier.clone();
+                calls += 1;
+                let first = calls == 1;
+                let barrier = barrier.clone();
                 Box::pin(async move {
                     if first {
                         barrier.wait().await;
                         Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
-                    } else { Ok(()) }
+                    } else {
+                        Ok(())
+                    }
                 })
-            }).await
+            })
+            .await
         });
     }
     tokio::time::timeout(Duration::from_secs(3), async {
-        while let Some(result) = tasks.join_next().await { result.unwrap().unwrap(); }
-    }).await.unwrap();
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(budget.window.lock().unwrap().weight, 2);
     // Later independent requests belong to new generations and can reduce again.
     for weight in [4, 8] {
         assert!(cover_chunk::<()>(&budget, async {
             Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
-        }).await.is_err());
+        })
+        .await
+        .is_err());
         assert_eq!(budget.window.lock().unwrap().weight, weight);
     }
     let next_file = Budget::account(&id);
@@ -794,7 +881,9 @@ async fn broadcast_timeout_reduces_one_generation_only_and_recovers_across_files
     drop(stale);
     tokio::time::pause();
     for weight in [8, 4, 2, 1] {
-        for _ in 0..31 { cover_chunk(&next_file, async { Ok(()) }).await.unwrap(); }
+        for _ in 0..31 {
+            cover_chunk(&next_file, async { Ok(()) }).await.unwrap();
+        }
         assert_eq!(next_file.window.lock().unwrap().weight, weight * 2);
         tokio::time::advance(Duration::from_secs(30)).await;
         cover_chunk(&next_file, async { Ok(()) }).await.unwrap();
@@ -807,60 +896,115 @@ async fn broadcast_timeout_reduces_one_generation_only_and_recovers_across_files
     next_file.failed(stale_generation, true);
     assert_eq!(next_file.window.lock().unwrap().weight, 1);
     let mut held = vec![];
-    for _ in 0..16 { held.push(next_file.acquire().await.unwrap()); }
-    assert!(tokio::time::timeout(Duration::from_millis(1), next_file.acquire()).await.is_err());
+    for _ in 0..16 {
+        held.push(next_file.acquire().await.unwrap());
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), next_file.acquire())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
 async fn independent_sessions_import_separately_and_share_only_account_budget() {
     let barrier = Arc::new(tokio::sync::Barrier::new(8));
     let budget = Budget::account(&uuid::Uuid::new_v4().to_string());
-    let mut clients = vec![]; let mut tasks = tokio::task::JoinSet::new();
+    let mut clients = vec![];
+    let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..2 {
         let client = Arc::new(FileMock {
-            home: 1, authorized_dcs: Some(Mutex::new(HashSet::new())),
-            auth_barrier: Some(barrier.clone()), ..Default::default()
+            home: 1,
+            authorized_dcs: Some(Mutex::new(HashSet::new())),
+            auth_barrier: Some(barrier.clone()),
+            ..Default::default()
         });
         let authorization = Arc::new(Authorization::default());
         clients.push(client.clone());
         // Two documents per independent session must still share its authorization.
         for _ in 0..2 {
             let mut source = adapter(client.clone(), document());
-            source.budget = budget.clone(); source.authorization = authorization.clone();
+            source.budget = budget.clone();
+            source.authorization = authorization.clone();
             let source = Arc::new(source);
             for _ in 0..2 {
                 let source = source.clone();
-                tasks.spawn(async move { source.fetch(Chunk {index:0, offset:0, length:DOWNLOAD_PART as usize}).await });
+                tasks.spawn(async move {
+                    source
+                        .fetch(Chunk {
+                            index: 0,
+                            offset: 0,
+                            length: DOWNLOAD_PART as usize,
+                        })
+                        .await
+                });
             }
         }
     }
     tokio::time::timeout(Duration::from_secs(3), async {
-        while let Some(result) = tasks.join_next().await { assert_eq!(result.unwrap().unwrap().len(), DOWNLOAD_PART as usize); }
-    }).await.unwrap();
+        while let Some(result) = tasks.join_next().await {
+            assert_eq!(result.unwrap().unwrap().len(), DOWNLOAD_PART as usize);
+        }
+    })
+    .await
+    .unwrap();
     for client in clients {
         assert_eq!(client.authorizations.load(Ordering::Relaxed), 1);
-        assert!(client.authorized_dcs.as_ref().unwrap().lock().unwrap().contains(&2));
+        assert!(client
+            .authorized_dcs
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .contains(&2));
     }
 }
 
 #[tokio::test]
 async fn slow_dc_import_does_not_block_an_authorized_dc() {
-    let started = Arc::new(Semaphore::new(0)); let release = Arc::new(Semaphore::new(0));
+    let started = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
     let client = Arc::new(FileMock {
-        home: 1, authorized_dcs: Some(Mutex::new(HashSet::from([3]))),
-        auth_started: Some(started.clone()), auth_release: Some(release.clone()), ..Default::default()
+        home: 1,
+        authorized_dcs: Some(Mutex::new(HashSet::from([3]))),
+        auth_started: Some(started.clone()),
+        auth_release: Some(release.clone()),
+        ..Default::default()
     });
     let source = Arc::new(adapter(client.clone(), document()));
-    let chunk = Chunk {index:0,offset:0,length:DOWNLOAD_PART as usize};
-    let blocked = { let source = source.clone(); tokio::spawn(async move { source.fetch(chunk).await }) };
-    tokio::time::timeout(Duration::from_secs(2), started.acquire()).await.unwrap().unwrap().forget();
+    let chunk = Chunk {
+        index: 0,
+        offset: 0,
+        length: DOWNLOAD_PART as usize,
+    };
+    let blocked = {
+        let source = source.clone();
+        tokio::spawn(async move { source.fetch(chunk).await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), started.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
     let mut other = adapter(client.clone(), document());
-    other.authorization = source.authorization.clone(); other.budget = source.budget.clone();
+    other.authorization = source.authorization.clone();
+    other.budget = source.budget.clone();
     other.document.lock().await.0.dc_id = 3;
-    assert_eq!(tokio::time::timeout(Duration::from_secs(1), other.fetch(chunk)).await.unwrap().unwrap().len(), DOWNLOAD_PART as usize);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), other.fetch(chunk))
+            .await
+            .unwrap()
+            .unwrap()
+            .len(),
+        DOWNLOAD_PART as usize
+    );
     assert!(!blocked.is_finished());
     release.add_permits(1);
-    assert!(tokio::time::timeout(Duration::from_secs(2), blocked).await.unwrap().unwrap().is_ok());
+    assert!(tokio::time::timeout(Duration::from_secs(2), blocked)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_ok());
     assert_eq!(client.authorizations.load(Ordering::Relaxed), 1);
 }
 
@@ -870,15 +1014,33 @@ async fn recovery_requires_both_stable_time_and_consecutive_file_successes() {
     tokio::time::pause();
     assert!(cover_chunk::<()>(&budget, async {
         Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
-    }).await.is_err());
-    for _ in 0..32 { cover_chunk(&budget, async { Ok(()) }).await.unwrap(); }
-    assert_eq!(budget.window.lock().unwrap().weight, 2, "success burst alone must not restore concurrency");
+    })
+    .await
+    .is_err());
+    for _ in 0..32 {
+        cover_chunk(&budget, async { Ok(()) }).await.unwrap();
+    }
+    assert_eq!(
+        budget.window.lock().unwrap().weight,
+        2,
+        "success burst alone must not restore concurrency"
+    );
     assert!(cover_chunk::<()>(&budget, async {
-        Err(InvocationError::Io(std::io::ErrorKind::ConnectionReset.into()))
-    }).await.is_err());
+        Err(InvocationError::Io(
+            std::io::ErrorKind::ConnectionReset.into(),
+        ))
+    })
+    .await
+    .is_err());
     tokio::time::advance(Duration::from_secs(30)).await;
-    for _ in 0..31 { cover_chunk(&budget, async { Ok(()) }).await.unwrap(); }
-    assert_eq!(budget.window.lock().unwrap().weight, 2, "a failure must reset the success streak");
+    for _ in 0..31 {
+        cover_chunk(&budget, async { Ok(()) }).await.unwrap();
+    }
+    assert_eq!(
+        budget.window.lock().unwrap().weight,
+        2,
+        "a failure must reset the success streak"
+    );
     cover_chunk(&budget, async { Ok(()) }).await.unwrap();
     assert_eq!(budget.window.lock().unwrap().weight, 1);
 }
@@ -889,12 +1051,20 @@ async fn only_valid_download_data_recovers_the_window() {
     for reply in [Reply::Short, Reply::Cdn] {
         let mock = file_mock(vec![], 1, false);
         let source = adapter(mock.clone(), document());
-        let chunk = Chunk {index:0,offset:0,length:DOWNLOAD_PART as usize};
+        let chunk = Chunk {
+            index: 0,
+            offset: 0,
+            length: DOWNLOAD_PART as usize,
+        };
         assert!(cover_chunk::<()>(&source.budget, async {
             Err(InvocationError::Io(std::io::ErrorKind::TimedOut.into()))
-        }).await.is_err());
+        })
+        .await
+        .is_err());
         tokio::time::advance(Duration::from_secs(30)).await;
-        for _ in 0..31 { source.fetch(chunk).await.unwrap(); }
+        for _ in 0..31 {
+            source.fetch(chunk).await.unwrap();
+        }
         assert_eq!(source.budget.window.lock().unwrap().weight, 2);
         assert_eq!(source.budget.window.lock().unwrap().successes, 31);
         mock.replies.lock().unwrap().push_back(reply);
@@ -902,7 +1072,9 @@ async fn only_valid_download_data_recovers_the_window() {
         assert_eq!(source.budget.window.lock().unwrap().weight, 2);
         assert_eq!(source.budget.window.lock().unwrap().successes, 0);
         tokio::time::advance(Duration::from_secs(30)).await;
-        for _ in 0..32 { source.fetch(chunk).await.unwrap(); }
+        for _ in 0..32 {
+            source.fetch(chunk).await.unwrap();
+        }
         assert_eq!(source.budget.window.lock().unwrap().weight, 1);
     }
 }
@@ -915,10 +1087,18 @@ async fn resumed_download_skips_confirmed_chunks_and_trims_partial_chunk() {
         let plan = Plan::new(bytes, DOWNLOAD_PART, 4).unwrap();
         let mut download = Download::from_offset(source.clone(), plan, offset).unwrap();
         let mut actual = Vec::new();
-        while let Some(chunk) = download.next().await.unwrap() { actual.extend(chunk); }
-        let expected: Vec<u8> = (offset..bytes).map(|position| (position / DOWNLOAD_PART) as u8).collect();
+        while let Some(chunk) = download.next().await.unwrap() {
+            actual.extend(chunk);
+        }
+        let expected: Vec<u8> = (offset..bytes)
+            .map(|position| (position / DOWNLOAD_PART) as u8)
+            .collect();
         assert_eq!(actual, expected);
-        let remaining_chunks = if offset == bytes { 0 } else { (bytes.div_ceil(DOWNLOAD_PART) - offset / DOWNLOAD_PART) as usize };
+        let remaining_chunks = if offset == bytes {
+            0
+        } else {
+            (bytes.div_ceil(DOWNLOAD_PART) - offset / DOWNLOAD_PART) as usize
+        };
         assert_eq!(source.calls.load(Ordering::Relaxed), remaining_chunks);
     }
 }

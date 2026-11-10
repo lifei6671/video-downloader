@@ -100,7 +100,12 @@ fn changed_messages(
         }
         ChannelDifference::TooLong(_) => return DifferencePage::Unusable("difference_too_long"),
     };
-    if ids.first().into_iter().chain(deleted.first()).any(|id| *id <= 0) {
+    if ids
+        .first()
+        .into_iter()
+        .chain(deleted.first())
+        .any(|id| *id <= 0)
+    {
         DifferencePage::Unusable("invalid_message_id")
     } else if pts < previous {
         DifferencePage::Unusable("pts_regressed")
@@ -109,7 +114,12 @@ fn changed_messages(
     } else if pts == previous && !(ids.is_empty() && deleted.is_empty()) {
         DifferencePage::Unusable("changed_ids_without_pts_advance")
     } else {
-        DifferencePage::Changes { pts, ids, deleted, complete }
+        DifferencePage::Changes {
+            pts,
+            ids,
+            deleted,
+            complete,
+        }
     }
 }
 
@@ -400,7 +410,9 @@ async fn refresh_with<T>(
     io.check()?;
     // Read the cursor only after admission. A slower full scan or difference
     // must not overwrite a newer cache committed by another uploader.
-    let _refresh = io.run(async { Ok(core.telegram_map_refresh.lock().await) }).await?;
+    let _refresh = io
+        .run(async { Ok(core.telegram_map_refresh.lock().await) })
+        .await?;
     io.check()?;
     let space = &target.scope.space_id;
     let previous: Option<(i32, i64)> = core.backup_db(|db| {
@@ -419,7 +431,12 @@ async fn refresh_with<T>(
             let pts = {
                 let _changes = delete_timing::refresh_span("channel_changes");
                 let (pts, new_ids, deleted, complete) = match source.changes(cursor, io).await? {
-                    DifferencePage::Changes { pts, ids, deleted, complete } => (pts, ids, deleted, complete),
+                    DifferencePage::Changes {
+                        pts,
+                        ids,
+                        deleted,
+                        complete,
+                    } => (pts, ids, deleted, complete),
                     DifferencePage::LostPosition(reason) => {
                         delete_timing::selected_full_scan("difference_unusable", Some(reason));
                         break;
@@ -438,12 +455,18 @@ async fn refresh_with<T>(
                 ids.extend(deleted);
                 delete_timing::record_difference_page(ids.len() - previous_count);
                 if ids.len() > MAX_DIFFERENCE_IDS {
-                    delete_timing::selected_full_scan("difference_unusable", Some("difference_id_limit"));
+                    delete_timing::selected_full_scan(
+                        "difference_unusable",
+                        Some("difference_id_limit"),
+                    );
                     break;
                 }
                 if !complete {
                     if page == MAX_DIFFERENCE_PAGES {
-                        delete_timing::selected_full_scan("difference_unusable", Some("difference_page_limit"));
+                        delete_timing::selected_full_scan(
+                            "difference_unusable",
+                            Some("difference_page_limit"),
+                        );
                         break;
                     }
                     cursor = pts;

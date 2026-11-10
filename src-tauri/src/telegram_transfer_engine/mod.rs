@@ -116,7 +116,12 @@ struct RequestWindow {
 }
 impl Default for RequestWindow {
     fn default() -> Self {
-        Self { generation: 0, weight: 1, successes: 0, stable_since: tokio::time::Instant::now() }
+        Self {
+            generation: 0,
+            weight: 1,
+            successes: 0,
+            stable_since: tokio::time::Instant::now(),
+        }
     }
 }
 #[derive(Debug)]
@@ -135,7 +140,12 @@ struct DcAuthorization {
 }
 impl Authorization {
     fn dc(&self, dc: i32) -> Arc<DcAuthorization> {
-        self.0.lock().expect("DC authorization").entry(dc).or_default().clone()
+        self.0
+            .lock()
+            .expect("DC authorization")
+            .entry(dc)
+            .or_default()
+            .clone()
     }
 }
 
@@ -174,7 +184,9 @@ impl Budget {
         accounts.insert(id.into(), budget.clone());
         budget
     }
-    pub(crate) fn media_connections(&self) -> Arc<Semaphore> { self.media_connections.clone() }
+    pub(crate) fn media_connections(&self) -> Arc<Semaphore> {
+        self.media_connections.clone()
+    }
     fn check(&self) -> Result<()> {
         if let Some(until) = *self.cooldown.lock().expect("transfer cooldown") {
             let left = until.saturating_duration_since(Instant::now());
@@ -191,18 +203,27 @@ impl Budget {
                 let window = self.window.lock().expect("transfer window");
                 (window.generation, window.weight)
             };
-            let permit = self.requests.clone().acquire_many_owned(weight as u32).await
+            let permit = self
+                .requests
+                .clone()
+                .acquire_many_owned(weight as u32)
+                .await
                 .context("TELEGRAM_TRANSFER_CANCELED")?;
             self.check()?;
             // A queued request must enter the current window, including after recovery.
             if generation == self.window.lock().expect("transfer window").generation {
-                return Ok(RequestPermit { _permit: permit, generation });
+                return Ok(RequestPermit {
+                    _permit: permit,
+                    generation,
+                });
             }
         }
     }
     fn failed(&self, generation: u64, timed_out: bool) {
         let mut window = self.window.lock().expect("transfer window");
-        if generation != window.generation { return; }
+        if generation != window.generation {
+            return;
+        }
         window.successes = 0;
         window.stable_since = tokio::time::Instant::now();
         if timed_out {
@@ -212,7 +233,9 @@ impl Budget {
     }
     fn succeeded(&self, generation: u64) {
         let mut window = self.window.lock().expect("transfer window");
-        if generation != window.generation || window.weight == 1 { return; }
+        if generation != window.generation || window.weight == 1 {
+            return;
+        }
         window.successes += 1;
         // Require both sustained progress and a stable interval before opening one step.
         if window.successes >= 32 && window.stable_since.elapsed() >= Duration::from_secs(30) {
@@ -352,7 +375,10 @@ pub(crate) async fn cover_chunk<T>(
 ) -> Result<T> {
     let permit = budget.acquire().await?;
     match tokio::time::timeout(RPC_TIMEOUT, work).await {
-        Ok(Ok(value)) => { budget.succeeded(permit.generation); Ok(value) },
+        Ok(Ok(value)) => {
+            budget.succeeded(permit.generation);
+            Ok(value)
+        }
         Ok(Err(error)) => {
             budget.failed(permit.generation, matches!(&error, InvocationError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut));
             if let InvocationError::Rpc(ref rpc) = error {
@@ -362,7 +388,10 @@ pub(crate) async fn cover_chunk<T>(
             }
             Err(crate::backup::telegram_session::rpc_error(error))
         }
-        Err(_) => { budget.failed(permit.generation, true); bail!("TELEGRAM_TRANSFER_TIMEOUT"); },
+        Err(_) => {
+            budget.failed(permit.generation, true);
+            bail!("TELEGRAM_TRANSFER_TIMEOUT");
+        }
     }
 }
 // Routing controls error handling; callers confirm valid file data separately.
@@ -431,7 +460,10 @@ async fn rpc<'a, T>(
                 ) || matches!(&error, InvocationError::Rpc(e) if e.code >= 500);
                 (crate::backup::telegram_session::rpc_error(error), retry)
             }
-            Err(_) => { budget.failed(generation, true); (anyhow::anyhow!("TELEGRAM_TRANSFER_TIMEOUT"), true) },
+            Err(_) => {
+                budget.failed(generation, true);
+                (anyhow::anyhow!("TELEGRAM_TRANSFER_TIMEOUT"), true)
+            }
         };
         stats.failures.fetch_add(1, Ordering::Relaxed);
         if let Some(part) = part {
@@ -658,10 +690,18 @@ impl Download {
     pub fn from_offset(source: Arc<dyn ChunkSource>, plan: Plan, offset: u64) -> Result<Self> {
         ensure!(offset <= plan.bytes, "BACKUP_INVALID_RANGE");
         let mut download = Self::new(source, plan);
-        let first = if offset == plan.bytes { plan.parts } else { offset / plan.part };
+        let first = if offset == plan.bytes {
+            plan.parts
+        } else {
+            offset / plan.part
+        };
         download.scheduled = first;
         download.emitted = first;
-        download.skip = if offset == plan.bytes { 0 } else { (offset % plan.part) as usize };
+        download.skip = if offset == plan.bytes {
+            0
+        } else {
+            (offset % plan.part) as usize
+        };
         Ok(download)
     }
     async fn next_inner(&mut self) -> Result<Option<Vec<u8>>> {
@@ -681,7 +721,10 @@ impl Download {
             }
             if let Some(mut bytes) = self.ready.remove(&self.emitted) {
                 self.emitted += 1;
-                if self.skip != 0 { bytes.drain(..self.skip); self.skip = 0; }
+                if self.skip != 0 {
+                    bytes.drain(..self.skip);
+                    self.skip = 0;
+                }
                 return Ok(Some(bytes));
             }
             let Some(result) = self.pending.next().await else {

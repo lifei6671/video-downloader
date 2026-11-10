@@ -1,5 +1,8 @@
 //! Telegram single-message downloads through grammers, using the existing task queue.
-use crate::backup::{provider::ProviderFuture, telegram_session::{rpc_error, retry_read}};
+use crate::backup::{
+    provider::ProviderFuture,
+    telegram_session::{retry_read, rpc_error},
+};
 use anyhow::{bail, Context, Result};
 use grammers_client::{
     media::{ChatPhoto, Downloadable, Media as SdkMedia, Photo, PhotoSize},
@@ -118,11 +121,16 @@ pub(crate) struct Media {
 impl PartialEq for Media {
     fn eq(&self, other: &Self) -> bool {
         // A channel rename cannot change the identity of an in-flight document.
-        self.channel == other.channel && self.message == other.message
-            && self.document == other.document && self.size == other.size
-            && self.mime == other.mime && self.name == other.name
-            && self.container == other.container && self.width == other.width
-            && self.height == other.height && self.duration_ms == other.duration_ms
+        self.channel == other.channel
+            && self.message == other.message
+            && self.document == other.document
+            && self.size == other.size
+            && self.mime == other.mime
+            && self.name == other.name
+            && self.container == other.container
+            && self.width == other.width
+            && self.height == other.height
+            && self.duration_ms == other.duration_ms
     }
 }
 #[derive(Debug)]
@@ -131,12 +139,19 @@ pub(crate) struct TransferResult {
     pub cover: Option<Vec<u8>>,
     pub avatar: Option<Vec<u8>>,
 }
-pub(crate) struct ReceivedPart { offset: u64, bytes: Vec<u8> }
+pub(crate) struct ReceivedPart {
+    offset: u64,
+    bytes: Vec<u8>,
+}
 pub(crate) trait Transport: Send {
     fn inspect<'a>(&'a mut self, link: &'a MessageLink) -> ProviderFuture<'a, Media>;
     fn next(&mut self, offset: u64) -> ProviderFuture<'_, Option<ReceivedPart>>;
-    fn cover(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> { Box::pin(async { Ok(None) }) }
-    fn avatar(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> { Box::pin(async { Ok(None) }) }
+    fn cover(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn avatar(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 #[cfg(test)]
 pub(crate) type Factory = std::sync::Arc<dyn Fn() -> Box<dyn Transport> + Send + Sync>;
@@ -158,7 +173,9 @@ impl Transport for SdkTransport {
                     if matches!(dialog.peer(), Peer::Channel(_))
                         && dialog.peer_id().bare_id_unchecked() as u64 == channel
                     {
-                        let Peer::Channel(channel) = dialog.peer() else { unreachable!("checked channel peer"); };
+                        let Peer::Channel(channel) = dialog.peer() else {
+                            unreachable!("checked channel peer");
+                        };
                         found = Some((
                             dialog.peer_ref(),
                             channel.title().trim().to_owned(),
@@ -176,10 +193,13 @@ impl Transport for SdkTransport {
                     .await
                     .map_err(rpc_error)?
                     .context("TELEGRAM_CHANNEL_FORBIDDEN")?;
-                let Peer::Channel(channel) = &peer else { bail!("UNSUPPORTED_CONTENT"); };
+                let Peer::Channel(channel) = &peer else {
+                    bail!("UNSUPPORTED_CONTENT");
+                };
                 let title = channel.title().trim().to_owned();
                 let photo_id = channel.photo().map(|photo| photo.photo_id);
-                let peer = peer.to_ref()
+                let peer = peer
+                    .to_ref()
                     .await
                     .map_err(|_| anyhow::anyhow!("TELEGRAM_CHANNEL_FORBIDDEN"))?
                     .context("TELEGRAM_CHANNEL_FORBIDDEN")?;
@@ -212,27 +232,57 @@ impl Transport for SdkTransport {
                     big: false,
                     peer: peer.into(),
                     photo_id,
-                }.into(),
+                }
+                .into(),
             });
             let client = self.client.clone();
             let message_id = link.message as i32;
-            let refresh: crate::telegram_transfer_engine::Refresh = std::sync::Arc::new(move || {
-                let client = client.clone();
-                Box::pin(async move {
-                    let message = retry_read(|| async { client.get_messages_by_id(peer, &[message_id]).await.map_err(rpc_error) }).await?
-                        .into_iter().next().flatten().context("TELEGRAM_MEDIA_MISSING")?;
-                    let Some(SdkMedia::Document(doc)) = message.media() else { bail!("TELEGRAM_MEDIA_CHANGED"); };
-                    let Some(tl::enums::Document::Document(raw)) = doc.raw.document else { bail!("TELEGRAM_MEDIA_CHANGED"); };
-                    Ok(raw)
-                })
-            });
-            self.iter = Some(crate::telegram_transfer_engine::download_file(self.client.clone(), raw, refresh, self.budget.clone(), self.authorization.clone())?);
+            let refresh: crate::telegram_transfer_engine::Refresh =
+                std::sync::Arc::new(move || {
+                    let client = client.clone();
+                    Box::pin(async move {
+                        let message = retry_read(|| async {
+                            client
+                                .get_messages_by_id(peer, &[message_id])
+                                .await
+                                .map_err(rpc_error)
+                        })
+                        .await?
+                        .into_iter()
+                        .next()
+                        .flatten()
+                        .context("TELEGRAM_MEDIA_MISSING")?;
+                        let Some(SdkMedia::Document(doc)) = message.media() else {
+                            bail!("TELEGRAM_MEDIA_CHANGED");
+                        };
+                        let Some(tl::enums::Document::Document(raw)) = doc.raw.document else {
+                            bail!("TELEGRAM_MEDIA_CHANGED");
+                        };
+                        Ok(raw)
+                    })
+                });
+            self.iter = Some(crate::telegram_transfer_engine::download_file(
+                self.client.clone(),
+                raw,
+                refresh,
+                self.budget.clone(),
+                self.authorization.clone(),
+            )?);
             Ok(result)
         })
     }
     fn next(&mut self, _: u64) -> ProviderFuture<'_, Option<ReceivedPart>> {
         Box::pin(async {
-            Ok(self.iter.as_mut().context("TELEGRAM_MEDIA_MISSING")?.next().await?.map(|(chunk, bytes)| ReceivedPart {offset: chunk.offset, bytes}))
+            Ok(self
+                .iter
+                .as_mut()
+                .context("TELEGRAM_MEDIA_MISSING")?
+                .next()
+                .await?
+                .map(|(chunk, bytes)| ReceivedPart {
+                    offset: chunk.offset,
+                    bytes,
+                }))
         })
     }
     fn cover(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> {
@@ -240,16 +290,28 @@ impl Transport for SdkTransport {
             let client = &self.client;
             let budget = &self.budget;
             first_available_cover(&self.covers, move |candidate| {
-                Box::pin(download_preview_bytes(client, budget, candidate, crate::telegram_cover::MAX_BYTES))
-            }).await
+                Box::pin(download_preview_bytes(
+                    client,
+                    budget,
+                    candidate,
+                    crate::telegram_cover::MAX_BYTES,
+                ))
+            })
+            .await
         })
     }
     fn avatar(&mut self) -> ProviderFuture<'_, Option<Vec<u8>>> {
         Box::pin(async {
-            let Some(photo) = &self.channel_photo else { return Ok(None); };
+            let Some(photo) = &self.channel_photo else {
+                return Ok(None);
+            };
             let bytes = download_preview_bytes(
-                &self.client, &self.budget, photo, crate::parse_cache::MAX_AVATAR_BYTES,
-            ).await?;
+                &self.client,
+                &self.budget,
+                photo,
+                crate::parse_cache::MAX_AVATAR_BYTES,
+            )
+            .await?;
             Ok(Some(bytes))
         })
     }
@@ -263,20 +325,37 @@ async fn download_preview_bytes(
 ) -> Result<Vec<u8>> {
     let mut download = client.iter_download(image);
     let mut bytes = Vec::new();
-    while let Some(chunk) = crate::telegram_transfer_engine::cover_chunk(budget, download.next()).await? {
-        anyhow::ensure!(bytes.len() + chunk.len() <= max_bytes, "INVALID_MEDIA_CONTENT");
+    while let Some(chunk) =
+        crate::telegram_transfer_engine::cover_chunk(budget, download.next()).await?
+    {
+        anyhow::ensure!(
+            bytes.len() + chunk.len() <= max_bytes,
+            "INVALID_MEDIA_CONTENT"
+        );
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
 }
 
-async fn first_available_cover<'a>(candidates: &'a [PhotoSize], read: impl Fn(&'a PhotoSize) -> ProviderFuture<'a, Vec<u8>>) -> Result<Option<Vec<u8>>> {
+async fn first_available_cover<'a>(
+    candidates: &'a [PhotoSize],
+    read: impl Fn(&'a PhotoSize) -> ProviderFuture<'a, Vec<u8>>,
+) -> Result<Option<Vec<u8>>> {
     for candidate in candidates {
-        if candidate.size() == 0 || candidate.size() > crate::telegram_cover::MAX_BYTES { continue; }
+        if candidate.size() == 0 || candidate.size() > crate::telegram_cover::MAX_BYTES {
+            continue;
+        }
         match read(candidate).await {
             Ok(body) if crate::telegram_cover::valid(&body) => return Ok(Some(body)),
-            Err(error) if matches!(error.to_string().as_str(), "TELEGRAM_AUTH_REQUIRED" | "CANCELED") => return Err(error),
-            _ => {},
+            Err(error)
+                if matches!(
+                    error.to_string().as_str(),
+                    "TELEGRAM_AUTH_REQUIRED" | "CANCELED"
+                ) =>
+            {
+                return Err(error)
+            }
+            _ => {}
         }
     }
     Ok(None)
@@ -288,7 +367,12 @@ fn cover_candidates(doc: &grammers_client::media::Document) -> Vec<PhotoSize> {
         values.sort_by_key(|size| std::cmp::Reverse(size.size()));
         values
     }
-    let mut covers = doc.raw.video_cover.clone().map(|photo| ranked(Photo::from_raw(photo).thumbs())).unwrap_or_default();
+    let mut covers = doc
+        .raw
+        .video_cover
+        .clone()
+        .map(|photo| ranked(Photo::from_raw(photo).thumbs()))
+        .unwrap_or_default();
     covers.extend(ranked(doc.thumbs()));
     covers
 }
@@ -338,9 +422,24 @@ fn media_info(channel: u64, message: u32, raw: &tl::types::Document) -> Result<M
             name.into()
         },
         container: container.into(),
-        width: raw.attributes.iter().find_map(|a| match a { tl::enums::DocumentAttribute::Video(v) => u32::try_from(v.w).ok().filter(|n| *n > 0), _ => None }),
-        height: raw.attributes.iter().find_map(|a| match a { tl::enums::DocumentAttribute::Video(v) => u32::try_from(v.h).ok().filter(|n| *n > 0), _ => None }),
-        duration_ms: raw.attributes.iter().find_map(|a| match a { tl::enums::DocumentAttribute::Video(v) if v.duration.is_finite() && v.duration > 0.0 && v.duration < u64::MAX as f64 / 1000.0 => Some((v.duration * 1000.0).round().max(1.0) as u64), _ => None }),
+        width: raw.attributes.iter().find_map(|a| match a {
+            tl::enums::DocumentAttribute::Video(v) => u32::try_from(v.w).ok().filter(|n| *n > 0),
+            _ => None,
+        }),
+        height: raw.attributes.iter().find_map(|a| match a {
+            tl::enums::DocumentAttribute::Video(v) => u32::try_from(v.h).ok().filter(|n| *n > 0),
+            _ => None,
+        }),
+        duration_ms: raw.attributes.iter().find_map(|a| match a {
+            tl::enums::DocumentAttribute::Video(v)
+                if v.duration.is_finite()
+                    && v.duration > 0.0
+                    && v.duration < u64::MAX as f64 / 1000.0 =>
+            {
+                Some((v.duration * 1000.0).round().max(1.0) as u64)
+            }
+            _ => None,
+        }),
     })
 }
 fn preview(media: &Media, link: &MessageLink) -> Value {
@@ -352,12 +451,21 @@ fn preview(media: &Media, link: &MessageLink) -> Value {
 }
 pub(crate) fn merge_attributes(video: &mut Value, metadata: &Value) {
     for field in ["width", "height", "duration_ms"] {
-        if metadata[field].as_u64().is_some_and(|n| n > 0) { video[field] = metadata[field].clone(); }
+        if metadata[field].as_u64().is_some_and(|n| n > 0) {
+            video[field] = metadata[field].clone();
+        }
     }
     merge_channel_title(video, metadata);
-    let width = video["width"].clone(); let height = video["height"].clone();
+    let width = video["width"].clone();
+    let height = video["height"].clone();
     if let Some(formats) = video["formats"].as_array_mut() {
-        for format in formats.iter_mut().filter(|format| format["format_id"] == "original") { format["width"] = width.clone(); format["height"] = height.clone(); }
+        for format in formats
+            .iter_mut()
+            .filter(|format| format["format_id"] == "original")
+        {
+            format["width"] = width.clone();
+            format["height"] = height.clone();
+        }
     }
 }
 pub(crate) fn fill_missing_attributes(video: &mut Value, metadata: &Value) {
@@ -371,15 +479,34 @@ pub(crate) fn fill_missing_attributes(video: &mut Value, metadata: &Value) {
     merge_channel_title(video, metadata);
 }
 fn merge_channel_title(video: &mut Value, metadata: &Value) {
-    if video["platform"] != "telegram" || video["video_id"] != metadata["video_id"] { return; }
-    let Some(channel) = video["video_id"].as_str().and_then(|id| id.split_once('_')).map(|v| v.0) else { return; };
-    if metadata["author_profile"]["id"].as_str() != Some(channel) { return; }
-    let Some(title) = metadata["author_profile"]["nickname"].as_str().map(str::trim).filter(|s| !s.is_empty()) else { return; };
+    if video["platform"] != "telegram" || video["video_id"] != metadata["video_id"] {
+        return;
+    }
+    let Some(channel) = video["video_id"]
+        .as_str()
+        .and_then(|id| id.split_once('_'))
+        .map(|v| v.0)
+    else {
+        return;
+    };
+    if metadata["author_profile"]["id"].as_str() != Some(channel) {
+        return;
+    }
+    let Some(title) = metadata["author_profile"]["nickname"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
     if video["author_profile"]["id"].as_str() != Some(channel) {
         video["author_profile"] = metadata["author_profile"].clone();
     } else {
         video["author_profile"]["nickname"] = title.into();
-        if metadata["author_profile"]["handle"].as_str().is_some_and(|s| !s.is_empty()) {
+        if metadata["author_profile"]["handle"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+        {
             video["author_profile"]["handle"] = metadata["author_profile"]["handle"].clone();
         }
     }
@@ -412,13 +539,24 @@ pub(crate) async fn operation(
     mut progress: impl FnMut(Value),
     mut cancel: watch::Receiver<bool>,
 ) -> Result<TransferResult> {
-    let binding = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download);
+    let binding = core
+        .telegram_accounts
+        .binding(crate::telegram_accounts::Purpose::Download);
     loop {
-        let current = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download);
-        if !std::sync::Arc::ptr_eq(&binding.session, &current.session) { bail!("TELEGRAM_ACCOUNT_MISMATCH"); }
+        let current = core
+            .telegram_accounts
+            .binding(crate::telegram_accounts::Purpose::Download);
+        if !std::sync::Arc::ptr_eq(&binding.session, &current.session) {
+            bail!("TELEGRAM_ACCOUNT_MISMATCH");
+        }
         if binding.session.reconnect.waiting() {
             progress(json!({"reconnecting":true}));
-            crate::telegram_accounts::recover_network(core, crate::telegram_accounts::Purpose::Download, cancel.clone()).await?;
+            crate::telegram_accounts::recover_network(
+                core,
+                crate::telegram_accounts::Purpose::Download,
+                cancel.clone(),
+            )
+            .await?;
         }
         let mut network = binding.session.network_cancellation();
         core.wait_telegram_slot(task_id, cancel.clone()).await?;
@@ -426,17 +564,39 @@ pub(crate) async fn operation(
         let result = if binding.session.network_change_pending() {
             Err(anyhow::anyhow!("TELEGRAM_NETWORK_CHANGED"))
         } else {
-            Box::pin(operation_once(core, input, expected, directory, &mut progress, cancel.clone())).await
+            Box::pin(operation_once(
+                core,
+                input,
+                expected,
+                directory,
+                &mut progress,
+                cancel.clone(),
+            ))
+            .await
         };
         let reason = result.as_ref().err().map(ToString::to_string);
-        if reason.as_deref().is_some_and(crate::telegram_reconnect::network_error) {
+        if reason
+            .as_deref()
+            .is_some_and(crate::telegram_reconnect::network_error)
+        {
             binding.session.reconnect.disconnected();
             progress(json!({"reconnecting":true}));
-            crate::telegram_accounts::recover_network(core, crate::telegram_accounts::Purpose::Download, cancel.clone()).await?;
+            crate::telegram_accounts::recover_network(
+                core,
+                crate::telegram_accounts::Purpose::Download,
+                cancel.clone(),
+            )
+            .await?;
             continue;
         }
-        if !reason.as_deref().is_some_and(|reason| reason == "TELEGRAM_NETWORK_CHANGED"
-            || reason == "TELEGRAM_BUSY" && (network.has_changed().unwrap_or(false) || binding.session.network_change_pending())) { return result; }
+        if !reason.as_deref().is_some_and(|reason| {
+            reason == "TELEGRAM_NETWORK_CHANGED"
+                || reason == "TELEGRAM_BUSY"
+                    && (network.has_changed().unwrap_or(false)
+                        || binding.session.network_change_pending())
+        }) {
+            return result;
+        }
         tokio::select! { biased;
             _=cancel.wait_for(|v|*v)=>bail!("CANCELED"),
             _=network.changed()=>{},
@@ -461,8 +621,12 @@ async fn operation_once(
         .clone();
     #[cfg(not(test))]
     let factory: Option<fn() -> Box<dyn Transport>> = None;
-    if expected.is_none() { progress(json!({"resolve_phase":"connecting_account"})); }
-    let binding = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Download);
+    if expected.is_none() {
+        progress(json!({"resolve_phase":"connecting_account"}));
+    }
+    let binding = core
+        .telegram_accounts
+        .binding(crate::telegram_accounts::Purpose::Download);
     let mut network_stop = binding.session.network_cancellation();
     let connection = if factory.is_some() {
         None
@@ -491,8 +655,18 @@ async fn operation_once(
                 .context("TELEGRAM_NOT_CONNECTED")?
                 .client(),
             iter: None,
-            budget: crate::telegram_transfer_engine::Budget::account(&binding.session.status().account.context("TELEGRAM_AUTH_REQUIRED")?.id),
-            authorization: connection.as_ref().context("TELEGRAM_NOT_CONNECTED")?.file_authorization(),
+            budget: crate::telegram_transfer_engine::Budget::account(
+                &binding
+                    .session
+                    .status()
+                    .account
+                    .context("TELEGRAM_AUTH_REQUIRED")?
+                    .id,
+            ),
+            authorization: connection
+                .as_ref()
+                .context("TELEGRAM_NOT_CONNECTED")?
+                .file_authorization(),
             covers: vec![],
             channel_photo: None,
         })
@@ -514,8 +688,13 @@ async fn operation_once(
     if let Some(connection) = connection {
         connection.close().await;
     }
-    if result.as_ref().is_err_and(|error| error.to_string() == "TELEGRAM_AUTH_REQUIRED") {
-        if let Some(id) = authorization_id { binding.session.authorization_failed(&id).await; }
+    if result
+        .as_ref()
+        .is_err_and(|error| error.to_string() == "TELEGRAM_AUTH_REQUIRED")
+    {
+        if let Some(id) = authorization_id {
+            binding.session.authorization_failed(&id).await;
+        }
     }
     result
 }
@@ -556,25 +735,49 @@ async fn transfer(
     directory: Option<&Path>,
     mut progress: impl FnMut(Value),
 ) -> Result<TransferResult> {
-    if expected.is_none() { progress(json!({"resolve_phase":"fetching_metadata"})); }
+    if expected.is_none() {
+        progress(json!({"resolve_phase":"fetching_metadata"}));
+    }
     let mut media = timeout(IDLE_TIMEOUT, source.inspect(link))
         .await
         .context("TELEGRAM_TIMEOUT")??;
-    if let Some(expected) = expected { check_expected(&media, expected)?; }
-    if expected.is_none() { progress(json!({"resolve_phase":"loading_preview"})); }
+    if let Some(expected) = expected {
+        check_expected(&media, expected)?;
+    }
+    if expected.is_none() {
+        progress(json!({"resolve_phase":"loading_preview"}));
+    }
     let cover = match timeout(Duration::from_secs(20), source.cover()).await {
         Ok(Ok(cover)) => cover,
-        Ok(Err(error)) if matches!(error.to_string().as_str(), "TELEGRAM_AUTH_REQUIRED" | "CANCELED") => return Err(error),
+        Ok(Err(error))
+            if matches!(
+                error.to_string().as_str(),
+                "TELEGRAM_AUTH_REQUIRED" | "CANCELED"
+            ) =>
+        {
+            return Err(error)
+        }
         _ => None,
     };
     if expected.is_none() {
         progress(json!({"resolve_phase":"loading_author"}));
         let avatar = match timeout(Duration::from_secs(5), source.avatar()).await {
             Ok(Ok(avatar)) => avatar,
-            Ok(Err(error)) if matches!(error.to_string().as_str(), "TELEGRAM_AUTH_REQUIRED" | "CANCELED") => return Err(error),
+            Ok(Err(error))
+                if matches!(
+                    error.to_string().as_str(),
+                    "TELEGRAM_AUTH_REQUIRED" | "CANCELED"
+                ) =>
+            {
+                return Err(error)
+            }
             _ => None,
         };
-        return Ok(TransferResult { value: preview(&media, link), cover, avatar });
+        return Ok(TransferResult {
+            value: preview(&media, link),
+            cover,
+            avatar,
+        });
     };
     let directory = directory.context("IO_ERROR")?;
     // Acquire exclusive creation and cleanup ownership together, without a
@@ -592,7 +795,10 @@ async fn transfer(
     let mut telemetry = DownloadProgress::new(Instant::now());
     loop {
         let next = {
-            let next = timeout(crate::telegram_transfer_engine::FILE_IO_TIMEOUT, source.next(received));
+            let next = timeout(
+                crate::telegram_transfer_engine::FILE_IO_TIMEOUT,
+                source.next(received),
+            );
             tokio::pin!(next);
             loop {
                 tokio::select! {
@@ -625,20 +831,29 @@ async fn transfer(
             }
             other => other?,
         };
-        let Some(ReceivedPart {offset, bytes}) = part else {
+        let Some(ReceivedPart { offset, bytes }) = part else {
             break;
         };
-        if bytes.is_empty() || received + bytes.len() as u64 > media.size || offset.checked_add(bytes.len() as u64).is_none_or(|end|end > media.size) {
+        if bytes.is_empty()
+            || received + bytes.len() as u64 > media.size
+            || offset
+                .checked_add(bytes.len() as u64)
+                .is_none_or(|end| end > media.size)
+        {
             bail!("INCOMPLETE_MEDIA");
         }
-        file.seek(std::io::SeekFrom::Start(offset)).await.context("IO_ERROR")?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .context("IO_ERROR")?;
         file.write_all(&bytes).await.context("IO_ERROR")?;
         received += bytes.len() as u64;
         if offset == 0 {
             head.clear();
             head.extend_from_slice(&bytes[..bytes.len().min(12 - head.len())]);
         }
-        if let Some(value) = telemetry.sample(Instant::now(), received, media.size) { progress(value); }
+        if let Some(value) = telemetry.sample(Instant::now(), received, media.size) {
+            progress(value);
+        }
     }
     if received != media.size {
         bail!("INCOMPLETE_MEDIA");

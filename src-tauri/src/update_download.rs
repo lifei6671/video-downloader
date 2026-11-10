@@ -85,25 +85,44 @@ fn cleanup_cache(directory: &Path, preferred: Option<&Path>) -> std::io::Result<
     let mut installers = Vec::new();
     for entry in entries {
         let entry = entry?;
-        let Some(version) = entry.file_name().to_str().and_then(cached_installer_version) else {
+        let Some(version) = entry
+            .file_name()
+            .to_str()
+            .and_then(cached_installer_version)
+        else {
             continue;
         };
-        if !entry.file_type()?.is_file() { continue; }
-        let modified = entry.metadata()?.modified().unwrap_or(std::time::UNIX_EPOCH);
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let modified = entry
+            .metadata()?
+            .modified()
+            .unwrap_or(std::time::UNIX_EPOCH);
         installers.push((version, modified, entry.path()));
     }
-    let retained = installers.iter().max_by(|a, b| {
-        a.0.cmp_precedence(&b.0)
-            .then_with(|| (Some(a.2.as_path()) == preferred).cmp(&(Some(b.2.as_path()) == preferred)))
-            .then_with(|| a.1.cmp(&b.1))
-            .then_with(|| a.2.cmp(&b.2))
-    }).map(|item| item.2.clone());
+    let retained = installers
+        .iter()
+        .max_by(|a, b| {
+            a.0.cmp_precedence(&b.0)
+                .then_with(|| {
+                    (Some(a.2.as_path()) == preferred).cmp(&(Some(b.2.as_path()) == preferred))
+                })
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        })
+        .map(|item| item.2.clone());
     for (_, _, path) in installers {
-        if Some(&path) == retained.as_ref() { continue; }
+        if Some(&path) == retained.as_ref() {
+            continue;
+        }
         if let Err(error) = std::fs::remove_file(path) {
             // A running Windows installer may still hold a file. Keep it and
             // retry at the next cleanup; a verified download remains usable.
-            eprintln!("Unable to remove outdated update installer: {}", error.kind());
+            eprintln!(
+                "Unable to remove outdated update installer: {}",
+                error.kind()
+            );
         }
     }
     Ok(retained)
@@ -319,7 +338,7 @@ impl UpdateDownloads {
                     return Err("UPDATE_NEWER_INSTALLER_CACHED".into());
                 }
                 Err(error) => eprintln!("Unable to inspect update cache: {}", error.kind()),
-                _ => {},
+                _ => {}
             }
             Ok(Installer {
                 id: id.to_owned(),
@@ -605,7 +624,9 @@ mod tests {
         let file = directory.path().join("file");
         std::fs::write(&file, b"keep").unwrap();
         assert!(cleanup_cache(&file, None).is_err());
-        assert!(cleanup_cache(&directory.path().join("missing"), None).unwrap().is_none());
+        assert!(cleanup_cache(&directory.path().join("missing"), None)
+            .unwrap()
+            .is_none());
         assert_eq!(std::fs::read(file).unwrap(), b"keep");
     }
 
@@ -693,7 +714,10 @@ mod tests {
         let bytes = std::mem::size_of_val(&future);
         // Tauri moves this future through command wrappers on the Windows main
         // thread's 1 MiB stack before spawning it; keep the read buffer off-stack.
-        assert!(bytes < 4096, "installer verification future is {bytes} bytes");
+        assert!(
+            bytes < 4096,
+            "installer verification future is {bytes} bytes"
+        );
     }
 
     #[tokio::test]

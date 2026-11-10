@@ -231,11 +231,19 @@ async fn two_uploads_overlap_third_waits_and_each_asset_is_written_once() {
     assert_ne!(c, b);
     provider.release.add_permits(2);
     until(|| completed(&f.core, 3)).await;
-    f.core.backup_db(|db| {
-        let remaining: i64 = db.query_row("SELECT COUNT(*) FROM backup_operation_captures", [], |r| r.get(0))?;
-        assert_eq!(remaining, 0, "acknowledged operations reclaim immutable captures");
-        Ok(())
-    }).unwrap();
+    f.core
+        .backup_db(|db| {
+            let remaining: i64 =
+                db.query_row("SELECT COUNT(*) FROM backup_operation_captures", [], |r| {
+                    r.get(0)
+                })?;
+            assert_eq!(
+                remaining, 0,
+                "acknowledged operations reclaim immutable captures"
+            );
+            Ok(())
+        })
+        .unwrap();
     stop(shutdown, worker).await;
     assert_eq!(provider.peak.load(Ordering::SeqCst), 2);
     assert_eq!(provider.active.load(Ordering::SeqCst), 0);
@@ -365,8 +373,13 @@ async fn foreground_delete_completes_while_unrelated_uploads_are_held() {
     until(|| {
         let op = scheduler::operation(&f.core, &deletion).unwrap();
         op.state == "completed" || op.payload["local_cleanup_done"] == true
-    }).await;
-    assert_eq!(provider.active.load(Ordering::SeqCst), 2, "deletion must not drain unrelated uploads");
+    })
+    .await;
+    assert_eq!(
+        provider.active.load(Ordering::SeqCst),
+        2,
+        "deletion must not drain unrelated uploads"
+    );
     provider.release.add_permits(2);
     entered(&mut rx).await;
     provider.release.add_permits(1);

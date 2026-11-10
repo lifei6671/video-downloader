@@ -78,9 +78,7 @@ async fn cleanup_restore_files(core: &Core, id: &str) -> Result<()> {
                         repository::fingerprint_with_cancel(&path, || *cancel.borrow())
                     })
                     .await??;
-                    let asset = core
-                        .backup_asset(id)?
-                        .context("BACKUP_ASSET_NOT_FOUND")?;
+                    let asset = core.backup_asset(id)?.context("BACKUP_ASSET_NOT_FOUND")?;
                     if asset.content_sha256.as_deref() != Some(&hash)
                         || source["size"].as_u64() != Some(asset.content_bytes)
                     {
@@ -111,7 +109,9 @@ pub async fn delete_task(core: &Arc<Core>, task_id: &str) -> Result<()> {
         if let Some(current) = super::spaces::get(core)? {
             let member:bool=core.backup_db(|db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2)",params![current.space_id,id],|r|r.get(0))?))?;
             if current.enabled && member {
-                return super::sync_delete::delete(core, &current.space_id, id).await.map(|_| ());
+                return super::sync_delete::delete(core, &current.space_id, id)
+                    .await
+                    .map(|_| ());
             } else {
                 stop_readers(core, id).await?;
                 let _writer = core.backup_write_lock.write().await;

@@ -93,7 +93,11 @@ pub(super) fn validate_incarnation(
                 _ => None,
             })
         {
-            let deleted_message = if deleted.revision <= i32::MAX as u64 { deleted.revision } else { deleted.revision >> 32 };
+            let deleted_message = if deleted.revision <= i32::MAX as u64 {
+                deleted.revision
+            } else {
+                deleted.revision >> 32
+            };
             if !matches!(&r.location,MediaLocation::TelegramMessage{message_id,..} if *message_id>deleted_message as i64)
             {
                 bail!("BACKUP_REUPLOAD_STALE");
@@ -112,37 +116,83 @@ pub(super) fn validate_incarnation(
 impl Event {
     /// Resolve the one historical reference shape without weakening current MediaRef parsing.
     /// Original event bytes remain the cursor evidence; only the decoded view is enriched.
-    pub(super) fn decode_with_documents(target: &Target, body: &[u8], documents: &[super::telegram_transfer::RemoteDocument]) -> Result<Self> {
+    pub(super) fn decode_with_documents(
+        target: &Target,
+        body: &[u8],
+        documents: &[super::telegram_transfer::RemoteDocument],
+    ) -> Result<Self> {
         let original = Self::decode(target, body);
-        if original.is_ok() { return original; }
-        let mut raw: serde_json::Value = serde_json::from_slice(body).context("TELEGRAM_INDEX_INVALID")?;
-        let asset = raw["change"]["asset_id"].as_str().context("TELEGRAM_INDEX_INVALID")?.to_owned();
-        fn resolve(value: &mut serde_json::Value, target: &Target, asset: &str, documents: &[super::telegram_transfer::RemoteDocument], changed: &mut bool) -> Result<()> {
+        if original.is_ok() {
+            return original;
+        }
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(body).context("TELEGRAM_INDEX_INVALID")?;
+        let asset = raw["change"]["asset_id"]
+            .as_str()
+            .context("TELEGRAM_INDEX_INVALID")?
+            .to_owned();
+        fn resolve(
+            value: &mut serde_json::Value,
+            target: &Target,
+            asset: &str,
+            documents: &[super::telegram_transfer::RemoteDocument],
+            changed: &mut bool,
+        ) -> Result<()> {
             match value {
                 serde_json::Value::Object(object) => {
-                    if object.get("location").is_some_and(|l| l["provider_type"] == "telegram_message" && l.get("document_id").is_none()) {
+                    if object.get("location").is_some_and(|l| {
+                        l["provider_type"] == "telegram_message" && l.get("document_id").is_none()
+                    }) {
                         let location = &object["location"];
-                        anyhow::ensure!(location["account_id"] == target.account_id && location["channel_id"] == target.channel_id, "BACKUP_SCOPE_MISMATCH");
+                        anyhow::ensure!(
+                            location["account_id"] == target.account_id
+                                && location["channel_id"] == target.channel_id,
+                            "BACKUP_SCOPE_MISMATCH"
+                        );
                         let mut matches = documents.iter().filter(|d| {
-                            if Some(i64::from(d.message_id)) != location["message_id"].as_i64() || Some(d.bytes) != object["bytes"].as_u64() { return false; }
-                            let Ok(e) = serde_json::from_str::<super::telegram_transfer::Envelope>(&d.caption) else { return false; };
-                            e.yingqu_media == 2 && e.library_id == target.scope.library_id && e.asset_id == asset && object["sha256"] == e.sha256 && object["container"] == e.container
+                            if Some(i64::from(d.message_id)) != location["message_id"].as_i64()
+                                || Some(d.bytes) != object["bytes"].as_u64()
+                            {
+                                return false;
+                            }
+                            let Ok(e) = serde_json::from_str::<super::telegram_transfer::Envelope>(
+                                &d.caption,
+                            ) else {
+                                return false;
+                            };
+                            e.yingqu_media == 2
+                                && e.library_id == target.scope.library_id
+                                && e.asset_id == asset
+                                && object["sha256"] == e.sha256
+                                && object["container"] == e.container
                         });
                         let document = matches.next().context("TELEGRAM_MEDIA_CHANGED")?;
                         anyhow::ensure!(matches.next().is_none(), "TELEGRAM_MEDIA_CHANGED");
-                        object.get_mut("location").and_then(serde_json::Value::as_object_mut).context("TELEGRAM_INDEX_INVALID")?.insert("document_id".into(), document.document_id.into());
+                        object
+                            .get_mut("location")
+                            .and_then(serde_json::Value::as_object_mut)
+                            .context("TELEGRAM_INDEX_INVALID")?
+                            .insert("document_id".into(), document.document_id.into());
                         *changed = true;
                     }
-                    for value in object.values_mut() { resolve(value, target, asset, documents, changed)?; }
+                    for value in object.values_mut() {
+                        resolve(value, target, asset, documents, changed)?;
+                    }
                 }
-                serde_json::Value::Array(values) => for value in values { resolve(value, target, asset, documents, changed)?; },
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        resolve(value, target, asset, documents, changed)?;
+                    }
+                }
                 _ => {}
             }
             Ok(())
         }
         let mut changed = false;
         resolve(&mut raw, target, &asset, documents, &mut changed)?;
-        if !changed { return original; }
+        if !changed {
+            return original;
+        }
         Self::decode(target, &serde_json::to_vec(&raw)?)
     }
     pub(super) fn encode(target: &Target, change: &AssetChange) -> Result<Vec<u8>> {
@@ -250,7 +300,9 @@ pub(super) fn replay(
     events: Vec<(i64, Vec<u8>)>,
     previous: Option<&Cursor>,
 ) -> Result<Projection> {
-    replay_decoded(target, high_water, events, previous, |body| Event::decode(target, body))
+    replay_decoded(target, high_water, events, previous, |body| {
+        Event::decode(target, body)
+    })
 }
 pub(super) fn replay_decoded(
     target: &Target,
@@ -294,11 +346,31 @@ pub(super) fn replay_decoded(
         // verifies every original byte digest at the end of replay.
         if id <= i64::from(i32::MAX) && !projection.assets.contains_key(&change.asset_id) {
             if let Some(base) = &change.base {
-                if base.revision == 0 || base.revision >= id as u64 || !base.deleted && base.media.is_none() { bail!("TELEGRAM_INDEX_INVALID"); }
-                for (field,value) in &base.fields { super::s3_provider::validate_field(field,value)?; }
-                if !base.deleted { super::s3_provider::validate_field("original_filename",base.fields.get("original_filename").context("TELEGRAM_INDEX_INVALID")?)?; }
-                if base.deleted { projection.last_deletions.insert(change.asset_id.clone(),base.revision); }
-                projection.assets.insert(change.asset_id.clone(),base.clone());
+                if base.revision == 0
+                    || base.revision >= id as u64
+                    || !base.deleted && base.media.is_none()
+                {
+                    bail!("TELEGRAM_INDEX_INVALID");
+                }
+                for (field, value) in &base.fields {
+                    super::s3_provider::validate_field(field, value)?;
+                }
+                if !base.deleted {
+                    super::s3_provider::validate_field(
+                        "original_filename",
+                        base.fields
+                            .get("original_filename")
+                            .context("TELEGRAM_INDEX_INVALID")?,
+                    )?;
+                }
+                if base.deleted {
+                    projection
+                        .last_deletions
+                        .insert(change.asset_id.clone(), base.revision);
+                }
+                projection
+                    .assets
+                    .insert(change.asset_id.clone(), base.clone());
             }
         }
         let current = projection.assets.get(&change.asset_id);
