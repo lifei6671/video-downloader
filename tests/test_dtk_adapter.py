@@ -35,7 +35,7 @@ def test_video_cover_priority_is_douyin_only_and_falls_back(platform, cover):
     item = SimpleNamespace(platform=platform, content_id='123', kind='video',
         raw={'video': {'cover_original_scale': cover}}, web_url='https://www.douyin.com/video/123',
         title='fixture', duration_ms=1000, music=None,
-        author=SimpleNamespace(uid='author-id', unique_id='fixture', nickname='fixture', avatar=None),
+        author=SimpleNamespace(uid='author-id', unique_id='fixture', nickname='fixture', signature=None, avatar=None),
         media=SimpleNamespace(video=stream, streams=[], covers=[SimpleNamespace(url=legacy)]))
     expected = ('https://p.douyinpic.com/designed' if platform == 'douyin' and cover and
                 'https://p.douyinpic.com/designed' in cover.get('url_list', []) else legacy)
@@ -125,7 +125,7 @@ def test_dtk_video_uses_same_guarded_single_file_downloader(monkeypatch, tmp_pat
                              width=1280, height=720, size_bytes=len(BODY), bitrate=None)
     item = SimpleNamespace(platform='douyin', content_id='123', kind='video', raw={},
         web_url='https://www.douyin.com/video/123', title='fixture', duration_ms=1000, music=None,
-        author=SimpleNamespace(uid='author-id',unique_id='fixture',nickname='fixture',avatar=None),
+        author=SimpleNamespace(uid='author-id',unique_id='fixture',nickname='fixture',signature='DTK 简介',avatar=None),
         media=SimpleNamespace(video=stream,streams=[stream],covers=[]))
     monkeypatch.setattr(dtk_adapter,'extract',lambda *args:item)
     from yt_dlp import YoutubeDL
@@ -140,6 +140,7 @@ def test_dtk_video_uses_same_guarded_single_file_downloader(monkeypatch, tmp_pat
         staging_dir=str(tmp_path)),lambda event_type,**value:events.append((event_type,value)))
     assert (tmp_path/'video.mp4').read_bytes()==BODY
     assert events[-1][0]=='download_finished' and events[-1][1]['bytes']==len(BODY)
+    assert events[-1][1]['author_profile'] == {'id': 'author-id', 'bio': 'DTK 简介'}
 
 
 def live_album(avatar_url=None):
@@ -148,7 +149,8 @@ def live_album(avatar_url=None):
     # intentionally unrelated; only the per-slide clip may be downloaded.
     return dtk_adapter.DOUYIN.parse_content({'aweme_detail': {
         'aweme_id': '123', 'desc': 'live fixture', 'status': {}, 'statistics': {},
-        'author': {'sec_uid': 'fixture-author', 'nickname': 'fixture',
+        'author': {'sec_uid': 'fixture-author', 'nickname': 'fixture', 'signature': 'DTK 简介',
+                   'follower_count': 0, 'total_favorited': 321, 'city': '上海',
                    'avatar_thumb': {'url_list': [avatar_url]} if avatar_url else None},
         'video': {'play_addr': {'url_list': ['http://v.fixture.douyinvod.com/music.mp4']}},
         'images': [
@@ -178,7 +180,7 @@ def test_batch_download_stages_optional_avatar_without_adding_to_media(
         item = SimpleNamespace(platform='douyin', content_id='123', kind=kind, raw={},
             web_url='https://www.douyin.com/video/123', title='fixture', duration_ms=1000, music=None,
             author=SimpleNamespace(uid='fixture-author', sec_uid='fixture-author',
-                                   unique_id='fixture', nickname='fixture',
+                                   unique_id='fixture', nickname='fixture', signature='DTK 简介',
                                    avatar=SimpleNamespace(url=avatar_url)),
             media=SimpleNamespace(video=stream, streams=[], covers=[]))
     monkeypatch.setattr(dtk_adapter, 'extract', lambda *_args: item)
@@ -200,6 +202,7 @@ def test_batch_download_stages_optional_avatar_without_adding_to_media(
         lambda event, **value: events.append((event, value)))
     event, result = events[-1]
     assert event == 'download_finished' and avatar_url not in str(result)
+    assert result['metadata']['author_profile']['bio'] == 'DTK 简介'
     assert avatar_requests == ([avatar_url] if fetch else [])
     if fetch and valid:
         assert result['author_avatar_filename'] == 'author-avatar'
@@ -228,6 +231,8 @@ def test_live_album_preserves_stills_and_original_clips(monkeypatch, tmp_path, m
     engine.operate('resolve_video', {**params, 'preview_dir': str(preview)}, emit)
     metadata = events[-1][1]['result']
     assert len(metadata['images']) == 2
+    assert metadata['author_profile']['bio'] == 'DTK 简介'
+    assert metadata['author_profile']['follower_count'] == 0
     assert len(list(preview.glob('preview-*.webp'))) == 2
     stage = tmp_path / 'stage'
     stage.mkdir()
@@ -237,6 +242,8 @@ def test_live_album_preserves_stills_and_original_clips(monkeypatch, tmp_path, m
         'staging_dir': str(stage)}, emit)
     assert events[-1][0] == 'download_finished'
     result = events[-1][1]
+    assert result['author_profile'] == {'id': 'fixture-author', 'bio': 'DTK 简介',
+                                        'follower_count': 0, 'likes_count': 321, 'region': '上海'}
     assert {p.name for p in (stage / 'album').iterdir()} == {'001.webp', '001.mp4', '002.webp'}
     assert (stage / 'album/001.mp4').read_bytes() == BODY
     assert result['files'][0]['video'] == dict(filename='001.mp4', bytes=len(BODY), sha256=hashlib.sha256(BODY).hexdigest())

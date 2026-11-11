@@ -124,9 +124,9 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 | `identify_douyin_link` 请求/`identified` | 区分抖音主页和作品。主页返回作者 ID，作品返回已验证的规范链接。短链通过 GuardedRH 展开，已缓存的作品短链沿用 SQLite 预览。 |
 | `resolve_video` 请求 | `id`、单条 `input`、`resolver`（auto/yt-dlp/dtk）、可选 Rust 专属 `preview_dir`、两平台配置快照；凭据只经 stdin |
 | `download_video` 请求 | `id`、规范作品链接、预期 platform/video_id/kind/image_count、实际 resolver、原任务配置快照、Rust 创建的专属 staging 目录 |
-| `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、可选 author_profile（id/nickname/handle/kind）、cover_url、duration_ms、width、height、filesize、filesize_approx、kind/resolver、images（尺寸/来源/本地相对预览名）、music（title/author）；可选字段可空。头像只返回暂存文件标识和字节数，详见下文作者资料 |
+| `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、可选 `author_profile`、cover_url、duration_ms、width、height、filesize、filesize_approx、kind/resolver、images（尺寸/来源/本地相对预览名）、music（title/author）。可选字段可空。作者资料字段及头像暂存方式见 [作者资料](author-profile.md) |
 | `progress` | 同一 `id`、downloaded_bytes、total_bytes、speed_bps、completed_items/total_items；不包含上游原始 dict |
-| `download_finished` | 同一 `id`、平台/作品身份、staging 内相对文件名、实际字节数与容器；图集为 files 清单（每文件 bytes/hash/尺寸/来源），不含媒体 URL；仅表示引擎文件写入结束 |
+| `download_finished` | 同一 `id`、平台/作品身份、staging 内相对文件名、实际字节数与容器。图集返回 files 清单（每文件 bytes/hash/尺寸/来源）。抖音和 TikTok 普通下载可附带 `author_profile`，包含作者 ID 与作品回包提供的简介或公开资料。该事件不含媒体 URL，仅表示引擎文件写入结束 |
 | `error` | 同一 `id`、稳定 code、脱敏 message、stage；可可靠获得时附 HTTP 状态 |
 
 请求和响应均包含 `protocol_version`。每个操作最多一个终端结果：身份识别以 `identified` 结束、解析以 `resolved` 结束、下载以 `download_finished` 结束，或以 `error` 结束。成功还必须伴随正常进程退出；EOF、超限、错 ID、错版本、重复终端消息、非零退出或缺失结果都明确失败。单条消息上限 1 MiB。
@@ -145,7 +145,7 @@ YouTube 请求被重定向至 `https://www.google.com/sorry/index` 或 `/sorry/`
 
 下载任务页顶部提供横向平台标签，顺序为全部、抖音、TikTok、YouTube、Telegram，首次进入默认全部。平台筛选与标题/作者搜索同时生效，仅影响列表展示；进行中计数、FIFO 等待位置仍按全部任务计算；清理历史限定当前 Tab 的平台，“全部”Tab 才覆盖全部平台，搜索不改变清理范围。尚无元数据的 Telegram 任务按已有 Telegram 链接归类，其他平台未知的记录保留在全部；空列表提示当前平台无任务，筛选在本次运行切换页面时保留，不额外持久化。
 
-点击列表作者昵称打开本地搜索结果视图，复用任务列表展示该作者已有记录，按平台和作者 ID 精确匹配，旧记录按账号名回退。包含本地解析预览，不请求平台作者作品接口。搜索结果视图隐藏批量清理入口，其他记录操作保持原有规则，详见 [作者资料](author-profile.md)。
+点击作品预览或任务中的作者昵称打开本地作者主页。主页读取已保存的作者资料，复用任务列表和卡片展示本地作品记录，按平台和作者 ID 匹配，旧记录按账号名回退。作品包括本地解析预览，支持已有单项操作。返回恢复原页的筛选状态。详见 [作者资料](author-profile.md)。
 
 | Tauri 命令 | 行为 |
 | --- | --- |

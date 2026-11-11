@@ -21,6 +21,8 @@ use std::{
 };
 use tokio::sync::watch;
 use uuid::Uuid;
+#[path = "authors.rs"]
+mod authors;
 #[path = "douyin_author.rs"]
 pub mod douyin_author;
 #[path = "redownload.rs"]
@@ -383,10 +385,15 @@ fn cleanup_task_staging(db: &Connection, id: &str) -> Result<()> {
     }
 }
 fn persist(db: &Connection, task: &Task) -> Result<()> {
+    let transaction = db
+        .is_autocommit()
+        .then(|| db.unchecked_transaction())
+        .transpose()?;
     let mut stored = task.clone();
     // Covers may carry short-lived query tokens. Keep them only in memory.
     if let Some(video) = stored.video.as_mut() {
         video["cover_url"] = Value::Null;
+        authors::strip_public_details(video);
     }
     db.execute(
         "INSERT INTO download_tasks(id,snapshot) VALUES (?1,?2)
@@ -394,6 +401,10 @@ fn persist(db: &Connection, task: &Task) -> Result<()> {
         params![task.id, serde_json::to_string(&stored)?],
     )
     .context("DATABASE_ERROR")?;
+    authors::link_task(db, task)?;
+    if let Some(transaction) = transaction {
+        transaction.commit()?;
+    }
     Ok(())
 }
 fn persist_new_attempt(db: &Connection, task: &Task) -> Result<()> {
@@ -436,7 +447,13 @@ fn emit_published(inner: &mut Inner, task: Task, emit: &dyn Fn(TaskEvent)) {
     } else {
         inner.tasks.insert(0, task.clone());
     }
-    emit(TaskEvent::Updated(Box::new(task)));
+    emit_task(&inner.db, task, emit);
+}
+
+fn emit_task(db: &Connection, task: Task, emit: &dyn Fn(TaskEvent)) {
+    emit(TaskEvent::Updated(Box::new(authors::display_task(
+        db, task,
+    ))));
 }
 
 fn restore_original_task(
@@ -492,6 +509,7 @@ impl Core {
         db.pragma_update(None, "foreign_keys", true)?;
         // Snapshot the master database before the single, atomic schema upgrade.
         let backup_migration = crate::backup::schema_migration::prepare(&db)?;
+        let author_migration = authors::prepare(&db, backup_migration.snapshot_created)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         let schema_tx = db.unchecked_transaction()?;
         schema_tx.execute_batch(
@@ -515,6 +533,7 @@ impl Core {
         transcription::init(&schema_tx)?;
         settings::init(&schema_tx)?;
         douyin_author::init(&schema_tx)?;
+        authors::apply_migration(&schema_tx, author_migration)?;
         crate::backup::repository::init_in_transaction(&schema_tx, backup_migration)?;
         schema_tx.commit()?;
         transcription::recover(&db)?;
@@ -810,14 +829,17 @@ impl Core {
     }
 
     pub fn list(&self) -> Vec<Task> {
-        self.inner
-            .lock()
-            .unwrap()
+        let inner = self.inner.lock().unwrap();
+        let mut profiles = authors::display_profiles(&inner.db).unwrap_or_default();
+        inner
             .tasks
             .iter()
             .cloned()
             .map(|mut t| {
                 t.file_missing = t.status == Status::Completed && file_missing(&t);
+                if let (Some(profile), Some(video)) = (profiles.remove(&t.id), t.video.as_mut()) {
+                    video["author_profile"] = profile;
+                }
                 t
             })
             .collect()
@@ -947,9 +969,14 @@ impl Core {
             ),
         );
         drop(registered);
+        let displayed: Vec<_> = updated
+            .iter()
+            .cloned()
+            .map(|task| authors::display_task(&inner.db, task))
+            .collect();
         drop(inner);
-        for task in &updated {
-            (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+        for task in displayed {
+            (self.emit)(TaskEvent::Updated(Box::new(task)));
         }
         if !updated.is_empty() {
             self.backup_wake.notify_waiters();
@@ -1345,7 +1372,7 @@ impl Core {
             if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
                 *old = task.clone();
             }
-            (self.emit)(TaskEvent::Updated(Box::new(task)));
+            emit_task(&inner.db, task, &*self.emit);
         }
         Ok(())
     }
@@ -1380,7 +1407,7 @@ impl Core {
             if let Some(old) = inner.tasks.iter_mut().find(|t| t.id == task.id) {
                 *old = task.clone();
             }
-            (self.emit)(TaskEvent::Updated(Box::new(task)));
+            emit_task(&inner.db, task, &*self.emit);
         }
         Ok(())
     }
@@ -1532,14 +1559,7 @@ impl Core {
             .video
             .as_ref()
             .context("FILE_MISSING")?;
-        if let Some(author) = douyin_author::batch_author_id(video) {
-            if video["author_profile"]["id"] == author {
-                if let Ok(body) = douyin_author::avatar(&inner.db, author) {
-                    return Ok(body);
-                }
-            }
-        }
-        parse_cache::avatar(&inner.db, video)
+        authors::avatar(&inner.db, id, video)
     }
     pub fn export_cover(&self, id: &str) -> Result<(String, Vec<u8>)> {
         let task = self
@@ -1697,7 +1717,8 @@ impl Core {
             .get_or_insert_with(|| ResolveProgress::new(phase))
             .advance(phase);
         task.revision += 1;
-        (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+        let displayed = task.clone();
+        emit_task(&inner.db, displayed, &*self.emit);
     }
 
     fn resolve_event(&self, id: &str, event: &Value) {
@@ -1922,17 +1943,12 @@ impl Core {
         update: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>,
     ) -> Result<Vec<String>> {
         let removing: HashSet<_> = ids.iter().map(String::as_str).collect();
-        let mut removed_authors = HashSet::new();
-        let mut retained_authors = HashSet::new();
-        for task in &inner.tasks {
-            if let Some(author) = task.video.as_ref().and_then(douyin_author::batch_author_id) {
-                if removing.contains(task.id.as_str()) {
-                    removed_authors.insert(author);
-                } else {
-                    retained_authors.insert(author);
-                }
-            }
-        }
+        let removed_authors: HashSet<_> = inner
+            .tasks
+            .iter()
+            .filter(|task| removing.contains(task.id.as_str()))
+            .filter_map(|task| task.video.as_ref().and_then(authors::key))
+            .collect();
         let retained: HashSet<_> = inner
             .tasks
             .iter()
@@ -1987,12 +2003,8 @@ impl Core {
         for video in release_covers {
             parse_cache::clear_cover(&tx, &video)?;
         }
-        for author in removed_authors.difference(&retained_authors) {
-            tx.execute(
-                "DELETE FROM douyin_author_avatars WHERE author_id=?",
-                [author],
-            )
-            .context("DATABASE_ERROR")?;
+        for author in removed_authors {
+            authors::release_avatar(&tx, author)?;
         }
         update(&tx)?;
         tx.commit().context("DATABASE_ERROR")?;
@@ -2282,7 +2294,8 @@ impl Core {
             // Old commit evidence must never complete a new attempt on restart.
             persist_new_attempt(&inner.db, &task)?;
             *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
-            (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+            let displayed = task.clone();
+            emit_task(&inner.db, displayed, &*self.emit);
         } else {
             publish(&mut inner, task.clone(), &*self.emit)?;
             task.insertion_id = inner
@@ -2317,11 +2330,12 @@ impl Core {
             task.status = Status::Ready;
             task.revision += 1;
             publish(&mut inner, task.clone(), &*self.emit)?;
+            let displayed = authors::display_task(&inner.db, task.clone());
             drop(inner);
             if download_after_resolve {
                 self.finish(&task.id, Ok(task.video.clone().unwrap()), false);
             }
-            return Ok(task);
+            return Ok(displayed);
         }
         let core = self.clone();
         let id = task.id.clone();
@@ -2408,15 +2422,9 @@ impl Core {
                     let mut inner = core.inner.lock().unwrap();
                     let mut cached = parse_cache::save(&mut inner.db, &video, images, cover, now())?;
                     // Optional avatar failures must not fail an otherwise valid video/album preview.
-                    if video["author_avatar_filename"] == "author-avatar" {
-                        if let Ok(body) = crate::files::read_cover(&stage.path().join("author-avatar")) {
-                            if video["author_avatar_bytes"].as_u64() == Some(body.len() as u64) {
-                                let _ = parse_cache::save_avatar(&inner.db, &cached.video, &body);
-                            }
-                        }
-                    }
+                    let _ = authors::save_staged_avatar(&inner.db, &cached.video, &video, stage.path(), cached.saved_at);
                     if let Some(profile) = cached.video["author_profile"].as_object_mut() {
-                        profile.insert("avatar_cached".into(), parse_cache::avatar(&inner.db, &video).is_ok().into());
+                        profile.insert("avatar_cached".into(), authors::has_avatar(&inner.db, &video).into());
                     }
                     parse_cache::remember(&inner.db, &input, &cached.video)?;
                     let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
@@ -2443,7 +2451,7 @@ impl Core {
             let _ = done.send(true);
         });
         inner.workers.push(worker);
-        Ok(task)
+        Ok(authors::display_task(&inner.db, task))
     }
 
     fn finish(self: &Arc<Self>, id: &str, result: Result<Value>, downloading: bool) {
@@ -2539,7 +2547,8 @@ impl Core {
             let previous = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
             task.resolve_progress = previous.resolve_progress.clone();
             *previous = task.clone();
-            (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+            let displayed = task.clone();
+            emit_task(&inner.db, displayed, &*self.emit);
         }
         if !matches!(task.status, Status::Ready | Status::Queued) {
             inner.active.remove(id);
@@ -2583,7 +2592,7 @@ impl Core {
         task.duplicate_confirmed = false;
         task.revision += 1;
         publish(&mut inner, task.clone(), &*self.emit)?;
-        Ok(task)
+        Ok(authors::display_task(&inner.db, task))
     }
 
     pub fn download(self: &Arc<Self>, id: &str, confirm_duplicate: bool) -> Result<()> {
@@ -2777,7 +2786,7 @@ impl Core {
             .iter_mut()
             .find(|stored| stored.id == task.id)
             .context("TASK_NOT_FOUND")? = task.clone();
-        (self.emit)(TaskEvent::Updated(Box::new(task)));
+        emit_task(&inner.db, task, &*self.emit);
         Ok(())
     }
 
@@ -2878,7 +2887,7 @@ impl Core {
                 });
                 if saved.is_err() {
                     *inner.tasks.iter_mut().find(|t| t.id == id).unwrap() = task.clone();
-                    (self.emit)(TaskEvent::Updated(Box::new(task)));
+                    emit_task(&inner.db, task, &*self.emit);
                 }
                 inner.active.remove(&id);
             }
@@ -2907,7 +2916,8 @@ impl Core {
         task.speed_bps = None;
         task.eta_seconds = None;
         task.revision += 1;
-        (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+        let displayed = task.clone();
+        emit_task(&inner.db, displayed, &*self.emit);
         if waiting {
             self.dispatch(&mut inner);
         }
@@ -2944,7 +2954,8 @@ impl Core {
                     task.speed_bps = None;
                     task.eta_seconds = None;
                     task.revision += 1;
-                    (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+                    let displayed = task.clone();
+                    emit_task(&inner.db, displayed, &*self.emit);
                     self.dispatch(&mut inner);
                     return Ok(());
                 }
@@ -3005,10 +3016,10 @@ impl Core {
         let mut cached =
             parse_cache::save(&mut inner.db, &video, Vec::new(), outcome.cover, now())?;
         if let Some(body) = outcome.avatar {
-            let _ = parse_cache::save_avatar(&inner.db, &cached.video, &body);
+            let _ = authors::save_avatar(&inner.db, &cached.video, &body, cached.saved_at);
         }
         cached.video["author_profile"]["avatar_cached"] =
-            parse_cache::avatar(&inner.db, &cached.video).is_ok().into();
+            authors::has_avatar(&inner.db, &cached.video).into();
         parse_cache::remember(&inner.db, input, &cached.video)?;
         let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
         task.cached_at = Some(cached.saved_at);
@@ -3054,8 +3065,7 @@ impl Core {
         let naming_time = crate::naming::current_time();
         let video = task.video.clone().context("INVALID_STATE")?;
         let author_batch = douyin_author::batch_id(&task).map(str::to_owned);
-        let fetch_author_avatar = douyin_author::batch_author_id(&video)
-            .is_some_and(|author| !douyin_author::has_avatar(&inner.db, author).unwrap_or(false));
+        let fetch_author_avatar = author_batch.is_some() && !authors::has_avatar(&inner.db, &video);
         let telegram_input = if telegram {
             Some(parse_cache::telegram_source(&inner.db, &video)?)
         } else {
@@ -3107,7 +3117,8 @@ impl Core {
                         task.completed_items = event["completed_items"].as_u64();
                         task.total_items = event["total_items"].as_u64();
                         task.revision += 1;
-                        (core.emit)(TaskEvent::Updated(Box::new(task.clone())));
+                        let displayed = task.clone();
+                        emit_task(&inner.db, displayed, &*core.emit);
                     };
                 let result = if telegram {
                     match telegram_download::operation(&core, &id, telegram_input.as_deref().context("INVALID_ENGINE_RESULT")?, Some(&video), Some(&media), progress, cancellation.clone()).await {
@@ -3294,37 +3305,40 @@ impl Core {
                     }
                     if author_batch.is_some() {
                         if let Some(video) = task.video.as_mut() {
-                            if let Some(author) = douyin_author::batch_author_id(video) {
-                                // The validated detail supplies the author ID for both videos and albums.
-                                let _ = douyin_author::save_staged_avatar(&inner.db, author, &result, &media);
-                                video["author_profile"]["avatar_cached"] = douyin_author::has_avatar(&inner.db, author).unwrap_or(false).into();
-                            }
+                            // The validated detail supplies the author ID for both videos and albums.
+                            let _ = authors::save_staged_avatar(&inner.db, video, &result, &media, now());
+                            video["author_profile"]["avatar_cached"] = authors::has_avatar(&inner.db, video).into();
                         }
                     }
                     task.path = Some(file.path);
                     task.bytes = file.bytes;
                     task.total_bytes = Some(file.bytes);
                     task.total_bytes_estimate = None;
-                    task.completed_at = Some(now());
+                    let completed_at = now();
+                    task.completed_at = Some(completed_at);
                     task.status = Status::Completed;
                     task.speed_bps = None;
                     task.eta_seconds = None;
-                task.merging = false;
+                    task.merging = false;
                     task.revision += 1;
                     // Cancellation and file/DB commit share this lock.
+                    let tx = inner.db.transaction().context("DATABASE_ERROR")?;
+                    let downloaded_profile = task.video.as_mut().and_then(|video| authors::downloaded_profile(&tx, video, &result));
                     if let Some(original) = replacement.as_ref() {
-                        let tx = inner.db.transaction().context("DATABASE_ERROR")?;
                         redownload::retire_local_asset(&tx, original)?;
                         if original.asset_id.is_some() {
                             task.asset_id = Some(Uuid::new_v4().to_string());
                         }
-                        persist_published(&tx, &mut task)?;
-                        redownload::forget(&tx, &id)?;
-                        tx.commit().context("DATABASE_ERROR")?;
-                        emit_published(&mut inner, task, &*core.emit);
-                    } else {
-                        publish(&mut inner, task, &*core.emit)?;
                     }
+                    persist_published(&tx, &mut task)?;
+                    if let Some(profile) = downloaded_profile {
+                        authors::save_downloaded_profile(&tx, profile, completed_at)?;
+                    }
+                    if replacement.is_some() {
+                        redownload::forget(&tx, &id)?;
+                    }
+                    tx.commit().context("DATABASE_ERROR")?;
+                    emit_published(&mut inner, task, &*core.emit);
                     Ok(Value::Null)
                 });
                 if let Some(original) = replacement.as_ref().filter(|_| committed.is_err()) {
@@ -3452,7 +3466,8 @@ impl Core {
                 if publish(&mut inner, task.clone(), &*self.emit).is_err() {
                     task.error = Some("DATABASE_ERROR".into());
                     *inner.tasks.iter_mut().find(|t| t.id == task.id).unwrap() = task.clone();
-                    (self.emit)(TaskEvent::Updated(Box::new(task.clone())));
+                    let displayed = task.clone();
+                    emit_task(&inner.db, displayed, &*self.emit);
                 }
                 inner.active.remove(&task.id);
             }
@@ -4168,6 +4183,281 @@ mod tests {
         assert!(app.author_avatar(&task.id).is_err());
         assert!(parse_cache::avatar(&app.inner.lock().unwrap().db, video).is_err());
         app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn author_upgrade_adopts_tasks_written_by_an_older_build() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let preview = app.resolve("valid".into()).unwrap();
+        let template = wait(&app, &preview.id, Status::Ready).await;
+        app.shutdown().await;
+        drop(app);
+
+        let mut db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
+        let shared = b"\x89PNG\r\n\x1a\nshared";
+        let legacy = b"\x89PNG\r\n\x1a\nlegacy";
+        let mut old_tasks = Vec::new();
+        for (id, video_id, author_id) in [
+            ("older-write-existing-author", "11", "101001"),
+            ("older-write-new-author", "12", "201002"),
+            ("older-write-linked-author", "13", "301003"),
+        ] {
+            let mut task = template.clone();
+            task.id = id.into();
+            task.status = Status::Completed;
+            task.download_requested = true;
+            let video = json!({
+                "platform":"tiktok", "video_id":video_id, "kind":"video", "resolver":"dtk",
+                "canonical_url":format!("https://www.tiktok.com/@fixture/video/{video_id}"),
+                "author_profile":{"id":author_id,"nickname":"Fixture","avatar_cached":true},
+            });
+            if author_id == "101001" {
+                authors::save_avatar(&db, &video, shared, task.created_at).unwrap();
+            }
+            parse_cache::save(&mut db, &video, Vec::new(), None, task.created_at).unwrap();
+            assert!(parse_cache::save_avatar(&db, &video, legacy).unwrap());
+            db.execute("UPDATE parse_cache SET revision=0 WHERE video_id=?1", [video_id])
+                .unwrap();
+            task.video = Some(video);
+            if author_id == "301003" {
+                // A task can already be linked when the old build fills its legacy cache.
+                persist(&db, &task).unwrap();
+            } else {
+                // The older writer persists new snapshots without author links.
+                db.execute(
+                    "INSERT INTO download_tasks(id,snapshot) VALUES(?1,?2)",
+                    params![task.id, serde_json::to_string(&task).unwrap()],
+                )
+                .unwrap();
+            }
+            old_tasks.push(task.id);
+        }
+        drop(db);
+
+        let reopened = core(root.path());
+        for (id, body) in old_tasks.iter().zip([shared.as_slice(), legacy, legacy]) {
+            let task = reopened
+                .list()
+                .into_iter()
+                .find(|task| &task.id == id)
+                .unwrap();
+            assert_eq!(task.video.unwrap()["author_profile"]["avatar_cached"], true);
+            assert_eq!(reopened.author_avatar(id).unwrap(), body);
+        }
+        reopened.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn old_author_database_copy_backs_up_and_migrates_shared_avatars() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let preview = app.resolve("valid".into()).unwrap();
+        let template = wait(&app, &preview.id, Status::Ready).await;
+        app.shutdown().await;
+        drop(app);
+
+        let old = Connection::open(root.path().join("tasks.sqlite")).unwrap();
+        let first = b"\x89PNG\r\n\x1a\nfirst";
+        let newest = b"\x89PNG\r\n\x1a\nnewest";
+        let shared = b"\x89PNG\r\n\x1a\nshared";
+        let rows = [
+            (
+                "older",
+                "tiktok",
+                "11",
+                "101001",
+                "https://www.tiktok.com/@fixture/video/11",
+                Some(first.as_slice()),
+            ),
+            (
+                "newer",
+                "tiktok",
+                "12",
+                "101001",
+                "https://www.tiktok.com/@fixture/video/12",
+                Some(newest.as_slice()),
+            ),
+            (
+                "same-name",
+                "tiktok",
+                "13",
+                "201002",
+                "https://www.tiktok.com/@other/video/13",
+                None,
+            ),
+            (
+                "telegram-with-profile",
+                "telegram",
+                "100_8",
+                "100",
+                "https://t.me/c/100/8",
+                Some(shared.as_slice()),
+            ),
+            (
+                "telegram-old",
+                "telegram",
+                "100_9",
+                "",
+                "https://t.me/c/100/9",
+                None,
+            ),
+            (
+                "douyin-batch",
+                "douyin",
+                "20",
+                "fixture-author",
+                "https://www.douyin.com/video/20",
+                Some(first.as_slice()),
+            ),
+        ];
+        for (offset, (id, platform, video_id, author_id, url, avatar)) in
+            rows.into_iter().enumerate()
+        {
+            let mut task = template.clone();
+            task.id = id.into();
+            task.status = Status::Canceled;
+            task.created_at += offset as u64;
+            task.cached_at = Some(task.created_at);
+            let resolver = if platform == "telegram" {
+                "grammers"
+            } else {
+                "dtk"
+            };
+            let mut video = json!({
+                "platform":platform, "video_id":video_id, "canonical_url":url,
+                "kind":"video", "resolver":resolver, "title":"迁移样本", "author":"同名作者",
+            });
+            if !author_id.is_empty() {
+                video["author_profile"] = json!({"id":author_id, "nickname":"同名作者"});
+            }
+            if id == "older" {
+                video["author_profile"]["bio"] = "旧库保留的简介".into();
+            }
+            if id == "newer" {
+                video["author_profile"]["handle"] = "new_handle".into();
+            }
+            if id == "douyin-batch" {
+                video["batch_author_id"] = author_id.into();
+            }
+            if let Some(body) = avatar {
+                let mut metadata = video.clone();
+                // The old parse cache did not keep batch metadata.
+                metadata.as_object_mut().unwrap().remove("batch_author_id");
+                parse_cache::save(
+                    &mut Connection::open(root.path().join("tasks.sqlite")).unwrap(),
+                    &metadata,
+                    Vec::new(),
+                    None,
+                    task.created_at,
+                )
+                .unwrap();
+                parse_cache::save_avatar(&old, &metadata, body).unwrap();
+            }
+            task.video = Some(video);
+            persist(&old, &task).unwrap();
+        }
+        old.execute_batch(
+            "DROP TABLE task_authors; DROP TABLE authors;
+             CREATE TABLE douyin_author_avatars(author_id TEXT PRIMARY KEY, body BLOB NOT NULL);",
+        )
+        .unwrap();
+        old.execute(
+            "INSERT INTO douyin_author_avatars VALUES('fixture-author',?1)",
+            [shared.as_slice()],
+        )
+        .unwrap();
+        let copy = root.path().join("old-copy.sqlite");
+        old.backup(rusqlite::MAIN_DB, &copy, None).unwrap();
+        drop(old);
+
+        let open = || {
+            Core::open(
+                &copy,
+                root.path().join("downloads"),
+                "missing-engine".into(),
+                Vec::new(),
+                |_| {},
+            )
+            .unwrap()
+        };
+        let app = open();
+        for id in ["older", "newer"] {
+            assert_eq!(app.author_avatar(id).unwrap(), newest);
+        }
+        for id in ["telegram-old", "telegram-with-profile", "douyin-batch"] {
+            assert_eq!(app.author_avatar(id).unwrap(), shared);
+        }
+        let legacy_telegram = app
+            .list()
+            .into_iter()
+            .find(|task| task.id == "telegram-old")
+            .unwrap();
+        let profile = &legacy_telegram.video.unwrap()["author_profile"];
+        assert_eq!(profile["id"], "100");
+        assert_eq!(profile["kind"], "channel");
+        assert_eq!(profile["avatar_cached"], true);
+        let updated_author = app
+            .list()
+            .into_iter()
+            .find(|task| task.id == "older")
+            .unwrap();
+        let profile = &updated_author.video.unwrap()["author_profile"];
+        assert_eq!(profile["bio"], "旧库保留的简介");
+        assert_eq!(profile["handle"], "new_handle");
+        {
+            let inner = app.inner.lock().unwrap();
+            let count = |sql: &str| {
+                inner
+                    .db
+                    .query_row(sql, [], |row| row.get::<_, i64>(0))
+                    .unwrap()
+            };
+            assert_eq!(count("SELECT count(*) FROM authors"), 4);
+            assert_eq!(
+                count("SELECT count(*) FROM authors WHERE avatar IS NOT NULL"),
+                3
+            );
+            assert_eq!(count("SELECT count(*) FROM task_authors"), 6);
+            assert_eq!(count("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+        }
+        let backups = || {
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension().is_some_and(|ext| ext == "sqlite")
+                        && path
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with("old-copy.sqlite.before-authors-v1-")
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = backups();
+        assert_eq!(before.len(), 1);
+        let backup = Connection::open(&before[0]).unwrap();
+        assert_eq!(
+            backup
+                .query_row("SELECT count(*) FROM download_tasks", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        assert!(backup.prepare("SELECT * FROM authors").is_err());
+        drop(backup);
+        app.shutdown().await;
+        drop(app);
+
+        let reopened = open();
+        assert_eq!(backups(), before);
+        assert_eq!(reopened.author_avatar("telegram-old").unwrap(), shared);
+        assert!(reopened.author_avatar("same-name").is_err());
+        reopened.remove_history("older").unwrap();
+        assert_eq!(reopened.author_avatar("newer").unwrap(), newest);
+        reopened.shutdown().await;
     }
 
     #[tokio::test]

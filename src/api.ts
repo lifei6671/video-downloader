@@ -38,7 +38,21 @@ export interface AuthorLink {
   canonical_url: string;
   scan: AuthorScan | null;
 }
-export interface AuthorProfile { id?: string | null; nickname?: string | null; handle?: string | null; kind: 'user' | 'channel'; avatar_cached?: boolean }
+export interface AuthorProfile {
+  id?: string | null;
+  nickname?: string | null;
+  handle?: string | null;
+  bio?: string | null;
+  kind: 'user' | 'channel';
+  avatar_cached?: boolean;
+  follower_count?: number | null;
+  following_count?: number | null;
+  likes_count?: number | null;
+  age?: number | null;
+  region?: string | null;
+  ip_location?: string | null;
+  profile_updated_at?: number;
+}
 export interface Video { author_scan_id?: string; author_profile?: AuthorProfile; cookie_warning?: string; formats?: VideoFormat[]; selected_format_id?: string | null; platform: string; video_id: string; canonical_url: string; title?: string; author?: string; cover_url?: string; duration_ms?: number; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; kind?: 'video' | 'image_album'; resolver?: Resolver; images?: ImageMeta[]; music?: { title?: string | null; author?: string | null } }
 export type ResolvePhase = 'checking_link' | 'checking_cache' | 'starting_engine' | 'loading_configuration' | 'resolving_link' | 'connecting_account' | 'fetching_metadata' | 'selecting_formats' | 'loading_preview' | 'loading_author' | 'finalizing' | 'cache_hit' | 'completed';
 export interface ResolveProgress { phase: ResolvePhase; steps: ResolvePhase[] }
@@ -177,13 +191,40 @@ export function compareTaskInsertion(a: Task, b: Task): number {
   return (b.insertion_id ?? 0) - (a.insertion_id ?? 0) || b.created_at - a.created_at;
 }
 
+function storedAuthorKey(video: Video | null) {
+  const profile = video?.author_profile;
+  return video && profile?.id && profile.profile_updated_at != null ? `${video.platform}:${profile.id}` : null;
+}
+
 export function mergeTasks(current: Task[], incoming: Task[], removed: ReadonlySet<string>): Task[] {
   const map = new Map(current.filter(t => !removed.has(t.id)).map(t => [t.id, t]));
+  const authors = new Map<string, AuthorProfile>();
+  const rememberAuthor = (task: Task, newerRevision = false) => {
+    const key = storedAuthorKey(task.video);
+    const profile = task.video?.author_profile;
+    if (!key || !profile || profile.profile_updated_at == null) return;
+    const previous = authors.get(key)?.profile_updated_at;
+    if (previous == null || profile.profile_updated_at > previous
+      || (profile.profile_updated_at === previous && newerRevision)) authors.set(key, profile);
+  };
+  for (const task of map.values()) rememberAuthor(task);
   for (const task of incoming) {
     if (removed.has(task.id)) continue;
-    if (!map.has(task.id) || map.get(task.id)!.revision <= task.revision) map.set(task.id, task);
+    const existing = map.get(task.id);
+    if (!existing || existing.revision <= task.revision) {
+      map.set(task.id, task);
+      // Equal-revision list snapshots can arrive after an event in the same second.
+      rememberAuthor(task, existing != null && existing.revision < task.revision);
+    }
   }
-  return [...map.values()].sort(compareTaskInsertion);
+  // A single task event carries the shared profile for every work by that author.
+  return Array.from(map.values(), task => {
+    const key = storedAuthorKey(task.video);
+    const profile = key ? authors.get(key) : undefined;
+    return task.video && profile && profile !== task.video.author_profile
+      ? { ...task, video: { ...task.video, author_profile: profile } }
+      : task;
+  }).sort(compareTaskInsertion);
 }
 const errors: Record<string, string> = {
   TELEGRAM_APP_NOT_CONFIGURED: '此构建尚未配置 Telegram 应用身份',

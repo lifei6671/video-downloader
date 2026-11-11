@@ -71,7 +71,7 @@ export function TaskMoreMenu({ task, busy, play, stream, reveal, copy, copyPath,
       const item = row.current?.closest('[data-task-row]');
       const neighbor = item?.nextElementSibling ?? item?.previousElementSibling;
       removalFocus.current = neighbor?.querySelector<HTMLElement>('button:not(:disabled):not([aria-disabled="true"])') ?? null;
-      list.current = row.current?.closest<HTMLElement>('[role="tabpanel"]') ?? null;
+      list.current = row.current?.closest<HTMLElement>('.task-list-scroll') ?? null;
     }
     onOpenChange?.(open);
   }}>

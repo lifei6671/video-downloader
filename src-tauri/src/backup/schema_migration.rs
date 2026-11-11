@@ -26,6 +26,7 @@ const CONFIG: &[&str] = &[
 
 pub(crate) struct Prepared {
     version: Option<i64>,
+    pub(crate) snapshot_created: bool,
 }
 
 fn version(db: &Connection) -> Result<Option<i64>> {
@@ -64,6 +65,7 @@ fn columns(db: &Connection, table: &str, expected: &[&str]) -> Result<()> {
 pub(crate) fn prepare(db: &Connection) -> Result<Prepared> {
     ensure!(db.is_autocommit(), "BACKUP_SCHEMA_REQUIRES_AUTOCOMMIT");
     let old = version(db)?;
+    let mut snapshot_created = false;
     match old {
         None => {
             // master has the desktop tables but no backup schema. Back it up before
@@ -73,7 +75,8 @@ pub(crate) fn prepare(db: &Connection) -> Result<Prepared> {
                 [], |row| row.get(0),
             )?;
             if existing {
-                snapshot(db, 0)?;
+                snapshot(db, "before-backup-v0")?;
+                snapshot_created = true;
             }
         }
         Some(VERSION | 9) => {
@@ -126,15 +129,19 @@ pub(crate) fn prepare(db: &Connection) -> Result<Prepared> {
             if old == Some(9) {
                 // Already-final development databases need only the consolidated
                 // version marker; never replay the removed intermediate migrations.
-                snapshot(db, 9)?;
+                snapshot(db, "before-backup-v9")?;
+                snapshot_created = true;
             }
         }
         _ => bail!("BACKUP_UNSUPPORTED_SCHEMA"),
     }
-    Ok(Prepared { version: old })
+    Ok(Prepared {
+        version: old,
+        snapshot_created,
+    })
 }
 
-fn snapshot(db: &Connection, old: i64) -> Result<()> {
+pub(crate) fn snapshot(db: &Connection, label: &str) -> Result<()> {
     let Some(path) = db.path().filter(|path| !path.is_empty()) else {
         return Ok(()); // In-memory fixture; no persistent user database exists.
     };
@@ -159,10 +166,7 @@ fn snapshot(db: &Connection, old: i64) -> Result<()> {
         .sync_all()
         .context("BACKUP_MIGRATION_BACKUP_FAILED")?;
     temporary
-        .persist_noclobber(parent.join(format!(
-            "{name}.before-backup-v{old}-{}.sqlite",
-            uuid::Uuid::new_v4(),
-        )))
+        .persist_noclobber(parent.join(format!("{name}.{label}-{}.sqlite", uuid::Uuid::new_v4(),)))
         .map_err(|error| anyhow::anyhow!(error))
         .context("BACKUP_MIGRATION_BACKUP_FAILED")?;
     Ok(())

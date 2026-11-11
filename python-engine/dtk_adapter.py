@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import structlog
 from yt_dlp.networking import Request
+from author_profile import normalize_bio, public_details
 from douyin import original_scale_cover, cover_candidates
 from media_album import MAX_IMAGES
 
@@ -111,6 +112,11 @@ def metadata(content):
                   duration_ms=content.duration_ms, cover_url=None)
     result['author_profile'] = dict(id=content.author.uid, nickname=content.author.nickname,
                                   handle=content.author.unique_id, kind='user')
+    bio = normalize_bio(content.author.signature)
+    if bio is not None:
+        result['author_profile']['bio'] = bio
+    raw = content.raw or {}
+    result['author_profile'].update(public_details(str(content.platform), raw.get('author'), raw))
     if content.music:
         result['music'] = dict(title=content.music.title, author=content.music.author)
     if str(content.kind) == 'image_album':

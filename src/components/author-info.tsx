@@ -1,26 +1,41 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type Ref } from 'react';
 import { api, type Task } from '@/api';
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from 'cn';
 
-export function AuthorInfo({ task, compact = false, showId = true, showAvatar = true, onAuthorClick }: { task: Task; compact?: boolean; showId?: boolean; showAvatar?: boolean; onAuthorClick?: () => void }) {
-  const profile = task.video?.author_profile;
-  const loadAvatar = showAvatar && (profile?.avatar_cached || (task.status === 'completed' && !!task.video?.author_scan_id));
+export function hasAuthorAvatar(task: Task) {
+  return task.video?.author_profile?.avatar_cached || (task.status === 'completed' && !!task.video?.author_scan_id);
+}
+
+export function AuthorAvatar({ task, name, compact, className }: { task?: Task; name: string; compact?: boolean; className?: string }) {
+  const taskId = task?.id;
+  const profileId = task?.video?.author_profile?.id;
+  const cachedAt = task?.cached_at;
+  const avatarCached = task?.video?.author_profile?.avatar_cached;
+  const loadAvatar = !!task && hasAuthorAvatar(task);
   const [source, setSource] = useState<string>();
   useEffect(() => {
     let disposed = false;
     let url: string | undefined;
     setSource(undefined);
-    if (loadAvatar) void api.authorAvatar(task.id).then(data => {
+    if (loadAvatar && taskId) void api.authorAvatar(taskId).then(data => {
       if (disposed) return;
       const body = new Uint8Array(data);
       url = URL.createObjectURL(new Blob([body], { type: body[0] === 0xff ? 'image/jpeg' : body[0] === 0x89 ? 'image/png' : 'image/webp' }));
       setSource(url);
     }).catch(() => { /* The official Avatar fallback covers missing local bytes. */ });
     return () => { disposed = true; if (url) URL.revokeObjectURL(url); };
-  }, [task.id, task.cached_at, profile?.id, loadAvatar]);
+  }, [taskId, cachedAt, profileId, loadAvatar, avatarCached]);
+  return <Avatar size={compact ? 'sm' : 'default'} className={className}>
+    <AvatarImage src={source} alt={`${name}的头像`} />
+    <AvatarFallback>{Array.from(name)[0]}</AvatarFallback>
+  </Avatar>;
+}
+
+export function AuthorInfo({ task, compact = false, showId = true, showAvatar = true, onAuthorClick, triggerRef }: { task: Task; compact?: boolean; showId?: boolean; showAvatar?: boolean; onAuthorClick?: (trigger: HTMLButtonElement) => void; triggerRef?: Ref<HTMLButtonElement> }) {
+  const profile = task.video?.author_profile;
   if (!task.video) return null;
   const telegram = task.video.platform === 'telegram';
   const authorId = profile?.id?.trim() || (telegram ? task.video.video_id.split('_')[0] : undefined);
@@ -31,12 +46,9 @@ export function AuthorInfo({ task, compact = false, showId = true, showAvatar = 
     ? channelName
     : (!showId && authorId) || profile?.handle || task.video.author || '作者未知');
   return <div data-author-info="" role="group" aria-label={telegram ? '频道信息' : '作者信息'} className="flex min-w-0 items-center gap-2">
-    {showAvatar && <Avatar size={compact ? 'sm' : 'default'}>
-      <AvatarImage src={source} alt={`${name}的头像`} />
-      <AvatarFallback>{Array.from(name)[0]}</AvatarFallback>
-    </Avatar>}
+    {showAvatar && <AuthorAvatar task={task} name={name} compact={compact} />}
     <div className="flex min-w-0 flex-1 items-baseline gap-2">
-      <Tooltip><TooltipTrigger asChild>{onAuthorClick ? <Button variant="link" aria-label={`查看${name}的作品`} onClick={onAuthorClick} className={cn('h-auto min-w-0 justify-start p-0', id && 'max-w-[40%] shrink-0', compact ? 'text-xs font-normal' : 'text-sm font-medium')}><span className="truncate">{name}</span></Button>
+      <Tooltip><TooltipTrigger asChild>{onAuthorClick ? <Button ref={triggerRef} variant="link" aria-label={`查看${name}的作品`} onClick={event => onAuthorClick(event.currentTarget)} className={cn('h-auto min-w-0 justify-start p-0', id && 'max-w-[40%] shrink-0', compact ? 'text-xs font-normal' : 'text-sm font-medium')}><span className="truncate">{name}</span></Button>
         : <span tabIndex={0} className={cn('truncate', id && 'max-w-[40%] shrink-0', compact ? 'text-xs' : 'text-sm font-medium')}>{name}</span>}</TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{name}</TooltipContent></Tooltip>
       {id && <Tooltip><TooltipTrigger asChild><span tabIndex={0} className="max-w-full truncate text-xs text-muted-foreground">ID: {id}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">ID: {id}</TooltipContent></Tooltip>}
     </div>

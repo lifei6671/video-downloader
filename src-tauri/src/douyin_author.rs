@@ -120,9 +120,7 @@ pub(super) fn init(db: &Connection) -> Result<()> {
             id TEXT PRIMARY KEY, queued INTEGER NOT NULL, skipped INTEGER NOT NULL, pause_reason TEXT);
          CREATE TABLE IF NOT EXISTS author_download_batch_tasks(
             batch_id TEXT NOT NULL REFERENCES author_download_batches(id) ON DELETE CASCADE,
-            task_id TEXT NOT NULL, PRIMARY KEY(batch_id,task_id));
-         CREATE TABLE IF NOT EXISTS douyin_author_avatars(
-            author_id TEXT PRIMARY KEY, body BLOB NOT NULL CHECK(length(body) BETWEEN 1 AND 2097152));",
+            task_id TEXT NOT NULL, PRIMARY KEY(batch_id,task_id));",
     ).context("DATABASE_ERROR")?;
     let has_legacy: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='author_scans')",
@@ -394,53 +392,6 @@ pub(super) fn batch_id(task: &Task) -> Option<&str> {
 pub(super) fn batch_author_id(video: &Value) -> Option<&str> {
     let author = video["batch_author_id"].as_str()?;
     (video["platform"] == "douyin" && valid_author(author)).then_some(author)
-}
-
-pub(super) fn has_avatar(db: &Connection, author: &str) -> Result<bool> {
-    db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM douyin_author_avatars WHERE author_id=?)",
-        [author],
-        |row| row.get(0),
-    )
-    .context("DATABASE_ERROR")
-}
-
-pub(super) fn avatar(db: &Connection, author: &str) -> Result<Vec<u8>> {
-    db.query_row(
-        "SELECT body FROM douyin_author_avatars WHERE author_id=?",
-        [author],
-        |row| row.get(0),
-    )
-    .optional()
-    .context("DATABASE_ERROR")?
-    .context("FILE_MISSING")
-}
-
-pub(super) fn save_staged_avatar(
-    db: &Connection,
-    author: &str,
-    result: &Value,
-    stage: &Path,
-) -> Result<()> {
-    if result["author_avatar_filename"] != "author-avatar" {
-        return Ok(());
-    }
-    let expected = result["author_avatar_bytes"]
-        .as_u64()
-        .context("INVALID_ENGINE_RESULT")?;
-    if !(1..=parse_cache::MAX_AVATAR_BYTES as u64).contains(&expected) {
-        bail!("INVALID_MEDIA_CONTENT");
-    }
-    let body = crate::files::read_cover(&stage.join("author-avatar"))?;
-    if expected != body.len() as u64 {
-        bail!("INCOMPLETE_MEDIA");
-    }
-    db.execute(
-        "INSERT INTO douyin_author_avatars(author_id,body) VALUES(?,?) ON CONFLICT(author_id) DO UPDATE SET body=excluded.body",
-        params![author, body],
-    )
-    .context("DATABASE_ERROR")?;
-    Ok(())
 }
 
 fn archived(task: &Task) -> bool {
@@ -995,7 +946,7 @@ impl Core {
         inner.tasks.retain(|task| !reused.contains(&task.id));
         inner.tasks.splice(0..0, published.iter().rev().cloned());
         for task in published {
-            (self.emit)(TaskEvent::Updated(Box::new(task)));
+            super::emit_task(&inner.db, task, &*self.emit);
         }
         self.dispatch(&mut inner);
         Ok(batch)
@@ -1095,7 +1046,12 @@ impl Core {
             return Err(error);
         }
         self.dispatch(&mut inner);
-        Ok(inner.tasks.iter().find(|task| task.id == id).cloned())
+        Ok(inner
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .cloned()
+            .map(|task| super::authors::display_task(&inner.db, task)))
     }
 }
 
@@ -1498,7 +1454,10 @@ mod tests {
         reopened.remove_history(&video_task_id).unwrap();
         assert_eq!(reopened.author_avatar(&album_task_id).unwrap(), avatar_body);
         reopened.remove_history(&album_task_id).unwrap();
-        assert!(!has_avatar(&reopened.inner.lock().unwrap().db, "fixture-author").unwrap());
+        assert!(!authors::has_avatar(
+            &reopened.inner.lock().unwrap().db,
+            video.video.as_ref().unwrap()
+        ));
         reopened.shutdown().await;
     }
 
@@ -1858,9 +1817,21 @@ mod tests {
             2
         );
         assert_eq!(finished(&app, "sample", 120).await.completed, 2);
+        let (bio, links): (Option<String>, i64) = app.inner.lock().unwrap().db.query_row(
+            "SELECT a.bio,count(t.task_id) FROM authors a JOIN task_authors t USING(platform,author_id)
+             WHERE a.platform='douyin' AND a.author_id=? GROUP BY a.author_id",
+            [&author],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(links, 2);
+        println!(
+            "author_bio_chars={}",
+            bio.as_deref().map_or(0, |text| text.chars().count())
+        );
         for task in app.list() {
             assert!(archived(&task));
             let video = task.video.unwrap();
+            assert_eq!(video["author_profile"]["bio"].as_str(), bio.as_deref());
             println!(
                 "{}: {} bytes, {} images",
                 video["kind"],

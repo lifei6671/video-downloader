@@ -566,6 +566,7 @@ def operate(method, params, emit):
                     ydl.params['retries'] = 0
                     media_album.download_images(
                         ydl, album, platform, result['video_id'], actual_resolver, stage, emit,
+                        author_profile=None if batch_author else author_profile.downloaded_profile(result),
                         **({'metadata': result, 'avatar_url': avatar} if batch_author else {}))
                 else:
                     if preview:
@@ -626,10 +627,12 @@ def operate(method, params, emit):
                 raise EngineError('IO_ERROR', 'output')
             if fetch_batch_avatar:
                 avatar = author_profile.avatar_url(ydl, info, platform)
+            profile = None if batch_author else author_profile.downloaded_profile(result)
             emit('download_finished', platform=platform, video_id=result['video_id'],
                  filename=file.name, bytes=file.stat().st_size, container=info['ext'],
                  format_id=result['selected_format_id'], width=result['width'], height=result['height'],
                  **({'metadata': result} if batch_author else {}),
+                 **({'author_profile': profile} if profile is not None else {}),
                  **({'transferred_bytes': progress.transferred} if platform == 'youtube' else {}),
                  **(author_profile.download_avatar(ydl, avatar, stage) if avatar else {}),
                  **download_cover(ydl, info, stage))

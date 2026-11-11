@@ -18,9 +18,8 @@ export function TaskRemovalRow({ id, removing, onExited, children }: {
     if (node.contains(active) || active === document.body && focused.current) {
       const neighbor = [node.nextElementSibling, node.previousElementSibling].find(element => element && !element.hasAttribute('inert'))
         ?? Array.from(node.parentElement?.children ?? []).find(element => element !== node && !element.hasAttribute('inert'));
-      const target = neighbor?.querySelector<HTMLElement>('button:not(:disabled):not([aria-disabled="true"]), [tabindex="0"]')
-        ?? node.closest<HTMLElement>('[role="tabpanel"]');
-      const panel = node.closest<HTMLElement>('[role="tabpanel"]');
+      const panel = node.closest<HTMLElement>('.task-list-scroll');
+      const target = neighbor?.querySelector<HTMLElement>('button:not(:disabled):not([aria-disabled="true"]), [tabindex="0"]') ?? panel;
       restoreFocus = () => {
         if (document.activeElement === document.body || node.contains(document.activeElement)) {
           (target?.isConnected ? target : panel?.isConnected ? panel : null)?.focus({preventScroll:true});

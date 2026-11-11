@@ -28,7 +28,7 @@ export function taskListRows(tasks: Task[], assets: BackupAsset[]) {
   return [...tasks.map(task => ({ kind: 'task' as const, task })), ...assets.map(asset => ({ kind: 'asset' as const, asset }))];
 }
 
-export function TaskList({ tasks, paginationKey, platform, onPlatformChange, view, onViewChange, listRef, removingIds, onExited, renderRow, assets = [], renderAsset, removingAssetIds, onAssetExited, toolbar, empty }: {
+export function TaskList({ tasks, paginationKey, platform, onPlatformChange, view, onViewChange, listRef, removingIds, onExited, renderRow, assets = [], renderAsset, removingAssetIds, onAssetExited, toolbar, empty, intro }: {
   tasks: Task[];
   assets?: BackupAsset[];
   removingAssetIds?: ReadonlySet<string>;
@@ -36,8 +36,8 @@ export function TaskList({ tasks, paginationKey, platform, onPlatformChange, vie
   renderAsset?: (asset: BackupAsset) => ReactNode;
   toolbar?: ReactNode;
   paginationKey: string;
-  platform: string;
-  onPlatformChange: (value: string) => void;
+  platform?: string;
+  onPlatformChange?: (value: string) => void;
   view: TaskView;
   onViewChange: (view: TaskView) => void;
   listRef: RefObject<HTMLDivElement | null>;
@@ -45,6 +45,7 @@ export function TaskList({ tasks, paginationKey, platform, onPlatformChange, vie
   onExited: (id: string) => void;
   renderRow: (task: Task) => ReactNode;
   empty: ReactNode;
+  intro?: ReactNode;
 }) {
   const [page, setPage] = useState({ key: paginationKey, limit: 30 });
   const [loading, setLoading] = useState(false);
@@ -73,21 +74,26 @@ export function TaskList({ tasks, paginationKey, platform, onPlatformChange, vie
     observer.observe(sentinel.current);
     return () => { observer.disconnect(); clearTimeout(timer); };
   }, [hasMore, limit, paginationKey, platform, view, listRef]);
-  return <Tabs value={platform} onValueChange={onPlatformChange} className="task-browser min-h-0 flex-1">
-    <div className="task-platform-toolbar">
-      <TaskPlatformFilters />
+  const viewAction = view === 'list' ? platform ? '切换为信息流' : '切换为卡片' : '切换为列表';
+  const controls = <div className="task-platform-toolbar">
+      {platform && <TaskPlatformFilters />}
       {toolbar}
-      <Tooltip><TooltipTrigger asChild><Button type="button" size="icon" variant="ghost" className="task-view-toggle shrink-0 cursor-pointer" aria-label={view === 'list' ? '切换为信息流' : '切换为列表'} aria-pressed={view === 'feed'} onClick={() => onViewChange(view === 'list' ? 'feed' : 'list')}>
+      <Tooltip><TooltipTrigger asChild><Button type="button" size="icon" variant="ghost" className="task-view-toggle shrink-0 cursor-pointer" aria-label={viewAction} aria-pressed={view === 'feed'} onClick={() => onViewChange(view === 'list' ? 'feed' : 'list')}>
         {view === 'list' ? <LayoutGrid aria-hidden="true" /> : <List aria-hidden="true" />}
-      </Button></TooltipTrigger><TooltipContent>{view === 'list' ? '切换为信息流' : '切换为列表'}</TooltipContent></Tooltip>
-    </div>
-    <TabsContent ref={listRef} value={platform} className="flex min-h-0 flex-col overflow-y-auto">
+      </Button></TooltipTrigger><TooltipContent>{viewAction}</TooltipContent></Tooltip>
+    </div>;
+  const contents = <div ref={listRef} tabIndex={0} className="task-list-scroll flex min-h-0 flex-1 flex-col overflow-y-auto">
+      {intro}
+      {!platform && controls}
       {rows.length ? <div role="list" aria-label="媒体任务列表" data-view={view} className="task-list">
         {rows.slice(0, limit).map(row => row.kind === 'task' ? <TaskRemovalRow key={row.task.id} id={row.task.id} removing={removingIds.has(row.task.id)} onExited={onExited}>{renderRow(row.task)}</TaskRemovalRow> : <TaskRemovalRow key={'asset-' + row.asset.asset_id} id={row.asset.asset_id} removing={removingAssetIds?.has(row.asset.asset_id) ?? false} onExited={onAssetExited ?? onExited}>{renderAsset?.(row.asset)}</TaskRemovalRow>)}
       </div> : empty}
       {hasMore && <div ref={sentinel} className="task-load-more" role="status" aria-live="polite" aria-busy={loading}>
         {loading && <><Spinner aria-hidden="true" />正在加载更多…</>}
       </div>}
-    </TabsContent>
-  </Tabs>;
+    </div>;
+  return platform ? <Tabs value={platform} onValueChange={onPlatformChange} className="task-browser min-h-0 flex-1">
+    {controls}
+    <TabsContent asChild value={platform}>{contents}</TabsContent>
+  </Tabs> : <div className="task-browser flex min-h-0 flex-1 flex-col">{contents}</div>;
 }

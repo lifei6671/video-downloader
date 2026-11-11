@@ -208,7 +208,7 @@ async page => {
   results.push('feed removal preserves existing commit and exit behavior');
   await load('author-results');await feed();
   await row('first').getByRole('button',{name:'查看作者昵称的作品',exact:true}).click();
-  await page.getByRole('heading',{name:'搜索结果',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'作者昵称',exact:true}).waitFor();
   check(await list().getAttribute('data-view')==='feed','author results lost view');
   const ready=row('second');await ready.getByRole('button',{name:'下载视频',exact:true}).waitFor();
   check(await ready.locator('.task-row-footer').count()===0,'author-ready retained footer');

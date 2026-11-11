@@ -11,11 +11,11 @@ export interface AuthorSearch {
 export function authorSearch(video: Video | null): AuthorSearch | null {
   if (!video) return null;
   const profile = video.author_profile;
-  const id = profile?.id || (video.platform === 'telegram' ? video.video_id.split('_')[0] : null);
-  const handle = profile?.handle || null;
-  const legacyAuthor = video.author || null;
+  const id = profile?.id?.trim() || (video.platform === 'telegram' ? video.video_id.split('_')[0] : null);
+  const handle = profile?.handle?.trim() || null;
+  const legacyAuthor = video.author?.trim() || null;
   if (!id && !handle && !legacyAuthor) return null;
-  const name = profile?.nickname || handle || legacyAuthor || (id ? video.platform === 'telegram' ? 'Telegram 频道' : '作者未知' : null);
+  const name = profile?.nickname?.trim() || handle || legacyAuthor || (id ? video.platform === 'telegram' ? 'Telegram 频道' : '作者未知' : null);
   return name ? { platform: video.platform, id, handle, legacyAuthor, name } : null;
 }
 
@@ -28,4 +28,11 @@ export function matchesAuthor(video: Video | null, query: AuthorSearch): boolean
   return !!candidate.legacyAuthor && (candidate.legacyAuthor === query.legacyAuthor
     || candidate.legacyAuthor === query.handle)
     || !!query.legacyAuthor && query.legacyAuthor === candidate.handle;
+}
+
+export function matchingAuthorRecords<T extends { video: Video | null }>(records: T[], identity: AuthorSearch): T[] {
+  const matches = records.filter(record => matchesAuthor(record.video, identity));
+  if (identity.id) return matches;
+  const knownIds = new Set(matches.map(record => authorSearch(record.video)?.id).filter(Boolean));
+  return knownIds.size > 1 ? matches.filter(record => !authorSearch(record.video)?.id) : matches;
 }

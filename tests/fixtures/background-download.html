@@ -20,6 +20,7 @@ const control = {loaded:false,calls:[],holdEvents:scenario === 'delayed',holdRef
 window.backgroundTest = control;
 control.api = api;
 control.emit = task => listener(structuredClone(task));
+control.setSnapshot = snapshot => { tasks = structuredClone(snapshot); };
 if (scenario === 'parse-controls') {
   api.readClipboardText = () => new Promise(resolve => control.releaseClipboard = resolve);
   control.finishParsing = status => {
@@ -39,11 +40,13 @@ if (scenario === 'author-results') {
     bytes:65536,completed_at:Math.floor(new Date(2026,9,16,20,48).getTime()/1000),path:'C:\\TestVideos\\'+id+'.mp4',
     video:{...structuredClone(video),platform,video_id:id,title,author:'account_handle',selected_format_id:'original',
       formats:[{format_id:'original',container:'mp4',width:1080,height:1920,filesize:65536}],
-      author_profile:{id:authorId,nickname,handle:'account_handle',kind:'user',avatar_cached:true}}});
-  tasks=[make('first','douyin','author-1','作者昵称','原作品'),make('second','douyin','author-1','更早的昵称','另一条作品'),
+      author_profile:{id:authorId,nickname,handle:'account_handle',kind:'user',avatar_cached:true,bio:authorId === 'author-1' && platform === 'douyin' ? '记录日常，也分享作品。\n第二行简介' : null}}});
+  tasks=[make('first','douyin','author-1','作者昵称','原作品'),make('second','douyin','author-1','作者昵称','另一条作品'),
     make('different','douyin','author-2','作者昵称','同名其他作者'),make('cross-platform','tiktok','author-1','作者昵称','其他平台作品'),
     make('legacy','douyin',null,null,'旧版作品')];
   tasks[0].file_missing=true;
+  for (const task of tasks.slice(0,2)) Object.assign(task.video.author_profile, {
+    profile_updated_at:10,follower_count:12345,following_count:0,likes_count:null,age:28,region:'中国 上海',ip_location:'浙江'});
   Object.assign(tasks[1],{status:'ready',download_requested:false,completed_at:null,path:null});
   Object.assign(tasks[1].video.formats[0],{width:720,height:1280});
   delete tasks[4].video.author_profile;

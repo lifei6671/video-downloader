@@ -28,10 +28,54 @@ def test_author_identity_nickname_and_avatar_are_separate(platform, node, expect
 def test_tiktok_wrapper_preserves_upstream_result_and_captures_author(monkeypatch):
     monkeypatch.setattr(UpstreamTikTokIE, '_parse_aweme_video_web', lambda *a, **k: {'id': '123'})
     info = author_profile.TikTokIE()._parse_aweme_video_web(
-        {'author': {'id': '456', 'uniqueId': 'name', 'nickname': '昵称', 'avatarThumb': 'https://p.tiktokcdn.com/a'}},
+        {'author': {'id': '456', 'uniqueId': 'name', 'nickname': '昵称', 'signature': ' TikTok 简介 ',
+                    'avatarThumb': 'https://p.tiktokcdn.com/a'}},
         'https://www.tiktok.com/@name/video/123', '123')
     assert info['id'] == '123'
-    assert author_profile.metadata(info, 'tiktok')['nickname'] == '昵称'
+    profile = author_profile.metadata(info, 'tiktok')
+    assert profile['nickname'] == '昵称'
+    assert profile['bio'] == 'TikTok 简介'
+
+
+@pytest.mark.parametrize('signature,bio', [(' 抖音简介 ', '抖音简介'), (' ', None), (None, None), (123, None)])
+def test_optional_signature_is_a_text_bio(signature, bio):
+    info = author_profile.attach({}, {'uid': '123', 'signature': signature}, 'douyin')
+    profile = author_profile.metadata(info, 'douyin')
+    assert profile.get('bio') == bio
+    assert ('bio' in profile) == (bio is not None)
+
+
+def test_douyin_optional_details_keep_zero_and_separate_profile_region_from_ip_label():
+    node = {'sec_uid': 'MS4wLjABfixture', 'follower_count': '12345', 'following_count': 0,
+            'total_favorited': 456, 'user_age': 28, 'country': '中国', 'province': '上海',
+            'city': '上海', 'ip_location': 'IP属地：浙江'}
+    profile = author_profile.metadata(author_profile.attach({}, node, 'douyin'), 'douyin')
+    assert author_profile.downloaded_profile({'author_profile': profile}) == {
+        'id': 'MS4wLjABfixture', 'follower_count': 12345, 'following_count': 0,
+        'likes_count': 456, 'age': 28, 'region': '中国 上海', 'ip_location': '浙江'}
+    assert author_profile.public_details('douyin', {
+        'follower_count': True, 'total_favorited': -1, 'user_age': 28, 'show_age': False,
+        'birthday': '2000-01-01', 'province': '未知', 'ip_location': 'IP属地：'}) == {'age_hidden': True}
+
+
+def test_tiktok_uses_author_counters_field_by_field(monkeypatch):
+    monkeypatch.setattr(UpstreamTikTokIE, '_parse_aweme_video_web', lambda *a, **k: {'id': '123'})
+    info = author_profile.TikTokIE()._parse_aweme_video_web({
+        'author': {'id': '456', 'region': 'US', 'age': 22, 'showAge': 'FALSE'},
+        'authorStatsV2': {'followerCount': '0', 'heartCount': '325'},
+        'authorStats': {'followerCount': 99, 'followingCount': 20, 'heartCount': 999},
+        'stats': {'diggCount': 77},
+    })
+    profile = author_profile.metadata(info, 'tiktok')
+    assert author_profile.downloaded_profile({'author_profile': profile}) == {
+        'id': '456', 'follower_count': 0, 'following_count': 20, 'likes_count': 325,
+        'region': 'US', 'age_hidden': True}
+    assert author_profile.public_details('tiktok', {'id': '456', 'region': 'ZZ'},
+                                         {'stats': {'diggCount': 77}, 'region': 'GB'}) == {}
+    root = {'authorId': '456', 'region': 'GB', 'age': 22, 'authorStats': {'heart': 325}}
+    info = author_profile.TikTokIE()._parse_aweme_video_web(root)
+    assert author_profile.downloaded_profile({'author_profile': author_profile.metadata(info, 'tiktok')}) == {
+        'id': '456', 'likes_count': 325}
 
 
 def test_youtube_uses_channel_id_not_handle_for_identity():
