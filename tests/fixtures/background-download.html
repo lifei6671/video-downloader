@@ -18,6 +18,7 @@ let tasks = [structuredClone(original), ...(scenario === 'duplicate' ? [complete
 let listener = () => {}; let removedListener = () => {}; let next = 0; const pendingUpdates = [], pendingSnapshots = [];
 const control = {loaded:false,calls:[],holdEvents:scenario === 'delayed',holdRefresh:scenario === 'delayed',race:scenario === 'race',release:()=>{},snapshot:()=>structuredClone(tasks),flush:()=>{control.holdEvents=false;control.holdRefresh=false;for(const task of pendingUpdates.splice(0))listener(task);for(const [resolve,snapshot] of pendingSnapshots.splice(0))resolve(snapshot)},complete:id=>{const task=tasks.find(t=>t.id===id);Object.assign(task,{revision:task.revision+1,status:'completed',bytes:65536,path:'C:\\TestVideos\\'+id+'.mp4',completed_at:20});listener(structuredClone(task))},stale:()=>listener(structuredClone(original))};
 window.backgroundTest = control;
+control.api = api;
 control.emit = task => listener(structuredClone(task));
 if (scenario === 'parse-controls') {
   api.readClipboardText = () => new Promise(resolve => control.releaseClipboard = resolve);

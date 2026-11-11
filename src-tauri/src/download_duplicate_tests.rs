@@ -86,7 +86,7 @@ async fn redownload_recovery_rolls_back_an_uncommitted_replacement() {
     let replacement = b"\0\0\0\x18ftypmp42new-version";
     std::fs::write(&source, replacement).unwrap();
     let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
-    redownload::remember(&db, &original, "preview").unwrap();
+    redownload::remember(&db, &original, Some("preview")).unwrap();
     let mut attempt = original.clone();
     attempt.status = Status::Downloading;
     attempt.path = None;
@@ -122,7 +122,7 @@ async fn redownload_rollback_failure_is_retained_even_when_canceling() {
         let mut attempt = original.clone();
         attempt.status = Status::Downloading;
         attempt.canceling = true;
-        redownload::remember(&inner.db, &original, "preview").unwrap();
+        redownload::remember(&inner.db, &original, Some("preview")).unwrap();
         persist_new_attempt(&inner.db, &attempt).unwrap();
         *inner.tasks.iter_mut().find(|task| task.id == original.id).unwrap() = attempt;
     }

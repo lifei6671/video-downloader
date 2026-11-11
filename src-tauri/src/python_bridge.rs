@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.14.7";
+pub const ENGINE_VERSION: &str = "0.14.8";
 pub const YTDLP_VERSION: &str = "2026.10.26";
 
 async fn cancellation() -> Result<()> {
@@ -255,6 +255,7 @@ impl PythonBridge {
         let mut recognizing = false;
         let mut transcription_segments: Option<(u64, u64)> = None;
         let mut resolve_order = None;
+        let mut author_final_page = false;
         let mut phase_deadline = tokio::time::Instant::now() + Duration::from_secs(1800);
         loop {
             let wait = if method == "transcribe_video" {
@@ -264,6 +265,8 @@ impl PythonBridge {
             } else {
                 Duration::from_secs(if merging {
                     600
+                } else if author_final_page {
+                    5
                 } else if method == "scan_author_posts" {
                     120
                 } else {
@@ -281,6 +284,7 @@ impl PythonBridge {
                 if method != "scan_author_posts" {
                     bail!("ENGINE_PROTOCOL_ERROR");
                 }
+                author_final_page = value["has_more"] == false;
                 progress(value);
                 continue;
             }

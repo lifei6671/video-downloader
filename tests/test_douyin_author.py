@@ -92,6 +92,37 @@ def test_scan_reads_past_forty_pages_and_validates_the_end(monkeypatch):
     assert events[-1] == ('author_scan_finished', {'result': {'pages': 42}})
 
 
+def test_scan_resume_preserves_cursor_page_number_and_request_delay(monkeypatch):
+    seen, waits, events = [], [], []
+
+    def page(*_args, cursor, **_kwargs):
+        seen.append(cursor)
+        return dict(status_code=0, aweme_list=[], has_more=0)
+
+    monkeypatch.setattr(douyin_author.dtk_adapter, 'request_json', page)
+    monkeypatch.setattr(douyin_author.time, 'monotonic', lambda: 0)
+    monkeypatch.setattr(douyin_author.time, 'sleep', waits.append)
+    monkeypatch.setattr(douyin_author.random, 'randint', lambda *_args: 1200)
+    params = {'input': URL, 'profile': {'cookie': 'sessionid=fixture'},
+              'cursor': '1234', 'completed_pages': 4}
+    douyin_author.scan(params, lambda event, **value: events.append((event, value)))
+    assert seen == ['1234']
+    assert waits == pytest.approx([9.7])
+    assert events[0][1]['page'] == 5
+    assert events[-1] == ('author_scan_finished', {'result': {'pages': 5}})
+
+    with pytest.raises(engine.EngineError, match='AUTHOR_CURSOR_INVALID'):
+        douyin_author.scan({**params, 'cursor': None}, lambda *_args, **_kwargs: None)
+
+
+def test_author_scan_does_not_fall_back_to_browser_with_empty_configured_cookie(monkeypatch):
+    monkeypatch.setattr(douyin_author, 'load_default_cookies',
+                        lambda *_args: pytest.fail('saved cookie must not read another identity'))
+    with pytest.raises(engine.EngineError, match='AUTHOR_LOGIN_REQUIRED'):
+        douyin_author.scan({'input': URL, 'profile': {'cookie': ';'}},
+                           lambda *_args, **_kwargs: None)
+
+
 def test_share_query_does_not_override_author_and_posts_are_not_profiles():
     assert douyin_author.profile_link(URL + '?sec_uid=another-author')[1] == AUTHOR
     with pytest.raises(engine.EngineError, match='INVALID_AUTHOR_LINK'):

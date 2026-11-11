@@ -137,22 +137,30 @@ def parse_page(payload, author_id):
 def scan(params, emit):
     from engine import EngineError, add_cookies, error_code, profile_config
     url, author_id = profile_link(params.get('input'))
-    ua, cookies, proxy = profile_config(params['profile'])
+    cursor = params.get('cursor')
+    completed = params.get('completed_pages', 0)
+    if (type(completed) is not int or not 0 <= completed < MAX_PAGES
+            or (completed == 0 and cursor is not None)
+            or (completed > 0 and (not isinstance(cursor, str)
+                                   or not re.fullmatch(r'[0-9]{1,32}', cursor) or cursor == '0'))):
+        raise EngineError('AUTHOR_CURSOR_INVALID', 'author_list')
+    profile = params['profile']
+    ua, cookies, proxy = profile_config(profile)
     with guarded_client(proxy) as ydl:
         if author_id is None:
             _, author_id = profile_link(expand_share(ydl, url, ua))
             if author_id is None:
                 raise EngineError('INVALID_AUTHOR_LINK', 'author_link')
-        if cookies:
+        if profile.get('cookie'):
             add_cookies(ydl.cookiejar, cookies, 'douyin')
         else:
             load_default_cookies(ydl.cookiejar, 'douyin', ydl.params['logger'])
         if not has_login(ydl.cookiejar):
             raise EngineError('AUTHOR_LOGIN_REQUIRED', 'author_list')
 
-        cursor, started = None, None
-        cursors = set()
-        for number in range(1, MAX_PAGES + 1):
+        started = time.monotonic() if cursor is not None else None
+        cursors = {cursor} if cursor is not None else set()
+        for number in range(completed + 1, MAX_PAGES + 1):
             for attempt in range(2):
                 if started is not None:
                     wait = max(0, 8.5 - (time.monotonic() - started))

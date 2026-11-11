@@ -12,9 +12,8 @@ export interface RuntimeStatus { platform: string; directory: string; tools: Run
 export interface RuntimeProgress { tool: RuntimeTool['id']; phase: 'downloading' | 'verifying' | 'installing'; downloaded_bytes: number; total_bytes: number }
 export interface ImageMeta { width?: number | null; height?: number | null; quality_source: 'original' | 'high_definition'; preview_filename?: string; filename?: string; bytes?: number; sha256?: string; video?: { filename: string; bytes: number; sha256: string } }
 export interface VideoFormat { requires_merge?: boolean; format_id: string; container: string; codec?: string | null; width?: number | null; height?: number | null; filesize?: number | null; filesize_approx?: number | null; fps?: number | null; tbr?: number | null }
-export type AuthorScanMode = 'full' | 'incremental';
-export type AuthorBaselineAction = 'archive_history' | 'baseline_only';
-export interface AuthorBatch { queued: number; skipped: number; baseline_only: boolean }
+export type AuthorDownloadMode = 'full' | 'incremental';
+export interface AuthorBatch { queued: number; skipped: number }
 export interface AuthorScan {
   id: string;
   author_id: string | null;
@@ -30,16 +29,13 @@ export interface AuthorScan {
   remaining: number;
   completed: number;
   failed: number;
-  mode: AuthorScanMode;
-  needs_baseline: boolean;
-  new_posts: number;
-  retry_posts: number;
+  pending_downloads: number;
   already_local: number;
+  resume_page: number | null;
 }
 export interface AuthorLink {
   author_id: string;
   canonical_url: string;
-  default_mode: AuthorScanMode;
   scan: AuthorScan | null;
 }
 export interface AuthorProfile { id?: string | null; nickname?: string | null; handle?: string | null; kind: 'user' | 'channel'; avatar_cached?: boolean }
@@ -141,11 +137,13 @@ export const api = {
   tasks: () => invoke<Task[]>('list_tasks'),
   settings: () => invoke<Settings>('get_settings'),
   resolve: (input: string, resolver: Resolver = 'auto') => invoke<Task | AuthorLink>('resolve_download_link', { input, resolver }),
-  startAuthorScan: (input: string, mode: AuthorScanMode) => invoke<AuthorScan>('start_author_scan', { input, mode }),
+  recoverAuthorScan: (scanId: string, reset: boolean) =>
+    invoke<AuthorScan>('recover_author_scan', { scanId, reset }),
   authorScan: (scanId?: string) => invoke<AuthorScan | null>('get_author_scan', { scanId }),
   cancelAuthorScan: (scanId: string) => invoke<AuthorScan>('cancel_author_scan', { scanId }),
-  confirmAuthorScan: (scanId: string, allowPartial: boolean, baselineAction?: AuthorBaselineAction) =>
-    invoke<AuthorBatch>('confirm_author_scan', { scanId, allowPartial, baselineAction }),
+  discardAuthorScan: (scanId: string) => invoke<void>('discard_author_scan', { scanId }),
+  confirmAuthorScan: (scanId: string, allowPartial: boolean, mode: AuthorDownloadMode) =>
+    invoke<AuthorBatch>('confirm_author_scan', { scanId, allowPartial, mode }),
   resumeAuthorBatch: (scanId: string) => invoke<AuthorScan>('resume_author_batch', { scanId }),
   chooseFormat: (taskId: string, formatId: string) => invoke<Task>('choose_video_format', { taskId, formatId }),
   download: (taskId: string, confirmDuplicate = false, replaceTaskId?: string) => invoke<string>('start_download', { taskId, confirmDuplicate, replaceTaskId }),
@@ -344,11 +342,7 @@ const errors: Record<string, string> = {
   AUTHOR_CURSOR_INVALID: '抖音返回了无效或重复的翻页位置',
   AUTHOR_SCAN_LIMIT: '已达到本次扫描的处理上限',
   AUTHOR_SCAN_NOT_FOUND: '找不到这次作者扫描',
-  AUTHOR_BASELINE_COOKIE_REQUIRED: '请在系统设置中保存抖音登录 Cookie 后，再使用增量下载',
   AUTHOR_SCOPE_CHANGED: '抖音登录或网络配置已变更，请重新扫描',
-  AUTHOR_SCAN_STALE: '已有更新的归档基线，请重新扫描',
-  AUTHOR_BASELINE_ACTION_REQUIRED: '请选择如何处理首次扫描发现的历史作品',
-  AUTHOR_BASELINE_INCOMPLETE: '扫描到末页后才能建立基线',
   RISK_CONTROL: '平台要求验证或暂时限制当前网络出口；请在浏览器打开链接完成验证，或切换 TUN/代理出口后重试。',
   NOT_FOUND: '当前视频无法访问',
   TIMEOUT: '请求超时，请检查网络后重新解析',

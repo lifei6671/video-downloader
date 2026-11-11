@@ -13,7 +13,7 @@
 | 能力 | 首版行为 |
 | --- | --- |
 | 输入 | 统一输入一个作品链接或抖音主页链接，支持长链、短链和包含一条链接的分享文案 |
-| 抖音作者 | 识别抖音主页后选择全量归档或增量下载，确认扫描后使用 DTK 按游标读取。用户确认后，视频与图集进入现有队列。见[抖音作者作品方案](douyin-author-download-plan.md)。 |
+| 抖音作者 | 每次解析抖音主页后使用 DTK 从第一页扫描，支持重置和按会话内游标继续。扫描结束后选择全量下载或增量下载，视频与图集进入现有队列。见[抖音作者作品方案](douyin-author-download-plan.md)。 |
 | 预览 | 标题、作者、封面、时长；可选字段缺失不阻止下载 |
 | 平台设置 | 抖音、小红书、TikTok、YouTube 各自独立 Cookie、User-Agent、可选 HTTP/SOCKS5 代理 |
 | 下载 | 实际下载字节、速度；总大小未知时显示不确定进度 |
@@ -149,7 +149,7 @@ YouTube 请求被重定向至 `https://www.google.com/sorry/index` 或 `/sorry/`
 
 | Tauri 命令 | 行为 |
 | --- | --- |
-| `resolve_download_link` | 识别统一入口的分享文本，返回单作品解析任务或抖音主页下载选项 |
+| `resolve_download_link` | 识别统一入口的分享文本，返回单作品解析任务或抖音主页扫描记录。每次解析主页自动从第一页扫描 |
 | `resolve_video` | 输入分享文本及 resolver，创建 task_id，异步解析并发出快照 |
 | `open_project_page` | 接收 source / issues / releases / license / credits，以及 credit-ytdlp / credit-dtk / credit-tauri / credit-react / credit-shadcn / credit-lucide 固定标识，后六项打开对应组件 GitHub 仓库；仅 releases 可附 release_tag（经正式 SemVer 标签校验），打开本项目对应 Release 详情页；失败返回 OPEN_LINK_FAILED，不接受任意 URL |
 | `check_for_updates` | 无前端参数；Rust 以实际应用版本请求本项目 GitHub 最新正式 Release，返回 current_version、latest_version、release_tag、has_update、release_notes、published_at；15 秒总超时，网络、限流、无正式版及异常响应均明确失败，不伪报已是最新 |

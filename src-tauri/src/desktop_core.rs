@@ -269,6 +269,7 @@ impl From<String> for ResolveInput {
 
 struct Inner {
     author_scan: Option<douyin_author::ActiveScan>,
+    author_draft: Option<douyin_author::ScanDraft>,
     author_paused: HashSet<String>,
     backup_cancel: watch::Sender<bool>,
     backup_started: bool,
@@ -774,6 +775,7 @@ impl Core {
             _instance_lock: instance_lock,
             inner: Mutex::new(Inner {
                 author_scan: None,
+                author_draft: None,
                 author_paused,
                 backup_cancel: watch::channel(false).0,
                 backup_started: false,
@@ -2707,14 +2709,7 @@ impl Core {
             };
             let directory = replacement
                 .as_ref()
-                .map(|original| {
-                    original
-                        .path
-                        .as_deref()
-                        .and_then(Path::parent)
-                        .map(Path::to_owned)
-                        .context("FILE_MISSING")
-                })
+                .map(redownload::directory)
                 .transpose()?
                 .unwrap_or_else(|| inner.settings.download_directory.clone());
             let filename_template = inner.settings.filename_template.clone();
@@ -2763,9 +2758,7 @@ impl Core {
         if let Some((original, preview_id)) = replacing {
             let saved = (|| {
                 let tx = inner.db.transaction().context("DATABASE_ERROR")?;
-                tx.execute("DELETE FROM commit_intents WHERE task_id=?", [&task.id])
-                    .context("DATABASE_ERROR")?;
-                redownload::remember(&tx, original, preview_id)?;
+                redownload::remember(&tx, original, Some(preview_id))?;
                 persist(&tx, &task)?;
                 tx.commit().context("DATABASE_ERROR")
             })();
@@ -3426,7 +3419,7 @@ impl Core {
                 let _ = cancel.send(true);
             }
             if let Some(scan) = &inner.author_scan {
-                scan.cancel.send_replace(true);
+                scan.request_stop();
             }
             let active = inner
                 .active
@@ -3474,6 +3467,7 @@ impl Core {
         for worker in workers {
             let _ = worker.await;
         }
+        self.inner.lock().unwrap().author_draft = None;
     }
 }
 

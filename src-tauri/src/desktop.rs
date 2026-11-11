@@ -711,13 +711,12 @@ async fn resolve_download_link(
         .map_err(error)
 }
 #[tauri::command]
-async fn start_author_scan(
+async fn recover_author_scan(
     core: State<'_, AppCore>,
-    input: String,
-    mode: Option<yingqu_core::desktop_core::douyin_author::ScanMode>,
+    scan_id: String,
+    reset: bool,
 ) -> Result<yingqu_core::desktop_core::douyin_author::Scan, String> {
-    core.start_author_scan(input, mode.unwrap_or_default())
-        .map_err(error)
+    core.recover_author_scan(&scan_id, reset).map_err(error)
 }
 #[tauri::command]
 fn get_author_scan(
@@ -738,13 +737,17 @@ async fn cancel_author_scan(
     core.cancel_author_scan(&scan_id).await.map_err(error)
 }
 #[tauri::command]
+fn discard_author_scan(core: State<AppCore>, scan_id: String) -> Result<(), String> {
+    core.discard_author_scan(&scan_id).map_err(error)
+}
+#[tauri::command]
 async fn confirm_author_scan(
     core: State<'_, AppCore>,
     scan_id: String,
     allow_partial: bool,
-    baseline_action: Option<yingqu_core::desktop_core::douyin_author::BaselineAction>,
+    mode: yingqu_core::desktop_core::douyin_author::DownloadMode,
 ) -> Result<yingqu_core::desktop_core::douyin_author::Batch, String> {
-    core.confirm_author_scan(&scan_id, allow_partial, baseline_action)
+    core.confirm_author_scan(&scan_id, allow_partial, mode)
         .map_err(error)
 }
 #[tauri::command]
@@ -1193,10 +1196,11 @@ fn main() {
             set_filename_template,
             preview_filename,
             resolve_video,
-            start_author_scan,
+            recover_author_scan,
             resolve_download_link,
             get_author_scan,
             cancel_author_scan,
+            discard_author_scan,
             confirm_author_scan,
             resume_author_batch,
             start_download,

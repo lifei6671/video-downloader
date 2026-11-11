@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.7", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.8", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.buffer.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
@@ -30,6 +30,20 @@ if request['method'] == 'scan_author_posts':
     author = 'fixture-author'
     video = dict(video_id='501', kind='video', title='Video', author='Fixture', author_id=author, published_at=1)
     album = dict(video_id='601', kind='image_album', title='Album', author='Fixture', author_id=author, published_at=2)
+    if params['input'].startswith('finish-after-last:'):
+        gate = Path(params['input'].split(':', 1)[1])
+        emit('author_scan_page', author_id=author, page=1, items=[video, album], skipped=0,
+             has_more=False, next_cursor=None)
+        while not gate.is_file():
+            time.sleep(0.01)
+        emit('author_scan_finished', result={'pages': int(gate.read_text())})
+        sys.exit(0)
+    if params.get('cursor'):
+        assert (params['cursor'], params['completed_pages']) == ('20', 1)
+        emit('author_scan_page', author_id=author, page=2, items=[video, {**album, 'video_id': '602'}],
+             skipped=1, has_more=False, next_cursor=None)
+        emit('author_scan_finished', result={'pages': 2})
+        sys.exit(0)
     items = [video, album]
     if params['input'] == 'new-video':
         items.append({**video, 'video_id': '502', 'published_at': 0})
@@ -40,6 +54,8 @@ if request['method'] == 'scan_author_posts':
     if params['input'] == 'partial':
         emit('error', error={'code': 'ACCESS_DENIED', 'stage': 'author_list'})
         sys.exit(1)
+    if params['input'] == 'stop-after-first':
+        time.sleep(120)
     emit('author_scan_page', author_id=author, page=2, items=[video], skipped=0,
          has_more=False, next_cursor=None)
     emit('author_scan_finished', result={'pages': 2})
@@ -174,6 +190,9 @@ else:
     stage = Path(params["staging_dir"])
     video_id = params["expected"]["video_id"]
     batch_author = params['expected'].get('author_id')
+    replacement = b"replacement" if batch_author and any(
+        (parent / "author-replacement-fixture").is_file() for parent in stage.parents
+    ) else b""
     metadata = dict(platform='douyin', video_id=video_id, kind=params['expected']['kind'],
                     canonical_url=params['input'], resolver='dtk',
                     author_profile=dict(id=batch_author), title='Batch fixture') if batch_author else None
@@ -188,7 +207,7 @@ else:
         static = (stage.parent.parent.parent / "album-static").is_file()
         files=[];total=0
         for index, ext in enumerate(("jpeg", "webp"), 1):
-            body=b"\xff\xd8\xfffixture" if ext=="jpeg" else b"RIFF\x10\x00\x00\x00WEBPfixture"
+            body=(b"\xff\xd8\xfffixture" if ext=="jpeg" else b"RIFF\x10\x00\x00\x00WEBPfixture") + replacement
             name=f"{index:03d}.{ext}"; (album/name).write_bytes(body);total+=len(body)
             files.append(dict(filename=name,bytes=len(body),sha256=hashlib.sha256(body).hexdigest(),width=100,height=200,quality_source="high_definition"))
             if index == 1 and not static:
@@ -222,7 +241,7 @@ else:
                 emit("progress", downloaded_bytes=(i + 1)*1024, total_bytes=None, speed_bps=None)
                 time.sleep(.03)
     else:
-        body = b"\x00\x00\x00\x18ftypmp42fixture"
+        body = b"\x00\x00\x00\x18ftypmp42fixture" + replacement
         (stage / "video.mp4").write_bytes(body)
         emit("progress", downloaded_bytes=len(body), total_bytes=len(body), speed_bps=None)
         cover = {}

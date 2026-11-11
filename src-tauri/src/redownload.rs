@@ -18,7 +18,7 @@ pub(super) fn original(db: &Connection, id: &str) -> Result<Option<Task>> {
         .transpose()
 }
 
-pub(super) fn remember(db: &Connection, original: &Task, preview_id: &str) -> Result<()> {
+pub(super) fn remember(db: &Connection, original: &Task, preview_id: Option<&str>) -> Result<()> {
     let mut original = original.clone();
     if let Some(video) = original.video.as_mut() {
         video["cover_url"] = serde_json::Value::Null;
@@ -28,9 +28,22 @@ pub(super) fn remember(db: &Connection, original: &Task, preview_id: &str) -> Re
         params![original.id, serde_json::to_string(&original)?],
     )
     .context("DATABASE_ERROR")?;
-    db.execute("DELETE FROM download_tasks WHERE id=?", [preview_id])
+    db.execute("DELETE FROM commit_intents WHERE task_id=?", [&original.id])
         .context("DATABASE_ERROR")?;
+    if let Some(preview_id) = preview_id {
+        db.execute("DELETE FROM download_tasks WHERE id=?", [preview_id])
+            .context("DATABASE_ERROR")?;
+    }
     Ok(())
+}
+
+pub(super) fn directory(original: &Task) -> Result<PathBuf> {
+    original
+        .path
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_owned)
+        .context("FILE_MISSING")
 }
 
 fn parked_original(source: &Path) -> Result<PathBuf> {

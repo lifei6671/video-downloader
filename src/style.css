@@ -76,6 +76,8 @@
   --warning: var(--amber-12);
   --warning-bg: var(--amber-3);
   --warning-text: var(--amber-12);
+  --author-full-bg: var(--violet-3);
+  --author-full-text: var(--violet-12);
   --error: var(--red-11);
   --error-bg: var(--red-3);
   --error-hover: var(--red-4);
@@ -298,6 +300,12 @@
 :is(button, a)[data-variant][data-size][data-variant="outline"]:hover, :is(button, a)[data-variant][data-size][data-variant="secondary"]:hover,
 :is(button, a)[data-variant][data-size][data-variant="ghost"]:hover, [data-slot="alert-dialog-cancel"]:hover { background: var(--surface-hover); color: var(--foreground); }
 :is(button, a)[data-variant][data-size]:disabled { opacity: 0.5; }
+button[data-author-action="reset"] { --action-bg: var(--warning-bg); --action-text: var(--warning-text); }
+button[data-author-action="full"] { --action-bg: var(--author-full-bg); --action-text: var(--author-full-text); }
+button[data-author-action="incremental"] { --action-bg: var(--success-bg); --action-text: var(--success-text); }
+button[data-variant][data-size][data-author-action] { background: var(--action-bg); color: var(--action-text); }
+button[data-variant][data-size][data-author-action]:hover { background: color-mix(in srgb, var(--action-bg) 93%, var(--action-text)); }
+button[data-variant][data-size][data-author-action]:active { background: color-mix(in srgb, var(--action-bg) 87%, var(--action-text)); }
 
 [data-slot="input"], [data-slot="select-trigger"], [data-slot="input-group"], [data-slot="textarea"] {
   border: 0.5px solid var(--border-input); border-radius: 8px; background: var(--surface-input);
