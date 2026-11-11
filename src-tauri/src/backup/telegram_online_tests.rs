@@ -135,7 +135,7 @@ fn source(core: &Arc<Core>, config: &Config, provider: &dyn BackupProvider) -> R
             tx.execute("INSERT INTO media_assets VALUES(?1,NULL,?2,'telegram-t3-synthetic.mp4',?3,?4,'active')",params![run.asset_id,json!({"title":"Telegram T3 合成恢复验证","platform":"youtube","video_id":"12345678901","canonical_url":"https://www.youtube.com/watch?v=12345678901"}).to_string(),hash,signature["size"].as_u64().context("missing fixture size")? as i64])?;
             tx.execute("INSERT INTO asset_local_files VALUES(?1,?2,?3,?4,?5,unixepoch(),'present')",params![run.asset_id,path.to_string_lossy(),signature["size"].as_u64().unwrap() as i64,hash,signature.to_string()])?;
             tx.execute("INSERT INTO asset_transcripts VALUES(?1,?2,'T3 全新数据库恢复验证。中文 English 123。','synthetic-test',NULL,'telegram-t3',1,NULL)",params![run.asset_id,hash])?;
-            tx.execute("INSERT INTO asset_covers VALUES(?1,?2)",params![run.asset_id,cover])?;
+            crate::cover_store::put(&tx, crate::cover_store::Owner::Asset, &run.asset_id, &cover)?;
             sync_engine::register_download(&tx,&run.asset_id)?;tx.commit()?;
         }
         Ok(())

@@ -15,7 +15,7 @@ async fn cover_read_preserves_adopted_conflict_before_and_after_fetch() {
         let b = png(2);
         f.core
             .backup_db(|db| {
-                db.execute("INSERT INTO asset_covers VALUES(?1,?2)", params![f.id, a])?;
+                crate::cover_store::put(db, crate::cover_store::Owner::Asset, &f.id, &a)?;
                 Ok(())
             })
             .unwrap();
@@ -69,7 +69,7 @@ async fn cover_read_preserves_adopted_conflict_before_and_after_fetch() {
         if !cached_a {
             f.core
                 .backup_db(|db| {
-                    db.execute("DELETE FROM asset_covers WHERE asset_id=?", [&f.id])?;
+                    crate::cover_store::remove(db, crate::cover_store::Owner::Asset, &f.id)?;
                     Ok(())
                 })
                 .unwrap();
@@ -138,7 +138,7 @@ async fn cover_read_honors_pending_edits_in_another_space() {
     f.core.backup_db(|db| {
         repository::save_space(db,&other)?;
         db.execute("INSERT INTO backup_space_assets(space_id,remote_asset_id,local_asset_id,pending_json) VALUES(?1,?2,?2,'{\"cover\":1}')",params![other.space_id,f.id])?;
-        db.execute("INSERT INTO asset_covers VALUES(?1,?2)",params![f.id,body])?;
+        crate::cover_store::put(db, crate::cover_store::Owner::Asset, &f.id, &body)?;
         Ok(())
     }).unwrap();
     assert_eq!(

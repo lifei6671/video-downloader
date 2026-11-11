@@ -79,11 +79,19 @@ fn thumbnail_source(
     remote: &str,
     operation: &str,
 ) -> Result<Option<Vec<u8>>> {
-    let payload: Option<String> = db.query_row("SELECT COALESCE(c.capture_json,json_extract(o.payload_json,'$.capture')) FROM backup_operations o LEFT JOIN backup_operation_captures c USING(operation_id) WHERE o.operation_id=?1 AND o.space_id=?2 AND o.kind='upload'",rusqlite::params![operation,space],|row|row.get::<_,Option<String>>(0)).optional()?.flatten();
-    if let Some(payload) = payload {
-        let payload: serde_json::Value = serde_json::from_str(&payload)?;
-        if payload["remote"] == remote && payload["cover"].is_array() {
-            return Ok(Some(serde_json::from_value(payload["cover"].clone())?));
+    let payload = db.query_row(
+        "SELECT COALESCE(c.capture_json,json_extract(o.payload_json,'$.capture')),c.operation_id IS NOT NULL
+         FROM backup_operations o LEFT JOIN backup_operation_captures c USING(operation_id)
+         WHERE o.operation_id=?1 AND o.space_id=?2 AND o.kind='upload'",
+        rusqlite::params![operation,space], |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,bool>(1)?)),
+    ).optional()?;
+    if let Some((Some(payload), separate)) = payload {
+        let mut payload: serde_json::Value = serde_json::from_str(&payload)?;
+        if payload["remote"] == remote {
+            crate::cover_store::hydrate_capture(db, operation, &mut payload, separate)?;
+            if payload["cover"].is_array() {
+                return Ok(Some(serde_json::from_value(payload["cover"].take())?));
+            }
         }
     }
     Ok(db.query_row("SELECT c.body FROM asset_covers c JOIN backup_space_assets b ON c.asset_id=b.local_asset_id WHERE b.space_id=?1 AND b.remote_asset_id=?2",rusqlite::params![space,remote],|row|row.get(0)).optional()?)
@@ -1511,6 +1519,7 @@ mod caption_tests {
     #[test]
     fn thumbnail_uses_captured_original_cover_and_keeps_space_isolation() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::cover_store::init(&db).unwrap();
         db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT,space_id TEXT,kind TEXT,payload_json TEXT);
             CREATE TABLE backup_operation_captures(operation_id TEXT PRIMARY KEY,capture_json TEXT NOT NULL); CREATE TABLE asset_covers(asset_id TEXT,body BLOB); CREATE TABLE backup_space_assets(space_id TEXT,remote_asset_id TEXT,local_asset_id TEXT);").unwrap();
         let captured = vec![1u8, 2, 3];
@@ -1537,9 +1546,8 @@ mod caption_tests {
             thumbnail_source(&db, "a", "remote", "operation").unwrap(),
             Some(captured.clone())
         );
-        db.execute(
-            "INSERT INTO backup_operation_captures VALUES('operation',?1)",
-            [serde_json::json!({"remote":"remote","cover":captured}).to_string()],
+        crate::cover_store::save_capture(
+            &db, "operation", serde_json::json!({"remote":"remote","cover":captured}),
         )
         .unwrap();
         db.execute(

@@ -478,7 +478,9 @@ pub async fn confirm_on_read(
             if let Some(reference)=old.and_then(|s|s.cover) {
                 let body:Option<Vec<u8>>=tx.query_row("SELECT body FROM asset_covers WHERE asset_id=?",[local],|r|r.get(0)).optional()?;
                 use sha2::{Digest,Sha256};
-                if body.is_some_and(|b|format!("{:x}",Sha256::digest(b))==reference.sha256) {tx.execute("DELETE FROM asset_covers WHERE asset_id=?",[local])?;}
+                if body.is_some_and(|b|format!("{:x}",Sha256::digest(b))==reference.sha256) {
+                    crate::cover_store::remove(&tx, crate::cover_store::Owner::Asset, local)?;
+                }
             }
         }
         tx.execute("DELETE FROM asset_remote_records WHERE space_id=?1 AND asset_id=?2",params![scope.space_id,local])?;

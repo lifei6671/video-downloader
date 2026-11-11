@@ -1,4 +1,7 @@
-use crate::files::{image_extension, Video};
+use crate::{
+    cover_store::{self, Owner},
+    files::{image_extension, Video},
+};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -10,6 +13,10 @@ pub struct Preview {
 }
 
 pub fn init(db: &Connection) -> Result<bool> {
+    let tx = db
+        .is_autocommit()
+        .then(|| db.unchecked_transaction())
+        .transpose()?;
     let existed: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='parse_cache')",
@@ -21,7 +28,7 @@ pub fn init(db: &Connection) -> Result<bool> {
         "CREATE TABLE IF NOT EXISTS parse_cache (
            cache_key TEXT PRIMARY KEY, platform TEXT NOT NULL, video_id TEXT NOT NULL,
            resolver TEXT NOT NULL, kind TEXT NOT NULL, metadata TEXT NOT NULL,
-           saved_at INTEGER NOT NULL CHECK(saved_at>=0), revision TEXT NOT NULL, cover BLOB);
+           saved_at INTEGER NOT NULL CHECK(saved_at>=0), revision TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS parse_cache_images (
            cache_key TEXT NOT NULL, image_index INTEGER NOT NULL CHECK(image_index BETWEEN 0 AND 63),
            body BLOB NOT NULL CHECK(length(body) BETWEEN 1 AND 33554432),
@@ -39,6 +46,11 @@ pub fn init(db: &Connection) -> Result<bool> {
     if !has_avatar {
         db.execute("ALTER TABLE parse_cache ADD COLUMN author_avatar BLOB", [])
             .context("DATABASE_ERROR")?;
+    }
+    cover_store::init(db)?;
+    cover_store::migrate_cache(db)?;
+    if let Some(tx) = tx {
+        tx.commit()?;
     }
     Ok(!existed)
 }
@@ -124,7 +136,9 @@ pub fn share_url(input: &str) -> Option<String> {
 
 pub fn get(db: &Connection, platform: &str, id: &str, resolver: &str) -> Result<Option<Preview>> {
     let row = db.query_row(
-        "SELECT cache_key,metadata,saved_at,cover IS NOT NULL,author_avatar IS NOT NULL FROM parse_cache
+        "SELECT cache_key,metadata,saved_at,
+          EXISTS(SELECT 1 FROM cover_refs WHERE owner='cache' AND owner_id=parse_cache.cache_key),
+          author_avatar IS NOT NULL FROM parse_cache
          WHERE platform=?1 AND video_id=?2 AND revision=?4 AND
            (resolver=?3 OR (?3='auto' AND resolver=CASE WHEN kind='image_album' AND platform<>'xiaohongshu' THEN 'dtk' ELSE 'yt-dlp' END))",
         params![platform,id,resolver,revision(resolver)],
@@ -364,11 +378,11 @@ pub fn save(
     let has_cover = cover.is_some();
     let tx = db.transaction().context("DATABASE_ERROR")?;
     tx.execute(
-        "INSERT INTO parse_cache(cache_key,platform,video_id,resolver,kind,metadata,saved_at,revision,cover)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(cache_key) DO UPDATE SET
+        "INSERT INTO parse_cache(cache_key,platform,video_id,resolver,kind,metadata,saved_at,revision)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(cache_key) DO UPDATE SET
         author_avatar=CASE WHEN json_extract(parse_cache.metadata,'$.author_profile.id')=json_extract(excluded.metadata,'$.author_profile.id')
             THEN parse_cache.author_avatar ELSE NULL END,
-        metadata=excluded.metadata,kind=excluded.kind,saved_at=excluded.saved_at,revision=excluded.revision,cover=excluded.cover",
+        metadata=excluded.metadata,kind=excluded.kind,saved_at=excluded.saved_at,revision=excluded.revision",
         params![
             cache_key,
             identity.platform,
@@ -377,11 +391,15 @@ pub fn save(
             identity.kind,
             metadata.to_string(),
             i64::try_from(saved_at).context("DATABASE_ERROR")?,
-            revision(&identity.resolver),
-            cover
+            revision(&identity.resolver)
         ],
     )
     .context("DATABASE_ERROR")?;
+    if let Some(body) = &cover {
+        cover_store::put(&tx, Owner::Cache, &cache_key, body)?;
+    } else {
+        cover_store::remove(&tx, Owner::Cache, &cache_key)?;
+    }
     tx.execute(
         "DELETE FROM parse_cache_images WHERE cache_key=?",
         [&cache_key],
@@ -472,31 +490,40 @@ pub fn save_cover(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {
     {
         bail!("INVALID_MEDIA_CONTENT");
     }
-    Ok(db
-        .execute(
-            "UPDATE parse_cache SET cover=?1 WHERE cache_key=?2 AND revision=?3",
-            params![
-                body,
-                key(video)?,
-                revision(
-                    video["resolver"]
-                        .as_str()
-                        .context("INVALID_ENGINE_RESULT")?
-                )
-            ],
+    let cache_key = key(video)?;
+    let resolver = video["resolver"]
+        .as_str()
+        .context("INVALID_ENGINE_RESULT")?;
+    let exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM parse_cache WHERE cache_key=?1 AND revision=?2)",
+            params![cache_key, revision(resolver)],
+            |row| row.get(0),
         )
-        .context("DATABASE_ERROR")?
-        != 0)
+        .context("DATABASE_ERROR")?;
+    if exists {
+        cover_store::put(db, Owner::Cache, &cache_key, body)?;
+    }
+    Ok(exists)
 }
 
 // Task removal can release shared cover/avatar bytes while preserving reusable
 // album images, metadata and aliases. The caller checks for remaining references.
 pub fn clear_cover(db: &Connection, video: &Value) -> Result<()> {
+    let tx = db
+        .is_autocommit()
+        .then(|| db.unchecked_transaction())
+        .transpose()?;
+    let cache_key = key(video)?;
     db.execute(
-        "UPDATE parse_cache SET cover=NULL,author_avatar=NULL WHERE cache_key=?",
-        [key(video)?],
+        "UPDATE parse_cache SET author_avatar=NULL WHERE cache_key=?",
+        [&cache_key],
     )
     .context("DATABASE_ERROR")?;
+    cover_store::remove(db, Owner::Cache, &cache_key).context("DATABASE_ERROR")?;
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -504,7 +531,8 @@ pub fn cover(db: &Connection, video: &Value) -> Result<Vec<u8>> {
     cached_image(
         db,
         video,
-        "SELECT cover FROM parse_cache WHERE cache_key=?",
+        "SELECT b.body FROM cover_refs r JOIN cover_blobs b USING(digest)
+         WHERE r.owner='cache' AND r.owner_id=?",
         10 * 1024 * 1024,
     )
 }
@@ -669,7 +697,8 @@ mod tests {
         assert!(hit.has_cover);
         assert_eq!(cover(&db, &video).unwrap(), body);
         assert!(save_cover(&db, &video, b"<html>error</html>").is_err());
-        db.execute("UPDATE parse_cache SET revision='obsolete',cover=NULL", [])
+        clear_cover(&db, &video).unwrap();
+        db.execute("UPDATE parse_cache SET revision='obsolete'", [])
             .unwrap();
         assert!(!save_cover(&db, &video, body).unwrap());
         assert!(cover(&db, &video).is_err());

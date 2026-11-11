@@ -106,9 +106,10 @@ pub fn list_for_display_cached(
         let mut assets = super::repository::list_assets(&tx)?;
         core.backup_file_presence.lock().expect("backup file presence").check(&mut assets, verify_local);
         let current = super::sync_read::list_in(&tx, space_id, assets.clone())?;
-        let mut query = tx.prepare("SELECT a.asset_id,h.asset_id IS NOT NULL,c.asset_id IS NOT NULL,t.asset_id IS NOT NULL
+        let mut query = tx.prepare("SELECT a.asset_id,h.asset_id IS NOT NULL,c.owner_id IS NOT NULL,t.asset_id IS NOT NULL
             FROM media_assets a LEFT JOIN asset_hidden_history h USING(asset_id)
-            LEFT JOIN asset_covers c USING(asset_id) LEFT JOIN asset_transcripts t USING(asset_id)")?;
+            LEFT JOIN cover_refs c ON c.owner='asset' AND c.owner_id=a.asset_id
+            LEFT JOIN asset_transcripts t USING(asset_id)")?;
         let flags = query.query_map([], |r| Ok((r.get::<_,String>(0)?,(r.get::<_,bool>(1)?,r.get::<_,bool>(2)?,r.get::<_,bool>(3)?))))?
             .collect::<rusqlite::Result<std::collections::HashMap<_,_>>>()?;
         let mut seen: std::collections::HashSet<_> = current.iter().map(|e| e.asset.asset_id.clone()).collect();

@@ -101,16 +101,14 @@ fn metadata_fill_preserves_native_values_and_newer_cache_identity() {
     let new_cover = png([90, 80, 70]);
     crate::parse_cache::save(&mut db, &fresh, vec![], Some(new_cover.clone()), 2).unwrap();
     crate::parse_cache::update_telegram_metadata(&db, &native).unwrap();
-    let (cached, cover): (String, Vec<u8>) = db
-        .query_row("SELECT metadata,cover FROM parse_cache", [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
+    let cached: String = db
+        .query_row("SELECT metadata FROM parse_cache", [], |row| row.get(0))
         .unwrap();
     let cached: Value = serde_json::from_str(&cached).unwrap();
     assert_eq!(cached["telegram_document_id"], 99);
     assert!(cached["width"].is_null());
     assert_eq!(cached["title"], "new caption");
-    assert_eq!(cover, new_cover);
+    assert_eq!(crate::parse_cache::cover(&db, &fresh).unwrap(), new_cover);
 }
 
 #[test]

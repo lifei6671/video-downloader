@@ -1,6 +1,9 @@
 //! SQLite initialization, compatible local migration and asset persistence; no network calls.
 use super::model::{Asset, AssetTranscript, Space};
-use crate::desktop_core::{transcription::Snapshot, Status, Task};
+use crate::{
+    cover_store,
+    desktop_core::{transcription::Snapshot, Status, Task},
+};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -10,6 +13,7 @@ use uuid::Uuid;
 
 pub fn init(db: &Connection) -> Result<()> {
     let prepared = super::schema_migration::prepare(db)?;
+    cover_store::prepare(db, prepared.snapshot_created)?;
     let tx = db.unchecked_transaction()?;
     init_in_transaction(&tx, prepared)?;
     tx.commit()?;
@@ -29,6 +33,8 @@ pub(crate) fn init_in_transaction(
     tx.execute_batch(include_str!("sync-schema.sql"))?;
     tx.execute_batch(include_str!("telegram-schema.sql"))?;
     tx.execute_batch(include_str!("operation-display.sql"))?;
+    cover_store::init(tx)?;
+    cover_store::migrate_backup(tx)?;
     // Reclaim captures left by older terminal paths, preserving uncertain/canceled work.
     tx.execute("DELETE FROM backup_operation_captures WHERE operation_id IN (SELECT operation_id FROM backup_operations WHERE kind='upload' AND state='completed')", [])?;
     // History tasks exist in the desktop database, but not in standalone backup stores.
@@ -202,15 +208,12 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
     let source = serde_json::to_string(&crate::desktop_core::transcription::Source::read(path)?)?;
     db.execute("INSERT OR IGNORE INTO asset_local_files(asset_id,path,bytes,source_json,local_state) VALUES(?1,?2,?3,?4,'present')",
         params![asset_id,path.to_string_lossy(),i64::try_from(file.len())?,source])?;
-    // Preserve the cover independently before history can release its cache reference.
+    // Keep an asset reference before history can release its cache reference.
     let cover = crate::parse_cache::cover(db, video)
         .ok()
         .or_else(|| task.cover_path.as_ref().and_then(|p| fs::read(p).ok()));
     if let Some(cover) = cover {
-        db.execute(
-            "INSERT OR IGNORE INTO asset_covers(asset_id,body) VALUES(?1,?2)",
-            params![asset_id, cover],
-        )?;
+        cover_store::register_asset(db, &asset_id, &cover)?;
     }
     task.asset_id = Some(asset_id);
     if is_new {

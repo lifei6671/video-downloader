@@ -235,7 +235,7 @@ pub async fn cover(core: &Core, provider: &dyn BackupProvider, local: &str) -> R
         if current.dirty || current.revisions != previous.revisions || current.body != previous.body {
             return current.body.context("COVER_UNAVAILABLE");
         }
-        tx.execute("INSERT INTO asset_covers VALUES(?1,?2) ON CONFLICT(asset_id) DO UPDATE SET body=excluded.body", params![local,body])?;
+        crate::cover_store::put(&tx, crate::cover_store::Owner::Asset, local, &body)?;
         tx.commit()?;
         Ok(body)
     })
@@ -620,13 +620,13 @@ pub(super) fn list_in(
     let mut query = db.prepare("SELECT m.local_asset_id,m.remote_deleted,m.pending_json,
         (SELECT COUNT(*) FROM backup_conflicts c WHERE c.space_id=m.space_id AND c.remote_asset_id=m.remote_asset_id),
         h.asset_id IS NOT NULL,d.asset_id IS NOT NULL,o.remote_state,r.record_json,
-        c.asset_id IS NOT NULL,t.asset_id IS NOT NULL
+        c.owner_id IS NOT NULL,t.asset_id IS NOT NULL
         FROM backup_space_assets m
         LEFT JOIN asset_hidden_history h ON h.asset_id=m.local_asset_id
         LEFT JOIN asset_deletion_hidden_history d ON d.space_id=m.space_id AND d.asset_id=m.local_asset_id
         LEFT JOIN asset_remote_objects o ON o.space_id=m.space_id AND o.asset_id=m.local_asset_id
         LEFT JOIN asset_remote_records r ON r.space_id=m.space_id AND r.asset_id=m.local_asset_id
-        LEFT JOIN asset_covers c ON c.asset_id=m.local_asset_id
+        LEFT JOIN cover_refs c ON c.owner='asset' AND c.owner_id=m.local_asset_id
         LEFT JOIN asset_transcripts t ON t.asset_id=m.local_asset_id WHERE m.space_id=?1")?;
     let mut members = query
         .query_map([space], |r| {

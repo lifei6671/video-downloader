@@ -117,7 +117,7 @@ async fn real_r2_current_upload_readback_fresh_database() -> Result<()> {
             tx.execute("INSERT INTO backup_current_space VALUES(1,?)", [&space.space_id])?;
             tx.execute("INSERT INTO media_assets VALUES(?1,NULL,?2,'r2-synthetic.mp4',?3,?4,'active')",params![asset,metadata.to_string(),hash,sql_bytes])?;
             tx.execute("INSERT INTO asset_local_files VALUES(?1,?2,?3,?4,?5,unixepoch(),'present')",params![asset,video.to_string_lossy(),sql_bytes,hash,signature.to_string()])?;
-            tx.execute("INSERT INTO asset_covers VALUES(?1,?2)",params![asset,cover])?;
+            crate::cover_store::put(&tx, crate::cover_store::Owner::Asset, &asset, &cover)?;
             tx.execute("INSERT INTO asset_transcripts(asset_id,content_sha256,text,model_revision,pipeline_revision,completed_at) VALUES(?1,?2,?3,'synthetic-test','r2-current-test',1)",params![asset,hash,text])?;
             sync_engine::register_download(&tx,&asset)?;
             tx.commit()?;

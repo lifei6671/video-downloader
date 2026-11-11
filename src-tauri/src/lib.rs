@@ -1,4 +1,5 @@
 pub mod backup;
+mod cover_store;
 pub mod desktop_core;
 pub mod files;
 mod local_media;

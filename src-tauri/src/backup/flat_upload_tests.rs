@@ -9,7 +9,7 @@ fn key(reference: &MediaRef) -> &str {
 }
 fn cover(core: &Core, space: &str, id: &str, body: &[u8]) {
     core.backup_db(|db| {
-        db.execute("INSERT INTO asset_covers VALUES(?1,?2) ON CONFLICT(asset_id) DO UPDATE SET body=excluded.body",params![id,body])?;
+        crate::cover_store::put(db, crate::cover_store::Owner::Asset, id, body)?;
         sync_engine::mark_local(db,id,Default::default(),false)?;
         let (raw,revision):(String,i64)=db.query_row("SELECT pending_json,local_revision FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![space,id],|r|Ok((r.get(0)?,r.get(1)?)))?;
         let mut pending:sync_engine::PendingChanges=serde_json::from_str(&raw)?;

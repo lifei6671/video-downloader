@@ -165,7 +165,7 @@ pub async fn resolve(
         if inflight {bail!("BACKUP_LOCAL_CHANGES_PENDING");}
         if let Some(t)=selected {pending.transcript=Some(u64::try_from(revision+1)?);tx.execute("INSERT INTO asset_transcripts(asset_id,content_sha256,text,model_revision,model_name,pipeline_revision,completed_at,source_json) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL) ON CONFLICT(asset_id) DO UPDATE SET text=excluded.text,content_sha256=excluded.content_sha256,model_revision=excluded.model_revision,model_name=excluded.model_name,pipeline_revision=excluded.pipeline_revision,completed_at=excluded.completed_at,source_json=NULL",params![local,t.content_sha256,t.text,t.model_revision,t.model_name,t.pipeline_revision,i64::try_from(t.completed_at)?])?;}
         if let Some(body)=selected_cover {
-            tx.execute("INSERT INTO asset_covers VALUES(?1,?2) ON CONFLICT(asset_id) DO UPDATE SET body=excluded.body",params![local,body])?;
+            crate::cover_store::put(&tx, crate::cover_store::Owner::Asset, local, &body)?;
             pending.cover=Some(u64::try_from(revision+1)?);
         }
         // This explicit choice is based on the fresh record above, not a previous edit's base.

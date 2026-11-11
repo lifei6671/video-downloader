@@ -510,6 +510,10 @@ impl Core {
         // Snapshot the master database before the single, atomic schema upgrade.
         let backup_migration = crate::backup::schema_migration::prepare(&db)?;
         let author_migration = authors::prepare(&db, backup_migration.snapshot_created)?;
+        crate::cover_store::prepare(
+            &db,
+            backup_migration.snapshot_created || !matches!(author_migration, authors::Migration::Current),
+        )?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         let schema_tx = db.unchecked_transaction()?;
         schema_tx.execute_batch(
@@ -6835,8 +6839,8 @@ mod tests {
             app.cancel(&preview.id).await.unwrap();
             let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
             db.execute_batch(
-                "CREATE TRIGGER block_cover_cleanup BEFORE UPDATE OF cover ON parse_cache
-                WHEN NEW.cover IS NULL BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;",
+                "CREATE TRIGGER block_cover_cleanup BEFORE DELETE ON cover_refs
+                WHEN OLD.owner='cache' BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;",
             )
             .unwrap();
             assert_eq!(
@@ -6875,8 +6879,8 @@ mod tests {
             let before = app.cover(&task.id).unwrap();
             let db = Connection::open(root.path().join("tasks.sqlite")).unwrap();
             db.execute_batch(
-                "CREATE TRIGGER block_cover_save BEFORE UPDATE OF cover ON parse_cache
-                BEGIN SELECT RAISE(ABORT, 'fixture cache failure'); END;",
+                "CREATE TRIGGER block_cover_save BEFORE INSERT ON cover_refs
+                WHEN NEW.owner='cache' BEGIN SELECT RAISE(ABORT, 'fixture cache failure'); END;",
             )
             .unwrap();
             app.download(&task.id, false).unwrap();

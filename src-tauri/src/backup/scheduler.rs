@@ -187,18 +187,23 @@ pub(super) fn operation(core: &Core, id: &str) -> Result<Operation> {
         .pop()
         .ok_or_else(|| anyhow::anyhow!("BACKUP_INVALID_OPERATION"))?;
     if operation.kind == "upload" {
-        let capture: Option<String> = core.backup_db(|db| {
-            Ok(db
+        core.backup_db(|db| {
+            let capture: Option<String> = db
                 .query_row(
                     "SELECT capture_json FROM backup_operation_captures WHERE operation_id=?",
                     [id],
                     |r| r.get(0),
                 )
-                .optional()?)
+                .optional()?;
+            let separate = capture.is_some();
+            if let Some(raw) = capture {
+                operation.payload["capture"] = serde_json::from_str(&raw)?;
+            }
+            if let Some(capture) = operation.payload.get_mut("capture") {
+                crate::cover_store::hydrate_capture(db, id, capture, separate)?;
+            }
+            Ok(())
         })?;
-        if let Some(raw) = capture {
-            operation.payload["capture"] = serde_json::from_str(&raw)?;
-        }
     }
     Ok(operation)
 }

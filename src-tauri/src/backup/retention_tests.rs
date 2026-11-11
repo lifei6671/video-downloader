@@ -813,7 +813,7 @@ async fn retention_old_delete_interleaved_with_reupload_cannot_republish_or_remo
             local_text(&bcore, &id, "transcript after recreation");
             bcore.backup_db(|db| {
                 let cover = b"\x89PNG\r\n\x1a\nnew cover".to_vec();
-                db.execute("INSERT INTO asset_covers VALUES(?1,?2) ON CONFLICT(asset_id) DO UPDATE SET body=excluded.body",params![id,cover])?;
+                crate::cover_store::put(db, crate::cover_store::Owner::Asset, &id, &cover)?;
                 let raw:String=db.query_row("SELECT pending_json FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![b.scope().space_id,id],|r|r.get(0))?;
                 let mut pending:sync_engine::PendingChanges=serde_json::from_str(&raw)?;
                 pending.cover=pending.transcript;

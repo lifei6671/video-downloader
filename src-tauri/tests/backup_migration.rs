@@ -94,7 +94,10 @@ fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losi
             "platform,user_agent,proxy,cookie,credential_ref,http_chunk_size",
         ),
         ("tdl_settings", "*"),
-        ("parse_cache", "*"),
+        (
+            "parse_cache",
+            "cache_key,platform,video_id,resolver,kind,metadata,saved_at,revision,author_avatar",
+        ),
         ("parse_cache_images", "*"),
         ("parse_cache_aliases", "*"),
         ("video_transcripts", "*"),
@@ -120,10 +123,18 @@ fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losi
         rows(&db, "SELECT bypass_proxy FROM platform_settings"),
         vec![vec![Value::Integer(0)]]
     );
+    assert_eq!(
+        rows(&db, "SELECT b.body FROM cover_refs r JOIN cover_blobs b USING(digest) WHERE r.owner='cache' AND r.owner_id='cached'"),
+        vec![vec![Value::Blob(vec![1, 2])]]
+    );
     let snapshots = backups(root.path());
     assert_eq!(snapshots.len(), 1);
     let snapshot = Connection::open(&snapshots[0]).unwrap();
     assert_eq!(schema(&snapshot), original_schema);
+    assert_eq!(
+        rows(&snapshot, "SELECT cover FROM parse_cache"),
+        vec![vec![Value::Blob(vec![1, 2])]]
+    );
     assert_eq!(
         rows(&snapshot, "SELECT * FROM download_tasks"),
         original_task
@@ -146,9 +157,12 @@ fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losi
         "SELECT type,name,tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
     ).unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
     for (kind, name, table) in objects {
-        if table == "app_settings" {
+        if matches!(
+            table.as_str(),
+            "app_settings" | "parse_cache" | "asset_covers"
+        ) {
             continue;
-        } // Only master constraint intentionally changes.
+        } // The settings constraint and cover storage intentionally change.
         let found: bool = db
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2)",
@@ -238,7 +252,11 @@ fn final_development_database_is_adopted_without_replaying_old_migrations() {
         INSERT INTO backup_provider_config(space_id,provider_type,profile) VALUES('space','s3','r2');
         INSERT INTO backup_sync_preference VALUES(1,1);
         INSERT INTO media_assets VALUES('asset',NULL,'{}','video.mp4','hash',4,'active');
-        INSERT INTO asset_covers VALUES('asset',X'010203');
+        INSERT INTO asset_covers VALUES('asset',X'0102');
+        CREATE TABLE library_assets(id TEXT PRIMARY KEY);
+        CREATE TABLE asset_resources(asset_id TEXT NOT NULL REFERENCES library_assets(id) ON DELETE CASCADE,kind TEXT NOT NULL CHECK(kind='cover'),body BLOB NOT NULL,PRIMARY KEY(asset_id,kind));
+        INSERT INTO library_assets VALUES('legacy');
+        INSERT INTO asset_resources VALUES('legacy','cover',X'0102');
         INSERT INTO asset_transcripts VALUES('asset','hash','saved transcript','model',NULL,'pipeline',1,NULL);
         INSERT INTO asset_deletion_hidden_history VALUES('space','asset');
         INSERT INTO backup_operations(operation_id,space_id,asset_id,kind,state,phase,payload_json) VALUES('upload','space','asset','upload','blocked','sending','{\"nonce\":123}');
@@ -252,7 +270,7 @@ fn final_development_database_is_adopted_without_replaying_old_migrations() {
         "asset_transcripts",
         "asset_deletion_hidden_history",
         "backup_operations",
-        "backup_operation_captures",
+        "asset_resources",
         "telegram_media_sends",
         "telegram_account_bindings",
     ];
@@ -270,6 +288,19 @@ fn final_development_database_is_adopted_without_replaying_old_migrations() {
             "development data changed: {table}"
         );
     }
+    assert_eq!(
+        rows(
+            &db,
+            "SELECT count(*),count(DISTINCT digest) FROM cover_refs"
+        ),
+        vec![vec![Value::Integer(4), Value::Integer(1)]]
+    );
+    assert_eq!(
+        rows(&db, "SELECT capture_json FROM backup_operation_captures"),
+        vec![vec![Value::Text(
+            json!({"transcript":"saved body"}).to_string()
+        )]]
+    );
     assert_eq!(
         version(&Connection::open(&backups(root.path())[0]).unwrap()),
         9
@@ -311,6 +342,55 @@ fn fresh_database_matches_upgraded_schema_except_preserved_obsolete_master_table
         1,
         "fresh database should not need a snapshot"
     );
+}
+
+#[test]
+fn standalone_cover_upgrade_snapshots_before_rewriting_and_reopens_once() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("app.sqlite");
+    drop(open(&path));
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(
+        "ALTER TABLE parse_cache ADD COLUMN cover BLOB;
+         INSERT INTO parse_cache(cache_key,platform,video_id,resolver,kind,metadata,saved_at,revision,cover)
+         VALUES('preview','douyin','123','yt-dlp','video','{}',1,'legacy',X'0102');",
+    )
+    .unwrap();
+    let snapshots = || {
+        fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("app.sqlite.before-cover-store-v1-")
+                    && path.extension().is_some_and(|ext| ext == "sqlite")
+            })
+            .collect::<Vec<_>>()
+    };
+    let core = open(&path);
+    let saved = snapshots();
+    assert_eq!(saved.len(), 1);
+    let previous = Connection::open(&saved[0]).unwrap();
+    assert_eq!(
+        rows(&previous, "SELECT cover FROM parse_cache"),
+        vec![vec![Value::Blob(vec![1, 2])]]
+    );
+    assert_eq!(
+        rows(
+            &db,
+            "SELECT count(*) FROM pragma_table_info('parse_cache') WHERE name='cover'"
+        ),
+        vec![vec![Value::Integer(0)]]
+    );
+    assert_eq!(
+        rows(&db, "SELECT body FROM cover_blobs"),
+        vec![vec![Value::Blob(vec![1, 2])]]
+    );
+    drop(core);
+    let _reopened = open(&path);
+    assert_eq!(snapshots(), saved);
 }
 
 #[test]

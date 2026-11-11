@@ -902,7 +902,15 @@ async fn telegram_t4_cancel_cleanup_then_upload_uses_new_operation_and_messages(
             )?)
         })
         .unwrap();
-    assert!(serde_json::from_str::<serde_json::Value>(&capture).unwrap()["cover"].is_array());
+    assert!(serde_json::from_str::<serde_json::Value>(&capture)
+        .unwrap()
+        .get("cover")
+        .is_none());
+    let original_cover = super::super::scheduler::operation(&core, &old)
+        .unwrap()
+        .payload["capture"]["cover"]
+        .clone();
+    assert!(original_cover.is_array());
     let (_c, c) = tokio::sync::watch::channel(false);
     let (_s, s) = tokio::sync::watch::channel(false);
     let io = Io::new(c, s, None);
@@ -945,6 +953,12 @@ async fn telegram_t4_cancel_cleanup_then_upload_uses_new_operation_and_messages(
         .unwrap(),
         capture
     );
+    assert_eq!(
+        super::super::scheduler::operation(&core, &old)
+            .unwrap()
+            .payload["capture"]["cover"],
+        original_cover
+    );
     net.before_publish.store(false, Ordering::SeqCst);
     sync_engine::request_upload_with(&core, p.clone(), &asset).unwrap();
     core.backup_db(|db| {
@@ -964,6 +978,7 @@ async fn telegram_t4_cancel_cleanup_then_upload_uses_new_operation_and_messages(
             )?,
             0
         );
+        assert!(crate::cover_store::read(db, crate::cover_store::Owner::Capture, &old)?.is_none());
         Ok(())
     })
     .unwrap();
@@ -1217,7 +1232,7 @@ fn seed(core: &Core, root: &Path) -> (String, Vec<u8>) {
         db.execute("INSERT INTO media_assets VALUES(?1,NULL,?2,'original.mp4',?3,?4,'active')",params![asset,json!({"title":"原始标题","platform":"youtube","video_id":"12345678901","canonical_url":"https://www.youtube.com/watch?v=12345678901"}).to_string(),hash,body.len() as i64])?;
         db.execute("INSERT INTO asset_local_files VALUES(?1,?2,?3,?4,?5,unixepoch(),'present')",params![asset,path.to_string_lossy(),body.len() as i64,hash,source.to_string()])?;
         db.execute("INSERT INTO asset_transcripts VALUES(?1,?2,'中文 English 123','synthetic',NULL,'test',1,NULL)",params![asset,hash])?;
-        db.execute("INSERT INTO asset_covers VALUES(?1,?2)",params![asset,b"\x89PNG\r\n\x1a\nfixture".to_vec()])?;
+        crate::cover_store::put(db, crate::cover_store::Owner::Asset, &asset, b"\x89PNG\r\n\x1a\nfixture")?;
         sync_engine::register_download(db,&asset)
     }).unwrap();
     (asset, body)

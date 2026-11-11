@@ -17,11 +17,10 @@ CREATE TABLE IF NOT EXISTS asset_local_files(
 CREATE TABLE IF NOT EXISTS asset_remote_objects(
  space_id TEXT NOT NULL REFERENCES backup_spaces(space_id),asset_id TEXT NOT NULL REFERENCES media_assets(asset_id),record_revision INTEGER NOT NULL DEFAULT 0,
  remote_state TEXT NOT NULL CHECK(remote_state IN ('not_backed_up','pending','uploading','backed_up','pending_delete','deleted','error')),PRIMARY KEY(space_id,asset_id));
+/* Asset transcript body is device-local; the portable object excludes source_json. */
 CREATE TABLE IF NOT EXISTS asset_transcripts(
  asset_id TEXT PRIMARY KEY REFERENCES media_assets(asset_id),content_sha256 TEXT,text TEXT NOT NULL,model_revision TEXT NOT NULL,model_name TEXT,pipeline_revision TEXT NOT NULL,completed_at INTEGER NOT NULL,source_json TEXT);
 CREATE TABLE IF NOT EXISTS asset_remote_records(space_id TEXT NOT NULL REFERENCES backup_spaces(space_id),asset_id TEXT NOT NULL REFERENCES media_assets(asset_id),record_json TEXT NOT NULL,PRIMARY KEY(space_id,asset_id));
-/* Asset transcript body is device-local; the portable object excludes source_json. */
-CREATE TABLE IF NOT EXISTS asset_covers(asset_id TEXT PRIMARY KEY REFERENCES media_assets(asset_id),body BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS backup_operations(
  operation_id TEXT PRIMARY KEY,space_id TEXT NOT NULL REFERENCES backup_spaces(space_id),asset_id TEXT REFERENCES media_assets(asset_id),kind TEXT NOT NULL,
  state TEXT NOT NULL CHECK(state IN ('pending','running','retry_wait','blocked','completed','canceled')),phase TEXT NOT NULL,payload_json TEXT NOT NULL,

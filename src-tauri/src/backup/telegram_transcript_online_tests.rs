@@ -118,7 +118,7 @@ async fn source_stage(core: &Arc<Core>, cfg: &Config, mode: &str) -> Result<()> 
                 let tx=db.unchecked_transaction()?;
                 tx.execute("INSERT INTO media_assets VALUES(?1,NULL,?2,'telegram-later-transcript.mp4',?3,?4,'active')",params![run.asset,metadata.to_string(),hash,sig["size"].as_u64().unwrap() as i64])?;
                 tx.execute("INSERT INTO asset_local_files VALUES(?1,?2,?3,?4,?5,unixepoch(),'present')",params![run.asset,path.to_string_lossy(),sig["size"].as_u64().unwrap() as i64,hash,sig.to_string()])?;
-                tx.execute("INSERT INTO asset_covers VALUES(?1,?2)",params![run.asset,cover])?;
+                crate::cover_store::put(&tx, crate::cover_store::Owner::Asset, &run.asset, &cover)?;
                 sync_engine::register_download(&tx,&run.asset)?;tx.commit()?;
             } else if mode=="recreate" {
                 db.execute("UPDATE asset_local_files SET path=?2,bytes=?3,sha256=?4,source_json=?5,local_state='present' WHERE asset_id=(SELECT local_asset_id FROM backup_space_assets WHERE space_id=?6 AND remote_asset_id=?1)",params![run.asset,path.to_string_lossy(),sig["size"].as_u64().unwrap() as i64,hash,sig.to_string(),p.scope().space_id])?;

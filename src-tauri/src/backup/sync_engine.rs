@@ -546,7 +546,7 @@ impl SyncEngine {
             }
             let tx = db.unchecked_transaction()?;
             if let Some(capture) = next.as_object_mut().and_then(|p| p.remove("capture")) {
-                tx.execute("INSERT OR IGNORE INTO backup_operation_captures VALUES(?1,?2)", params![operation,capture.to_string()])?;
+                crate::cover_store::save_capture(&tx, operation, capture)?;
             }
             tx.execute("UPDATE backup_operations SET phase=?2,payload_json=?3,updated_at=unixepoch() WHERE operation_id=?1",params![operation,phase,next.to_string()])?;tx.commit()?;Ok(())})
     }

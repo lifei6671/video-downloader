@@ -29,7 +29,7 @@ fn fixture(core: &Arc<Core>, cfg: &Config, p: &dyn BackupProvider) -> Result<Run
             tx.execute("INSERT INTO media_assets VALUES(?1,NULL,?2,'telegram-rich-synthetic.mp4',?3,?4,'active')",params![run.asset_id,metadata.to_string(),hash,signature["size"].as_u64().context("fixture size")? as i64])?;
             tx.execute("INSERT INTO asset_local_files VALUES(?1,?2,?3,?4,?5,unixepoch(),'present')",params![run.asset_id,video.to_string_lossy(),signature["size"].as_u64().unwrap() as i64,hash,signature.to_string()])?;
             tx.execute("INSERT INTO asset_transcripts VALUES(?1,?2,'富消息正式上传与按需恢复验证。Chinese English 123。','synthetic-test',NULL,'telegram-rich',1,NULL)",params![run.asset_id,hash])?;
-            tx.execute("INSERT INTO asset_covers VALUES(?1,?2)",params![run.asset_id,cover])?;
+            crate::cover_store::put(&tx, crate::cover_store::Owner::Asset, &run.asset_id, &cover)?;
             sync_engine::register_download(&tx,&run.asset_id)?;tx.commit()?;
         }
         Ok(())
