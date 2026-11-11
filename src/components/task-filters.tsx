@@ -1,7 +1,7 @@
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { TabsList, TabsTrigger } from '@/components/ui/tabs';
 
-export const taskStatuses = [['all', '全部'], ['downloading', '下载中'], ['queued', '等待中'], ['completed', '已完成'], ['failed', '失败']] as const;
+export const taskStatuses = [['all', '全部'], ['downloading', '下载中'], ['queued', '等待中'], ['completed', '已完成'], ['failed', '失败'], ['syncing', '同步中']] as const;
 export type TaskStatusFilter = typeof taskStatuses[number][0];
 
 export function TaskStatusFilters({ value, counts, onChange }: {

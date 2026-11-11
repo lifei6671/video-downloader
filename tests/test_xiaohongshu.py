@@ -64,7 +64,8 @@ def test_album_uses_cdn_assets_for_preview_and_download(monkeypatch, tmp_path, m
             clean_stream,
         ]})
         images.append({'fileId': 'spectrum/still-slide', 'livePhoto': False})
-    note = dict(noteId=NOTE_ID, type=kind, imageList=images, video={'consumer': {'originVideoKey': 'fixture'}},
+    note = dict(noteId=NOTE_ID, type=kind, time=1700000000123, lastUpdateTime=1700000001000,
+                imageList=images, video={'consumer': {'originVideoKey': 'fixture'}},
                 user={'userId': 'fixture-author', 'nickName' if mobile else 'nickname': '作者', 'avatar': AVATAR})
     requests = []
 
@@ -94,6 +95,7 @@ def test_album_uses_cdn_assets_for_preview_and_download(monkeypatch, tmp_path, m
     engine.operate('resolve_video', dict(input=input_url, preview_dir=str(preview)), emit)
     result = events[-1][1]['result']
     assert (result['resolver'], result['kind'], result['canonical_url']) == ('yt-dlp', 'image_album', page_url)
+    assert result['published_at'] == 1700000000
     assert len(result['images']) == len(images) and 'formats' not in result
     assert all((item['width'], item['height']) == (80, 60) for item in result['images'])
     assert (preview / result['images'][0]['preview_filename']).read_bytes() == JPEG
@@ -133,7 +135,7 @@ def test_video_cookie_fallback_and_watermarked_stream_exclusion(monkeypatch, tmp
     stream = dict(streamType=258, streamDesc='X264_MP4', videoCodec='h264', audioCodec='aac',
                   width=720, height=1280, size=123, masterUrl='http://sns-video-v6.xhscdn.com/fixture.mp4')
     mini = dict(stream, streamType=259, streamDesc='MINI_APP_259', width=1080, height=1920)
-    note = dict(noteId=NOTE_ID, title='fixture', type='video', imageList=[{'fileId': 'cover'}],
+    note = dict(noteId=NOTE_ID, title='fixture', type='video', time=1700000000123, imageList=[{'fileId': 'cover'}],
                 video={'media': {'stream': {'h264': [mini, stream]}}, 'consumer': {'originVideoKey': 'fixture'}},
                 user={'userId': 'fixture-author', 'nickname': '作者', 'avatar': AVATAR})
     requests = []
@@ -164,6 +166,7 @@ def test_video_cookie_fallback_and_watermarked_stream_exclusion(monkeypatch, tmp
     scoped = [('.xiaohongshu.com', 'web_session', 'manual-fixture' if manual else 'browser-fixture')]
     assert requests == ([scoped] if manual else [[], scoped])
     assert [f['width'] for f in resolved[0]['formats']] == [720]
+    assert resolved[0]['published_at'] == 1700000000
     assert resolved[0]['author_profile']['id'] == 'fixture-author'
     assert (tmp_path / resolved[0]['author_avatar_filename']).read_bytes() == JPEG
     assert resolved[0]['author_avatar_bytes'] == len(JPEG)

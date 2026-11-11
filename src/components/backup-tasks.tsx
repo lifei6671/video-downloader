@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Cloud, CircleCheck, CircleArrowUp, CircleArrowDown, Play, RotateCcw, FileText, ImageOff, ListVideo, ListX, Trash2, X } from 'lucide-react';
 import { TaskCardFeedback, TaskCardMessage, TaskCardNotice } from '@/components/task-row';
 import { bytes } from '@/lib/format-bytes';
-import { taskCardStatus } from '@/lib/task-card-status';
+import { backupUploadCleanup, isBackupUnconfirmed, taskCardStatus, type CardStatus } from '@/lib/task-card-status';
 import { api, errorText, type BackupAsset, type BackupOperation, type BackupSettings, type Task } from '@/api';
 import { DeleteProgressTooltip, deleteProgressDetail, useDeleteActivity } from './delete-progress-tooltip';
 import { Button } from '@/components/ui/button';
@@ -15,6 +15,8 @@ import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdow
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { BackupDataDialog } from '@/components/backup-conflicts';
 import { toast } from 'sonner';
+
+type SyncStatus = Pick<CardStatus, 'label' | 'variant' | 'operation'> & { error?: string | null };
 
 function deletionFinished(operation: BackupOperation) {
   return operation.kind === 'delete' && operation.phase !== 'superseded' && (operation.payload.local_cleanup_done === true || operation.state === 'completed' && operation.phase === 'completed');
@@ -167,6 +169,31 @@ export function useBackupTasks() {
   }
   const finishAssetRemoval = useCallback((id: string) => setExitingAssets(old => old.filter(asset => asset.asset_id !== id)), []);
   const {assetsById, operationsByAsset} = useMemo(() => indexBackup(assets, operations), [assets, operations]);
+  const syncStatuses = useMemo(() => {
+    const statuses = new Map<string, SyncStatus>();
+    if (!settings) return statuses;
+    for (const asset of assets) {
+      if (asset.space_id !== settings.space_id || asset.in_current_space === false ||
+          asset.asset_state !== 'active' || asset.remote_state === 'pending_delete') continue;
+      const assetOperations = operationsByAsset.get(asset.asset_id) ?? [];
+      const uploads = assetOperations.filter(op =>
+        op.space_id === settings.space_id && op.kind === 'upload' && op.phase !== 'superseded');
+      const operation = uploads.find(op =>
+        ['pending', 'running', 'retry_wait', 'blocked'].includes(op.state) &&
+        op.phase !== 'cancel_cleaned' &&
+        !['BACKUP_DELETE_PENDING', 'BACKUP_ASSET_DELETED'].includes(op.last_error ?? ''));
+      const pending = asset.has_pending_local_changes && !asset.remote_deleted && !uploads.some(op => op.state === 'canceled');
+      if (!operation && !pending) continue;
+      const cleanup = backupUploadCleanup(operation, assetOperations, settings.space_id);
+      const error = cleanup?.error ?? operation?.last_error;
+      const status = isBackupUnconfirmed(error) ? { label: '待确认', variant: 'warning' as const }
+        : cleanup?.blocked || operation?.state === 'blocked' ? { label: '同步失败', variant: 'destructive' as const }
+        : !cleanup && operation?.state === 'running' ? { label: '同步中', variant: 'info' as const }
+        : { label: '待同步', variant: 'warning' as const };
+      statuses.set(asset.asset_id, { ...status, operation, error });
+    }
+    return statuses;
+  }, [assets, operationsByAsset, settings]);
   const activeByAsset = useMemo(() => {
     const result = new Map<string, BackupOperation>();
     for (const op of operations) {
@@ -176,7 +203,7 @@ export function useBackupTasks() {
   }, [operations, assetsById]);
   const operation = (id: string) => activeByAsset.get(id);
   const exitingIds = useMemo(() => new Set(exitingAssets.map(asset => asset.asset_id)), [exitingAssets]);
-  return { assetsById, operationsByAsset, exitingIds, settings, setSettings, settingsLoaded, deleteActivity, backupEnabled, cancelingUploads, cancelUpload, revision, assets, exitingAssets, finishAssetRemoval, operations, operation, restoring, submittingDeletes, deleteErrors, deleteAsset, refreshing, refresh, reload, run, restore };
+  return { assetsById, operationsByAsset, syncStatuses, exitingIds, settings, setSettings, settingsLoaded, deleteActivity, backupEnabled, cancelingUploads, cancelUpload, revision, assets, exitingAssets, finishAssetRemoval, operations, operation, restoring, submittingDeletes, deleteErrors, deleteAsset, refreshing, refresh, reload, run, restore };
 }
 export type BackupTasks = ReturnType<typeof useBackupTasks>;
 
@@ -356,7 +383,23 @@ export function BackupTaskStatus({ backup, assetId }: { backup: BackupTasks; ass
   return <><Tooltip><TooltipTrigger asChild><span className="backup-sync-tooltip inline-flex rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={disabled ? 0 : undefined}><Button variant="ghost" size="icon" className="backup-sync-button shrink-0" data-complete={complete || undefined} disabled={disabled} aria-busy={busy} aria-label={label} onClick={() => void act()}><span className="backup-sync-glyph"><SyncIcon uploading={uploading || startingUpload || draining} indeterminate={draining || waitingUpload || startingUpload || uploading && op?.payload.completed_bytes == null || restoring && (waitingRestore || op?.payload.completed_bytes == null)} restoring={restoring} download={needsDownload} complete={complete} progress={progress} label={state} failed={!!failure} /></span></Button></span></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>{(asset.conflict_count > 0 || asset.remote_deleted && asset.has_pending_local_changes) && <Button variant="ghost" size="sm" className="h-6 px-1 text-xs text-destructive" onClick={() => setInspect(true)}>{asset.remote_deleted ? '本机待处理' : `冲突 ${asset.conflict_count}`}</Button>}<BackupDataDialog asset={asset} open={inspect} close={() => setInspect(false)} changed={backup.reload} /></>;
 }
 
-export function BackupTaskFeedback({ backup, assetId }: { backup: BackupTasks; assetId: string }) {
+export function BackupTaskFeedback({ backup, assetId, syncStatus }: { backup: BackupTasks; assetId: string; syncStatus?: SyncStatus }) {
+  if (syncStatus) {
+    const {operation, error} = syncStatus;
+    if (error) {
+      const message = error === 'TELEGRAM_RECONNECTING'
+        ? '正在重连 Telegram，连接恢复后自动继续' : errorText(error);
+      return syncStatus.variant === 'destructive' || isBackupUnconfirmed(error)
+        ? <TaskCardNotice message={message} warning={syncStatus.variant === 'warning'} />
+        : <TaskCardMessage message={message} />;
+    }
+    const total = backup.assetsById.get(assetId)?.content_bytes ?? 0;
+    const uploaded = operation?.payload.completed_bytes;
+    if (syncStatus.variant === 'info' && uploaded != null && total > 0) {
+      return <TaskCardMessage message={`上传进度 ${Math.min(99, Math.round(uploaded / total * 100))}%`} />;
+    }
+    return null;
+  }
   const deletion = backupDeletion(backup, assetId);
   if (backup.deleteErrors[assetId] || deletion?.failed) return <BackupTaskError backup={backup} assetId={assetId} overlay />;
   if (deletion) return <TaskCardMessage message={deleteProgressDetail(deletion, backup.deleteActivity)} />;
@@ -430,11 +473,12 @@ function Cover({ asset, revision }: { asset: BackupAsset; revision: number }) {
 export function canPlayBackupAsset(asset: BackupAsset, deleting: boolean, restoreInProgress: boolean) {
   return !deleting && !restoreInProgress && (!!asset.path || asset.in_current_space !== false && !asset.remote_deleted);
 }
-export function BackupAssetRow({ asset, backup, play, openTranscript, feed = false }: {
+export function BackupAssetRow({ asset, backup, play, openTranscript, syncStatus, feed = false }: {
   asset: BackupAsset;
   backup: BackupTasks;
   play: (target: HTMLElement | null, streaming?: true) => void;
   openTranscript: (target: HTMLElement | null) => void;
+  syncStatus?: SyncStatus;
   feed?: boolean;
 }) {
   const row = useRef<HTMLDivElement>(null);
@@ -456,11 +500,11 @@ export function BackupAssetRow({ asset, backup, play, openTranscript, feed = fal
     const bounds = event.currentTarget.getBoundingClientRect();
     event.currentTarget.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: bounds.right - 24, clientY: bounds.top + bounds.height / 2 }));
   }}><CardContent className="task-row-content">
-    <div className="task-row-cover"><Cover asset={asset} revision={backup.revision} />{feed && <><BackupAssetCoverBadge backup={backup} assetId={asset.asset_id} />{!deletion && (backupAction ? <BackupCardAction backup={backup} assetId={asset.asset_id} /> : playAction)}{!deletion && <BackupRestoreProgress backup={backup} assetId={asset.asset_id} />}<BackupDeleteProgress backup={backup} assetId={asset.asset_id} cover /></>}</div>
+    <div className="task-row-cover"><Cover asset={asset} revision={backup.revision} />{feed && <>{syncStatus ? <Badge variant={syncStatus.variant} className="task-feed-status">{syncStatus.label}</Badge> : <BackupAssetCoverBadge backup={backup} assetId={asset.asset_id} />}{!deletion && (backupAction ? <BackupCardAction backup={backup} assetId={asset.asset_id} /> : playAction)}{!deletion && <BackupRestoreProgress backup={backup} assetId={asset.asset_id} />}<BackupDeleteProgress backup={backup} assetId={asset.asset_id} cover /></>}</div>
     <div className="task-row-information"><CardTitle className="task-row-heading"><span className="task-title-backup"><BackupTaskStatus backup={backup} assetId={asset.asset_id} /></span><Tooltip><TooltipTrigger asChild><span className="task-row-title" tabIndex={0}>{title}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{title}</TooltipContent></Tooltip></CardTitle>
-      <div className="task-row-byline">{author && <Tooltip><TooltipTrigger asChild><span className="task-row-author" tabIndex={0}>{author}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{author}</TooltipContent></Tooltip>}<span>{location}</span>{feed && <div role="group" aria-label="下载信息" className="task-row-metadata flex flex-wrap items-center text-xs text-muted-foreground"><Tooltip><TooltipTrigger asChild><span tabIndex={0}>{resolution}</span></TooltipTrigger><TooltipContent>{width > 0 && height > 0 ? `${width} × ${height}` : resolution}</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><span tabIndex={0}>{bytes(asset.content_bytes)}</span></TooltipTrigger><TooltipContent>文件大小</TooltipContent></Tooltip></div>}</div>
+      <div className="task-row-byline">{author && <Tooltip><TooltipTrigger asChild><span className="task-row-author" tabIndex={0}>{author}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{author}</TooltipContent></Tooltip>}{!feed && syncStatus ? <Badge variant={syncStatus.variant}>{syncStatus.label}</Badge> : <span>{location}</span>}{feed && <div role="group" aria-label="下载信息" className="task-row-metadata flex flex-wrap items-center text-xs text-muted-foreground"><Tooltip><TooltipTrigger asChild><span tabIndex={0}>{resolution}</span></TooltipTrigger><TooltipContent>{width > 0 && height > 0 ? `${width} × ${height}` : resolution}</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><span tabIndex={0}>{bytes(asset.content_bytes)}</span></TooltipTrigger><TooltipContent>文件大小</TooltipContent></Tooltip></div>}</div>
       {!feed && <BackupDeleteProgress backup={backup} assetId={asset.asset_id} />}
-      <TaskCardFeedback><BackupTaskFeedback backup={backup} assetId={asset.asset_id} /></TaskCardFeedback>
+      <TaskCardFeedback><BackupTaskFeedback backup={backup} assetId={asset.asset_id} syncStatus={syncStatus} /></TaskCardFeedback>
     </div>
     {!feed && <div className="task-row-footer"><div className="task-row-controls">
       {playAction}

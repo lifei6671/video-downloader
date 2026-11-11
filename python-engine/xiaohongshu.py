@@ -70,10 +70,15 @@ def fetch_note(ydl, url, short):
 
 def metadata(note, canonical):
     user = note.get('user') if isinstance(note.get('user'), dict) else {}
-    return dict(platform=PLATFORM, video_id=note['noteId'], canonical_url=canonical,
+    result = dict(platform=PLATFORM, video_id=note['noteId'], canonical_url=canonical,
                 resolver='yt-dlp', title=text(note.get('title')), author=text(user.get('nickname') or user.get('nickName')),
                 author_profile=dict(id=text(user.get('userId')), nickname=text(user.get('nickname') or user.get('nickName')),
                                     handle=None, kind='user'), cover_url=None)
+    # The note detail reports publication time in milliseconds.
+    timestamp = note.get('time')
+    if type(timestamp) is int and 1_000_000_000_000 <= timestamp < 253_402_300_800_000:
+        result['published_at'] = timestamp // 1000
+    return result
 
 
 def avatar_url(note):
@@ -185,6 +190,7 @@ def video_info(ydl, note, canonical, selected_format=None):
         duration = traverse_obj(note, ('video', 'capa', 'duration', {float_or_none}, {positive}),
                                 ('video', 'media', 'video', 'duration', {float_or_none}, {positive}))
     return dict(id=base['video_id'], webpage_url=canonical, title=base['title'], uploader=base['author'],
+                timestamp=base.get('published_at'),
                 _yingqu_author=base['author_profile'], _yingqu_author_avatar=avatar_url(note), formats=formats,
                 duration=duration,
                 thumbnails=[{'url': cover}] if cover else [], extractor=PLATFORM, extractor_key='XiaoHongShu')

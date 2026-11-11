@@ -4,8 +4,16 @@ import { AuthorAvatar, hasAuthorAvatar } from '@/components/author-info';
 import { authorSearch, type AuthorSearch } from '@/lib/author-search';
 
 const countFormat = new Intl.NumberFormat('zh-CN');
+const compactCountFormat = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const counts = [['follower_count', '粉丝'], ['following_count', '关注'], ['likes_count', '获赞']] as const;
 const labels = [['region', '地区'], ['ip_location', 'IP 属地']] as const;
+
+function formatFollowers(count: number) {
+  if (count >= 100_000_000) return `${compactCountFormat.format(count / 100_000_000)}亿`;
+  if (count >= 10_000_000) return `${compactCountFormat.format(count / 10_000_000)}千万`;
+  if (count >= 10_000) return `${compactCountFormat.format(count / 10_000)}万`;
+  return countFormat.format(count);
+}
 
 export function AuthorProfileHeader({ identity, source, tasks, platformName }: {
   identity: AuthorSearch;
@@ -41,7 +49,7 @@ export function AuthorProfileHeader({ identity, source, tasks, platformName }: {
         {identity.platform !== 'douyin' && authorId && <div><dt>{identity.platform === 'telegram' ? '频道 ID' : '作者 ID'}</dt><dd>{authorId}</dd></div>}
         {counts.map(([field, label]) => {
           const count = profiles.find(item => item?.[field] != null)?.[field];
-          return count == null ? null : <div key={field}><dt>{label}</dt><dd className="tabular-nums">{countFormat.format(count)}</dd></div>;
+          return count == null ? null : <div key={field}><dt>{label}</dt><dd className="tabular-nums">{field === 'follower_count' ? formatFollowers(count) : countFormat.format(count)}</dd></div>;
         })}
         {age != null && <div><dt>年龄</dt><dd className="tabular-nums">{age} 岁</dd></div>}
         {labels.map(([field, label]) => {

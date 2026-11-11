@@ -15,9 +15,9 @@ async page => {
     await page.getByRole('button',{name:'下载任务',exact:true}).click();
     await rows().first().waitFor();
     const counts = () => states().locator('.task-filter-count').allTextContents();
-    check((await counts()).join(',')==='6,1,2,1,2', 'counts include preview or omit submitted tasks');
+    check((await counts()).join(',')==='6,1,2,1,2,0', 'counts include preview or omit submitted tasks');
     const before = await page.evaluate(()=>JSON.stringify(window.taskPlatformsTest.snapshot()));
-    for (const [name,expected] of [['下载中',['douyin-live']],['等待中',['telegram-wait','tiktok-wait']],['已完成',['youtube-done']],['失败',['unknown-failed','youtube-failed']]]) {
+    for (const [name,expected] of [['同步中',[]],['下载中',['douyin-live']],['等待中',['telegram-wait','tiktok-wait']],['已完成',['youtube-done']],['失败',['unknown-failed','youtube-failed']]]) {
       await choose(name);
       check(JSON.stringify(await ids())===JSON.stringify(expected), 'status filter '+name);
     }
@@ -31,7 +31,7 @@ async page => {
     await choose('下载中');
     await page.evaluate(()=>window.taskPlatformsTest.push('youtube-arrived','youtube'));
     await page.locator('[data-task-id="youtube-arrived"]').waitFor();
-    check((await counts()).join(',')==='3,1,0,1,1', 'counts did not update with platform and task event');
+    check((await counts()).join(',')==='3,1,0,1,1,0', 'counts did not update with platform and task event');
     check((await ids()).join(',')==='youtube-arrived','live event bypassed filter');
     await choose('全部'); await platform('全部').click();
     const first = rows().first();

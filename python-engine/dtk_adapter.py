@@ -110,6 +110,8 @@ def metadata(content):
                   canonical_url=content.web_url, resolver='dtk', kind=str(content.kind),
                   title=content.title, author=content.author.unique_id or content.author.nickname,
                   duration_ms=content.duration_ms, cover_url=None)
+    if content.created_at:
+        result['published_at'] = int(content.created_at.timestamp())
     result['author_profile'] = dict(id=content.author.uid, nickname=content.author.nickname,
                                   handle=content.author.unique_id, kind='user')
     bio = normalize_bio(content.author.signature)
@@ -145,9 +147,11 @@ def video_info(content):
                             tbr=stream.bitrate / 1000 if stream.bitrate else None))
     if not formats:
         raise EngineError('UNSUPPORTED_CONTENT', 'format')
+    details = metadata(content)
     return dict(id=content.content_id, webpage_url=content.web_url, title=content.title,
+                timestamp=details.get('published_at'),
                 _yingqu_douyin_covers=cover_candidates(content.raw) if str(content.platform) == 'douyin' else [],
-                _yingqu_author=metadata(content)['author_profile'],
+                _yingqu_author=details['author_profile'],
                 _yingqu_author_avatar=content.author.avatar.url if content.author.avatar else None,
                 uploader=content.author.unique_id or content.author.nickname,
                 duration=content.duration_ms / 1000 if content.duration_ms else None,

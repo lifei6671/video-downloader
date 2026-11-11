@@ -114,7 +114,7 @@ async page => {
   check(await profile.getByText('@account_handle', {exact: true}).isVisible(), 'account handle missing');
   check(await profile.getByText('作者 ID', {exact: true}).count() === 0, 'Douyin author ID label was displayed');
   check(await profile.getByText('author-1', {exact: true}).count() === 0, 'Douyin author ID was displayed');
-  check(await profile.getByText('12,345', {exact: true}).isVisible(), 'follower count missing');
+  check(await profile.getByText('1.2万', {exact: true}).isVisible(), 'follower count missing');
   check(await profile.getByText('0', {exact: true}).isVisible(), 'a reported zero was hidden');
   check(await profile.getByText('获赞', {exact: true}).count() === 0, 'unknown likes were displayed');
   for (const value of ['28 岁', '中国 上海', '浙江']) {
@@ -144,10 +144,10 @@ async page => {
   await page.evaluate(() => {
     const sibling = window.backgroundTest.snapshot().find(task => task.id === 'second');
     sibling.revision++;
-    Object.assign(sibling.video.author_profile, {profile_updated_at:11,follower_count:12346,age:null});
+    Object.assign(sibling.video.author_profile, {profile_updated_at:11,follower_count:13456,age:null});
     window.backgroundTest.emit(sibling);
   });
-  await profile.getByText('12,346', {exact: true}).waitFor();
+  await profile.getByText('1.3万', {exact: true}).waitFor();
   check(await profile.getByText('年龄', {exact: true}).count() === 0, 'sibling event did not clear the previously visible age');
   await page.getByRole('button', {name: '返回下载任务', exact: true}).click();
   check(await search.inputValue() === '原作品', 'return lost task search');

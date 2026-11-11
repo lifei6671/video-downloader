@@ -6,6 +6,7 @@ import os
 import re
 import socket
 import sys
+from datetime import date
 from http.cookiejar import Cookie
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
@@ -34,7 +35,7 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.14.8'
+ENGINE_VERSION = '0.14.9'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.10.26'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -310,6 +311,20 @@ def download_cover(ydl, info, stage):
         return dict(cover_error='COVER_UNAVAILABLE')
 
 
+def publication_metadata(info):
+    for timestamp_key, date_key in (('release_timestamp', 'release_date'), ('timestamp', 'upload_date')):
+        timestamp = info.get(timestamp_key)
+        if type(timestamp) is int and 0 < timestamp <= 253_402_300_799:
+            return {'published_at': timestamp}
+        value = info.get(date_key)
+        if isinstance(value, str) and re.fullmatch(r'[0-9]{8}', value):
+            try:
+                return {'published_date': date.fromisoformat(value).isoformat()}
+            except ValueError:
+                pass
+    return {}
+
+
 def metadata(info, platform):
     video_id = info.get('id')
     id_pattern = {'youtube': r'[A-Za-z0-9_-]{11}', 'xiaohongshu': r'[0-9a-f]{24}'}
@@ -335,7 +350,8 @@ def metadata(info, platform):
                 title=info.get('title'), author=info.get('uploader'), cover_url=cover,
                 author_profile=author_profile.metadata(info, platform),
                 duration_ms=duration_ms, resolver='yt-dlp', kind='video',
-                formats=public_formats(info, platform == 'youtube'), selected_format_id=info.get('_yingqu_format_id'), **selected)
+                formats=public_formats(info, platform == 'youtube'), selected_format_id=info.get('_yingqu_format_id'),
+                **selected, **publication_metadata(info))
 
 
 def input_identity(platform, url, resolver, source_url):

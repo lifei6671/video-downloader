@@ -77,6 +77,26 @@ def test_hd_size_unknown_and_missing_audio_not_silent():
         next(select_format({'formats': [items[-1]]}, merge=True))
 
 
+@pytest.mark.parametrize('fields,expected', [
+    ({'release_timestamp': 1700000000, 'timestamp': 1690000000}, {'published_at': 1700000000}),
+    ({'timestamp': 1700000000, 'upload_date': '20231114'}, {'published_at': 1700000000}),
+    ({'release_date': '20240229', 'upload_date': '20240228'}, {'published_date': '2024-02-29'}),
+    ({'upload_date': '20240229'}, {'published_date': '2024-02-29'}),
+    ({'release_timestamp': True, 'release_date': '20230229', 'modified_timestamp': 1700000000}, {}),
+    ({}, {}),
+])
+def test_resolve_publication_keeps_source_precision(monkeypatch, fields, expected):
+    monkeypatch.setattr(engine, 'javascript_runtime', lambda: {'node': {'path': 'fixture-node'}})
+    monkeypatch.setattr(YoutubeDL, 'extract_info', lambda self, url, download: self.process_ie_result(
+        dict(id='BaW_jenozKc', webpage_url=URL, title='fixture', extractor='fixture',
+             extractor_key='Fixture', formats=formats(), **fields), download=False))
+    events = []
+    engine.operate('resolve_video', {'input': URL}, lambda kind, **data: events.append((kind, data)))
+    kind, data = events[-1]
+    assert kind == 'resolved'
+    assert {key: value for key, value in data['result'].items() if key.startswith('published_')} == expected
+
+
 @pytest.mark.parametrize('reverse', [False, True])
 @pytest.mark.parametrize('chunk', ['missing', None, 0, 3 * 1048576])
 def test_top_level_language_reaches_real_ytdlp_selector_and_public_choices(monkeypatch, tmp_path, reverse, chunk):

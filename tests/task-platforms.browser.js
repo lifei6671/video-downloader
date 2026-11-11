@@ -10,7 +10,7 @@ async page=>{
   const results=[];
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]) {
     await page.setViewportSize({width,height});await load();
-    check(await tabs().getByRole('tab').allTextContents().then(x=>x.join(','))==='全部,抖音,TikTok,YouTube,Telegram','tab order incorrect');
+    check(await tabs().getByRole('tab').allTextContents().then(x=>x.join(','))==='全部,抖音,小红书,TikTok,YouTube,Telegram','tab order incorrect');
     check(await tabs().getByRole('tab',{name:'全部',exact:true}).getAttribute('aria-selected')==='true','default is not all');
     const before=await page.evaluate(()=>window.taskPlatformsTest.snapshot());
     for(const [name,wanted] of Object.entries(expected)) {
@@ -74,7 +74,12 @@ async page=>{
     check(Math.abs((await tabs().boundingBox()).y-beforeTabs.y)<1,'keyboard scroll moves tabs');
     await page.screenshot({path:'.local/task-tabs-fixed-'+width+'.png',animations:'disabled'});
     await tabs().getByRole('tab',{name:'抖音',exact:true}).click();
-    check((await titles()).length===51,'fixed tab cannot filter long list');
+    for (const loaded of [40, 50, 51]) {
+      await panel().press('Control+End');
+      await cards.nth(loaded - 1).waitFor();
+    }
+    const douyinTitles = await titles();
+    check(douyinTitles.length===51 && douyinTitles.every(title=>title.startsWith('douyin-')),'fixed tab cannot filter long list');
     await tabs().getByRole('tab',{name:'TikTok',exact:true}).click();
     check((await titles()).join(',')==='tiktok-wait','short filter after long list failed');
     check(await panel().evaluate(node=>node.scrollTop===0),'short filter retained invalid scroll offset');
