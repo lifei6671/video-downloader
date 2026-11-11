@@ -50,11 +50,16 @@ pub(crate) fn init_in_transaction(
         "INSERT OR IGNORE INTO backup_device(id,device_id) VALUES(1,?)",
         [Uuid::new_v4().to_string()],
     )?;
-    if tx
-        .prepare("PRAGMA foreign_key_check")?
-        .query([])?
-        .next()?
-        .is_some()
+    if cover_store::has_dangling_refs(tx)?
+        || tx
+            .prepare(
+                "SELECT 1 FROM main.sqlite_schema AS tables
+                 CROSS JOIN pragma_foreign_key_check(tables.name, 'main')
+                 WHERE tables.type='table' AND tables.name<>'cover_refs' LIMIT 1",
+            )?
+            .query([])?
+            .next()?
+            .is_some()
     {
         bail!("BACKUP_SCHEMA_FOREIGN_KEY_ERROR");
     }

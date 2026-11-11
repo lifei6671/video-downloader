@@ -94,6 +94,18 @@ pub(crate) fn remove(db: &Connection, owner: Owner, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn has_dangling_refs(db: &Connection) -> Result<bool> {
+    // Read only the parent digests once. Probing the WITHOUT ROWID primary
+    // index per reference is expensive because its records also contain BLOBs.
+    Ok(db.query_row(
+        "WITH blob_digests AS MATERIALIZED (SELECT digest FROM main.cover_blobs)
+         SELECT EXISTS(SELECT 1 FROM main.cover_refs
+             WHERE digest NOT IN (SELECT digest FROM blob_digests))",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 pub(crate) fn register_asset(db: &Connection, id: &str, body: &[u8]) -> Result<()> {
     if !db.query_row(
         "SELECT EXISTS(SELECT 1 FROM cover_refs WHERE owner='asset' AND owner_id=?)",

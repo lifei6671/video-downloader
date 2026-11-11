@@ -46,6 +46,8 @@ yingqu.sqlite.before-backup-v0-<UUID>.sqlite
 
 封面迁移把解析缓存、下载任务使用的缓存、资产封面、备份操作捕获和旧素材库封面统一到 `cover_blobs`。同一 SHA-256 对应一份原始图片字节。`cover_refs` 分别保存缓存、资产和各类操作的引用。引用可独立更新或释放，最后一个引用释放后回收字节。备份操作固定引用捕获时的封面，任务或资产后续更换封面时，重试仍读取原始版本。云端记录和附件协议沿用原契约。
 
+启动时批量读取封面摘要来校验 `cover_refs` 的外键，其余表继续使用 SQLite 外键检查。发现悬空引用时，启动事务仍会报错并回滚。
+
 旧库迁移前生成 `yingqu.sqlite.before-cover-store-v1-<UUID>.sqlite`，同一次启动已经生成完整的 SQLite 迁移快照时复用。迁移事务内转移原始字节并移除旧列或 JSON 数组。`asset_covers` 和旧库的 `asset_resources` 通过视图保留封面读取。释放出的 SQLite 页面可供后续写入重用。文件体积的压缩在隔离副本单独测量。
 
 历史 `backup_legacy_v5_operations` 的封面通过 `cover_refs` 中的 `owner='legacy_upload'` 和原 `operation_id` 查找。迁移快照保留原始 JSON。

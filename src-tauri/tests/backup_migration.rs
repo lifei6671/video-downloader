@@ -394,6 +394,29 @@ fn standalone_cover_upgrade_snapshots_before_rewriting_and_reopens_once() {
 }
 
 #[test]
+fn startup_rejects_dangling_cover_and_other_foreign_keys() {
+    for insert in [
+        "INSERT INTO cover_refs VALUES('cache','orphan',printf('%064d',0))",
+        "INSERT INTO asset_remote_objects(space_id,asset_id,remote_state)
+         VALUES('missing-space','missing-asset','pending')",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("app.sqlite");
+        drop(open(&path));
+        let db = Connection::open(&path).unwrap();
+        db.pragma_update(None, "foreign_keys", false).unwrap();
+        db.execute(insert, []).unwrap();
+        assert!(!rows(&db, "PRAGMA foreign_key_check").is_empty());
+        drop(db);
+
+        let error = Core::open(&path, root.path().into(), "unused".into(), vec![], |_| {})
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "BACKUP_SCHEMA_FOREIGN_KEY_ERROR");
+    }
+}
+
+#[test]
 fn unsupported_intermediate_and_unknown_schemas_are_rejected_before_startup_writes() {
     for old in [0, 2, 3, 4, 5, 6, 7, 8, 99] {
         let root = tempfile::tempdir().unwrap();
