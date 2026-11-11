@@ -91,10 +91,11 @@ def test_album_download_retains_no_retry_contract(monkeypatch, tmp_path):
         video_id='123', kind='image_album', images=[{'quality_source': 'original'}]))
     monkeypatch.setattr(engine.dtk_adapter, 'image_choices', lambda *_: [{}])
     called = []
-    def images(ydl, choices, platform, video_id, resolver, stage, emit):
+    def images(ydl, choices, platform, video_id, resolver, stage, emit, *, author_profile=None):
         assert ydl.params['retries'] == 0
         assert ydl.params['continuedl'] is False
         assert (platform, video_id, resolver) == ('douyin', '123', 'dtk')
+        assert author_profile is None
         called.append(True)
     monkeypatch.setattr(engine.media_album, 'download_images', images)
     engine.operate('download_video', dict(input='https://www.douyin.com/note/123', staging_dir=str(tmp_path),
