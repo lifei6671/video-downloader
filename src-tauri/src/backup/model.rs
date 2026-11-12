@@ -27,6 +27,19 @@ pub struct Asset {
     pub local_state: String,
 }
 
+pub(super) fn publication_field(metadata: &Value) -> Option<(&'static str, Value)> {
+    if let Some(at) = metadata["published_at"]
+        .as_i64()
+        .filter(|&at| at > 0 && chrono::DateTime::from_timestamp(at, 0).is_some())
+    {
+        return Some(("published_at", at.into()));
+    }
+    let date = metadata["published_date"].as_str()?;
+    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    (date.len() == 10 && parsed.format("%Y-%m-%d").to_string() == date)
+        .then(|| ("published_date", date.into()))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetTranscript {
     pub asset_id: String,

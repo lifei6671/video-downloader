@@ -54,6 +54,7 @@ async page => {
     await expectPlaying('连播视频 A');
     const details = stream.getByRole('region', { name: '任务详细信息' });
     await details.getByRole('heading', { name: '连播视频 A', exact: true }).waitFor();
+    check((await details.locator('time[datetime="2025-11-07T10:20:30.000Z"]').innerText()).endsWith(':30'), 'streaming lost publication time precision');
     const mediaBounds = await media.boundingBox();
     const detailsBounds = await details.boundingBox();
     check(detailsBounds.x >= mediaBounds.x + mediaBounds.width - 1, 'details did not stay in the right pane');
@@ -90,6 +91,7 @@ async page => {
     await wheel(1);
     await active('连播图集 B').waitFor();
     await stream.getByRole('img', { name: '第 1 张图片' }).waitFor();
+    check(await details.locator('time').count() === 0, 'streaming displayed the previous work’s publication time');
     if (width === 1440) {
       await stream.locator('.album-stage').evaluate(stage => {
         window.autoAlbumFades = 0;
@@ -119,6 +121,7 @@ async page => {
     await wheel(1);
     await expectPlaying('连播视频 D');
     await details.getByRole('heading', { name: '连播视频 D', exact: true }).waitFor();
+    check(await details.locator('time').innerText() === '2024-05-06', 'streaming invented a time for a date-only work');
     check(await visibleVideo.evaluate(video => video === window.streamPreloadedVideo), 'switching did not reuse the buffered video');
     check(await page.evaluate(() => window.backgroundTest.calls.filter(call => call.type === 'prepare-playback' && call.id === 'visual-9').length === 1
       && !window.backgroundTest.calls.some(call => call.type === 'prepare-playback' && call.id === 'wheel-cloud')), 'switching refetched the local video or restored the cloud video early');
@@ -173,6 +176,7 @@ async page => {
       await page.evaluate(() => window.releaseStreamCloud());
     }
     await expectPlaying('连播远端视频 E');
+    check(await stream.locator('.stream-playback-work:not(.stream-playback-outgoing) .task-media-sidebar time').innerText() === '2024-04-05', 'streaming lost backup publication date');
     if (width === 1440) {
       await page.waitForFunction(() => window.streamSeamAnimations.length === 2);
       const seam = await stream.evaluate(element => {

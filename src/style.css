@@ -141,11 +141,6 @@
   --task-feed-status-height: 24px;
   --task-feed-action-size: 32px;
   --task-feed-feedback-height: 18px;
-  --video-player-max-width: 960px;
-  --video-player-min-width: 300px;
-  --video-player-viewport-inset: 48px;
-  --video-player-frame-width: 42px;
-  --video-player-max-stage-height: calc(100dvh - 196px);
   --task-media-fallback-width: 920px;
   --task-media-fallback-height: 520px;
   --task-media-viewport-inset: 96px;
@@ -720,11 +715,9 @@ button.task-feed-progress-cancel[data-variant][data-size]:disabled { pointer-eve
   .backup-sync-glyph { transform: none !important; }
 }
 
-.video-player-dialog:not(.task-media-dialog)[data-slot="dialog-content"] { display: flex; flex-direction: column; width: min(var(--video-player-max-width), max(var(--video-player-min-width), calc(var(--video-player-max-stage-height) * var(--video-player-ratio) + var(--video-player-frame-width)))); max-width: calc(100vw - var(--video-player-viewport-inset)); max-height: calc(100dvh - var(--video-player-viewport-inset)); overflow-y: auto; transition: none; }
-.video-player-stage { position: relative; display: flex; flex: none; align-items: center; justify-content: center; aspect-ratio: var(--video-player-ratio); max-height: var(--video-player-max-stage-height); overflow: hidden; border-radius: 8px; background: var(--foreground); color: var(--on-primary); }
+.video-player-stage { position: relative; display: flex; flex: 1; min-height: 0; align-items: center; justify-content: center; overflow: hidden; background: var(--foreground); color: var(--on-primary); }
 .video-player-stage video { width: 100%; height: 100%; object-fit: contain; }
 .video-player-loading { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; gap: 8px; pointer-events: none; font-size: 12px; }
-.task-media-panel .video-player-stage { flex: 1; min-height: 0; max-height: none; aspect-ratio: auto; border-radius: 0; }
 .task-media-panel .video-player-stage video,
 .task-media-panel .album-stage video,
 .task-media-panel .album-still > img:not(.media-atmosphere) { object-fit: scale-down; }

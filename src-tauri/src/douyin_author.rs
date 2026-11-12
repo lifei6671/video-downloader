@@ -458,6 +458,11 @@ pub(super) fn downloaded_metadata(previous: &Value, result: &Value) -> Result<Va
         video["filesize_approx"] = Value::Null;
     }
     video["cover_url"] = Value::Null;
+    if video["published_at"].as_i64().unwrap_or_default() <= 0
+        && previous["published_at"].as_i64().unwrap_or_default() > 0
+    {
+        video["published_at"] = previous["published_at"].clone();
+    }
     video["author_scan_id"] = previous["author_scan_id"].clone();
     video["batch_author_id"] = previous["batch_author_id"].clone();
     video["author_scope"] = previous["author_scope"].clone();
@@ -801,7 +806,10 @@ impl Core {
             .unwrap_or(0);
         let default_directory = &inner.settings.download_directory;
         let requested_at = chrono::Utc::now().timestamp_millis().max(0) as u64;
-        for post in &session.writer.posts {
+        let mut posts: Vec<_> = session.writer.posts.iter().collect();
+        // Scan order can include pinned posts. Preserve it only for ties or missing dates.
+        posts.sort_by_key(|post| post.published_at.filter(|at| *at > 0).unwrap_or(i64::MAX));
+        for post in posts {
             let matches = existing
                 .get(post.video_id.as_str())
                 .map_or(&[][..], Vec::as_slice);
@@ -1412,6 +1420,15 @@ mod tests {
         assert!(album.files[0].video.is_some());
         assert!(tasks.iter().all(archived));
         let video = tasks.iter().find(|task| task.files.is_empty()).unwrap();
+        assert_eq!(video.queue_order, Some(1));
+        assert_eq!(album.queue_order, Some(2));
+        assert_eq!(video.video.as_ref().unwrap()["published_at"], 1);
+        assert_eq!(album.video.as_ref().unwrap()["published_at"], 2);
+        let asset = app
+            .backup_asset(video.asset_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(asset.metadata["published_at"], 1);
         let video_task_id = video.id.clone();
         let album_task_id = album.id.clone();
         let avatar_body = b"\x89PNG\r\n\x1a\nbatch-author-fixture";

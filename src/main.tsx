@@ -86,13 +86,28 @@ function downloadTime(timestamp: number | null) {
 const publicationTimeFormat = new Intl.DateTimeFormat('zh-CN', {
   dateStyle: 'short', timeStyle: 'medium', hourCycle: 'h23',
 });
-function PublicationTime({ timestamp, date }: { timestamp?: number | null; date?: string | null }) {
+function publicationInstant(timestamp?: number | null) {
   const instant = typeof timestamp === 'number' && timestamp > 0 ? new Date(timestamp * 1000) : null;
-  const hasTime = instant && Number.isFinite(instant.getTime());
-  if (!hasTime && !date) return null;
+  return instant && Number.isFinite(instant.getTime()) ? instant : null;
+}
+function publicationDate(date?: string | null) {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const instant = new Date(`${date}T00:00:00Z`);
+  return Number.isFinite(instant.getTime()) && instant.toISOString().slice(0, 10) === date ? date : null;
+}
+function publicationOrder(video: Task['video']) {
+  const instant = publicationInstant(video?.published_at);
+  if (instant) return instant.getTime();
+  const date = publicationDate(video?.published_date);
+  return date ? Date.parse(`${date}T00:00:00`) : -Infinity;
+}
+function PublicationTime({ timestamp, date }: { timestamp?: number | null; date?: string | null }) {
+  const instant = publicationInstant(timestamp);
+  const dateTime = instant?.toISOString() ?? publicationDate(date);
+  if (!dateTime) return null;
   return <p className="text-xs text-muted-foreground">
-    发布时间 <time className="tabular-nums" dateTime={hasTime ? instant.toISOString() : date ?? undefined}>
-      {hasTime ? publicationTimeFormat.format(instant) : date}
+    发布时间 <time className="tabular-nums" dateTime={dateTime}>
+      {instant ? publicationTimeFormat.format(instant) : dateTime}
     </time>
   </p>;
 }
@@ -133,6 +148,7 @@ function TaskDetails({ task, coverTools, regionRef }: { task: Task; coverTools?:
   return <div ref={regionRef} className="task-details-content" role="region" aria-label="任务详细信息" tabIndex={0}>
         <div className="flex min-w-0 items-center justify-between gap-2"><AuthorInfo task={task} showId={false} />{coverTools}</div>
         <h2 className="task-details-title text-sm font-semibold">{taskTitle(task)}</h2>
+        <PublicationTime timestamp={video?.published_at} date={video?.published_date} />
         <TaskMetadata task={task} details />
         <dl className="task-details-fields">
           <dt>来源</dt><dd>{platform}</dd>
@@ -680,20 +696,23 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
     '--task-media-intrinsic-width': `${mediaSize.width}px`,
     '--task-media-aspect': mediaSize.width / mediaSize.height,
   } as React.CSSProperties : undefined;
-  const size = mediaSize ?? video?.video;
-  const ratio = size?.width && size.height ? size.width / size.height : 0;
-  const playerStyle = { '--video-player-ratio': Number.isFinite(ratio) && ratio > 0 ? ratio : 16 / 9 } as React.CSSProperties;
   const albumGallery = currentTask && current?.entry.kind === 'task' && album && (waitingForAlbumSize
     ? <Spinner className="m-auto" aria-label="正在加载图集" />
     : <AlbumGallery key={currentTask.id} task={currentTask} expanded open={open} slideshow startAtLast={current.entry.startAtLast} navigation={albumNavigation} onMediaReady={streaming ? onMediaReady : undefined} />);
-  const taskDetails = currentTask && <TaskDetails key={currentTask.id} task={currentTask} regionRef={details}
-    coverTools={!streaming && (video || album) && <VideoCover task={currentTask} mode="actions" operations={coverOperations} />} />;
+  const videoTitle = video?.video?.title?.trim() || '视频播放';
+  const taskDetails = currentTask ? <TaskDetails key={currentTask.id} task={currentTask} regionRef={details}
+    coverTools={!streaming && (video || album) && <VideoCover task={currentTask} mode="actions" operations={coverOperations} />} />
+    : <div key={video?.id} ref={details} className="task-details-content" role="region" aria-label="任务详细信息" tabIndex={0}>
+      <h2 className="task-details-title text-sm font-semibold">{videoTitle}</h2>
+      <PublicationTime timestamp={video?.video?.published_at} date={video?.video?.published_date} />
+      {video?.video?.width && video.video.height && <dl className="task-details-fields"><dt>分辨率</dt><dd>{video.video.width} × {video.video.height}</dd></dl>}
+    </div>;
   const renderLayout = (media: React.ReactNode, tools?: React.ReactNode) => <>
     <div className="task-media-panel">{media}</div>
-    {currentTask && <div className="task-media-sidebar">
+    <div className="task-media-sidebar">
       {taskDetails}
       {tools}
-    </div>}
+    </div>
   </>;
   const streamVideos = [
     ...(video && mediaEntry ? [{ entry: mediaEntry, subject: video, preloading: false }] : []),
@@ -702,7 +721,7 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
   const streamSizeAction = streamMaximized ? '还原大小' : '最大化';
 
   return <Dialog open={open} onOpenChange={next => { if (!next) close(); }}>
-    <DialogContent ref={setDialog} showCloseButton={!streaming} className={cn(streaming ? 'stream-playback-dialog' : !standalone && 'task-media-dialog', streaming && streamMaximized && 'is-maximized', album && 'album-dialog', !streaming && video && 'video-player-dialog', !streaming && !standalone && mediaStyle && 'has-media-size')} style={streaming ? undefined : standalone ? playerStyle : mediaStyle} onOpenAutoFocus={event => {
+    <DialogContent ref={setDialog} showCloseButton={!streaming} className={cn(streaming ? 'stream-playback-dialog' : 'task-media-dialog', streaming && streamMaximized && 'is-maximized', album && 'album-dialog', !streaming && video && 'video-player-dialog', !streaming && mediaStyle && 'has-media-size')} style={streaming ? undefined : mediaStyle} onOpenAutoFocus={event => {
       if (!details.current) return;
       event.preventDefault();
       details.current.focus({ preventScroll: true });
@@ -713,7 +732,7 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
       (available ? target : fallbackFocus())?.focus({ preventScroll: true });
     }}>
       {streaming ? <><DialogTitle className="sr-only">{currentTask ? taskTitle(currentTask) : video?.video?.title?.trim() || '流式播放'}</DialogTitle><DialogDescription className="sr-only">流式播放</DialogDescription></>
-        : standalone ? <DialogHeader className="pr-8"><DialogTitle className="line-clamp-2">{video?.video?.title?.trim() || '视频播放'}</DialogTitle><DialogDescription className="sr-only">本地视频播放器</DialogDescription></DialogHeader>
+        : standalone ? <><DialogTitle className="sr-only">{videoTitle}</DialogTitle><DialogDescription className="sr-only">本地视频播放器</DialogDescription></>
         : <><DialogTitle className="sr-only">任务详情</DialogTitle><DialogDescription className="sr-only">作品媒体与任务信息</DialogDescription></>}
       {streaming && <div className="stream-playback-controls">
         <span ref={streamCoverControls} className="inline-flex empty:hidden">
@@ -737,12 +756,9 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
           {albumGallery}
         </div>
         <div className="task-media-sidebar">
-          {taskDetails ?? <div ref={details} className="task-details-content" role="region" aria-label="任务详细信息" tabIndex={0}>
-            <h2 className="task-details-title text-sm font-semibold">{video?.video?.title?.trim() || '视频播放'}</h2>
-            {video?.video?.width && video.video.height && <dl className="task-details-fields"><dt>分辨率</dt><dd>{video.video.width} × {video.video.height}</dd></dl>}
-          </div>}
+          {taskDetails}
         </div>
-      </div> : video && mediaEntry ? <PlaybackSession key={playbackKey(mediaEntry)} task={video} open={open} close={close} removedIds={removedIds} onMediaSize={onMediaSize} renderLayout={standalone ? undefined : renderLayout} />
+      </div> : video && mediaEntry ? <PlaybackSession key={playbackKey(mediaEntry)} task={video} open={open} close={close} removedIds={removedIds} onMediaSize={onMediaSize} renderLayout={renderLayout} />
         : currentTask && renderLayout(albumGallery || <VideoCover key={currentTask.id} task={currentTask} mode="details" operations={coverOperations} />)}
     </DialogContent>
   </Dialog>;
@@ -1235,8 +1251,12 @@ function App() {
   const allTaskRows = [...tasks, ...exitingTasks];
   for (const task of allTaskRows) if (!taskOrder.current.has(task.id)) taskOrder.current.set(task.id, taskOrder.current.size);
   const orderedTasks = (a: Task, b: Task) => compareTaskInsertion(a, b) || taskOrder.current.get(a.id)! - taskOrder.current.get(b.id)!;
-  const authorWorks = activeAuthor ? matchingAuthorRecords(allTaskRows.filter(task => task.status !== 'canceled'), activeAuthor.identity).sort(orderedTasks) : [];
-  const authorRecords = authorWorks.filter(task => !removedIds.current.has(task.id));
+  const authorRows = activeAuthor ? matchingAuthorRecords(allTaskRows.filter(task => task.status !== 'canceled'), activeAuthor.identity).sort(orderedTasks) : [];
+  const authorRecords = authorRows.filter(task => !removedIds.current.has(task.id));
+  const authorWorks = authorRows
+    .map(task => ({ task, published: publicationOrder(task.video) }))
+    .sort((a, b) => a.published === b.published ? 0 : b.published - a.published)
+    .map(({ task }) => task);
   const syncing = taskStatus === 'syncing';
   const isSyncingTask = (task: Task) => task.status === 'completed' && !!task.asset_id && backup.syncStatuses.has(task.asset_id);
   const filteredTasks = allTaskRows.filter(t => t.status !== 'canceled' && t.download_requested)

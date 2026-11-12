@@ -45,6 +45,9 @@ if (scenario === 'author-results') {
     make('different','douyin','author-2','作者昵称','同名其他作者'),make('cross-platform','tiktok','author-1','作者昵称','其他平台作品'),
     make('legacy','douyin',null,null,'旧版作品')];
   tasks[0].file_missing=true;
+  tasks[0].video.published_at=Date.parse('2026-08-31T10:20:30Z')/1000;
+  tasks[1].video.published_date='2026-09-02';
+  tasks[4].insertion_id=100;
   for (const task of tasks.slice(0,2)) Object.assign(task.video.author_profile, {
     profile_updated_at:10,follower_count:12345,following_count:0,likes_count:null,age:28,region:'中国 上海',ip_location:'浙江'});
   Object.assign(tasks[1],{status:'ready',download_requested:false,completed_at:null,path:null});
@@ -224,6 +227,7 @@ if (scenario.startsWith('visual')) {
   tasks=['ready','downloading','queued','completed','failed','completed','canceled',...Array(scenario==='visual-list-paging'?68:28).fill('completed')].map((status,i)=>row(i,status));
   if (scenario.startsWith('visual-list')) {
     tasks[3].video.title='镜头里的城市漫游：从清晨的街角走到暮色中的河岸，记录沿途遇见的人与风景，保留这一段完整的周末时光，穿过旧城区与沿江步道，慢慢发现日常生活中值得珍藏的瞬间';
+    tasks[3].video.published_at=Date.parse('2025-10-16T12:34:56Z')/1000;
     tasks[3].video.author_profile.nickname='周末影像记录者与城市漫游摄影档案';
     Object.assign(tasks[6],{status:'completed',completed_at:1792644480,path:'C:\\TestVideos\\城市图集',bytes:16777216,files:[{filename:'01.png'},{filename:'02.png'}]});
     Object.assign(tasks[6].video,{title:'街角光影，城市漫游图集',kind:'image_album',images:[{quality_source:'original',width:768,height:1376},{quality_source:'original',width:768,height:1376}]});
@@ -274,8 +278,10 @@ if (scenario.startsWith('visual')) {
       const ordered = [first, downloading, album, failed, single, filtered, last];
       const titles = ['连播视频 A', '连播下载中', '连播图集 B', '连播下载失败', '连播单张图集 C', '搜索排除的视频', '连播视频 D'];
       ordered.forEach((task,index) => Object.assign(task, {insertion_id:ordered.length-index, video:{...task.video, title:titles[index]}}));
+      first.video.published_at=Date.parse('2025-11-07T10:20:30Z')/1000;
+      last.video.published_date='2024-05-06';
       tasks = ordered.reverse();
-      const cloud = {asset_id:'wheel-cloud', task_id:null, space_id:'wheel-space', metadata:{...last.video,title:'连播远端视频 E'}, original_filename:'E.mp4', content_bytes:100,
+      const cloud = {asset_id:'wheel-cloud', task_id:null, space_id:'wheel-space', metadata:{...last.video,title:'连播远端视频 E',published_date:'2024-04-05'}, original_filename:'E.mp4', content_bytes:100,
         path:null, local_state:'missing', asset_state:'active', remote_state:'backed_up', remote_deleted:false, in_current_space:true, backup_locations:[]};
       api.backupSettings = async () => ({space_id:'wheel-space', provider_type:'telegram', enabled:true});
       api.backupSyncEnabled = async () => true;

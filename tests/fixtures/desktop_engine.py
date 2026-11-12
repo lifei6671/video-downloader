@@ -45,7 +45,9 @@ if request['method'] == 'scan_author_posts':
         emit('author_scan_finished', result={'pages': 2})
         sys.exit(0)
     items = [video, album]
-    if params['input'] == 'new-video':
+    if params['input'] == 'full':
+        items = [album]
+    elif params['input'] == 'new-video':
         items.append({**video, 'video_id': '502', 'published_at': 0})
     elif params['input'] == 'new-album':
         items.append({**album, 'video_id': '602', 'published_at': 0})

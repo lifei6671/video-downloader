@@ -177,6 +177,10 @@ async page => {
       await remote.getByRole('button', { name: '播放视频', exact: true }).click();
       const asset = page.getByRole('dialog', { name: '连播远端视频 E', exact: true });
       await asset.locator('.video-player-stage video').waitFor();
+      const publication = asset.locator('.task-media-sidebar time');
+      check(await publication.innerText() === '2024-04-05', 'normal backup playback lost the date-only publication');
+      const [videoBounds, dateBounds] = await Promise.all([asset.locator('video').boundingBox(), publication.boundingBox()]);
+      check(dateBounds.x >= videoBounds.x + videoBounds.width - 1, 'normal backup playback put publication outside the right sidebar');
       await asset.locator('.video-player-stage').hover();
       await page.mouse.wheel(0, -120);
       await idle();

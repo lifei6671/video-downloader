@@ -180,6 +180,9 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
             metadata.insert(field.into(), value.clone());
         }
     }
+    if let Some((field, value)) = super::model::publication_field(video) {
+        metadata.insert(field.into(), value);
+    }
     if let Some(url) = canonical_source(video) {
         metadata.insert("canonical_url".into(), url.into());
     }

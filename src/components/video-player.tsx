@@ -1,13 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ExternalLink, AlertCircle, Play } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, errorText } from '@/api';
+import { api, errorText, type Video } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { readPlaybackPosition, writePlaybackPosition } from '@/lib/playback-position';
 
-export type PlaybackSubject = {id: string; path: string | null; completed_at: number | null; video: {title?: string; width?: number | null; height?: number | null} | null; asset?: boolean};
+export type PlaybackSubject = {id: string; path: string | null; completed_at: number | null; video: Pick<Video, 'title' | 'width' | 'height' | 'published_at' | 'published_date'> | null; asset?: boolean};
 export type MediaSize = { width: number; height: number };
 
 function VideoStartButton({ onClick }: { onClick: () => void }) {

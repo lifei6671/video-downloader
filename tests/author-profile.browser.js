@@ -126,14 +126,14 @@ async page => {
   check(await search.count() === 0 && await page.getByRole('button', {name: '清理历史', exact: true}).count() === 0, 'profile exposed download-task search or bulk actions');
   const works = page.getByRole('list', {name: '媒体任务列表', exact: true});
   const workIds = () => works.locator('[data-task-id]').evaluateAll(rows => rows.map(row => row.dataset.taskId));
-  check(JSON.stringify(await workIds()) === JSON.stringify(['first', 'second', 'legacy']), 'profile mixed identities or dropped previews');
+  check(JSON.stringify(await workIds()) === JSON.stringify(['second', 'first', 'legacy']), 'profile did not sort by publication or mixed identities');
   for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
     await page.setViewportSize({width, height});
     const toCards = page.getByRole('button', {name: '切换为卡片', exact: true});
     await toCards.focus();
     await page.keyboard.press('Enter');
     check(await works.getAttribute('data-view') === 'feed', 'profile did not switch to cards');
-    check(JSON.stringify(await workIds()) === JSON.stringify(['first', 'second', 'legacy']), 'layout switch changed works');
+    check(JSON.stringify(await workIds()) === JSON.stringify(['second', 'first', 'legacy']), 'layout switch changed publication order');
     check(await works.getByRole('button', {name: '下载视频', exact: true}).isVisible(), 'profile lost ready action');
     check(!await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), 'profile overflow');
     await page.screenshot({path: `.local/author-home-card-${width}.png`});
@@ -142,13 +142,13 @@ async page => {
     await page.screenshot({path: `.local/author-home-list-${width}.png`});
   }
   await page.evaluate(() => {
-    const sibling = window.backgroundTest.snapshot().find(task => task.id === 'second');
-    sibling.revision++;
-    Object.assign(sibling.video.author_profile, {profile_updated_at:11,follower_count:13456,age:null});
-    window.backgroundTest.emit(sibling);
+    const olderWork = window.backgroundTest.snapshot().find(task => task.id === 'first');
+    olderWork.revision++;
+    Object.assign(olderWork.video.author_profile, {profile_updated_at:11,follower_count:13456,age:null});
+    window.backgroundTest.emit(olderWork);
   });
   await profile.getByText('1.3万', {exact: true}).waitFor();
-  check(await profile.getByText('年龄', {exact: true}).count() === 0, 'sibling event did not clear the previously visible age');
+  check(await profile.getByText('年龄', {exact: true}).count() === 0, 'older work event did not clear the previously visible age');
   await page.getByRole('button', {name: '返回下载任务', exact: true}).click();
   check(await search.inputValue() === '原作品', 'return lost task search');
   check(await page.getByRole('tab', {name: '抖音', exact: true}).getAttribute('aria-selected') === 'true', 'return lost platform filter');

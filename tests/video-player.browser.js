@@ -45,6 +45,8 @@ async page => {
     const bounds=await dialog().boundingBox();
     check(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=width&&bounds.y+bounds.height<=height,'player escaped viewport');
     const detailRegion = dialog().getByRole('region',{name:'任务详细信息'});
+    const publication = detailRegion.locator('time[datetime="2025-10-16T12:34:56.000Z"]');
+    check((await publication.innerText()).endsWith(':56'), 'normal playback lost publication time precision');
     const button = dialog().getByRole('button',{name:'使用系统播放器',exact:true});
     const details = await detailRegion.boundingBox();
     const systemPlayer = await button.boundingBox();

@@ -1264,9 +1264,9 @@ fn backup_author_profile_validates_portable_fields_and_optional_identity() {
 }
 
 #[tokio::test]
-async fn backup_metadata_rebuild_retains_title_and_portable_author_identity() {
+async fn backup_metadata_rebuild_retains_title_author_identity_and_publication_date() {
     let (f, provider, engine) = sync_fixture().await;
-    let metadata = serde_json::json!({"platform":"youtube","video_id":"12345678901","title":"当前视频标题","author":"作者昵称","author_profile":{"id":"author-123","nickname":"作者昵称","handle":"@author","kind":"user","avatar_cached":true},"duration_ms":2000,"width":1920,"height":1080});
+    let metadata = serde_json::json!({"platform":"youtube","video_id":"12345678901","title":"当前视频标题","author":"作者昵称","author_profile":{"id":"author-123","nickname":"作者昵称","handle":"@author","kind":"user","avatar_cached":true},"duration_ms":2000,"width":1920,"height":1080,"published_date":"2025-12-06"});
     f.core
         .backup_db(|db| {
             db.execute(
@@ -1287,6 +1287,7 @@ async fn backup_metadata_rebuild_retains_title_and_portable_author_identity() {
     let snapshot = provider.read_asset(&f.id).await.unwrap().unwrap().snapshot;
     assert_eq!(snapshot.fields["title"], "当前视频标题");
     assert_eq!(snapshot.fields["author"], "作者昵称");
+    assert_eq!(snapshot.fields["source"]["published_date"], "2025-12-06");
     assert_eq!(
         snapshot.fields["source"]["author_profile"]["id"],
         "author-123"
@@ -1298,6 +1299,7 @@ async fn backup_metadata_rebuild_retains_title_and_portable_author_identity() {
     let asset = rebuilt.backup_assets().unwrap().remove(0);
     assert_eq!(asset.metadata["title"], "当前视频标题");
     assert_eq!(asset.metadata["author_profile"]["handle"], "@author");
+    assert_eq!(asset.metadata["published_date"], "2025-12-06");
 }
 
 #[tokio::test]

@@ -259,6 +259,9 @@ pub fn fields(asset: &Asset) -> FieldPatch {
         .map(|k| (k.into(), m[k].clone()))
         .collect();
     let mut source = json!({"platform":m["platform"],"video_id":m["video_id"],"canonical_url":m["canonical_url"]});
+    if let Some((field, value)) = super::model::publication_field(m) {
+        source[field] = value;
+    }
     // Avatar cache flags are local state; preserve the portable author identity only.
     if let Some(profile) = m["author_profile"].as_object() {
         let profile: serde_json::Map<String, Value> = ["id", "nickname", "handle", "kind"]
