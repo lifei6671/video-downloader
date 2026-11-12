@@ -867,7 +867,14 @@ function ProfileForm({ profile, saved }: { profile: Profile; saved: (settings: S
     </FieldGroup></FieldSet></form></CardContent><CardFooter className="justify-end py-2"><Button type="submit" form={'profile-' + profile.platform} disabled={busy || !changed || chunkInvalid}>{busy && <Spinner aria-hidden="true" data-icon="inline-start" />}{busy ? '保存中…' : '保存平台配置'}</Button></CardFooter>
   </Card>;
 }
-function App() {
+function StartupScreen({ failed = false }: { failed?: boolean }) {
+  return <div className="startup-screen" role={failed ? 'alert' : 'status'}>
+    <img src={brandIcon} alt="映取" />
+    <span>{failed ? '无法启动映取，请从托盘退出后重试。' : '正在启动…'}</span>
+  </div>;
+}
+
+function App({ initialSettings }: { initialSettings: Settings }) {
   useEffect(() => {
     const preventContextMenu = (event: MouseEvent) => {
       if (!(event.target instanceof Element && event.target.closest('#video-input, [data-cover-context-menu], .task-context-target'))) event.preventDefault();
@@ -876,12 +883,14 @@ function App() {
     return () => document.removeEventListener('contextmenu', preventContextMenu, true);
   }, []);
   const [page, setPage] = useState('download');
+  const [connected, setConnected] = useState(false);
+  const [startupFailed, setStartupFailed] = useState(false);
   const [resolveSubmitting, setResolveSubmitting] = useState(false);
   const [resolveRequestError, setResolveRequestError] = useState('');
   const [resolveSource, setResolveSource] = useState('');
   const pageContentRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => { pageContentRef.current?.scrollTo(0, 0); }, [page]);
-  const backup = useBackupTasks();
+  const backup = useBackupTasks(connected);
   const backupSettings = backup.settings;
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('download');
   const settingsActive = page === 'settings';
@@ -890,8 +899,8 @@ function App() {
   const [backupSettingsVisited, setBackupSettingsVisited] = useState(false);
   useEffect(() => { if (settingsActive) setSettingsVisited(true); }, [settingsActive]);
   useEffect(() => { if (backupSettingsActive) setBackupSettingsVisited(true); }, [backupSettingsActive]);
-  const runtimeDependencies = useRuntimeDependencies();
-  const videoTranscripts = useVideoTranscripts();
+  const runtimeDependencies = useRuntimeDependencies(connected);
+  const videoTranscripts = useVideoTranscripts(connected);
   const [settingsPlatform, setSettingsPlatform] = useState('douyin');
   const settingsSectionInfo = settingsSections.find(section => section.id === settingsSection);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -903,7 +912,7 @@ function App() {
   const authorListRef = useRef<HTMLDivElement>(null);
   const previewAuthorRef = useRef<HTMLButtonElement>(null);
   const finishRemoval = useCallback((id: string) => setExitingTasks(old => old.filter(task => task.id !== id)), []);
-  const [settings, setSettings] = useState<Settings | null>(null);
+  const [settings, setSettings] = useState(initialSettings);
   const filenamePreviewCache = useRef<FilenamePreviewCache | null>(null);
   const [input, setInput] = useState('');
   const authorParseGeneration = useRef(0);
@@ -924,7 +933,6 @@ function App() {
   const pendingTaskActions = useRef(new Set<string>());
   const [waitingTaskActions, setWaitingTaskActions] = useState(() => new Set<string>());
   const [dismissedTaskErrorRevisions, setDismissedTaskErrorRevisions] = useState(() => new Map<string, number>());
-  const [connected, setConnected] = useState(false);
   const [confirm, setConfirm] = useState<{task: Task; resetPreview: boolean; input: string} | null>(null);
   const [duplicate, setDuplicate] = useState<{task: Task; previous: Task; background?: boolean} | null>(null);
   const duplicateCompleted = duplicate?.previous.status === 'completed';
@@ -1072,14 +1080,15 @@ function App() {
   }, []);
   useEffect(() => {
     let disposed = false;
+    let loaded = false;
     let unsubscribe: (() => void) | undefined;
     (async () => {
       try {
         unsubscribe = await api.subscribe(task => { if (!disposed) setTasks(old => mergeTasks(old, [task], removedIds.current)); }, (id, spaceId) => { if (!disposed) removeTasks([id], spaceId); });
         if (disposed) { unsubscribe(); return; }
-        const [snapshot, config] = await Promise.all([api.tasks(), api.settings()]);
+        const snapshot = await api.tasks();
         if (!disposed) {
-          setTasks(old => mergeTasks(old, snapshot, removedIds.current)); setSettings(config); setConnected(true);
+          setTasks(old => mergeTasks(old, snapshot, removedIds.current));
           // Restored previews must not open unsolicited duplicate dialogs when
           // a different preview is handed to the background queue.
           for (const restored of snapshot) {
@@ -1090,10 +1099,14 @@ function App() {
             const source = restored.video.canonical_url;
             setInput(value => value || source);
           }
+          loaded = true;
+          setConnected(true);
         }
-      } catch { if (!disposed) toast.error('无法连接本地应用，请通过桌面程序启动映取。', { id: 'connection-error', duration: 8000 }); }
+      } catch { if (!disposed) setStartupFailed(true); }
     })();
-    const refresh = () => { api.tasks().then(snapshot => { if (!disposed) setTasks(old => mergeTasks(old, snapshot, removedIds.current)); }).catch(() => {}); };
+    const refresh = () => {
+      if (loaded) api.tasks().then(snapshot => { if (!disposed) setTasks(old => mergeTasks(old, snapshot, removedIds.current)); }).catch(() => {});
+    };
     window.addEventListener('focus', refresh);
     return () => { disposed = true; unsubscribe?.(); window.removeEventListener('focus', refresh); };
   }, []);
@@ -1364,7 +1377,15 @@ function App() {
         ? playTaskEntry(task, returnFocus, 0)
         : { kind: 'task', id: task.id, returnFocus, streamStep: 0 })
       : undefined;
-    return <TaskMoreMenu stream={stream} children={children} backupActions={task.asset_id ? <BackupTransferMenuItems backup={backup} assetId={task.asset_id} context={children !== undefined} /> : undefined} coverActions={coverActions} onOpenChange={open => { if (open) React.startTransition(() => setSelectedRow(task.id)); }} task={task} play={canPlayTask(task) ? () => playTask(task) : undefined} deleteBackup={deleteFromBackup} release={member?.remote_state === 'backed_up' && !member.remote_deleted ? () => { void run(async () => { await api.releaseAsset(task.asset_id!); setTasks(await api.tasks()); toast.success('本机副本已释放'); }); } : undefined} busy={busy || !!deleting || waitingTaskActions.has(task.id)} waitingCancel={waitingTaskActions.has(task.id) ? () => { void api.cancel(task.id).catch(reportActionError); } : undefined} cancel={taskListPage && ['parsing','ready','queued','downloading'].includes(task.status) ? returnFocus => requestCancel(task, returnFocus) : undefined} transcript={task.status === 'completed' && task.video?.kind !== 'image_album' && (!task.file_missing || videoTranscripts.values[task.id]?.has_result || !!asset && (asset.has_transcript || asset.in_current_space !== false && !asset.remote_deleted)) ? { label: videoTranscripts.values[task.id]?.state === 'running' ? '正在提取文案' : videoTranscripts.values[task.id]?.has_result || asset?.has_transcript ? '查看文案' : '提取文案', open: returnFocus => videoTranscripts.open(task.id, returnFocus) } : undefined} reveal={() => { void run(() => api.reveal(task.id)); }} copy={() => { void run(() => navigator.clipboard.writeText(task.video?.canonical_url ?? task.telegram_link!)); }} copyPath={() => { void run(async () => { await navigator.clipboard.writeText(displayPath(task.path)); toast.success('本地地址已复制'); }); }} remove={() => { void runTaskAction(task.id, () => removeTask(task.id)); }} deleteFile={deleteUnavailable ? undefined : deleteFromBackup ? () => { void backup.deleteAsset(task.asset_id!); } : () => { void runTaskAction(task.id, () => removeTask(task.id, true)); }} />;
+    const releaseLocalCopy = member?.remote_state === 'backed_up' && !member.remote_deleted ? () => {
+      void run(async () => {
+        await api.releaseAsset(task.asset_id!);
+        const snapshot = await api.tasks();
+        setTasks(old => mergeTasks(old, snapshot, removedIds.current));
+        toast.success('本机副本已释放');
+      });
+    } : undefined;
+    return <TaskMoreMenu stream={stream} children={children} backupActions={task.asset_id ? <BackupTransferMenuItems backup={backup} assetId={task.asset_id} context={children !== undefined} /> : undefined} coverActions={coverActions} onOpenChange={open => { if (open) React.startTransition(() => setSelectedRow(task.id)); }} task={task} play={canPlayTask(task) ? () => playTask(task) : undefined} deleteBackup={deleteFromBackup} release={releaseLocalCopy} busy={busy || !!deleting || waitingTaskActions.has(task.id)} waitingCancel={waitingTaskActions.has(task.id) ? () => { void api.cancel(task.id).catch(reportActionError); } : undefined} cancel={taskListPage && ['parsing','ready','queued','downloading'].includes(task.status) ? returnFocus => requestCancel(task, returnFocus) : undefined} transcript={task.status === 'completed' && task.video?.kind !== 'image_album' && (!task.file_missing || videoTranscripts.values[task.id]?.has_result || !!asset && (asset.has_transcript || asset.in_current_space !== false && !asset.remote_deleted)) ? { label: videoTranscripts.values[task.id]?.state === 'running' ? '正在提取文案' : videoTranscripts.values[task.id]?.has_result || asset?.has_transcript ? '查看文案' : '提取文案', open: returnFocus => videoTranscripts.open(task.id, returnFocus) } : undefined} reveal={() => { void run(() => api.reveal(task.id)); }} copy={() => { void run(() => navigator.clipboard.writeText(task.video?.canonical_url ?? task.telegram_link!)); }} copyPath={() => { void run(async () => { await navigator.clipboard.writeText(displayPath(task.path)); toast.success('本地地址已复制'); }); }} remove={() => { void runTaskAction(task.id, () => removeTask(task.id)); }} deleteFile={deleteUnavailable ? undefined : deleteFromBackup ? () => { void backup.deleteAsset(task.asset_id!); } : () => { void runTaskAction(task.id, () => removeTask(task.id, true)); }} />;
   }
   function canPlayTask(task: Task) {
     if (task.status !== 'completed' || !task.video || task.video.kind === 'image_album') return false;
@@ -1463,6 +1484,7 @@ function App() {
       queuePosition={queued.findIndex(t => t.id === task.id) + 1} actions={taskView === 'list' ? taskActions(task) : null}
     />, coverActions)} />;
   }
+  if (!connected) return <StartupScreen failed={startupFailed} />;
   return <TooltipProvider><Toaster position="top-center" closeButton /><SidebarProvider className="h-dvh min-h-0 overflow-hidden" open={wide} onOpenChange={setWide} style={{'--sidebar-width':'192px','--sidebar-width-icon':'56px'} as React.CSSProperties}>
     <Sidebar collapsible="icon"><SidebarHeader className="app-brand-header h-16 justify-center px-2"><div data-slot="app-brand" className="flex h-10 items-center gap-2 px-2 group-data-[collapsible=icon]:px-0"><img src={brandIcon} alt="" className="size-8 shrink-0 object-contain" /><span className="grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 group-data-[collapsible=icon]:hidden"><span className="whitespace-nowrap text-xl font-semibold">映取</span><Badge variant="outline" className="min-w-0 max-w-full justify-self-end" title={__APP_VERSION__}><span className="truncate">{__APP_VERSION__}</span></Badge></span></div></SidebarHeader><SidebarSeparator /><SidebarContent><SidebarGroup className="px-2 py-2"><SidebarGroupContent><SidebarMenu className="gap-1">{nav.map(({id,label,Icon}) => <SidebarMenuItem key={id}><SidebarMenuButton className="app-navigation-item" isActive={page === id || !!activeAuthor && id === activeAuthor.origin} aria-current={page === id || activeAuthor?.origin === id ? 'page' : undefined} tooltip={label} onClick={() => { if (activeAuthor?.origin === id) returnFromAuthorPage(); else { setPage(id); setSearch(''); setAuthorPage(null); } }}><Icon /><span>{label}</span></SidebarMenuButton>{id === 'tasks' && activeCount > 0 && <SidebarMenuBadge>{activeCount}</SidebarMenuBadge>}</SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup></SidebarContent><SidebarSeparator /><SidebarFooter className="p-2"><SidebarMenu><SidebarMenuItem><SidebarMenuButton asChild tooltip={connected ? '本地运行' : '连接不可用'}><div role="status"><HardDrive /><span>{connected ? '本地运行' : '连接不可用'}</span></div></SidebarMenuButton></SidebarMenuItem></SidebarMenu></SidebarFooter></Sidebar>
     <SidebarInset className={cn("min-h-0 min-w-0 overflow-hidden bg-background", taskListPage && "task-workspace")}><header className={cn("app-page-header", taskListPage && "task-page-header")}>
@@ -1505,4 +1527,12 @@ function App() {
     <AlertDialog open={!!confirm} onOpenChange={open => { if (!open) setConfirm(null); }}><AlertDialogContent onCloseAutoFocus={event => { event.preventDefault(); requestAnimationFrame(() => { const trigger = cancelTrigger.current; (trigger?.isConnected && !trigger.matches(':disabled') ? trigger : currentTaskList() ?? inputRef.current)?.focus({preventScroll: true}); }); }}><AlertDialogHeader><AlertDialogTitle>取消当前任务？</AlertDialogTitle><AlertDialogDescription>将取消等待，或停止当前解析 / 下载并清理暂存文件。取消完成后从列表移除，其他任务不受影响。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel size="sm">返回</AlertDialogCancel><AlertDialogAction size="sm" onClick={() => { const pending = confirm; setConfirm(null); if (pending) void run(() => cancelTask(pending)); }}>确认取消</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </SidebarProvider></TooltipProvider>;
 }
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
+const root = createRoot(document.getElementById('root')!);
+void (async () => {
+  try {
+    const settings = await api.settings();
+    root.render(<React.StrictMode><App initialSettings={settings} /></React.StrictMode>);
+  } catch {
+    root.render(<StartupScreen failed />);
+  }
+})();

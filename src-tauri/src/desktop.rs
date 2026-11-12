@@ -6,11 +6,13 @@ use std::sync::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, State,
+    webview::PageLoadEvent,
+    Emitter, Manager, State, WebviewWindowBuilder,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
+use tokio::sync::watch;
 use yingqu_core::{
     desktop_core::{Core, Status, Task, TaskEvent},
     runtime_dependencies::RuntimeStatus,
@@ -21,6 +23,25 @@ use yingqu_core::{
 
 type AppCore = Arc<Core>;
 type TelegramStorageView = yingqu_core::backup::telegram_session::View;
+
+#[derive(Default)]
+struct DesktopLifecycle {
+    main_page_loaded: AtomicBool,
+    exiting: AtomicBool,
+    startup: watch::Sender<Option<Result<(), &'static str>>>,
+}
+
+impl DesktopLifecycle {
+    async fn wait_for_startup(&self) -> Result<(), &'static str> {
+        let mut startup = self.startup.subscribe();
+        let finished = startup
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| "STARTUP_FAILED")?;
+        (*finished).unwrap_or(Err("STARTUP_FAILED"))
+    }
+}
+
 #[tauri::command]
 fn telegram_storage_status(
     core: State<AppCore>,
@@ -477,8 +498,11 @@ fn cancel_backup_operation(core: State<AppCore>, operation_id: String) -> Result
     yingqu_core::backup::scheduler::cancel(&core, &operation_id).map_err(error)
 }
 #[tauri::command]
-fn list_tasks(core: State<AppCore>) -> Vec<Task> {
-    core.list()
+async fn list_tasks(core: State<'_, AppCore>) -> Result<Vec<Task>, &'static str> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.list())
+        .await
+        .map_err(|_| "DATABASE_ERROR")
 }
 #[tauri::command]
 fn list_video_transcripts(
@@ -563,8 +587,12 @@ async fn export_video_transcript(
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 #[tauri::command]
-fn get_settings(core: State<AppCore>) -> Settings {
-    core.settings()
+async fn get_settings(app: tauri::AppHandle) -> Result<Settings, &'static str> {
+    app.state::<DesktopLifecycle>().wait_for_startup().await?;
+    let core = app.state::<AppCore>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.settings())
+        .await
+        .map_err(|_| "DATABASE_ERROR")
 }
 #[tauri::command]
 fn read_clipboard_text(app: tauri::AppHandle) -> Result<String, String> {
@@ -945,7 +973,11 @@ async fn open_update_installer(
     let path = downloads.installer_path(&download_id).await?;
     #[cfg(windows)]
     {
-        if app.state::<AtomicBool>().load(Ordering::SeqCst) {
+        if app
+            .state::<DesktopLifecycle>()
+            .exiting
+            .load(Ordering::SeqCst)
+        {
             return Err("UPDATE_DOWNLOAD_SHUTTING_DOWN".into());
         }
         launch_windows_installer(&path).map_err(|_| "UPDATE_INSTALLER_OPEN_FAILED")?;
@@ -996,12 +1028,124 @@ async fn install_runtime_dependency(
 fn cancel_runtime_dependency(core: State<AppCore>) -> Result<(), String> {
     core.cancel_dependency().map_err(error)
 }
+fn initialize_desktop(app: &tauri::AppHandle) -> anyhow::Result<(AppCore, Arc<UpdateDownloads>)> {
+    let data = app.path().app_data_dir()?;
+    // Preserve the existing database when adopting the new bundle identifier.
+    let legacy = data.with_file_name("com.yingqu.desktop");
+    if !data.exists() && legacy.join("yingqu.sqlite").is_file() {
+        std::fs::rename(&legacy, &data)?;
+    }
+    std::fs::create_dir_all(&data)?;
+    let update_handle = app.clone();
+    let updates = UpdateDownloads::new(
+        data.join("updates"),
+        app.package_info().version.to_string(),
+        move |status| {
+            let _ = update_handle.emit("update_download", status);
+        },
+    );
+    let downloads = app.path().download_dir()?.join("Yingqu");
+    #[cfg(debug_assertions)]
+    let engine_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("python-engine/dist/video-engine");
+    #[cfg(not(debug_assertions))]
+    let engine_dir = app.path().resource_dir()?.join("video-engine");
+    let engine = engine_dir.join(if cfg!(windows) {
+        "video-engine.exe"
+    } else {
+        "video-engine"
+    });
+    let handle = app.clone();
+    let core = Core::open(
+        &data.join("yingqu.sqlite"),
+        downloads,
+        engine.to_string_lossy().into_owned(),
+        vec![],
+        move |event| match event {
+            TaskEvent::DeleteActivity(activity) => {
+                let _ = handle.emit("backup_delete_activity", activity);
+            }
+            TaskEvent::BackupAssetDeleted(operation) => {
+                let _ = handle.emit("backup_asset_deleted", operation);
+            }
+            TaskEvent::Updated(task) => {
+                let _ = handle.emit("task_updated", task);
+            }
+            TaskEvent::Removed(id) => {
+                let _ = handle.emit("task_removed", id);
+            }
+            TaskEvent::RemovedFromSpace { id, space_id } => {
+                let _ = handle.emit(
+                    "task_removed",
+                    serde_json::json!({ "id": id, "space_id": space_id }),
+                );
+            }
+            TaskEvent::Transcription(snapshot) => {
+                let _ = handle.emit("transcription_updated", snapshot);
+            }
+        },
+    )?;
+    Ok((core, updates))
+}
+
+fn start_desktop(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let worker = app.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || initialize_desktop(&worker))
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|opened| opened);
+        let handle = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            let lifecycle = handle.state::<DesktopLifecycle>();
+            let status = match result {
+                Ok((core, updates)) => {
+                    let focused = handle
+                        .get_webview_window("main")
+                        .is_some_and(|window| window.is_focused().unwrap_or(false));
+                    core.set_backup_foreground(focused);
+                    handle.manage(core.clone());
+                    handle.manage(updates);
+                    if !lifecycle.exiting.load(Ordering::SeqCst) {
+                        let backup_core = core.clone();
+                        tauri::async_runtime::spawn(async move {
+                            backup_core.start_backup_service();
+                        });
+                        tauri::async_runtime::spawn(async move {
+                            core.telegram_accounts.restore_saved().await;
+                        });
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    eprintln!("Unable to initialize desktop: {error}");
+                    Err("STARTUP_FAILED")
+                }
+            };
+            lifecycle.startup.send_replace(Some(status));
+        }) {
+            eprintln!("Unable to complete desktop startup: {error}");
+            app.state::<DesktopLifecycle>()
+                .startup
+                .send_replace(Some(Err("STARTUP_FAILED")));
+        }
+    });
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
-    app.state::<AppCore>().set_backup_foreground(true);
-    if app.state::<AtomicBool>().load(Ordering::SeqCst) {
+    let lifecycle = app.state::<DesktopLifecycle>();
+    if !lifecycle.main_page_loaded.load(Ordering::SeqCst)
+        || lifecycle.exiting.load(Ordering::SeqCst)
+    {
         return;
     }
     if let Some(window) = app.get_webview_window("main") {
+        if let Some(core) = app.try_state::<AppCore>() {
+            core.set_backup_foreground(true);
+        }
         if let Err(error) = window
             .show()
             .and_then(|_| window.unminimize())
@@ -1013,96 +1157,52 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 fn request_exit(app: &tauri::AppHandle) {
-    if app.state::<AtomicBool>().swap(true, Ordering::SeqCst) {
+    let lifecycle = app.state::<DesktopLifecycle>();
+    if lifecycle.exiting.swap(true, Ordering::SeqCst) {
         return;
     }
-    let core = app.state::<AppCore>().inner().clone();
-    let updates = app.state::<Arc<UpdateDownloads>>().inner().clone();
+    let startup_started = lifecycle.main_page_loaded.load(Ordering::SeqCst);
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        updates.shutdown().await;
-        core.shutdown().await;
+        if startup_started {
+            let _ = handle.state::<DesktopLifecycle>().wait_for_startup().await;
+        }
+        if let Some(updates) = handle.try_state::<Arc<UpdateDownloads>>() {
+            updates.shutdown().await;
+        }
+        if let Some(core) = handle.try_state::<AppCore>() {
+            core.shutdown().await;
+        }
         handle.exit(0);
     });
 }
 
 fn main() {
     tauri::Builder::default()
-        .manage(AtomicBool::new(false))
+        .manage(DesktopLifecycle::default())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            let data = app.path().app_data_dir()?;
-            // Preserve the existing database when adopting the new bundle identifier.
-            let legacy = data.with_file_name("com.yingqu.desktop");
-            if !data.exists() && legacy.join("yingqu.sqlite").is_file() {
-                std::fs::rename(&legacy, &data)?;
+        .on_page_load(|webview, page| {
+            if webview.label() != "main"
+                || page.event() != PageLoadEvent::Finished
+                || page.url().scheme() == "about"
+            {
+                return;
             }
-            std::fs::create_dir_all(&data)?;
-            let update_handle = app.handle().clone();
-            app.manage(UpdateDownloads::new(
-                data.join("updates"),
-                app.package_info().version.to_string(),
-                move |status| {
-                    let _ = update_handle.emit("update_download", status);
-                },
-            ));
-            let downloads = app.path().download_dir()?.join("Yingqu");
-            #[cfg(debug_assertions)]
-            let engine_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .join("python-engine/dist/video-engine");
-            #[cfg(not(debug_assertions))]
-            let engine_dir = app.path().resource_dir()?.join("video-engine");
-            let engine = engine_dir.join(if cfg!(windows) {
-                "video-engine.exe"
-            } else {
-                "video-engine"
-            });
-            let handle = app.handle().clone();
-            let core = Core::open(
-                &data.join("yingqu.sqlite"),
-                downloads,
-                engine.to_string_lossy().into_owned(),
-                vec![],
-                move |event| match event {
-                    TaskEvent::DeleteActivity(activity) => {
-                        let _ = handle.emit("backup_delete_activity", activity);
-                    }
-                    TaskEvent::BackupAssetDeleted(operation) => {
-                        let _ = handle.emit("backup_asset_deleted", operation);
-                    }
-                    TaskEvent::Updated(task) => {
-                        let _ = handle.emit("task_updated", task);
-                    }
-                    TaskEvent::Removed(id) => {
-                        let _ = handle.emit("task_removed", id);
-                    }
-                    TaskEvent::RemovedFromSpace { id, space_id } => {
-                        let _ = handle.emit(
-                            "task_removed",
-                            serde_json::json!({ "id": id, "space_id": space_id }),
-                        );
-                    }
-                    TaskEvent::Transcription(snapshot) => {
-                        let _ = handle.emit("transcription_updated", snapshot);
-                    }
-                },
-            )?;
-            let backup_core = core.clone();
-            tauri::async_runtime::spawn(async move {
-                backup_core.start_backup_service();
-            });
-            let account_core = core.clone();
-            tauri::async_runtime::spawn(async move {
-                account_core.telegram_accounts.restore_saved().await;
-            });
-            app.manage(core);
+            let app = webview.app_handle();
+            let lifecycle = app.state::<DesktopLifecycle>();
+            if !lifecycle.exiting.load(Ordering::SeqCst)
+                && !lifecycle.main_page_loaded.swap(true, Ordering::SeqCst)
+            {
+                show_main_window(app);
+                start_desktop(app);
+            }
+        })
+        .setup(|app| {
             let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出映取", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
@@ -1131,6 +1231,15 @@ fn main() {
                     }
                 })
                 .build(app)?;
+            // Keep the window hidden until the lightweight startup page has loaded.
+            let main = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == "main")
+                .ok_or_else(|| anyhow::anyhow!("Main window configuration missing"))?;
+            WebviewWindowBuilder::from_config(app.handle(), main)?.build()?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1233,7 +1342,9 @@ fn main() {
                 ..
             } if label == "main" => {
                 api.prevent_close();
-                app.state::<AppCore>().set_backup_foreground(false);
+                if let Some(core) = app.try_state::<AppCore>() {
+                    core.set_backup_foreground(false);
+                }
                 if let Some(window) = app.get_webview_window("main") {
                     if let Err(error) = window.hide() {
                         eprintln!("Unable to hide main window: {error}");
@@ -1245,7 +1356,9 @@ fn main() {
                 event: tauri::WindowEvent::Focused(focused),
                 ..
             } if label == "main" => {
-                app.state::<AppCore>().set_backup_foreground(focused);
+                if let Some(core) = app.try_state::<AppCore>() {
+                    core.set_backup_foreground(focused);
+                }
             }
             tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
                 api.prevent_exit();

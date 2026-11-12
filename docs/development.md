@@ -242,7 +242,9 @@ npm run build
 
 ## 启动首屏验证
 
-`index.html` 保留无需 JavaScript 的启动提示，React 接管后移除；更新说明通过动态导入按需加载。修改启动路径后，先执行 `npm run build`，再运行 `npm exec vite -- preview --host 127.0.0.1 --port 1421 --strictPort`，使用已安装的 Playwright CLI 执行 `tests/startup-paint-browser.mjs`。脚本使用独立页面与模拟 IPC，不访问用户数据或远端服务；延迟首屏脚本验证启动内容，覆盖 1440×900、1280×800、1024×680，并验证更新说明延迟加载及 GFM 表格。
+`index.html` 提供启动提示，入口脚本在页面加载后动态导入主界面。原生窗口显示后，Rust 在后台初始化本地核心。设置和任务快照均就绪后展示首屏。修改启动路径后，先执行 `npm run build`，再运行 `npm exec vite -- preview --host 127.0.0.1 --port 1421 --strictPort`，使用已安装的 Playwright CLI 执行 `tests/startup-paint-browser.mjs`。脚本使用模拟 IPC，验证主脚本、设置、任务快照延迟及读取失败时的界面，覆盖 1440×900、1280×800、1024×680，并验证更新说明按需加载及 GFM 表格。
+
+原生桌面另验启动提示先于首屏出现，数据库较慢或初始化失败时仍能关闭和恢复窗口。启动期间的重复打开恢复原窗口，托盘退出等待已启动的数据库初始化结束后退出。
 
 2026-10-30 验证：类型检查、前端构建及上述浏览器回归通过。首屏 JS 从 778,688 bytes 降至 620,248 bytes，Markdown 独立块为 159,081 bytes；这是构建体积对比，不是启动耗时测量。Windows 原生冷启动耗时及 WebView 初始化阶段：`NOT_RUN`，浏览器模拟结果不能代替原生验收。
 

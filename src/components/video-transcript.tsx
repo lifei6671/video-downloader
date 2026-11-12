@@ -9,7 +9,7 @@ import { Progress } from '@/components/ui/progress';
 import { Textarea } from '@/components/ui/textarea';
 import { ModelVersionSelect, type useRuntimeDependencies } from '@/components/runtime-dependencies';
 
-export function useVideoTranscripts() {
+export function useVideoTranscripts(active: boolean) {
   const [values, setValues] = useState<Record<string, VideoTranscript>>({});
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -19,6 +19,7 @@ export function useVideoTranscripts() {
     setValues(old => removed.current.has(value.task_id) || (old[value.task_id]?.sequence ?? -1) > value.sequence ? old : {...old, [value.task_id]: value});
   }
   useEffect(() => {
+    if (!active) return;
     let disposed = false, unsubscribe: (() => void) | undefined;
     void (async () => {
       try {
@@ -29,7 +30,7 @@ export function useVideoTranscripts() {
       } catch (e) { if (!disposed) setError(String(e)); }
     })();
     return () => { disposed = true; unsubscribe?.(); };
-  }, []);
+  }, [active]);
   function open(id: string, returnFocus?: HTMLElement | null) { trigger.current = returnFocus ?? document.activeElement as HTMLElement; setError(''); setSelected(id); }
   function remove(ids: string[]) {
     ids.forEach(id => removed.current.add(id));

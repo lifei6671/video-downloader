@@ -49,7 +49,7 @@ export function indexBackup(assets: BackupAsset[], operations: BackupOperation[]
   return {assetsById, operationsByAsset};
 }
 
-export function useBackupTasks() {
+export function useBackupTasks(active: boolean) {
   const [settings, setSettings] = useState<BackupSettings | null>(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [syncPreference, setSyncPreference] = useState<{settings: typeof settings; enabled: boolean} | null>(null);
@@ -71,7 +71,12 @@ export function useBackupTasks() {
   const currentSpace = useRef(settings?.space_id); currentSpace.current = settings?.space_id;
   const deleteActivity = useDeleteActivity(operations.some(operation => operation.space_id === settings?.space_id && operation.kind === 'delete' && !['completed','canceled','blocked'].includes(operation.state) && operation.phase !== 'superseded' && !deletionFinished(operation)), settings?.space_id);
   useEffect(() => { setAssets([]); setOperations([]); setExitingAssets([]); setSubmittingDeletes(new Set()); setDeleteErrors({}); assetSnapshot.current = []; operationSnapshot.current = []; }, [settings?.space_id]);
-  useEffect(() => { live.current = true; void api.backupSettings().then(v => { if (live.current) { setSettings(v); setSettingsLoaded(true); } }).catch(e => { if (live.current) toast.error(errorText(e), { id: 'backup-error' }); }); return () => { live.current = false; }; }, []);
+  useEffect(() => {
+    if (!active) return;
+    live.current = true;
+    void api.backupSettings().then(v => { if (live.current) { setSettings(v); setSettingsLoaded(true); } }).catch(e => { if (live.current) toast.error(errorText(e), { id: 'backup-error' }); });
+    return () => { live.current = false; };
+  }, [active]);
   useEffect(() => {
     if (!settings) { setSyncPreference(null); return; }
     let disposed = false;

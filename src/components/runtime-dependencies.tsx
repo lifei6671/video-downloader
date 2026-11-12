@@ -17,7 +17,7 @@ const descriptions = {
 const phases = { downloading: '正在下载', verifying: '正在校验与解压', installing: '正在验证依赖可用性' };
 const megabytes = (value: number) => (value / 1024 / 1024).toFixed(1) + ' MiB';
 
-export function useRuntimeDependencies() {
+export function useRuntimeDependencies(active: boolean) {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState<RuntimeTool['id'] | null>(null);
@@ -35,8 +35,8 @@ export function useRuntimeDependencies() {
     finally { setChecking(false); }
   }
   useEffect(() => {
-    if (!initialized.current) { initialized.current = true; void check(); }
-  }, []);
+    if (active && !initialized.current) { initialized.current = true; void check(); }
+  }, [active]);
   async function install(tool: RuntimeTool['id']) {
     setInstalling(tool); setError(''); setNotice(''); setProgress(null);
     try {
