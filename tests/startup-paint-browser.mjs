@@ -12,7 +12,17 @@ async (page) => {
   const finishRead = (command, fail = false) => preview.evaluate(([name, rejected]) => window.startupTest.finish(name, rejected), [command, fail]);
   const splash = preview.getByText('正在启动…', { exact: true });
   const navigation = preview.getByRole('button', { name: '下载任务', exact: true });
+  const checkMotion = async expected => {
+    const motion = await preview.locator('.startup-mark').evaluate(mark => ({
+      clip: getComputedStyle(mark.querySelector('.startup-clip')).animationName,
+      icon: getComputedStyle(mark.querySelector('img')).animationName,
+      ripple: getComputedStyle(mark, '::before').animationName,
+    }));
+    const expectedNames = expected ? ['startup-clip', 'startup-catch', 'startup-ripple'] : ['none', 'none', 'none'];
+    if (Object.values(motion).join() !== expectedNames.join()) throw new Error('Unexpected startup animation: ' + JSON.stringify(motion));
+  };
   try {
+    await preview.emulateMedia({ reducedMotion: 'no-preference' });
     await preview.addInitScript(() => {
       const settings = { download_directory: 'C:/fixture', filename_template: '{title}', max_downloads: 2, profiles: [] };
       const video = { platform: 'douyin', video_id: '123', canonical_url: 'https://www.douyin.com/video/123', title: '已恢复的作品', resolver: 'yt-dlp', kind: 'video', selected_format_id: 'original', formats: [{ format_id: 'original', container: 'mp4' }] };
@@ -54,6 +64,10 @@ async (page) => {
       });
       if (!valid) throw new Error(`Invalid startup screen at ${width}x${height}`);
     }
+    await checkMotion(true);
+    await preview.emulateMedia({ reducedMotion: 'reduce' });
+    await checkMotion(false);
+    await preview.emulateMedia({ reducedMotion: 'no-preference' });
     if (await navigation.count()) throw new Error('Main UI was rendered before its bundle loaded');
     releaseEntry();
     await waitForRead('get_settings');
@@ -62,6 +76,7 @@ async (page) => {
     await finishRead('get_settings');
     await waitForRead('list_tasks');
     await splash.waitFor();
+    await checkMotion(true);
     if (await navigation.count()) throw new Error('Main UI appeared before tasks loaded');
     const blockedCalls = await preview.evaluate(() => {
       window.dispatchEvent(new Event('focus'));
@@ -91,10 +106,17 @@ async (page) => {
       }
       await finishRead(failedRead, true);
       await preview.getByRole('alert').getByText('无法启动映取，请从托盘退出后重试。').waitFor();
+      await checkMotion(false);
       if (await navigation.count()) throw new Error('Main UI appeared despite a failed startup read');
     }
+    await preview.route('**/assets/main-*.js', route => route.abort());
+    await preview.reload({ waitUntil: 'commit' });
+    const bundleError = preview.getByRole('alert');
+    await bundleError.getByText('无法加载映取界面，请从托盘退出后重试。').waitFor();
+    await bundleError.getByRole('img', { name: '映取' }).waitFor();
+    await checkMotion(false);
     if (errors.length) throw new Error(errors.join('\n'));
-    return { result: 'PASS', viewports: 3, startupBeforeMainBundle: true, waitsForSettingsAndTasks: true, restoresFirstPage: true, reportsReadFailures: true, lazyReleaseNotes: true, gfmTable: true, pageErrors: errors.length };
+    return { result: 'PASS', viewports: 3, startupBeforeMainBundle: true, startupMotion: true, reducedMotion: true, waitsForSettingsAndTasks: true, restoresFirstPage: true, staticFailureStates: true, lazyReleaseNotes: true, gfmTable: true, pageErrors: errors.length };
   } finally {
     releaseEntry();
     releaseNotes();

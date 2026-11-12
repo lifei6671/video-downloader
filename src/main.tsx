@@ -869,8 +869,11 @@ function ProfileForm({ profile, saved }: { profile: Profile; saved: (settings: S
 }
 function StartupScreen({ failed = false }: { failed?: boolean }) {
   return <div className="startup-screen" role={failed ? 'alert' : 'status'}>
-    <img src={brandIcon} alt="映取" />
-    <span>{failed ? '无法启动映取，请从托盘退出后重试。' : '正在启动…'}</span>
+    <span className="startup-mark">
+      <img src={brandIcon} alt="映取" />
+      <span className="startup-clip" aria-hidden="true" />
+    </span>
+    <span className="startup-message">{failed ? '无法启动映取，请从托盘退出后重试。' : '正在启动…'}</span>
   </div>;
 }
 

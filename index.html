@@ -6,14 +6,51 @@
     <meta name="color-scheme" content="light">
     <title>映取</title>
     <style>
-      /* Critical first-paint colors from DESIGN.md: slate-2 and slate-11. */
+      /* Critical first-paint colors from DESIGN.md. */
       html, body { margin: 0; background: #f9f9fb; }
-      .startup-screen { min-height: 100dvh; display: grid; place-content: center; justify-items: center; gap: 12px; color: #60646c; font: 14px/20px system-ui, sans-serif; }
-      .startup-screen img { width: 48px; height: 48px; }
+      .startup-screen { min-height: 100dvh; display: grid; place-content: center; justify-items: center; gap: 4px; color: #60646c; font: 14px/20px system-ui, sans-serif; }
+      .startup-mark { position: relative; isolation: isolate; display: grid; place-items: center; width: 92px; height: 76px; }
+      .startup-mark img { display: block; width: 48px; height: 48px; }
+      .startup-clip { display: none; }
+      @media (prefers-reduced-motion: no-preference) {
+        .startup-screen[role="status"] .startup-mark::before {
+          content: ""; position: absolute; z-index: -1; inset: 14px 22px; border: .5px solid #8da4ef; border-radius: 13px;
+          animation: startup-ripple 1.5s ease-out infinite;
+        }
+        .startup-screen[role="status"] .startup-mark img { animation: startup-catch 1.5s ease-in-out infinite; }
+        .startup-screen[role="status"] .startup-clip {
+          position: absolute; top: 7px; right: 10px; display: grid; place-items: center; width: 23px; height: 16px; border-radius: 4px; background: #3e63dd;
+          animation: startup-clip 1.5s ease-in-out infinite;
+        }
+        .startup-clip::after {
+          content: ""; width: 0; height: 0; margin-left: 1px; border-block: 3px solid transparent; border-left: 5px solid #fcfcfd;
+        }
+      }
+      @keyframes startup-clip {
+        0% { opacity: .8; transform: translate(4px, -2px) rotate(13deg) scale(.85); }
+        17% { opacity: 1; transform: translate(-4px, 1px) rotate(8deg) scale(1); }
+        36% { opacity: 1; transform: translate(-15px, 14px) rotate(-7deg) scale(.9); }
+        48%, 100% { opacity: 0; transform: translate(-25px, 24px) scale(.45); }
+      }
+      @keyframes startup-catch {
+        0%, 36%, 69%, 100% { transform: translateY(0) scale(1); }
+        48% { transform: translateY(2px) scale(1.07, .95); }
+        57% { transform: translateY(-3px) scale(.98, 1.04); }
+      }
+      @keyframes startup-ripple {
+        0%, 41% { opacity: 0; transform: scale(.85); }
+        47% { opacity: 1; transform: scale(1); }
+        72%, 100% { opacity: 0; transform: scale(1.38); }
+      }
     </style>
   </head>
   <body>
-    <div id="root"><div class="startup-screen" role="status" aria-live="polite"><img src="/src-tauri/icons/64x64.png" alt="映取"><span>正在启动…</span></div></div>
+    <div id="root">
+      <div class="startup-screen" role="status" aria-live="polite">
+        <span class="startup-mark"><img src="/src-tauri/icons/64x64.png" alt="映取"><span class="startup-clip" aria-hidden="true"></span></span>
+        <span class="startup-message">正在启动…</span>
+      </div>
+    </div>
     <script type="module" src="/src/startup.ts"></script>
   </body>
 </html>
