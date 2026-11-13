@@ -180,6 +180,8 @@ git push --atomic origin master v1.3.0
 
 三个构建全部成功后，使用仓库自带 `GITHUB_TOKEN` 创建草稿、上传 Windows NSIS `.exe` 和两种 macOS `.dmg`，随后公开 Release。创建时通过 `--notes-from-tag` 将附注标签中的 Markdown 原样作为 Release 正文，软件“检查更新”也会读取这份正文；不再自动生成仅含提交记录的说明。务必使用附注标签，轻量标签会退回到提交信息。构建失败不发布；已有同名 Release 不覆盖。若上传中断留下草稿，先检查并删除该草稿，再重跑失败的发布 job。Actions artifacts 保留 14 天。仓库/组织策略须允许该 workflow 的 `contents: write`，无需新增发布 Token。
 
+三个构建 job 在打包后、上传前分别为 Windows `.exe`、macOS Intel `.dmg` 和 macOS Apple Silicon `.dmg` 生成 SLSA 构建证明。证明由 GitHub 保存，任一平台签发失败都会阻止发布。发布时重命名不改变文件摘要。下载后可用 `gh attestation verify <安装包路径> --repo lifei6671/video-downloader --signer-workflow lifei6671/video-downloader/.github/workflows/release.yml --source-ref refs/tags/<发布标签>` 验证文件与发布工作流和标签的关联。
+
 发布 job 必须先通过 `actions/checkout` 检出代码和标签（`fetch-depth: 0`），`--notes-from-tag` 需要本地附注标签，只有远端标签会报错。修改工作流不会改变已触发运行所使用的定义；若三个构建均成功、仅发布步骤失败，可核对原运行的 commit/tag 后，使用该运行的三份安装包和原标签说明恢复发布，不移动已有标签或替换构建来源。
 
 上传 Release 前按构建平台重命名安装包，版本号取自标签。例如 Windows x64 为 `Yingqu-windows-x64-setup-1.10.1.exe`，macOS Intel 为 `Yingqu-darwin-x64-1.10.1.dmg`，macOS Apple Silicon 为 `Yingqu-darwin-aarch64-1.10.1.dmg`。每个平台须提供一个安装包。应用内更新优先匹配新格式，也能识别历史 Release 的下划线格式。只识别旧格式的已安装版本可以通过「前往发行页面」下载新版。
