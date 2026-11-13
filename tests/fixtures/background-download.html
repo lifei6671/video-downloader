@@ -4,7 +4,7 @@
 // Explicit browser-only mock of IPC. No download, login or platform request occurs.
 import {api} from '/src/api';
 const scenario = new URLSearchParams(location.search).get('scenario') || 'telegram';
-const sourcePlatform = ['author-missing','author-broken','author-results'].includes(scenario) ? 'douyin' : scenario.replace('cached-cover-', '').replace('author-', '');
+const sourcePlatform = ['author-missing','author-broken','author-results','author-preview-only'].includes(scenario) ? 'douyin' : scenario.replace('cached-cover-', '').replace('author-', '');
 const platform = ['douyin','tiktok','youtube'].includes(sourcePlatform) ? sourcePlatform : scenario === 'album' ? 'douyin' : 'telegram';
 const video = {platform, video_id:'100_9', canonical_url:platform === 'telegram' ? 'https://t.me/c/100/9' : platform === 'youtube' ? 'https://www.youtube.com/watch?v=test1234567' : platform === 'tiktok' ? 'https://www.tiktok.com/@test/video/123' : 'https://www.douyin.com/video/123', title:'原作品', resolver:scenario === 'album' ? 'dtk' : platform === 'telegram' ? 'grammers' : 'yt-dlp', kind:scenario === 'album' ? 'image_album' : 'video', filesize:65536, selected_format_id:scenario === 'album' ? null : 'original', formats:scenario === 'album' ? [] : [{format_id:'original',container:'mp4',filesize:65536}], images:scenario === 'album' ? [{quality_source:'original',width:1,height:1}] : undefined};
 if (scenario.startsWith('variant')) Object.assign(video, {platform:'youtube',resolver:'yt-dlp',
@@ -31,7 +31,7 @@ if (scenario === 'parse-controls') {
 }
 if (scenario.startsWith('author-')) {
   tasks[0].video.author_profile = {id:platform === 'telegram' ? '100' : 'MS4w.'+'author-id-'.repeat(6),nickname:platform === 'telegram' ? null : '作者昵称',handle:platform === 'telegram' ? 'channel_name' : 'account_handle',kind:platform === 'telegram' ? 'channel' : 'user',avatar_cached:scenario !== 'author-missing'};
-  tasks.push({...structuredClone(tasks[0]),id:'author-list',created_at:9,status:'completed',download_requested:true,
+  if (scenario !== 'author-preview-only') tasks.push({...structuredClone(tasks[0]),id:'author-list',created_at:9,status:'completed',download_requested:true,
     video:{...structuredClone(tasks[0].video),video_id:'100_8'}});
   api.authorAvatar = async id => {control.calls.push({type:'avatar',id}); if(scenario === 'author-broken') throw 'FILE_MISSING'; return api.cover(id)};
 }
@@ -50,9 +50,13 @@ if (scenario === 'author-results') {
   tasks[4].insertion_id=100;
   for (const task of tasks.slice(0,2)) Object.assign(task.video.author_profile, {
     profile_updated_at:10,follower_count:12345,following_count:0,likes_count:null,age:28,region:'中国 上海',ip_location:'浙江'});
-  Object.assign(tasks[1],{status:'ready',download_requested:false,completed_at:null,path:null});
+  Object.assign(tasks[1],{status:'ready',completed_at:null,path:null,bytes:0});
   Object.assign(tasks[1].video.formats[0],{width:720,height:1280});
   delete tasks[4].video.author_profile;
+  tasks.push(
+    {...structuredClone(tasks[1]),id:'preview-only',insertion_id:101,created_at:11,download_requested:false},
+    {...structuredClone(tasks[1]),id:'interrupted-preview',status:'failed',error:'INTERRUPTED',download_requested:false},
+  );
 }
 if(scenario.startsWith('variant') && scenario!=='variant-race')tasks.push(completed);
 if(scenario==='variant-race')control.race=true;

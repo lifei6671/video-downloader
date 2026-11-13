@@ -1271,15 +1271,18 @@ function App({ initialSettings }: { initialSettings: Settings }) {
   const allTaskRows = [...tasks, ...exitingTasks];
   for (const task of allTaskRows) if (!taskOrder.current.has(task.id)) taskOrder.current.set(task.id, taskOrder.current.size);
   const orderedTasks = (a: Task, b: Task) => compareTaskInsertion(a, b) || taskOrder.current.get(a.id)! - taskOrder.current.get(b.id)!;
-  const authorRows = activeAuthor ? matchingAuthorRecords(allTaskRows.filter(task => task.status !== 'canceled'), activeAuthor.identity).sort(orderedTasks) : [];
-  const authorRecords = authorRows.filter(task => !removedIds.current.has(task.id));
-  const authorWorks = authorRows
+  const nonCanceledTaskRows = allTaskRows.filter(task => task.status !== 'canceled');
+  const submittedTaskRows = nonCanceledTaskRows.filter(task => task.download_requested);
+  const authorMatches = activeAuthor ? matchingAuthorRecords(nonCanceledTaskRows, activeAuthor.identity).sort(orderedTasks) : [];
+  const authorProfileTasks = authorMatches.filter(task => !removedIds.current.has(task.id));
+  const authorRecords = authorMatches.filter(task => task.download_requested);
+  const authorWorks = authorRecords
     .map(task => ({ task, published: publicationOrder(task.video) }))
     .sort((a, b) => a.published === b.published ? 0 : b.published - a.published)
     .map(({ task }) => task);
   const syncing = taskStatus === 'syncing';
   const isSyncingTask = (task: Task) => task.status === 'completed' && !!task.asset_id && backup.syncStatuses.has(task.asset_id);
-  const filteredTasks = allTaskRows.filter(t => t.status !== 'canceled' && t.download_requested)
+  const filteredTasks = submittedTaskRows
     .filter(t => taskPlatform === 'all' || (t.video?.platform ?? (t.telegram_link ? 'telegram' : undefined)) === taskPlatform)
     .filter(t => !search || ((t.video?.title ?? '') + (t.video?.author ?? '') + (t.video?.author_profile?.nickname ?? '') + (t.video?.author_profile?.id ?? '') + (t.telegram_link ?? '')).includes(search));
   const statusCounts: Record<TaskStatusFilter, number> = {all: 0, downloading: 0, queued: 0, completed: 0, failed: 0, syncing: 0};
@@ -1515,8 +1518,8 @@ function App({ initialSettings }: { initialSettings: Settings }) {
     <TaskList tasks={visible} assets={visibleAssets} removingAssetIds={new Set(backup.exitingAssets.map(asset => asset.asset_id))} onAssetExited={backup.finishAssetRemoval} renderAsset={asset => <BackupAssetRow asset={asset} backup={backup} syncStatus={syncing ? backup.syncStatuses.get(asset.asset_id) : undefined} play={(returnFocus, streaming) => setMediaEntry({ kind: 'asset', id: asset.asset_id, returnFocus, streamStep: streaming ? 0 : undefined, asset: assetPlayback(asset) })} openTranscript={returnFocus => videoTranscripts.open(asset.asset_id, returnFocus)} feed={taskView === 'feed'} />} toolbar={backupSettings?.enabled && <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" aria-label="刷新备份" disabled={backup.refreshing} onClick={() => void backup.refresh()}><RefreshCw aria-hidden="true" /></Button></TooltipTrigger><TooltipContent>刷新备份</TooltipContent></Tooltip>} paginationKey={JSON.stringify([taskPlatform, taskStatus, search])} platform={taskPlatform} onPlatformChange={setTaskPlatform} view={taskView} onViewChange={changeTaskView} listRef={taskListRef} removingIds={removedIds.current} onExited={finishRemoval} empty={emptyState(true)} renderRow={renderTaskRow} />
     </RetainedTaskPage>
     {activeAuthor && <TaskList tasks={authorWorks} paginationKey={activeAuthor.source.id} view={taskView} onViewChange={changeTaskView} listRef={authorListRef} removingIds={removedIds.current} onExited={finishRemoval} renderRow={task => renderTaskRow(task, true)}
-      intro={<AuthorProfileHeader identity={activeAuthor.identity} source={activeAuthor.source} tasks={authorRecords} platformName={platformName(activeAuthor.identity.platform)} />}
-      toolbar={<div className="flex min-w-0 flex-1 items-baseline gap-2"><h2 className="text-sm font-semibold">作品记录</h2><span className="text-xs text-muted-foreground tabular-nums">{authorRecords.length} 条</span></div>}
+      intro={<AuthorProfileHeader identity={activeAuthor.identity} source={activeAuthor.source} tasks={authorProfileTasks} platformName={platformName(activeAuthor.identity.platform)} />}
+      toolbar={<div className="flex min-w-0 flex-1 items-baseline gap-2"><h2 className="text-sm font-semibold">作品记录</h2><span className="text-xs text-muted-foreground tabular-nums">{authorRecords.filter(task => !removedIds.current.has(task.id)).length} 条</span></div>}
       empty={<Empty className="min-h-[160px] gap-2 p-4"><EmptyHeader><EmptyMedia variant="icon"><ListVideo /></EmptyMedia><EmptyTitle>暂无作品记录</EmptyTitle></EmptyHeader></Empty>} />}
     {(settingsActive || settingsVisited) && settings && <div hidden={!settingsActive} className={`${settingsActive ? 'grid' : 'hidden'} min-h-0 min-w-0 flex-1 grid-cols-[184px_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] gap-6 max-[1100px]:grid-cols-[160px_minmax(0,1fr)]`}>
       <nav aria-label="设置分类" className="settings-navigation self-stretch border-r pr-4"><SidebarMenu className="gap-2">{settingsSections.map(({ id, label, Icon }) => <SidebarMenuItem key={id}><SidebarMenuButton type="button" className="h-10 gap-3 px-3" isActive={settingsSection === id} aria-label={label} aria-current={settingsSection === id ? 'true' : undefined} aria-controls="settings-operation-area" onClick={() => setSettingsSection(id)}><Icon aria-hidden="true" /><span className="text-sm font-medium">{label}</span></SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></nav>

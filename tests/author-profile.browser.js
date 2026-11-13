@@ -126,7 +126,8 @@ async page => {
   check(await search.count() === 0 && await page.getByRole('button', {name: '清理历史', exact: true}).count() === 0, 'profile exposed download-task search or bulk actions');
   const works = page.getByRole('list', {name: '媒体任务列表', exact: true});
   const workIds = () => works.locator('[data-task-id]').evaluateAll(rows => rows.map(row => row.dataset.taskId));
-  check(JSON.stringify(await workIds()) === JSON.stringify(['second', 'first', 'legacy']), 'profile did not sort by publication or mixed identities');
+  check(JSON.stringify(await workIds()) === JSON.stringify(['second', 'first', 'legacy']), 'profile included an unsubmitted preview, mixed identities, or lost publication order');
+  check(await page.getByText('3 条', {exact: true}).isVisible(), 'profile counted an unsubmitted preview');
   for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
     await page.setViewportSize({width, height});
     const toCards = page.getByRole('button', {name: '切换为卡片', exact: true});
@@ -181,19 +182,41 @@ async page => {
   await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '查看作者昵称的作品');
   results.push('profile-preview-return');
 
+  await page.goto(`${base}/tests/fixtures/background-download.html?scenario=author-results`);
+  await previewAuthor.click();
+  await profile.waitFor();
+  check(JSON.stringify(await workIds()) === JSON.stringify(['second', 'first', 'legacy']), 'opening from an unsubmitted preview included that preview');
+  await page.getByRole('button', {name: '返回下载作品', exact: true}).click();
+  await previewAuthor.waitFor();
+  results.push('unsubmitted-preview-is-not-an-author-record');
+
+  await page.goto(`${base}/tests/fixtures/background-download.html?scenario=author-preview-only`);
+  await previewAuthor.click();
+  await profile.getByRole('img', {name: '作者昵称的头像', exact: true}).waitFor();
+  await page.getByText('暂无作品记录', {exact: true}).waitFor();
+  check(await page.getByText('0 条', {exact: true}).isVisible(), 'an author with only a preview has a nonzero record count');
+  results.push('preview-only-author-keeps-profile-with-empty-records');
+
   await page.goto(`${base}/tests/fixtures/background-download.html?scenario=author-telegram`);
   await page.getByRole('button', {name: '下载任务', exact: true}).click();
   await page.getByRole('button', {name: '查看channel_name的作品', exact: true}).click();
   const channel = page.getByRole('region', {name: 'channel_name', exact: true});
   await channel.waitFor();
   check(await channel.getByText('频道 ID', {exact: true}).isVisible() && await channel.getByText('100', {exact: true}).isVisible(), 'channel profile lost its stable identity');
-  check((await workIds()).length === 2, 'channel profile did not group messages');
+  check(JSON.stringify(await workIds()) === JSON.stringify(['author-list']), 'channel profile included a message that was only previewed');
   results.push('channel-home');
 
   await page.goto(`${base}/tests/fixtures/background-download.html?scenario=author-results`);
   await page.getByRole('button', {name: '下载任务', exact: true}).click();
+  await page.locator('[data-task-id="different"]').waitFor();
+  await page.evaluate(() => {
+    const task = window.backgroundTest.snapshot().find(task => task.id === 'different');
+    window.backgroundTest.emit({...task, revision: task.revision + 1, status: 'ready', download_requested: false,
+      completed_at: null, path: null, bytes: 0});
+  });
+  await page.locator('[data-task-id="different"]').waitFor({state: 'hidden'});
   await page.getByRole('button', {name: '查看account_handle的作品', exact: true}).click();
-  check(JSON.stringify(await workIds()) === JSON.stringify(['legacy']), 'legacy profile combined different confirmed authors');
+  check(JSON.stringify(await workIds()) === JSON.stringify(['legacy']), 'legacy profile ignored a conflicting author identity from an unsubmitted preview');
   await works.getByLabel('任务操作', {exact: true}).focus();
   await page.keyboard.press('Shift+F10');
   await page.getByRole('menuitem', {name: '从列表移除', exact: true}).focus();
