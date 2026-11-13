@@ -649,6 +649,9 @@ impl Core {
                                 continue;
                             }
                         }
+                        if identity.platform == "weixin" {
+                            cached.video["canonical_url"] = identity.canonical_url.into();
+                        }
                         task.video = Some(cached.video);
                         task.cache_hit = true;
                         task.cached_at = Some(cached.saved_at);
@@ -1740,7 +1743,10 @@ impl Core {
     }
 
     fn resolve_work(self: &Arc<Self>, input: ResolveInput, resolver: String) -> Result<Task> {
-        if !matches!(resolver.as_str(), "auto" | "yt-dlp" | "dtk" | "grammers") {
+        if !matches!(
+            resolver.as_str(),
+            "auto" | "yt-dlp" | "dtk" | "grammers" | "weixin"
+        ) {
             bail!("CONFIG_INVALID");
         }
         self.resolve_task(input, None, resolver, None, false, None)
@@ -1863,7 +1869,7 @@ impl Core {
         if platform.is_some_and(|p| {
             !matches!(
                 p,
-                "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram"
+                "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram" | "weixin"
             )
         }) {
             bail!("CONFIG_INVALID");
@@ -2230,6 +2236,17 @@ impl Core {
                 &resolver,
             )?
         };
+        let expected_weixin_id = previous
+            .as_ref()
+            .and_then(|task| task.video.as_ref())
+            .filter(|video| video["platform"] == "weixin")
+            .and_then(|video| video["video_id"].as_str())
+            .map(str::to_owned);
+        if let (Some(cached), Some(expected)) = (&cached, &expected_weixin_id) {
+            if cached.video["video_id"] != expected.as_str() {
+                bail!("UPSTREAM_CHANGED");
+            }
+        }
         if let (Some(cached), Some(format_id)) = (&mut cached, &requested_format) {
             apply_video_format(&mut cached.video, format_id)?;
         }
@@ -2365,17 +2382,23 @@ impl Core {
                         let identity: Video = serde_json::from_value(identified["result"].clone())
                             .context("INVALID_ENGINE_RESULT")?;
                         identity.validate()?;
+                        if expected_weixin_id.as_ref().is_some_and(|expected| &identity.video_id != expected) {
+                            bail!("UPSTREAM_CHANGED");
+                        }
                         if verified_identity.is_some_and(|url| identity.canonical_url.trim_end_matches('/') != url) {
                             bail!("INVALID_ENGINE_RESULT");
                         }
                         core.resolve_progress(&id, ResolvePhase::CheckingCache);
                         let mut inner = core.inner.lock().unwrap();
                         if inner.closing || *cancellation.borrow() { bail!("CANCELED"); }
-                        if let Some(cached) = parse_cache::get(
+                        if let Some(mut cached) = parse_cache::get(
                             &inner.db, &identity.platform, &identity.video_id, &identity.resolver,
                         )? {
                             parse_cache::remember(&inner.db, &input, &cached.video)?;
                             parse_cache::remember(&inner.db, &identity.canonical_url, &cached.video)?;
+                            if identity.platform == "weixin" {
+                                cached.video["canonical_url"] = identity.canonical_url.into();
+                            }
                             let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
                             task.cache_hit = true;
                             task.cached_at = Some(cached.saved_at);
@@ -2402,6 +2425,9 @@ impl Core {
                     let video: Video = serde_json::from_value(result["result"].clone())
                         .context("INVALID_ENGINE_RESULT")?;
                     video.validate()?;
+                    if expected_weixin_id.as_ref().is_some_and(|expected| &video.video_id != expected) {
+                        bail!("UPSTREAM_CHANGED");
+                    }
                     if verified_identity.is_some_and(|url| video.canonical_url.trim_end_matches('/') != url) {
                         bail!("INVALID_ENGINE_RESULT");
                     }
@@ -5276,6 +5302,33 @@ mod tests {
         assert_eq!(video["width"], 720);
         assert_eq!(video["height"], 1280);
         assert_eq!(video["filesize"], completed.bytes);
+    }
+
+    #[tokio::test]
+    async fn weixin_ready_alias_and_selected_format_survive_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        let first = app.resolve("https://weixin.qq.com/sph/First".into()).unwrap();
+        wait(&app, &first.id, Status::Ready).await;
+        let second_url = "https://weixin.qq.com/sph/Second";
+        let second = app.resolve(second_url.into()).unwrap();
+        let ready = wait(&app, &second.id, Status::Ready).await;
+        assert!(ready.cache_hit);
+        assert_eq!(ready.video.unwrap()["canonical_url"], second_url);
+        assert_eq!(app.author_avatar(&second.id).unwrap(), b"\xff\xd8\xfffixture-avatar");
+        let selected = "2".repeat(24);
+        app.choose_format(&second.id, &selected).unwrap();
+        app.shutdown().await;
+        drop(app);
+        let restarted = core(root.path());
+        let ready = wait(&restarted, &second.id, Status::Ready).await;
+        let video = ready.video.unwrap();
+        assert_eq!(video["canonical_url"], second_url);
+        assert_eq!(video["selected_format_id"], selected);
+        assert_eq!(video["width"], 720);
+        assert_eq!(video["height"], 1280);
+        assert_eq!(video["author_profile"]["avatar_cached"], true);
+        assert_eq!(restarted.author_avatar(&second.id).unwrap(), b"\xff\xd8\xfffixture-avatar");
     }
 
     #[tokio::test]

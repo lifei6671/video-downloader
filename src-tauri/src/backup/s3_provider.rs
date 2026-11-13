@@ -132,7 +132,7 @@ fn validate_source(value: &serde_json::Value) -> Result<()> {
         serde_json::from_value(value.clone()).context("BACKUP_INVALID_SOURCE")?;
     if !matches!(
         source.platform.as_str(),
-        "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram"
+        "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram" | "weixin"
     ) || source.video_id.is_empty()
         || source.video_id.len() > 128
     {
@@ -147,6 +147,7 @@ fn validate_source(value: &serde_json::Value) -> Result<()> {
             ),
             "douyin" => matches!(url.host_str(), Some("www.douyin.com" | "douyin.com")),
             "xiaohongshu" => url.host_str() == Some("www.xiaohongshu.com"),
+            "weixin" => crate::files::valid_weixin_share(&raw),
             "tiktok" => matches!(url.host_str(), Some("www.tiktok.com" | "tiktok.com")),
             "telegram" => url.host_str() == Some("t.me"),
             _ => false,

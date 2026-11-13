@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<div id="root"></div>
+<script type="module">
+import { api } from '/src/api';
+const profile = {platform:'weixin', user_agent:'fixture', cookie_configured:false};
+const settings = {download_directory:'C:\\TestVideos', max_downloads:5,
+  profiles:['douyin','xiaohongshu','tiktok','youtube','telegram','weixin'].map(platform => ({...profile, platform}))};
+let task, listener, cookie = '', opened = 0, submitted;
+const video = {
+  platform:'weixin', video_id:'a'.repeat(64), canonical_url:'https://weixin.qq.com/sph/Fixture',
+  title:'视频号测试作品', resolver:'weixin', kind:'video', selected_format_id:'h264',
+  formats:[{format_id:'h264',container:'mp4',codec:'h264'}, {format_id:'h265',container:'mp4',codec:'h265'}],
+};
+api.backupSettings = async () => null;
+api.settings = async () => settings;
+api.tasks = async () => task ? [structuredClone(task)] : [];
+api.subscribe = async callback => { listener = callback; return () => {}; };
+api.openYuanbao = async () => { opened++; };
+api.cookie = async platform => platform === 'weixin' ? cookie : '';
+api.proxy = async () => null;
+api.save = async update => {
+  if (update.platform !== 'weixin') throw Error('Wrong profile');
+  cookie = update.cookie;
+  settings.profiles.find(p => p.platform === 'weixin').cookie_configured = !!cookie;
+  return structuredClone(settings);
+};
+api.resolve = async (input, resolver) => {
+  submitted = {input,resolver};
+  const status = cookie ? 'ready' : 'failed';
+  const phase = cookie ? 'completed' : 'fetching_metadata';
+  task = {id:'weixin-test', revision:(task?.revision ?? 0)+1, status, error:cookie ? null : 'WEIXIN_LOGIN_REQUIRED',
+    video:cookie ? {...video} : null, resolve_progress:{phase,steps:[phase]}, created_at:10,
+    bytes:0, canceling:false, download_requested:false, cover_cached:false, files:[]};
+  return structuredClone(task);
+};
+api.chooseFormat = async (id, format) => {
+  task.video.selected_format_id = format;
+  task.revision++;
+  return structuredClone(task);
+};
+window.weixinTest = {
+  state: () => ({opened,submitted,selected:task?.video?.selected_format_id,cookieSaved:!!cookie}),
+  queue: () => { task = {...task, revision:task.revision+1, status:'queued', download_requested:true}; listener(task); },
+};
+await import('/src/main');
+</script>
+</html>

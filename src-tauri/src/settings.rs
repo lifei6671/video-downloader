@@ -182,10 +182,17 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         Err(rusqlite::Error::QueryReturnedNoRows) => default_directory,
         Err(_) => bail!("DATABASE_ERROR"),
     };
-    let profiles = ["douyin", "xiaohongshu", "tiktok", "youtube", "telegram"]
-        .into_iter()
-        .map(|platform| read_profile(db, platform))
-        .collect::<Result<Vec<_>>>()?;
+    let profiles = [
+        "douyin",
+        "xiaohongshu",
+        "tiktok",
+        "youtube",
+        "telegram",
+        "weixin",
+    ]
+    .into_iter()
+    .map(|platform| read_profile(db, platform))
+    .collect::<Result<Vec<_>>>()?;
     if profiles.iter().any(|p| {
         p.http_chunk_size
             .is_some_and(|n| p.platform != "youtube" || !valid_chunk_size(n))
@@ -723,7 +730,7 @@ mod tests {
     fn cookie_boundary_whitespace_is_trimmed_for_all_platforms() {
         let db = Connection::open_in_memory().unwrap();
         let mut settings = load(&db, PathBuf::new()).unwrap();
-        for platform in ["douyin", "xiaohongshu", "tiktok", "youtube"] {
+        for platform in ["douyin", "xiaohongshu", "tiktok", "youtube", "weixin"] {
             for (input, expected) in [
                 (
                     "\r\n \t session=fixture; preference=a b \r\n\t",
@@ -763,7 +770,7 @@ mod tests {
     fn cookie_internal_newlines_are_rejected_without_changing_saved_values() {
         let db = Connection::open_in_memory().unwrap();
         let mut settings = load(&db, PathBuf::new()).unwrap();
-        for platform in ["douyin", "xiaohongshu", "tiktok", "youtube"] {
+        for platform in ["douyin", "xiaohongshu", "tiktok", "youtube", "weixin"] {
             save_profile(
                 &db,
                 &mut settings,
@@ -941,7 +948,14 @@ mod tests {
                 .iter()
                 .map(|profile| profile.platform.as_str())
                 .collect::<Vec<_>>(),
-            ["douyin", "xiaohongshu", "tiktok", "youtube", "telegram"]
+            [
+                "douyin",
+                "xiaohongshu",
+                "tiktok",
+                "youtube",
+                "telegram",
+                "weixin"
+            ]
         );
         assert_eq!(
             super::cookie(&restored, "youtube").unwrap(),

@@ -133,3 +133,16 @@ def test_explicit_https_tunnel_ignores_bypass(monkeypatch):
         with pytest.raises(RequestError):
             ydl.urlopen('https://v.tiktokcdn.com/video')
     assert connected == [('127.0.0.1', 3067)]
+@pytest.mark.parametrize('url, scope', [
+    ('http://finder.video.qq.com/file', 'weixin-media'),
+    ('https://finder.video.qq.com.evil.test/file', 'weixin-media'),
+    ('https://@finder.video.qq.com/file', 'weixin-media'),
+    ('https://finder.video.qq.com:8443/file', 'weixin-media'),
+    ('https://127.0.0.1/file', 'weixin-media'),
+    ('https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info', 'weixin-yuanbao'),
+    ('https://yuanbao.tencent.com/other', 'weixin-yuanbao'),
+])
+def test_weixin_scopes_reject_other_targets(url, scope):
+    from network import TargetError, validate_target
+    with pytest.raises(TargetError):
+        validate_target(url, scope)

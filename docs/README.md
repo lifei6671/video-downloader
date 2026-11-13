@@ -1,6 +1,7 @@
 # 技术文档
 
 - [Telegram 下载](telegram-download.md)：grammers 原始视频下载、共用授权、队列/取消与历史兼容。
+- [微信视频号本地下载](weixin-channels-local-download-plan.md)：元宝认证、本地解析、规格和下载；见 [阶段实测记录](weixin-channels-probe-results.md)。
 - [Telegram 分片传输验证](telegram-transfer-performance-validation.md)：并行下载/上传、账号预算、协议正确性、连接限制和实测口径。
 - [旧云库兼容与恢复](backup-cloud-compatibility-recovery.md)：后台恢复登录、旧 R2/Telegram 读取边界及三条历史任务对账。
 

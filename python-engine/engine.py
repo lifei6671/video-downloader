@@ -29,13 +29,14 @@ import author_profile
 import douyin_cover
 import media_album
 import xiaohongshu
+import weixin_channels
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/dtk/upstream/src'))
 import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.14.9'
+ENGINE_VERSION = '0.15.3'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.10.26'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -207,6 +208,11 @@ def parse_input(text):
         if parts.username or parts.password or parts.port not in (None, 80 if parts.scheme == 'http' else 443):
             raise ValueError()
         host = parts.hostname
+        if host == 'weixin.qq.com':
+            try:
+                return 'weixin', weixin_channels.canonical_share(parts), False
+            except weixin_channels.WeixinError as error:
+                raise EngineError(str(error), 'input') from None
         if host in (*xiaohongshu.NOTE_HOSTS, *xiaohongshu.SHORT_HOSTS):
             return xiaohongshu.parse_link(parts)
         platform = ('douyin' if host in ('douyin.com', 'www.douyin.com', 'v.douyin.com')
@@ -233,12 +239,12 @@ def parse_input(text):
         raise EngineError('INVALID_INPUT', 'input') from None
 
 
-def profile_config(profile):
+def profile_config(profile, *, defer_cookie=False):
     if not isinstance(profile, dict) or set(profile) - {'cookie', 'user_agent', 'proxy', 'http_chunk_size'}:
         raise EngineError('CONFIG_INVALID', 'config')
     ua, cookie, proxy = profile.get('user_agent', DEFAULT_UA), profile.get('cookie', ''), profile.get('proxy')
     if (not isinstance(ua, str) or not ua or not isinstance(cookie, str)
-            or any(c in ua + cookie for c in '\r\n')):
+            or any(c in ua for c in '\r\n')):
         raise EngineError('CONFIG_INVALID', 'config')
     if proxy is not None:
         try:
@@ -248,6 +254,12 @@ def profile_config(profile):
                 raise ValueError()
         except (ValueError, TypeError, AttributeError):
             raise EngineError('CONFIG_INVALID', 'config') from None
+    return ua, cookie if defer_cookie else parse_cookie_header(cookie), proxy
+
+
+def parse_cookie_header(cookie):
+    if any(c in cookie for c in '\r\n'):
+        raise EngineError('CONFIG_INVALID', 'config')
     cookies = {}
     for item in cookie.split(';'):
         if not item.strip():
@@ -256,7 +268,7 @@ def profile_config(profile):
         if not sep or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
             raise EngineError('CONFIG_INVALID', 'config')
         cookies[name] = value
-    return ua, cookies, proxy
+    return cookies
 
 
 def add_cookies(jar, cookies, platform):
@@ -327,19 +339,21 @@ def publication_metadata(info):
 
 def metadata(info, platform):
     video_id = info.get('id')
-    id_pattern = {'youtube': r'[A-Za-z0-9_-]{11}', 'xiaohongshu': r'[0-9a-f]{24}'}
+    id_pattern = {'youtube': r'[A-Za-z0-9_-]{11}', 'xiaohongshu': r'[0-9a-f]{24}',
+                  'weixin': r'[0-9a-f]{64}'}
     if (info.get('_type', 'video') != 'video' or info.get('is_live') or info.get('live_status') == 'is_live'
             or not isinstance(video_id, str) or not re.fullmatch(
                 id_pattern.get(platform, r'\d{1,30}'), video_id)):
         raise EngineError('UNSUPPORTED_CONTENT', 'detail')
     canonical = info.get('webpage_url')
     actual, canonical, short = parse_input(canonical)
-    if actual != platform or short or input_identity(platform, canonical, 'auto', canonical)['video_id'] != video_id:
+    if (actual != platform or short or (platform != 'weixin'
+            and input_identity(platform, canonical, 'auto', canonical)['video_id'] != video_id)):
         raise EngineError('UPSTREAM_CHANGED', 'detail')
     duration = info.get('duration')
     duration_ms = (round(duration * 1000) if isinstance(duration, (float, int))
                    and math.isfinite(duration) and duration >= 0 else None)
-    cover = cover_url(info) if platform != 'xiaohongshu' else None
+    cover = cover_url(info) if platform not in ('xiaohongshu', 'weixin') else None
     selected = {}
     for field in ('width', 'height', 'filesize', 'filesize_approx'):
         value = info.get(field)
@@ -367,6 +381,93 @@ def input_identity(platform, url, resolver, source_url):
     video_id = parse_qs(parts.query)['v'][0] if platform == 'youtube' else parts.path.rstrip('/').rsplit('/', 1)[-1]
     return dict(platform=platform, video_id=video_id, canonical_url=url,
                 kind='image_album' if album else 'video', resolver=actual, source_url=source_url)
+
+
+def operate_weixin(method, params, emit, phase, url, ua, cookies, proxy, preview, stage, expected):
+    import local_media
+    logger = SafeLogger()
+    downloading = method == 'download_video'
+    progress = DownloadProgress(emit)
+    options = dict(proxy=proxy or '', http_headers={'User-Agent': ua}, logger=logger,
+                   quiet=True, noprogress=True, cachedir=False, allowed_extractors=[],
+                   outtmpl=str(stage / 'video.%(ext)s') if stage else 'unused.%(ext)s',
+                   overwrites=False, continuedl=False, socket_timeout=30, retries=1,
+                   progress_hooks=[progress] if downloading else [], fixup='never',
+                   postprocessors=[], js_runtimes={}, remote_components=set())
+    try:
+        if downloading and not installed_tool('ffprobe'):
+            raise EngineError('FFPROBE_UNAVAILABLE', 'media_validation')
+        ffmpeg = installed_tool('ffmpeg') if downloading else None
+        if downloading and not ffmpeg:
+            raise EngineError('FFMPEG_UNAVAILABLE', 'media_validation')
+        for attempt in range(2 if downloading else 1):
+            phase('resolving_link' if method == 'identify_input' else 'fetching_metadata')
+            info = weixin_channels.resolve(url, ua, cookies, proxy, logger)
+            identity = dict(platform='weixin', video_id=info['id'], canonical_url=url,
+                            kind='video', resolver='weixin', source_url=url)
+            if method == 'identify_input':
+                emit('identified', result=identity)
+                return
+            if downloading and (info['id'] != expected['video_id'] or expected.get('kind', 'video') != 'video'):
+                raise EngineError('UPSTREAM_CHANGED', 'identity')
+            phase('selecting_formats')
+            fmt = next(select_format(info, params.get('format_id'))) if downloading else None
+            with YoutubeDL(options) as ydl:
+                ydl._request_director = ydl.build_request_director(
+                    [functools.partial(GuardedRH, platform='weixin-media')])
+                if not downloading and preview:
+                    weixin_channels.probe_media_metadata(ydl, info['formats'], installed_tool('ffprobe'))
+                if not downloading:
+                    fmt = next(select_format(info, params.get('format_id')))
+                selected = {**info, **fmt, 'title': info.get('title') or '微信视频号作品'}
+                if not downloading:
+                    result = metadata(selected, 'weixin') | identity
+                    if preview:
+                        phase('loading_preview')
+                        result.update(download_cover(ydl, info, preview))
+                        if avatar := author_profile.avatar_url(ydl, info, 'weixin'):
+                            phase('loading_author')
+                            with YoutubeDL(options) as avatar_ydl:
+                                avatar_ydl._request_director = avatar_ydl.build_request_director(
+                                    [functools.partial(GuardedRH, platform='weixin-avatar')])
+                                result.update(author_profile.download_avatar(avatar_ydl, avatar, preview))
+                    emit('resolved', result=result)
+                    return
+                progress.prepare(selected)
+                try:
+                    ydl.process_info(selected)
+                except (DownloadError, HTTPError) as error:
+                    if error_code(error) != 'ACCESS_DENIED' and logger.code != 'ACCESS_DENIED':
+                        raise
+                    # CDN rejected the signed address; refresh once before surfacing failure.
+                    if attempt or progress.transferred:
+                        raise EngineError('WEIXIN_MEDIA_EXPIRED', 'download') from None
+                    for name in ('video.mp4', 'video.mp4.part'):
+                        (stage / name).unlink(missing_ok=True)
+                    logger.code = 'UPSTREAM_CHANGED'
+                    continue
+                file = Path(ydl.prepare_filename(selected))
+                if file.parent != stage or file.is_symlink() or not file.is_file() or not file.stat().st_size:
+                    raise EngineError('IO_ERROR', 'output')
+                try:
+                    media = local_media.probe({'source': str(file), 'validate_mp4': True,
+                                               'expected_codec': fmt.get('vcodec')})
+                    size = file.stat().st_size
+                    local_media.validate_download(file, ffmpeg, lambda: emit(
+                        'progress', downloaded_bytes=size, total_bytes=size))
+                except local_media.MediaInfoError as error:
+                    raise EngineError(str(error), 'media_validation') from None
+                emit('download_finished', platform='weixin', video_id=info['id'], filename=file.name,
+                     bytes=size, container='mp4', format_id=fmt['_yingqu_format_id'],
+                     width=media['width'], height=media['height'], **download_cover(ydl, info, stage))
+                return
+    except weixin_channels.WeixinError as error:
+        raise EngineError(str(error), 'weixin') from None
+    except (DownloadError, RequestError, TargetError, OSError) as error:
+        code = error_code(error)
+        if isinstance(error, DownloadError) and code == 'UPSTREAM_CHANGED':
+            code = logger.code
+        raise EngineError(code, 'weixin') from None
 
 
 def operate(method, params, emit):
@@ -411,7 +512,9 @@ def operate(method, params, emit):
             emit('resolve_progress', phase=value)
     source_url = url
     resolver = params.get('resolver', 'auto')
-    identity = None if short else input_identity(platform, url, resolver, source_url)
+    if platform == 'weixin' and resolver not in ('auto', 'weixin'):
+        raise EngineError('UNSUPPORTED_CONTENT', 'resolver')
+    identity = None if short or platform == 'weixin' else input_identity(platform, url, resolver, source_url)
     if method == 'identify_input' and identity and platform != 'xiaohongshu':
         emit('identified', result=identity)
         return
@@ -419,7 +522,7 @@ def operate(method, params, emit):
     if not isinstance(profiles, dict):
         raise EngineError('CONFIG_INVALID', 'config')
     phase('loading_configuration')
-    ua, cookies, proxy = profile_config(profiles.get(platform, {}))
+    ua, cookies, proxy = profile_config(profiles.get(platform, {}), defer_cookie=platform == 'weixin')
     if platform == 'xiaohongshu':
         ua = xiaohongshu.user_agent(url, short, ua, DEFAULT_UA)
     chunk_size = http_chunk_size(profiles.get(platform, {}), platform)
@@ -427,7 +530,7 @@ def operate(method, params, emit):
     downloading = method == 'download_video'
     expected = params.get('expected')
     batch_author = expected.get('author_id') if downloading and isinstance(expected, dict) else None
-    if resolver not in ('auto', 'yt-dlp', 'dtk'):
+    if resolver not in ('auto', 'yt-dlp', 'dtk', 'weixin') or (resolver == 'weixin' and platform != 'weixin'):
         raise EngineError('CONFIG_INVALID', 'resolver')
     stage = None
     if downloading:
@@ -450,6 +553,10 @@ def operate(method, params, emit):
         preview = Path(params['preview_dir'])
         if not preview.is_absolute() or not preview.is_dir() or preview.is_symlink() or any(preview.iterdir()):
             raise EngineError('IO_ERROR', 'preview')
+
+    if platform == 'weixin':
+        operate_weixin(method, params, emit, phase, url, ua, cookies, proxy, preview, stage, expected)
+        return
 
     audio_context = {}
 

@@ -15,7 +15,7 @@ import { api, errorText, type ProjectPage, type UpdateCheck, type UpdateDownload
 const ReleaseNotes = lazy(() => import('@/components/release-notes').then(module => ({ default: module.ReleaseNotes })));
 
 const brandIcon = new URL('../../src-tauri/icons/128x128.png', import.meta.url).href;
-const engineInfo = '引擎 0.14.9，yt-dlp 2026.10.26，DTK 5.1.10';
+const engineInfo = '引擎 0.15.3，yt-dlp 2026.10.26，DTK 5.1.10';
 export const aboutVersionInfo = `映取 v${__APP_VERSION__}\n${engineInfo}\nWindows / macOS`;
 const features = [
   { Icon: Link, title: '从分享链接开始', description: '粘贴抖音、小红书、TikTok 或 YouTube 链接，预览后下载。' },

@@ -34,6 +34,7 @@ python-engine/asr/
 /telegram-app.local.json
 tests/douyin.txt
 tests/TikTok.txt
+tests/yuanbao.txt
 node_modules/
 dist/
 src-tauri/gen/

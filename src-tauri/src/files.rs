@@ -28,6 +28,20 @@ fn default_resolver() -> String {
 
 impl Video {
     pub fn validate(&self) -> Result<()> {
+        if self.platform == "weixin" {
+            if self.kind != "video"
+                || self.resolver != "weixin"
+                || self.video_id.len() != 64
+                || !self
+                    .video_id
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || matches!(c, b'a'..=b'f'))
+                || !valid_weixin_share(&self.canonical_url)
+            {
+                bail!("INVALID_ENGINE_RESULT");
+            }
+            return Ok(());
+        }
         if self.platform == "telegram" {
             if self.kind != "video"
                 || !matches!(self.resolver.as_str(), "grammers" | "tdl")
@@ -85,6 +99,17 @@ impl Video {
         }
         Ok(())
     }
+}
+
+pub(crate) fn valid_weixin_share(raw: &str) -> bool {
+    raw.strip_prefix("https://weixin.qq.com/sph/")
+        .is_some_and(|token| {
+            !token.is_empty()
+                && token.len() <= 128
+                && token
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        })
 }
 
 #[derive(Serialize)]

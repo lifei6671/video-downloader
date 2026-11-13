@@ -59,6 +59,29 @@ def test_missing_ffprobe_is_an_actionable_dependency_error(monkeypatch, tmp_path
         local_media.probe({'source': str(source)})
 
 
+def test_download_validation_detects_late_corruption_at_unchanged_length(tmp_path):
+    ffmpeg, ffprobe = local_tools.installed_tool('ffmpeg'), local_tools.installed_tool('ffprobe')
+    if not ffmpeg or not ffprobe:
+        pytest.skip('existing FFmpeg/FFprobe unavailable')
+    source = tmp_path / 'late-corruption.mp4'
+    subprocess.run([ffmpeg, '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=64x48:rate=30',
+                    '-t', '5', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                    str(source)], capture_output=True, check=True, timeout=20)
+    local_media.validate_download(source, ffmpeg, lambda: None)
+    packets = json.loads(subprocess.check_output([
+        ffprobe, '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'packet=pos,size',
+        '-of', 'json', str(source)], timeout=20))['packets']
+    before = source.stat().st_size
+    with source.open('r+b') as stream:
+        for packet in packets[100:]:
+            stream.seek(int(packet['pos']))
+            stream.write(bytes(int(packet['size'])))
+    assert source.stat().st_size == before
+    assert local_media.probe({'source': str(source), 'validate_mp4': True})['width'] == 64
+    with pytest.raises(local_media.MediaInfoError, match='^INCOMPLETE_MEDIA$'):
+        local_media.validate_download(source, ffmpeg, lambda: None)
+
+
 @pytest.mark.parametrize('extension,codec', [('mp4', 'libx264'), ('mov', 'libx264'), ('mkv', 'libx264'), ('webm', 'libvpx')])
 def test_real_probe_preserves_original_video_bytes(tmp_path, extension, codec):
     ffmpeg, ffprobe = local_tools.installed_tool('ffmpeg'), local_tools.installed_tool('ffprobe')
@@ -82,7 +105,7 @@ def test_real_probe_preserves_original_video_bytes(tmp_path, extension, codec):
                               creationflags=0x08000000 if sys.platform == 'win32' else 0) as process:
             try:
                 ready = json.loads(process.stdout.readline())
-                assert ready['engine_version'] == '0.14.9'
+                assert ready['engine_version'] == '0.15.3'
                 process.stdin.write((json.dumps({'protocol_version': 3, 'id': 'local-probe', 'method': 'probe_video',
                                                 'params': {'source': str(source)}}) + '\n').encode())
                 process.stdin.flush()

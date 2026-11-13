@@ -1,7 +1,7 @@
 import { invoke, Channel, convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 export type Status = 'parsing' | 'ready' | 'queued' | 'downloading' | 'completed' | 'failed' | 'canceled';
-export type Resolver = 'auto' | 'yt-dlp' | 'dtk' | 'grammers';
+export type Resolver = 'auto' | 'yt-dlp' | 'dtk' | 'grammers' | 'weixin';
 export type ProjectPage = 'source' | 'issues' | 'releases' | 'license' | 'credits' | 'credit-ytdlp' | 'credit-dtk' | 'credit-tauri' | 'credit-react' | 'credit-shadcn' | 'credit-lucide';
 export interface UpdateCheck { current_version: string; latest_version: string; release_tag: string; has_update: boolean; release_notes: string; published_at: string | null; installer: { name: string; size: number } | null }
 export interface UpdateDownload { id: string; revision: number; release: UpdateCheck; phase: 'preparing' | 'downloading' | 'verifying' | 'canceling' | 'completed' | 'canceled' | 'failed'; downloaded_bytes: number; total_bytes: number | null; filename: string | null; error: string | null }
@@ -129,6 +129,7 @@ export const api = {
   readClipboardText: () => invoke<string>('read_clipboard_text'),
   openProjectPage: (page: ProjectPage, releaseTag?: string) => invoke<void>('open_project_page', { page, releaseTag }),
   openReleaseNoteLink: (url: string) => invoke<void>('plugin:opener|open_url', { url }),
+  openYuanbao: () => invoke<void>('plugin:opener|open_url', { url: 'https://yuanbao.tencent.com/' }),
   checkForUpdates: () => invoke<UpdateCheck>('check_for_updates'),
   updateDownload: () => invoke<UpdateDownload | null>('get_update_download'),
   startUpdateDownload: (releaseTag: string) => invoke<UpdateDownload>('start_update_download', { releaseTag }),
@@ -368,7 +369,7 @@ const errors: Record<string, string> = {
   UNSUPPORTED_PLATFORM: '请粘贴支持平台的作品分享链接',
   FFPROBE_UNAVAILABLE: '读取视频属性需要 FFprobe，请在系统设置的运行依赖中安装 FFmpeg。',
   VIDEO_METADATA_UNAVAILABLE: '无法读取视频时长和尺寸，请检查本地视频是否完整。',
-  FFMPEG_UNAVAILABLE: '此高清规格需要合并音视频，请在系统设置的运行依赖中检测并下载 FFmpeg。',
+  FFMPEG_UNAVAILABLE: '处理或校验视频需要 FFmpeg，请在系统设置的运行依赖中安装。',
   JS_RUNTIME_UNAVAILABLE: 'YouTube 解析需要 Node.js 22+ 或 Deno 2.3+，请在系统设置的运行依赖中检测并下载。',
   BROWSER_COOKIES_UNAVAILABLE: '未从系统默认浏览器读取到此平台的可用 Cookie。请确认已登录；若浏览器被占用或加密不支持，可关闭后重试，或在设置中粘贴 Cookie。',
   MEDIA_MERGE_FAILED: 'FFmpeg 合并音视频失败，请检查本机 FFmpeg 和磁盘空间后重试。',
@@ -390,6 +391,14 @@ const errors: Record<string, string> = {
   ENGINE_UNAVAILABLE: '下载引擎不可用，请检查引擎是否已打包',
   ENGINE_PROTOCOL_ERROR: '下载引擎返回异常，请重新启动应用',
   UPSTREAM_CHANGED: '平台响应已变化，暂时无法解析此作品',
+  WEIXIN_LOGIN_REQUIRED: '请登录腾讯元宝后重试，或填写腾讯元宝网页 Cookie',
+  WEIXIN_COOKIE_EXPIRED: '腾讯元宝登录已失效，请更新登录或 Cookie 后重试',
+  WEIXIN_VIDEO_UNAVAILABLE: '当前视频号作品不可访问',
+  WEIXIN_RATE_LIMITED: '视频号解析请求过于频繁，请稍后重试',
+  WEIXIN_UPSTREAM_CHANGED: '视频号接口响应已变化，暂时无法解析',
+  WEIXIN_MEDIA_EXPIRED: '视频地址已失效，请重试下载',
+  WEIXIN_MEDIA_PROTECTED: '当前视频受保护，无法保存为可播放文件',
+  NETWORK_TARGET_REJECTED: '平台返回了不受支持的网络地址',
   CREDENTIAL_ERROR: '系统凭据存储不可用，配置未能读取或保存',
   CREDENTIAL_CLEANUP_ERROR: '新配置已保存，但旧凭据清理失败',
   DATABASE_ERROR: '无法保存任务记录，请检查磁盘空间并重启应用',

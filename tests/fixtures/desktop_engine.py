@@ -8,13 +8,31 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.14.9", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.15.3", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.buffer.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
 platform = 'youtube' if source.hostname == 'www.youtube.com' else 'tiktok' if source.hostname == 'www.tiktok.com' else 'douyin'
 def emit(event_type, **data):
     print(json.dumps(dict(protocol_version=3, id=request["id"], type=event_type, **data)), flush=True)
+if source.hostname == 'weixin.qq.com' and request['method'] in ('identify_input', 'resolve_video'):
+    result = dict(platform='weixin', video_id='a'*64, canonical_url='https://weixin.qq.com'+source.path,
+                  resolver='weixin', kind='video')
+    if request['method'] == 'identify_input':
+        emit('identified', result=result)
+    else:
+        preview = params.get('preview_dir')
+        avatar = {}
+        if preview:
+            body = b'\xff\xd8\xfffixture-avatar'
+            (Path(preview) / 'author-avatar').write_bytes(body)
+            avatar = dict(author_avatar_filename='author-avatar', author_avatar_bytes=len(body))
+        emit('resolved', result=result | dict(title='Weixin fixture', selected_format_id='1'*24,
+             author_profile={'nickname': 'Fixture', 'kind': 'user'},
+             formats=[dict(format_id='1'*24, container='mp4', codec='h264', width=720, height=1280),
+                      dict(format_id='2'*24, container='mp4', codec='h265', width=720, height=1280)],
+             **avatar))
+    sys.exit(0)
 if request['method'] == 'identify_douyin_link':
     assert set(params['profile']) <= {'user_agent', 'proxy'}
     if source.path == '/fixture-block/':

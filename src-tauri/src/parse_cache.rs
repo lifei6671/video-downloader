@@ -56,6 +56,9 @@ pub fn init(db: &Connection) -> Result<bool> {
 }
 
 fn revision(resolver: &str) -> String {
+    if resolver == "weixin" {
+        return "weixin:4".into();
+    }
     if resolver == "grammers" {
         return crate::telegram_download::PROTOCOL_REVISION.into();
     }
@@ -102,6 +105,14 @@ pub fn share_url(input: &str) -> Option<String> {
     if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
         return None;
     }
+    if url.host_str() == Some("weixin.qq.com") {
+        let raw = text.split(['?', '#']).next()?;
+        let token = raw
+            .strip_prefix("https://weixin.qq.com/sph/")
+            .or_else(|| raw.strip_prefix("https://weixin.qq.com:443/sph/"))?;
+        let canonical = format!("https://weixin.qq.com/sph/{token}");
+        return crate::files::valid_weixin_share(&canonical).then_some(canonical);
+    }
     // Resolve the current share token instead of reusing a previous token from an alias.
     if matches!(
         url.host_str(),
@@ -135,6 +146,11 @@ pub fn share_url(input: &str) -> Option<String> {
 }
 
 pub fn get(db: &Connection, platform: &str, id: &str, resolver: &str) -> Result<Option<Preview>> {
+    let resolver = if resolver == "auto" && platform == "weixin" {
+        "weixin"
+    } else {
+        resolver
+    };
     let row = db.query_row(
         "SELECT cache_key,metadata,saved_at,
           EXISTS(SELECT 1 FROM cover_refs WHERE owner='cache' AND owner_id=parse_cache.cache_key),
@@ -181,13 +197,21 @@ pub fn find(db: &Connection, input: &str, resolver: &str) -> Result<Option<Previ
     let identity = db
         .query_row(
             "SELECT platform,video_id FROM parse_cache_aliases WHERE url=?",
-            [url],
+            [&url],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
         .optional()
         .context("DATABASE_ERROR")?;
     match identity {
-        Some((platform, id)) => get(db, &platform, &id, resolver),
+        Some((platform, id)) => {
+            let mut hit = get(db, &platform, &id, resolver)?;
+            if platform == "weixin" {
+                if let Some(preview) = &mut hit {
+                    preview.video["canonical_url"] = url.into();
+                }
+            }
+            Ok(hit)
+        }
         None => Ok(None),
     }
 }
@@ -778,6 +802,33 @@ mod tests {
             )
             .unwrap();
         assert!(!urls.contains("share text") && !urls.contains("tracking"));
+    }
+
+    #[test]
+    fn weixin_aliases_keep_current_share_and_use_dedicated_revision() {
+        let mut db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let first = "https://weixin.qq.com/sph/First";
+        let second = "https://weixin.qq.com/sph/Second";
+        let video = json!({"platform":"weixin","video_id":"a".repeat(64),"kind":"video",
+            "resolver":"weixin","canonical_url":first,
+            "cover_url":"https://finder.video.qq.com/cover?signature=private",
+            "formats":[{"format_id":"abc","container":"mp4","codec":"h264"}]});
+        save(&mut db, &video, vec![], None, 1).unwrap();
+        remember(&db, second, &video).unwrap();
+        let hit = find(&db, &format!("分享 {second}?from=wechat"), "auto")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.video["canonical_url"], second);
+        assert_eq!(hit.video["video_id"], video["video_id"]);
+        assert!(hit.video["cover_url"].is_null());
+        assert!(find(&db, first, "yt-dlp").unwrap().is_none());
+        assert!(find(&db, "http://weixin.qq.com/sph/First", "auto")
+            .unwrap()
+            .is_none());
+        db.execute("UPDATE parse_cache SET revision='weixin:obsolete'", [])
+            .unwrap();
+        assert!(find(&db, first, "auto").unwrap().is_none());
     }
     #[test]
     fn youtube_watch_aliases_keep_distinct_video_ids() {

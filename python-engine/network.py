@@ -27,6 +27,13 @@ DOMAINS = {
                'musical.ly', 'muscdn.com'),
 }
 
+WEIXIN_TARGETS = {
+    'weixin-yuanbao': ('yuanbao.tencent.com', '/api/weixin/get_parse_result'),
+    'weixin-feed': ('channels.weixin.qq.com', '/finder-preview/api/feed/get_feed_info'),
+    'weixin-media': ('finder.video.qq.com', None),
+    'weixin-avatar': ('wx.qlogo.cn', None),
+}
+
 
 class TargetError(ValueError):
     def __init__(self, message='NETWORK_TARGET_REJECTED', *, code='INVALID_INPUT'):
@@ -73,12 +80,18 @@ def validate_target(url, platform):
         if (platform == 'youtube' and parts.scheme == 'https' and host == 'www.google.com'
                 and parts.path in ('/sorry/index', '/sorry/')):
             raise TargetError('RISK_CONTROL', code='RISK_CONTROL')
-        if not any(host == d or host.endswith('.' + d) for d in DOMAINS[platform]):
+        if platform in WEIXIN_TARGETS:
+            expected_host, path = WEIXIN_TARGETS[platform]
+            if (parts.scheme != 'https' or host != expected_host
+                    or parts.username is not None or parts.password is not None
+                    or (path is not None and parts.path != path)):
+                raise ValueError()
+        elif not any(host == d or host.endswith('.' + d) for d in DOMAINS[platform]):
             raise ValueError()
     except TargetError:
         raise
     except (ValueError, KeyError):
-        raise TargetError() from None
+        raise TargetError(code='NETWORK_TARGET_REJECTED' if platform in WEIXIN_TARGETS else 'INVALID_INPUT') from None
 
 
 def direct_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):

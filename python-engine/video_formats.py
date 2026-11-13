@@ -34,7 +34,10 @@ def codec_name(value):
 def format_key(fmt):
     # CDN mirrors get numeric suffixes. Signing tokens/URLs and sizes are not identities.
     name = re.sub(r'-\d+$', '', str(fmt.get('format_id') or ''))
-    identity = [name, *(fmt.get(k) for k in ('ext', 'width', 'height', 'vcodec', 'acodec', 'tbr', 'fps'))]
+    # Weixin dimensions come from the optional preview probe. The upstream
+    # variant name identifies the download even if probing is unavailable.
+    dimensions = (None, None) if '_yingqu_compatibility' in fmt else (fmt.get('width'), fmt.get('height'))
+    identity = [name, fmt.get('ext'), *dimensions, *(fmt.get(k) for k in ('vcodec', 'acodec', 'tbr', 'fps'))]
     if fmt.get('requested_formats'):
         # Both stream identities and the actual audio language must survive re-extraction.
         # Normalize CDN mirror suffixes independently, never strip language metadata.
@@ -110,6 +113,7 @@ def candidates(context, merge=False):
     return sorted(choices.items(), key=lambda item: (
         (positive(item[1].get('width')) or 0) * (positive(item[1].get('height')) or 0),
         normalized_fps(item[1].get('fps')) or 0, positive(item[1].get('tbr')) or 0,
+        item[1].get('_yingqu_compatibility', 0),
         positive(item[1].get('filesize')) or 0, item[0]), reverse=True)
 
 
