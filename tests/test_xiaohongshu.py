@@ -81,7 +81,6 @@ def test_album_uses_cdn_assets_for_preview_and_download(monkeypatch, tmp_path, m
         return response(url, JPEG)
 
     monkeypatch.setattr(YoutubeDL, 'urlopen', open_url)
-    monkeypatch.setattr(engine, 'load_default_cookies', lambda *_: pytest.fail('successful anonymous request read browser cookies'))
     preview = tmp_path / 'preview'
     stage = tmp_path / 'stage'
     preview.mkdir()
@@ -130,7 +129,7 @@ def test_marked_live_photo_cannot_silently_fall_back_to_a_still():
 
 
 @pytest.mark.parametrize('manual', [False, True])
-def test_video_cookie_fallback_and_watermarked_stream_exclusion(monkeypatch, tmp_path, manual):
+def test_video_explicit_cookie_and_watermarked_stream_exclusion(monkeypatch, tmp_path, manual):
     page_url = NOTE + '?xsec_source=pc_share'
     stream = dict(streamType=258, streamDesc='X264_MP4', videoCodec='h264', audioCodec='aac',
                   width=720, height=1280, size=123, masterUrl='http://sns-video-v6.xhscdn.com/fixture.mp4')
@@ -139,7 +138,6 @@ def test_video_cookie_fallback_and_watermarked_stream_exclusion(monkeypatch, tmp
                 video={'media': {'stream': {'h264': [mini, stream]}}, 'consumer': {'originVideoKey': 'fixture'}},
                 user={'userId': 'fixture-author', 'nickname': '作者', 'avatar': AVATAR})
     requests = []
-    fallback = []
 
     def open_url(self, request):
         url = request if isinstance(request, str) else request.url
@@ -152,19 +150,17 @@ def test_video_cookie_fallback_and_watermarked_stream_exclusion(monkeypatch, tmp
             return response('https://www.xiaohongshu.com/login', b'')
         return response(page_url, note_page(note, False))
 
-    def browser(jar, platform, _logger):
-        fallback.append(platform)
-        engine.add_cookies(jar, {'web_session': 'browser-fixture'}, platform)
-
     monkeypatch.setattr(YoutubeDL, 'urlopen', open_url)
-    monkeypatch.setattr(engine, 'load_default_cookies', browser)
     params = {'input': page_url, 'preview_dir': str(tmp_path),
               'profiles': {'xiaohongshu': {'cookie': 'web_session=manual-fixture'} if manual else {}}}
     resolved = []
+    if not manual:
+        with pytest.raises(engine.EngineError, match='ACCESS_DENIED'):
+            engine.operate('resolve_video', params, lambda *_a, **_k: None)
+        assert requests == [[]]
+        return
     engine.operate('resolve_video', params, lambda _, **value: resolved.append(value['result']))
-    assert fallback == ([] if manual else ['xiaohongshu'])
-    scoped = [('.xiaohongshu.com', 'web_session', 'manual-fixture' if manual else 'browser-fixture')]
-    assert requests == ([scoped] if manual else [[], scoped])
+    assert requests == [[('.xiaohongshu.com', 'web_session', 'manual-fixture')]]
     assert [f['width'] for f in resolved[0]['formats']] == [720]
     assert resolved[0]['published_at'] == 1700000000
     assert resolved[0]['author_profile']['id'] == 'fixture-author'

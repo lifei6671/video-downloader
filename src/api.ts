@@ -57,7 +57,8 @@ export interface Video { author_scan_id?: string; author_profile?: AuthorProfile
 export type ResolvePhase = 'checking_link' | 'checking_cache' | 'starting_engine' | 'loading_configuration' | 'resolving_link' | 'connecting_account' | 'fetching_metadata' | 'selecting_formats' | 'loading_preview' | 'loading_author' | 'finalizing' | 'cache_hit' | 'completed';
 export interface ResolveProgress { phase: ResolvePhase; steps: ResolvePhase[] }
 export interface Task { resolve_progress?: ResolveProgress | null; insertion_id?: number; asset_id?: string | null; total_bytes_estimate?: number | null; telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; download_requested_at?: number | null; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; duplicate_confirmed?: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
-export interface Profile { http_chunk_size?: number | null; bypass_proxy?: boolean; platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean }
+export type AccountAuth = 'login' | 'manual';
+export interface Profile { http_chunk_size?: number | null; bypass_proxy?: boolean; platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean; login_configured?: boolean; account_auth?: AccountAuth | null }
 export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[] }
 export interface FilenamePreview { path: string; segments: { text: string; variable: string | null }[] }
 export type TelegramPurpose = 'download' | 'backup';
@@ -129,7 +130,9 @@ export const api = {
   readClipboardText: () => invoke<string>('read_clipboard_text'),
   openProjectPage: (page: ProjectPage, releaseTag?: string) => invoke<void>('open_project_page', { page, releaseTag }),
   openReleaseNoteLink: (url: string) => invoke<void>('plugin:opener|open_url', { url }),
-  openYuanbao: () => invoke<void>('plugin:opener|open_url', { url: 'https://yuanbao.tencent.com/' }),
+  loginPlatform: (platform: string) => invoke<Settings | null>('login_platform', { platform }),
+  setPlatformAuth: (platform: string, mode: AccountAuth, cookie?: string) => invoke<Settings>('set_platform_auth', { platform, mode, cookie }),
+  openYoutubeLogin: () => invoke<void>('plugin:opener|open_url', { url: 'https://www.youtube.com/signin' }),
   checkForUpdates: () => invoke<UpdateCheck>('check_for_updates'),
   updateDownload: () => invoke<UpdateDownload | null>('get_update_download'),
   startUpdateDownload: (releaseTag: string) => invoke<UpdateDownload>('start_update_download', { releaseTag }),
@@ -371,7 +374,7 @@ const errors: Record<string, string> = {
   VIDEO_METADATA_UNAVAILABLE: '无法读取视频时长和尺寸，请检查本地视频是否完整。',
   FFMPEG_UNAVAILABLE: '处理或校验视频需要 FFmpeg，请在系统设置的运行依赖中安装。',
   JS_RUNTIME_UNAVAILABLE: 'YouTube 解析需要 Node.js 22+ 或 Deno 2.3+，请在系统设置的运行依赖中检测并下载。',
-  BROWSER_COOKIES_UNAVAILABLE: '未从系统默认浏览器读取到此平台的可用 Cookie。请确认已登录；若浏览器被占用或加密不支持，可关闭后重试，或在设置中粘贴 Cookie。',
+  BROWSER_COOKIES_UNAVAILABLE: '请在平台账号设置中重新配置认证',
   MEDIA_MERGE_FAILED: 'FFmpeg 合并音视频失败，请检查本机 FFmpeg 和磁盘空间后重试。',
   FORMAT_UNAVAILABLE: '所选视频规格已不可用，请重新解析后选择；未自动降级。',
   UNSUPPORTED_CONTENT: '此作品或所选引擎不支持解析，图集请使用自动或 DTK',
@@ -379,7 +382,7 @@ const errors: Record<string, string> = {
   NETWORK_ERROR: '网络连接失败，请检查网络或代理设置',
   ACCESS_DENIED: '平台拒绝访问，请检查 Cookie 或稍后重试',
   INVALID_AUTHOR_LINK: '请输入抖音用户主页链接或主页分享口令',
-  AUTHOR_LOGIN_REQUIRED: '请在默认浏览器登录抖音，或在系统设置中更新抖音 Cookie',
+  AUTHOR_LOGIN_REQUIRED: '请在平台账号设置中登录抖音或更新抖音 Cookie',
   AUTHOR_API_LIMIT: '抖音暂时限制详情请求，批次已暂停',
   AUTHOR_CURSOR_INVALID: '抖音返回了无效或重复的翻页位置',
   AUTHOR_SCAN_LIMIT: '已达到本次扫描的处理上限',
@@ -393,6 +396,11 @@ const errors: Record<string, string> = {
   UPSTREAM_CHANGED: '平台响应已变化，暂时无法解析此作品',
   WEIXIN_LOGIN_REQUIRED: '请登录腾讯元宝后重试，或填写腾讯元宝网页 Cookie',
   WEIXIN_COOKIE_EXPIRED: '腾讯元宝登录已失效，请更新登录或 Cookie 后重试',
+  PLATFORM_LOGIN_WINDOW_FAILED: '无法打开平台登录窗口，请重试',
+  PLATFORM_LOGIN_REQUIRED: '此方式缺少已保存的登录信息，请先登录或填写 Cookie',
+  PLATFORM_LOGIN_BUSY: '已有平台登录正在进行',
+  PLATFORM_LOGIN_TIMEOUT: '平台登录超时，请重新打开登录窗口',
+  PLATFORM_COOKIE_READ_FAILED: '无法读取平台登录状态，请重试',
   WEIXIN_VIDEO_UNAVAILABLE: '当前视频号作品不可访问',
   WEIXIN_RATE_LIMITED: '视频号解析请求过于频繁，请稍后重试',
   WEIXIN_UPSTREAM_CHANGED: '视频号接口响应已变化，暂时无法解析',

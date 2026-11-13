@@ -1,4 +1,4 @@
-# YouTube、默认浏览器 Cookie 与本机工具
+# YouTube 登录与本机工具
 
 2026-10-14 用户授权新增。当前协议 v3、引擎 0.7.5，yt-dlp 2026.08.19、yt-dlp-ejs 0.8.0；历史验证记录按执行时版本保留。2026-10-21 的音轨、格式、进度、错误、分块与兼容规则见 [专项验证](ytdlp-processing-validation.md)。
 
@@ -7,7 +7,7 @@
 - 单个 YouTube watch、youtu.be、Shorts、embed 链接统一成 `watch?v=作品ID`；缓存保留 `v`，忽略追踪和播放列表参数。不支持播放列表、直播、任意站点或 DTK 的 YouTube 解析。
 - 设置中新增 YouTube 独立 Cookie、代理、User-Agent，复用现有保存/显示/隐藏/清除流程。未修改时保存禁用，成功后用图标和 12px 主题色文本提示。
 - “系统设置 → 平台账号 → YouTube → HTTP 分块下载”可选择继承上游默认、关闭分块或自定义。默认继承；自定义输入 1–1024 的整数 MiB，初始建议值 10 MiB。沿用“保存平台配置”，仅新任务使用新值，已经解析/排队/下载的任务保留配置快照。继承上游默认不等于关闭分块，速度需按实际网络和 CDN 测试，不承诺加速。
-- 三平台手动 Cookie 优先；留空时，仅尝试操作开始时系统 HTTPS 默认浏览器。复用 yt-dlp 提取并按平台域名过滤，不写回 SQLite、不输出凭据、不启动浏览器、不尝试其他浏览器。不支持的浏览器、锁库、无法解密或没有此平台可用 Cookie 时提示限制；公开作品仍可匿名尝试，访问拒绝不会触发切换引擎。
+- YouTube 账号设置可打开系统浏览器完成 Google 登录。认证解析使用用户手动保存的 YouTube Cookie，未启用时尝试匿名解析。Google 的 OAuth 政策限制嵌入式用户代理。参见 [Google OAuth 2.0 政策](https://developers.google.com/identity/protocols/oauth2/policies)。
 - YouTube 规格优先最高分辨率，配对兼容的 MP4/M4A 或 WebM 音视频，通过 FFmpeg `-c copy` 合并。大小只在真实已知时相加；缺少所选规格明确失败。下载传输总字节与合并后文件大小分别校验，Rust 继续执行文件内容校验及不覆盖提交。
 - 分离规格标记“需 FFmpeg”，合并期间显示状态并保留取消能力；合并单独限时 600 秒，不增加其他网络读取超时。取消/异常回收整个 Windows Job / Unix 进程组，包括 FFmpeg 与 JS 子进程。
 
@@ -27,13 +27,13 @@ FFmpeg 实际运行 `-version` 后才被采用；Node/Deno 同样逐候选验证
 
 - Windows：已确认旧进程 PATH 漏掉了注册表中的 WinGet FFmpeg 安装目录，修复后实际找到并执行本机 `N-126374-g089a48eb36-20260831`。真实 FFmpeg 生成本地音视频 fixture，经真实 yt-dlp HTTP 分流下载、合并及 ffprobe 验证，输出同时保留 `mpeg4` 视频和 `aac` 音轨，无转码。
 - 公开平台：源码与 Windows onedir 经本机已有代理解析 `https://www.youtube.com/watch?v=YE7VzlLtp-4`，均成功返回 17 个规格，最高 1080p，打包引擎正常退出。在线探针使用隔离的无凭据设置/虚构 Cookie，没有使用真实 Cookie；公开解析不证明登录身份有效。旧 yt-dlp 测试视频 `BaW_jenozKc` 在线返回上游错误，未将其失败当作适配通过。
-- 离线：覆盖链接/身份、格式与凭据隔离、默认浏览器异常、工具检测、合并进度/终态、进程后代回收（含 Windows 后代持有禁止删除共享的媒体文件句柄时，取消后立即清理 staging）、设置持久化与缓存别名；具体命令沿用开发文档与 CI。
+- 离线：覆盖链接/身份、格式与凭据隔离、工具检测、合并进度/终态、进程后代回收（含 Windows 后代持有禁止删除共享的媒体文件句柄时，取消后立即清理 staging）、设置持久化与缓存别名；具体命令沿用开发文档与 CI。
 - UI：Edge + 隔离 Tauri IPC fixture，检查三个平台设置、保存状态、提示、规格需求、合并状态与 1440×900 / 1280×800 / 1024×680 布局。此项不等于 Tauri 原生运行。
 - Windows onedir 引擎启动可离线验证；不代表全新 Windows 安装包验收。YouTube 平台真实媒体下载、真实浏览器解密与登录身份、macOS Intel/Apple Silicon 的本机工具/打包运行仍需分别验收，不能用 Windows 或 mock 结果代替。
 
 本轮验证：`python -m pytest -q` 165 项通过；Rust 完整运行 34 项通过；`cargo clippy --locked --features desktop --all-targets -- -D warnings`、`npm run build`、DTK vendor check、PyInstaller 打包和无 Python PATH 启动检查通过。前端保留已有 use-client/sourcemap 构建告警。
 
-参考：[yt-dlp EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS)、[downvid 固定源码](https://github.com/yxxbc/downvid/tree/b1ef96800f1bb999bf63bee6b9a0ad98996494ea/electron/utils)。downvid 按安装顺序选浏览器，本项目按用户要求识别系统默认浏览器。
+参考：[yt-dlp EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS)。
 
 ## TUN 环境合法链接被误报的修复（2026-10-14）
 
@@ -47,7 +47,9 @@ FFmpeg 实际运行 `-version` 后才被采用；Node/Deno 同样逐候选验证
 
 已启动的 `yingqu.exe` 与其资源不会随源码更新；退出应用后，重新构建桌面发行产物才能应用本次 UI 和 TUN 修复。Python 引擎已在 `python-engine/dist/video-engine/` 从最新源码重建并通过无 Python PATH 启动检查。最终完整 Python 166 项通过，前端类型检查与构建通过；原生 Tauri GUI 更新仍需退出后重建，macOS 实机未运行。
 
-## 浏览器 Cookie 状态与代理输入修复（2026-10-20）
+## 浏览器 Cookie 状态与代理输入修复（2026-10-20 历史记录）
+
+当前版本已移除浏览器 Cookie 自动导入。
 
 - 默认浏览器复选框按已保存的手动 Cookie 是否为空恢复，保存成功后保持勾选；切换平台、离开设置或重新打开时沿用相同规则。取消勾选可编辑手动 Cookie，手动值留空仍表示使用默认浏览器，不增加另一份开关配置。读取失败时禁用 Cookie 编辑，保存其他设置仍传 `null` 以保留已有 Cookie。
 - 抖音、TikTok、YouTube 保存手动 Cookie 时统一去除首尾空白及空行，成功后编辑框回显清理后的值；全空白按空值处理，恢复默认浏览器模式。中间内容保持原样，中间存在换行仍拒绝保存，不自动拼接；后端保存入口同样执行首尾清理，`null` 仍保留原值。

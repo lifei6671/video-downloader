@@ -8,7 +8,9 @@ import { api } from '/src/api';
 const profile = {platform:'weixin', user_agent:'fixture', cookie_configured:false};
 const settings = {download_directory:'C:\\TestVideos', max_downloads:5,
   profiles:['douyin','xiaohongshu','tiktok','youtube','telegram','weixin'].map(platform => ({...profile, platform}))};
-let task, listener, cookie = '', opened = 0, submitted;
+let task, listener, cookie = '', opened = 0, submitted, connected = false, finishLogin;
+const weixin = settings.profiles.find(p => p.platform === 'weixin');
+weixin.account_auth = null;
 const video = {
   platform:'weixin', video_id:'a'.repeat(64), canonical_url:'https://weixin.qq.com/sph/Fixture',
   title:'视频号测试作品', resolver:'weixin', kind:'video', selected_format_id:'h264',
@@ -18,21 +20,38 @@ api.backupSettings = async () => null;
 api.settings = async () => settings;
 api.tasks = async () => task ? [structuredClone(task)] : [];
 api.subscribe = async callback => { listener = callback; return () => {}; };
-api.openYuanbao = async () => { opened++; };
+api.loginPlatform = platform => {
+  if (platform !== 'weixin') throw Error('Wrong platform');
+  opened++;
+  return new Promise(resolve => { finishLogin = resolve; });
+};
+api.setPlatformAuth = async (platform, mode, value) => {
+  if (platform !== 'weixin') throw Error('Wrong platform');
+  if (mode === 'manual' && value != null) {
+    cookie = value;
+    weixin.cookie_configured = !!cookie;
+  }
+  if (mode === 'login' && value === '') weixin.login_configured = connected = false;
+  if (value !== '') weixin.account_auth = mode;
+  else if (weixin.account_auth === mode) weixin.account_auth = null;
+  return structuredClone(settings);
+};
 api.cookie = async platform => platform === 'weixin' ? cookie : '';
 api.proxy = async () => null;
 api.save = async update => {
   if (update.platform !== 'weixin') throw Error('Wrong profile');
-  cookie = update.cookie;
-  settings.profiles.find(p => p.platform === 'weixin').cookie_configured = !!cookie;
+  if (update.cookie !== null) cookie = update.cookie;
+  weixin.cookie_configured = !!cookie;
   return structuredClone(settings);
 };
 api.resolve = async (input, resolver) => {
-  submitted = {input,resolver};
-  const status = cookie ? 'ready' : 'failed';
-  const phase = cookie ? 'completed' : 'fetching_metadata';
-  task = {id:'weixin-test', revision:(task?.revision ?? 0)+1, status, error:cookie ? null : 'WEIXIN_LOGIN_REQUIRED',
-    video:cookie ? {...video} : null, resolve_progress:{phase,steps:[phase]}, created_at:10,
+  const auth = weixin.account_auth;
+  submitted = {input,resolver,auth};
+  const authenticated = auth === 'manual' ? !!cookie : auth === 'login' && connected;
+  const status = authenticated ? 'ready' : 'failed';
+  const phase = authenticated ? 'completed' : 'fetching_metadata';
+  task = {id:'weixin-test', revision:(task?.revision ?? 0)+1, status, error:authenticated ? null : 'WEIXIN_LOGIN_REQUIRED',
+    video:authenticated ? {...video} : null, resolve_progress:{phase,steps:[phase]}, created_at:10,
     bytes:0, canceling:false, download_requested:false, cover_cached:false, files:[]};
   return structuredClone(task);
 };
@@ -42,7 +61,14 @@ api.chooseFormat = async (id, format) => {
   return structuredClone(task);
 };
 window.weixinTest = {
-  state: () => ({opened,submitted,selected:task?.video?.selected_format_id,cookieSaved:!!cookie}),
+  state: () => ({opened,submitted,selected:task?.video?.selected_format_id,cookieSaved:!!cookie,connected,auth:weixin.account_auth}),
+  finishLogin: success => {
+    if (success) {
+      weixin.login_configured = connected = true;
+      weixin.account_auth = 'login';
+    }
+    finishLogin(success ? structuredClone(settings) : null);
+  },
   queue: () => { task = {...task, revision:task.revision+1, status:'queued', download_requested:true}; listener(task); },
 };
 await import('/src/main');

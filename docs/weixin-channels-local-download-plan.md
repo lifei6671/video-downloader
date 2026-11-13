@@ -10,7 +10,7 @@
 
 ### 1.1 目标
 
-用户在「下载作品」页面粘贴微信视频号的 `https://weixin.qq.com/sph/...` 分享链接或包含该链接的分享文本，即可预览作品并选择视频格式下载。正常情况下免配置；需要认证时，先使用应用中手动配置的腾讯元宝网页 Cookie，否则尝试读取系统默认浏览器的腾讯元宝 Cookie。读取不到有效登录态时，引导用户在浏览器登录 `https://yuanbao.tencent.com/`，然后重试或手动填写 Cookie。
+用户在「下载作品」页面粘贴微信视频号的 `https://weixin.qq.com/sph/...` 分享链接或包含该链接的分享文本，即可预览作品并选择视频格式下载。正常情况下免配置；需要认证时，仅使用账号设置里当前生效的一种方式。可选元宝登录和手动 Cookie。用户可以从账号设置或解析失败提示打开元宝官方扫码页，完成登录后窗口自动关闭。
 
 解析、格式选择和媒体下载均在桌面端进行，复用现有 Tauri + Rust + Python 引擎、yt-dlp 单文件下载、SQLite 缓存、任务队列、取消、重试和文件管理机制。
 
@@ -21,7 +21,7 @@
 - 支持单条 `weixin.qq.com/sph/` 视频分享链接，支持文本中提取单一链接。
 - 支持标题、作者、封面、发布时间、时长等可取得的元数据，缺失字段允许为空。
 - 支持返回且可验证的 H.264 / H.265 候选；不把编码类型误当作画质等级。
-- 支持匿名优先、手动 Cookie、默认浏览器 Cookie；按需触发授权提示。
+- 支持匿名优先、用户主动扫码和手动 Cookie；按需触发授权提示。
 - 下载前重新解析；复用现有格式选择、进度上报、取消、重试、目录、命名、历史去重。
 - 仅支持合法获取且能够按实际验证流程保存为可播放文件的作品。
 - 第一版不实现作者主页批量下载、直播、私密内容访问、微信客户端 HTTPS 抓包、根证书注入、系统代理接管、TUN 模式。
@@ -37,13 +37,13 @@
    - `POST https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info`：从 `playable_url` 提取 `eid` 和 `token`，用 `{baseReq:{generalToken:token},exportId:eid}` 取得 `feedInfo`。
 2. 分享页面的 `feedInfo` 可含 `videoUrl`、`h264VideoInfo.videoUrl`、`h265VideoInfo.videoUrl`；字段是否存在取决于真实响应。
 3. 上游项目还提供另一套「微信桌面客户端抓包」路线。该路线通过代理截获客户端信息，可能得到 `decodeKey`，并使用 ISAAC64 异或字节流处理部分文件数据。这不等于分享页接口一定返回 `decodeKey`。
-4. 本项目已有 `python-engine/browser_cookies.py`、`src-tauri/src/settings.rs` 和 `src/main.tsx` 的平台 Cookie 配置方案；Python 与 Rust 之间使用单任务单进程的桥接协议 v3。
+4. 本项目复用 `src-tauri/src/settings.rs` 和 `src/main.tsx` 的平台 Cookie 配置方案；Python 与 Rust 之间使用单任务单进程的桥接协议 v3。
 5. `python-engine/network.py` 的 `GuardedRH` 使用平台域名白名单；`engine.py` 中解析器和平台枚举需要扩展；`parse_cache.rs` 的 `auto` 缓存查询对视频默认假定 `yt-dlp`。
 
 **必须真实验证，不作为既定功能承诺**
 
 - 匿名请求腾讯元宝接口是否成功、返回哪些字段，以及不同时间和网络环境下是否一致。
-- 用户登录元宝后，默认浏览器 Cookie 能否被程序成功读取，并满足网页接口的认证要求；是否额外依赖动态请求头或其他会话字段。
+- P0 历史探测尝试过从默认浏览器读取元宝 Cookie，结果见探测记录。内置登录使用应用自身的隔离会话。
 - 分享接口返回的视频地址能否直接下载、能否播放、是否需要解密以及能否获取合法有效的密钥。
 - `wx_export_id` 或 `eid` 在不同分享链接中是否可作为同一作品的稳定标识。
 - 目标 URL 的 CDN 域名、重定向规则、编码与规格信息。
@@ -61,7 +61,7 @@ Python: parse_input / identify_input
       v
 weixin_channels.py
   ├─ 匿名查询元宝接口
-  ├─ 确认需要认证 → 手动 Cookie 或默认浏览器 Cookie → 最多一次认证重试
+  ├─ 确认需要认证 → 当前生效的认证方式 → 最多一次认证重试
   ├─ 从 playable_url 提取 eid/token
   ├─ 查询视频号 get_feed_info
   └─ 标准化元数据、稳定身份与媒体候选
@@ -115,9 +115,9 @@ ANONYMOUS
   └─ 超时/风控/字段变化 → 对应错误，不误判为需要登录
 
 AUTH_RETRY
-  ├─ 用户已手动配置元宝 Cookie → 用手动 Cookie 重试一次
-  ├─ 没有手动配置 → 从系统默认浏览器提取元宝适用 Cookie，重试一次
-  └─ 无有效 Cookie → LOGIN_REQUIRED
+  ├─ 元宝登录 → 使用已保存的元宝会话
+  ├─ 手动 Cookie → 使用已保存的手动 Cookie
+  └─ 所选方式缺少有效凭据 → 提示补充当前方式的凭据
 
 RETRY_RESULT
   ├─ 成功 → RESOLVED
@@ -128,26 +128,19 @@ RETRY_RESULT
 规则：
 
 1. **匿名优先**：即使用户已配置 Cookie，也先尝试匿名，只有明确需要认证时才使用凭证。这样可以减少敏感 Cookie 的网络发送。
-2. 手动 Cookie 优先于浏览器 Cookie；遵循现有抖音配置语义，手动配置失效时提示用户更新，不在背后悄悄切换账号。
+2. 两种认证方式互斥。升级时保留已有凭据，原默认浏览器来源迁移为匿名。切换面板只查看配置，启用或保存成功后才切换生效方式，保存的凭据可复用。认证失败时提示更新当前凭据。
 3. 仅认证相关错误触发 Cookie 读取，禁止在普通 HTTP 403、404、限流、内容不可访问时一律认为是 Cookie 缺失。
-4. 默认只读取当前操作系统默认浏览器；不扫描所有浏览器，不自动读取其他平台的登录态。
-5. 打开腾讯元宝登录页由用户完成；软件提供「打开元宝登录页面」「重试解析」「手动配置 Cookie」入口，不要求创建内嵌浏览器登录器。
-6. 不能读取浏览器 Cookie 时允许手动配置；自动读取的 Cookie 只用于本次请求，不写入 SQLite。
+4. 登录窗口只观察自己的 Cookie 存储。
+5. 「登录腾讯元宝」打开隔离的 Tauri WebView，直接展示元宝官方独立登录页。用户完成微信扫码、快捷登录或安全验证。Rust 在窗口打开时检查小窗的 Cookie 存储，匹配解析接口作用域，收齐 `hy_user`、`hy_token`、`hy_source` 后保存并关闭。窗口无远程 IPC 权限。关闭或超时停止检查，保留原会话。
+6. 扫码凭据单独存于本机 SQLite，只有设置摘要中的布尔状态可传给前端。用户可以清除或重新扫码。
 7. 已有手动 Cookie 的存储和读取保持项目现有行为；不得通过错误事件、前端任务快照或诊断日志暴露明文。
 8. 不使用视频号微信登录 Cookie 冒充元宝 Cookie；本解析路线的认证域为 `yuanbao.tencent.com`。
 
-### 3.4 浏览器 Cookie 精确隔离
+### 3.4 元宝凭据请求范围
 
-改造 `python-engine/browser_cookies.py`：
+内置登录只查看隔离的元宝小窗 Cookie，保存适用于元宝的三项认证凭据。视频号详情接口与媒体 CDN 使用各自的网络请求，不继承元宝 Cookie。
 
-- 保留现有 `default_browser()`、`extract_cookies_from_browser()` 和现有平台逻辑。
-- 添加按 **认证目标域名** 提取 Cookie 的通用接口，例如 `load_default_cookies_for_host(jar, "yuanbao.tencent.com", logger)`。基于 Cookie 的 Domain / Path / Secure / Expires 属性计算适用范围；正确处理作用于 `yuanbao.tencent.com` 的父域 Cookie，不扩大到整个腾讯域下的其他站点。
-- 不再用 `platform + ".com"` 来定位元宝 Cookie，不把 `weixin` 平台误映射为 `weixin.com`。
-- 使用隔离的元宝请求 Cookie 容器；发送到视频号详情接口与媒体 CDN 的请求不得继承元宝认证 Cookie。
-- 浏览器提取失败要区分浏览器不可识别、Cookie 不存在、读取失败、认证过期；面向 UI 只输出固定错误码，不输出浏览器数据库或系统密钥库路径。
-- 校验在 Windows/Edge 或 Chrome、macOS/Safari 或 Chrome 下实际有效；如果浏览器机制不支持则提供手动配置路径。
-
-手动 Cookie 从已有 `settings.rs` profile 快照传入 Python 引擎，仅在认证重试时作为请求头使用。保留手动 Cookie 长度、换行符和非法格式检查。
+扫码会话与手动 Cookie 复用已有平台配置快照传入 Python 引擎，仅在认证重试时使用。手动 Cookie 保留长度、换行符和格式校验。下载提交时取当时生效的认证方式，已排队或运行的任务沿用提交时的快照。
 
 ### 3.5 网络与代理
 
@@ -252,7 +245,7 @@ RETRY_RESULT
 | 位置 | 修改内容 |
 | --- | --- |
 | `python-engine/weixin_channels.py`（新建） | 两段 HTTP 解析、鉴权状态机、业务错误校验、元数据与媒体候选映射 |
-| `python-engine/browser_cookies.py` | 按元宝实际认证域读取默认浏览器 Cookie，保留既有平台实现 |
+| `src-tauri/src/platform_login.rs` | 隔离的元宝官方登录窗口与会话提取 |
 | `python-engine/engine.py` | 输入识别、`identify_input` 网络身份流程、`weixin` 解析器、下载前重解析、格式与错误处理 |
 | `python-engine/network.py` | 元宝接口、视频号接口与媒体 CDN 分级白名单、重定向与目标校验 |
 | `python-engine/video_formats.py` | 复用现有格式键与格式展示；补充视频号候选适配测试 |
@@ -276,9 +269,8 @@ RETRY_RESULT
 
 | 错误码 | 条件 | UI 文案 / 行动 |
 | --- | --- | --- |
-| `WEIXIN_LOGIN_REQUIRED` | 需要认证，且没有可用 Cookie | 请在默认浏览器登录腾讯元宝后重试，或手动配置 Cookie |
+| `WEIXIN_LOGIN_REQUIRED` | 需要认证，且没有可用 Cookie | 请扫码登录腾讯元宝后重试，或手动配置 Cookie |
 | `WEIXIN_COOKIE_EXPIRED` | 已提供 Cookie，但认证失败 | 腾讯元宝登录信息已失效，请更新后重试 |
-| `BROWSER_COOKIES_UNAVAILABLE` | 默认浏览器 Cookie 无法读取 | 可在平台账号设置中手动填写 |
 | `WEIXIN_VIDEO_UNAVAILABLE` | 作品失效/不可访问 | 当前视频不可访问 |
 | `WEIXIN_RATE_LIMITED` | 上游明确限流 | 请求频繁，请稍后重试 |
 | `WEIXIN_UPSTREAM_CHANGED` | 上游响应字段变化 | 视频号解析接口发生变化 |
@@ -287,7 +279,7 @@ RETRY_RESULT
 | `NETWORK_TARGET_REJECTED` | 请求或重定向目标不符合白名单 | 网络目标校验未通过 |
 
 - 只有确认证书失效、超时、暂时性限流等可恢复失败才重试；认证失败最多一次切换 Cookie 重试，避免反复触发上游风控。
-- 第一版 UI 复用平台账号现有表单，显示「微信视频号（通过腾讯元宝认证）」；提供打开元宝登录页入口。
+- 平台账号表单和解析失败提示均提供「登录腾讯元宝」入口。
 - 手动 Cookie 标签明确为「腾讯元宝网页 Cookie」，并说明不是微信 Cookie。
 - 各字段显示客观事实，未知分辨率、时长、文件大小保持未知。
 - 在前端登录提示旁提供一键重试，不把浏览器 Cookie 的实际内容展示在下载结果中。
@@ -296,18 +288,18 @@ RETRY_RESULT
 
 ### P0：可行性实验（必须先完成，暂不接 UI）
 
-实现一个单独的、可调用的 Python 诊断入口（例如 `scripts/probe_weixin_channels.py`），复用既有网络约束和浏览器 Cookie 工具，接受由开发者提供的测试分享 URL。不要向版本库提交真实 Cookie、个人会话头、原始签名 URL。
+实现一个单独的、可调用的 Python 诊断入口（例如 `scripts/probe_weixin_channels.py`），复用既有网络约束，接受由开发者提供的测试分享 URL。不要向版本库提交真实 Cookie、个人会话头、原始签名 URL。
 
 实验矩阵：
 
 1. 无 Cookie 请求元宝解析接口，区分匿名成功、认证不足、内容无效、限流、接口变更。
-2. 在浏览器登录元宝后读取默认浏览器 Cookie 进行请求。
+2. P0 历史步骤曾尝试读取默认浏览器 Cookie。当前诊断入口使用显式提供的 Cookie。
 3. 从手动配置的 Cookie 发起同一请求。
 4. 对成功的元宝响应提取 `playable_url`、`eid`、`token`，调用第二段详情接口，验证其错误码和字段结构。
 5. 分别下载一段 H.264/H.265 示例媒体到临时目录，使用媒体探测检查容器、视频轨、音轨和可播放性。
 6. 检查加密标志与所需密钥是否存在，记录直接下载与受保护资源的数量。
 7. 用同一作品的两个分享链接验证作品身份稳定性。
-8. Windows 11 和 macOS 上验证默认浏览器 Cookie 读取结果；未验证的标记为待验证。
+8. 分别记录 Windows 11 和 macOS 的实际验证结果。
 
 **P0 交付**：`docs/weixin-channels-probe-results.md`，包含脱敏请求结构、各实验状态、字段说明、成功与失败样本统计、加密结论、身份方案决策。没有完整可下载样本时，不把功能宣布为可用，也不要进入正式任务状态集成。
 
@@ -326,14 +318,14 @@ RETRY_RESULT
 
 ### P3：前端与设置集成
 
-- 增加视频号显示名称、账号卡片、自动读取默认浏览器 Cookie、手动 Cookie、登录/重试提示。
+- 增加视频号显示名称、账号卡片、内置元宝登录、手动 Cookie、登录/重试提示。
 - 复用当前解析器选择和格式选择 UI；当输入为视频号时自动选用专用解析器。
 - 视频预览、取消、失败重试、任务历史和筛选完整贯通。
 
 ### P4：系统验证与发布判定
 
 - Python 单元测试、Rust 相关单元/集成测试、前端构建与类型检查。
-- Windows 11 实机 + macOS 实机，验证匿名、有 Cookie、Cookie 失效、默认浏览器不可读、代理开关、文件取消和重试。
+- Windows 11 实机 + macOS 实机，验证匿名、有 Cookie、Cookie 失效、关闭内置登录窗口、代理开关、文件取消和重试。
 - 运行抖音视频、抖音图集、TikTok、YouTube、小红书、Telegram 的既有回归测试。
 - 如 P0 发现媒体加密且有可验证的解密材料，可新增单独子阶段实现受控解密；否则按受保护媒体错误处理。
 
@@ -342,7 +334,7 @@ RETRY_RESULT
 ### 9.1 功能
 
 - 全新安装用户粘贴可匿名访问的视频号链接时，能够解析、预览和下载可播放文件。
-- 需要认证时，提示登录元宝；用户登录默认浏览器后可重试成功，或通过手动 Cookie 成功。
+- 需要认证时，提示登录元宝；用户可在内置窗口登录，或保存手动 Cookie 后重试。
 - Cookie 提取失败、手动 Cookie 失效及内容本身不可访问能给出不同提示。
 - 同链接重复解析能够命中安全缓存；下载开始时重新获得有效媒体地址。
 - H.264/H.265 规格仅在确实存在且可验证时显示；选择的格式不会被重新解析错误切换。
@@ -355,7 +347,7 @@ RETRY_RESULT
 - 元宝 Cookie 只发送到符合 Cookie 作用域的元宝请求，不发送到视频号详情接口或媒体 CDN。
 - 拒绝私网/本地重定向和未验证媒体目标；代理行为不影响其他平台。
 - 没有新增系统级根证书、系统代理接管、TUN、第三方解析网关及 Go 运行时。
-- Windows 11、macOS 实机通过；浏览器 Cookie 不可读时手动配置仍可使用。
+- Windows 11、macOS 实机通过；分别验证内置登录和手动 Cookie。
 - 受保护媒体不能被误判为下载成功；不以修改文件扩展名掩盖无效数据。
 - 所有既有平台回归通过，且当前工作区既有用户改动得到保留。
 

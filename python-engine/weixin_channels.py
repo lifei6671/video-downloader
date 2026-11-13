@@ -15,7 +15,7 @@ from yt_dlp.networking import Request
 from yt_dlp.networking.exceptions import HTTPError, RequestError
 from yt_dlp.utils.networking import clean_proxies
 
-from browser_cookies import load_default_cookies_for_url, scoped_jar
+from cookie_scope import scoped_jar
 from local_media import display_dimensions
 from network import GuardedRH, TargetError, validate_target
 
@@ -241,15 +241,9 @@ def resolve(url, ua, cookies, proxy, logger):
     except WeixinError as error:
         if str(error) != 'WEIXIN_LOGIN_REQUIRED':
             raise
-        if cookies:
-            auth = parse_manual_cookie(cookies)
-        else:
-            _, status, auth = load_default_cookies_for_url(PARSE_URL)
-            if auth is None:
-                code = ('WEIXIN_LOGIN_REQUIRED' if status == 'NO_APPLICABLE_COOKIES' else
-                        'WEIXIN_COOKIE_EXPIRED' if status == 'COOKIES_EXPIRED' else
-                        'BROWSER_COOKIES_UNAVAILABLE')
-                raise WeixinError(code) from None
+        if not cookies:
+            raise
+        auth = parse_manual_cookie(cookies)
         try:
             result = parse(auth)
         except WeixinError as retry:

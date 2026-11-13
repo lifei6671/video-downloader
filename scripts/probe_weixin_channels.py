@@ -14,7 +14,6 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python-engine'))
 
-from browser_cookies import load_default_cookies_for_url
 from network import GuardedRH, validate_target
 from yt_dlp.cookies import YDLLogger, YoutubeDLCookieJar
 from yt_dlp.networking import Request
@@ -241,7 +240,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('urls', nargs='+')
     parser.add_argument('--cookie-file', type=Path)
-    parser.add_argument('--browser', action='store_true')
     parser.add_argument('--download', action='store_true', help='download and decode authorized samples')
     parser.add_argument('--compare-first-two', action='store_true',
                         help='compare identities of the first two URLs for the same work')
@@ -252,13 +250,9 @@ def main():
     except Exception as error:
         print(json.dumps({'status': 'INVALID_INPUT', 'error_type': type(error).__name__}))
         return 2
-    browser = None
-    if args.browser:
-        name, status, browser = load_default_cookies_for_url(PARSE_URL)
-        print(json.dumps({'mode': 'browser', 'browser': name, 'status': status}), flush=True)
     comparisons = {}
     for index, url in enumerate(urls, 1):
-        for mode, cookies in [('anonymous', None), ('manual', manual), ('browser', browser)]:
+        for mode, cookies in [('anonymous', None), ('manual', manual)]:
             if mode != 'anonymous' and cookies is None:
                 continue
             try:
@@ -270,7 +264,7 @@ def main():
                 result = {'status': 'PROBE_ERROR', 'error_type': type(error).__name__}
             print(json.dumps({'sample': index, 'mode': mode, **result}, ensure_ascii=True), flush=True)
     if args.compare_first_two:
-        for mode in ('anonymous', 'manual', 'browser'):
+        for mode in ('anonymous', 'manual'):
             left, right = comparisons.get((1, mode)), comparisons.get((2, mode))
             if left and right:
                 print(json.dumps({'mode': mode, 'identity_equal': {

@@ -19,8 +19,8 @@ from yt_dlp.networking import Request
 from yt_dlp.version import __version__
 
 from network import GuardedRH, TargetError, MediaRangeError
+from cookie_scope import scoped_jar
 from douyin import DouyinIE
-from browser_cookies import load_default_cookies
 from local_tools import installed_tool, javascript_runtime
 import runtime_dependencies
 import local_cover
@@ -36,7 +36,7 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.15.3'
+ENGINE_VERSION = '0.15.5'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.10.26'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -240,10 +240,11 @@ def parse_input(text):
 
 
 def profile_config(profile, *, defer_cookie=False):
-    if not isinstance(profile, dict) or set(profile) - {'cookie', 'user_agent', 'proxy', 'http_chunk_size'}:
+    if not isinstance(profile, dict) or set(profile) - {'cookie', 'user_agent', 'proxy', 'http_chunk_size', 'login_session'}:
         raise EngineError('CONFIG_INVALID', 'config')
     ua, cookie, proxy = profile.get('user_agent', DEFAULT_UA), profile.get('cookie', ''), profile.get('proxy')
     if (not isinstance(ua, str) or not ua or not isinstance(cookie, str)
+            or type(profile.get('login_session', False)) is not bool
             or any(c in ua for c in '\r\n')):
         raise EngineError('CONFIG_INVALID', 'config')
     if proxy is not None:
@@ -271,10 +272,11 @@ def parse_cookie_header(cookie):
     return cookies
 
 
-def add_cookies(jar, cookies, platform):
+def add_cookies(jar, cookies, platform, *, login_session=False):
+    domain = ('www.' if login_session else '.') + platform + '.com'
     for name, value in cookies.items():
-        jar.set_cookie(Cookie(0, name, value, None, False, '.' + platform + '.com', True,
-                             True, '/', True, True, None, True, None, None, {}))
+        jar.set_cookie(Cookie(0, name, value, None, False, domain, not login_session,
+                             not login_session, '/', True, True, None, True, None, None, {}))
 
 
 def cover_url(info):
@@ -522,7 +524,9 @@ def operate(method, params, emit):
     if not isinstance(profiles, dict):
         raise EngineError('CONFIG_INVALID', 'config')
     phase('loading_configuration')
-    ua, cookies, proxy = profile_config(profiles.get(platform, {}), defer_cookie=platform == 'weixin')
+    profile = profiles.get(platform, {})
+    ua, cookies, proxy = profile_config(profile, defer_cookie=platform == 'weixin')
+    login_session = profile.get('login_session', False)
     if platform == 'xiaohongshu':
         ua = xiaohongshu.user_agent(url, short, ua, DEFAULT_UA)
     chunk_size = http_chunk_size(profiles.get(platform, {}), platform)
@@ -594,16 +598,14 @@ def operate(method, params, emit):
         options['ffmpeg_location'] = installed_tool('ffmpeg')
     try:
         with YoutubeDL(options) as ydl:
-            cookie_warning = None
+            if login_session:
+                ydl.cookiejar = scoped_jar()
             if cookies:
-                add_cookies(ydl.cookiejar, cookies, platform)
-            elif platform != 'xiaohongshu':
-                cookie_warning = load_default_cookies(ydl.cookiejar, platform, logger)
-                cookies = {c.name: c.value for c in ydl.cookiejar if not c.is_expired()}
+                add_cookies(ydl.cookiejar, cookies, platform, login_session=login_session)
             if platform == 'douyin':
                 ydl.add_info_extractor(DouyinIE())
             elif platform == 'tiktok':
-                ydl.add_info_extractor(author_profile.TikTokIE())
+                ydl.add_info_extractor(author_profile.TikTokIE(login_session=login_session))
             ydl._request_director = ydl.build_request_director(
                 [functools.partial(GuardedRH, platform=platform)])
             note = None
@@ -611,14 +613,7 @@ def operate(method, params, emit):
                 if short:
                     phase('resolving_link')
                 phase('fetching_metadata')
-                try:
-                    url, note = xiaohongshu.fetch_note(ydl, url, short)
-                except (EngineError, HTTPError) as error:
-                    if cookies or error_code(error) != 'ACCESS_DENIED':
-                        raise
-                    if warning := load_default_cookies(ydl.cookiejar, platform, logger):
-                        raise EngineError(warning, 'detail') from None
-                    url, note = xiaohongshu.fetch_note(ydl, url, short)
+                url, note = xiaohongshu.fetch_note(ydl, url, short)
             elif short:
                 phase('resolving_link')
                 with ydl.urlopen(url) as response:
@@ -657,7 +652,7 @@ def operate(method, params, emit):
                     if content.author.sec_uid != batch_author or str(content.kind) != expected.get('kind'):
                         raise EngineError('UPSTREAM_CHANGED', 'identity')
                 else:
-                    content = dtk_adapter.extract(ydl, platform, video_id, ua, cookies, proxy)
+                    content = dtk_adapter.extract(ydl, platform, video_id, ua, None if login_session else cookies, proxy)
                 if str(content.kind) == 'image_album':
                     result = dtk_adapter.metadata(content)
                     album = dtk_adapter.image_choices(content)
@@ -678,8 +673,6 @@ def operate(method, params, emit):
             if album is not None:
                 phase('selecting_formats')
                 result['source_url'] = source_url
-                if cookie_warning:
-                    result['cookie_warning'] = cookie_warning
                 if downloading:
                     if (result['video_id'] != expected['video_id']
                             or expected.get('kind', 'video') != 'image_album'
@@ -710,8 +703,6 @@ def operate(method, params, emit):
             result = metadata({**info, **audio_context}, platform)
             result['resolver'] = actual_resolver
             result['source_url'] = source_url
-            if cookie_warning:
-                result['cookie_warning'] = cookie_warning
             if content and content.music:
                 result['music'] = dict(title=content.music.title, author=content.music.author)
             if not downloading:
@@ -765,8 +756,6 @@ def operate(method, params, emit):
         code = error_code(error)
         if code == 'UPSTREAM_CHANGED':
             code = 'MEDIA_MERGE_FAILED' if progress.merging else logger.code
-        if code == 'ACCESS_DENIED' and cookie_warning:
-            code = 'BROWSER_COOKIES_UNAVAILABLE'
         raise EngineError(code, 'yt_dlp') from None
     except TargetError as error:
         raise EngineError(error.code, 'network_target') from None

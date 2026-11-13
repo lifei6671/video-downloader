@@ -105,7 +105,7 @@ def test_real_probe_preserves_original_video_bytes(tmp_path, extension, codec):
                               creationflags=0x08000000 if sys.platform == 'win32' else 0) as process:
             try:
                 ready = json.loads(process.stdout.readline())
-                assert ready['engine_version'] == '0.15.3'
+                assert ready['engine_version'] == '0.15.5'
                 process.stdin.write((json.dumps({'protocol_version': 3, 'id': 'local-probe', 'method': 'probe_video',
                                                 'params': {'source': str(source)}}) + '\n').encode())
                 process.stdin.flush()

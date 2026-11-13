@@ -408,7 +408,6 @@ button[data-variant][data-size][data-author-action]:active { background: color-m
 [data-slot="tabs-trigger"]::after { background: var(--primary); height: 2px; }
 [data-slot="toggle-group-item"][data-variant][data-size][data-state="on"] { background: var(--accent); color: var(--accent-foreground); border-color: var(--primary); font-weight: 600; }
 [data-slot="toggle-group-item"][data-variant][data-size][data-state="on"]:hover { background: var(--primary-tint-hover); }
-.cookie-masked { -webkit-text-security: disc; }
 
 /* Shared application shell. Native window decorations remain outside this surface. */
 [data-slot="sidebar-inner"] { background: var(--sidebar); }

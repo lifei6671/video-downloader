@@ -15,9 +15,6 @@ def fixture_engine(monkeypatch, events, enabled):
         if enabled:
             assert events[-1] == ('resolve_progress', {'phase': phase})
 
-    def cookies(*args):
-        current('loading_configuration')
-
     def extract(self, url, download):
         current('fetching_metadata')
         return self.process_ie_result(dict(id='123', webpage_url=url, title='fixture',
@@ -39,7 +36,6 @@ def fixture_engine(monkeypatch, events, enabled):
         current('loading_author')
         return None
 
-    monkeypatch.setattr(engine, 'load_default_cookies', cookies)
     monkeypatch.setattr(YoutubeDL, 'extract_info', extract)
     monkeypatch.setattr(engine, 'metadata', metadata)
     monkeypatch.setattr(engine, 'download_cover', cover)

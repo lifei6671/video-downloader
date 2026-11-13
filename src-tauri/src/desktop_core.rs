@@ -1424,6 +1424,21 @@ impl Core {
     pub fn cookie(&self, platform: &str) -> Result<String> {
         settings::cookie(&self.inner.lock().unwrap().settings, platform)
     }
+    /// Updates the selected WeChat Channels authentication method and its credential.
+    pub fn update_account_auth(
+        &self,
+        platform: &str,
+        mode: settings::AccountAuth,
+        credential: Option<String>,
+    ) -> Result<Settings> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closing {
+            bail!("CANCELED");
+        }
+        let Inner { db, settings, .. } = &mut *inner;
+        settings::update_account_auth(db, settings, platform, mode, credential)?;
+        Ok(settings.clone())
+    }
     pub fn proxy(&self, platform: &str) -> Result<Option<String>> {
         settings::proxy(&self.inner.lock().unwrap().settings, platform)
     }
@@ -2460,9 +2475,6 @@ impl Core {
                     let task = inner.tasks.iter_mut().find(|t| t.id == id).unwrap();
                     task.cached_at = Some(cached.saved_at);
                     task.cover_cached = cached.has_cover;
-                    if video["cookie_warning"] == "BROWSER_COOKIES_UNAVAILABLE" {
-                        cached.video["cookie_warning"] = video["cookie_warning"].clone();
-                    }
                     Ok(cached.video)
                 });
                 stage.close().context("IO_ERROR")?;
@@ -2766,11 +2778,13 @@ impl Core {
             );
         }
         let filename_template = inner.settings.filename_template.clone();
-        inner
-            .active
-            .get_mut(&task.id)
-            .context("INVALID_STATE")?
-            .filename_template = filename_template;
+        let active = inner.active.get_mut(&task.id).context("INVALID_STATE")?;
+        active.filename_template = filename_template;
+        if let Some(platform) = task.video.as_ref().and_then(|video| video["platform"].as_str()) {
+            if new_request && platform != "telegram" {
+                settings::refresh_account_auth(&inner.settings, platform, Arc::make_mut(&mut active.profiles));
+            }
+        }
         task.status = Status::Queued;
         task.error = None;
         task.bytes = 0;
@@ -5254,25 +5268,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_cookie_warning_reaches_ui_but_is_not_replayed_from_cache() {
-        let root = tempfile::tempdir().unwrap();
-        let app = core(root.path());
-        let task = app.resolve("cookie-warning".into()).unwrap();
-        let ready = wait(&app, &task.id, Status::Ready).await;
-        assert_eq!(
-            ready.video.as_ref().unwrap()["cookie_warning"],
-            "BROWSER_COOKIES_UNAVAILABLE"
-        );
-        app.cancel(&task.id).await.unwrap();
-        let cached = app
-            .resolve("https://www.douyin.com/video/123".into())
-            .unwrap();
-        let cached = wait(&app, &cached.id, Status::Ready).await;
-        assert!(cached.cache_hit);
-        assert!(cached.video.as_ref().unwrap()["cookie_warning"].is_null());
-        app.shutdown().await;
-    }
-    #[tokio::test]
     async fn selected_format_survives_restart_and_reaches_fresh_download() {
         let root = tempfile::tempdir().unwrap();
         let app = core(root.path());
@@ -5302,6 +5297,26 @@ mod tests {
         assert_eq!(video["width"], 720);
         assert_eq!(video["height"], 1280);
         assert_eq!(video["filesize"], completed.bytes);
+    }
+
+    #[tokio::test]
+    async fn weixin_download_submission_refreshes_auth_from_the_current_settings() {
+        use settings::AccountAuth;
+
+        let root = tempfile::tempdir().unwrap();
+        let app = core(root.path());
+        app.update_account_auth("weixin", AccountAuth::Manual, Some("auth=manual".into())).unwrap();
+        let task = app.resolve("https://weixin.qq.com/sph/First".into()).unwrap();
+        let ready = wait(&app, &task.id, Status::Ready).await;
+        app.update_account_auth("weixin", AccountAuth::Login, Some("auth=login".into())).unwrap();
+        {
+            let mut inner = app.inner.lock().unwrap();
+            assert_eq!(inner.active[&task.id].profiles["weixin"]["cookie"], "auth=manual");
+            app.queue_download(&mut inner, ready, true, None).unwrap();
+            let profiles = &inner.active[&task.id].profiles;
+            assert_eq!(profiles["weixin"]["cookie"], "auth=login");
+        }
+        app.shutdown().await;
     }
 
     #[tokio::test]

@@ -2,11 +2,11 @@
 <body><div id="root"></div><script type="module">
 // Isolated IPC fixture: synthetic cookies only, no native credentials or network.
 import {api} from '/src/api';
-const initial={download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','xiaohongshu','tiktok','youtube','telegram'].map(platform=>({platform,user_agent:'test-only',proxy:null,bypass_proxy:false,cookie_configured:platform==='youtube',http_chunk_size:null}))};
+const initial={download_directory:'C:\\TestVideos',max_downloads:2,profiles:['douyin','xiaohongshu','tiktok','youtube','telegram'].map(platform=>({platform,user_agent:'test-only',proxy:null,bypass_proxy:false,cookie_configured:platform==='youtube',login_configured:false,account_auth:platform==='youtube'?'manual':null,http_chunk_size:null}))};
 let settings=JSON.parse(sessionStorage.getItem('profile-settings')||'null')||initial;
 let cookies=JSON.parse(sessionStorage.getItem('profile-cookies')||'null')||{douyin:'',xiaohongshu:'',tiktok:'',youtube:'session=fixture'};
 let proxies=JSON.parse(sessionStorage.getItem('profile-proxies')||'null')||Object.fromEntries(settings.profiles.map(p=>[p.platform,p.proxy]));
-const state={calls:[],failSave:false,failCookie:false,failProxy:false,holdProxy:false,releaseProxy:()=>{},holdSave:false,release:()=>{},snapshot:()=>structuredClone({settings,cookies,proxies})};
+const state={calls:[],loginCalls:[],cancelLogin:false,youtubeOpens:0,failSave:false,failCookie:false,failProxy:false,holdProxy:false,releaseProxy:()=>{},holdSave:false,release:()=>{},snapshot:()=>structuredClone({settings,cookies,proxies})};
 window.platformSettingsTest=state;
 api.settings=async()=>structuredClone(settings);
 api.tasks=async()=>[];
@@ -18,6 +18,35 @@ api.proxy=async platform=>{
   return proxies[platform];
 };
 api.telegramStorageStatus=async()=>({configured:false,operation_id:null,phase:'signed_out',account:null,last_error:null,qr:null,qr_expires_at:null});
+function saveAccounts(){
+  sessionStorage.setItem('profile-settings',JSON.stringify(settings));
+  sessionStorage.setItem('profile-cookies',JSON.stringify(cookies));
+  return structuredClone(settings);
+}
+api.loginPlatform=async platform=>{
+  state.loginCalls.push(platform);
+  if(state.cancelLogin)return null;
+  const profile=settings.profiles.find(p=>p.platform===platform);
+  profile.login_configured=true;
+  profile.account_auth='login';
+  return saveAccounts();
+};
+api.openYoutubeLogin=async()=>{state.youtubeOpens++};
+api.setPlatformAuth=async(platform,mode,value)=>{
+  if(state.holdAuth)await new Promise(resolve=>state.releaseAuth=resolve);
+  if(state.failSave)throw 'DATABASE_ERROR';
+  if(value && /[\r\n]/.test(value))throw 'CONFIG_INVALID';
+  const profile=settings.profiles.find(p=>p.platform===platform);
+  if(mode==='manual' && value!=null){
+    if(platform==='douyin') value=value.replace(/^\.?((www\.)?douyin\.com)\s*;\s*/i,'');
+    cookies[platform]=value;
+    profile.cookie_configured=!!value;
+  }
+  if(mode==='login' && value==='')profile.login_configured=false;
+  if(value!=='')profile.account_auth=mode;
+  else if(profile.account_auth===mode)profile.account_auth=null;
+  return saveAccounts();
+};
 api.save=async config=>{
   state.calls.push(structuredClone(config));
   if(state.holdSave)await new Promise(resolve=>state.release=resolve);

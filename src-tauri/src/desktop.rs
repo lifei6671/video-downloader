@@ -23,6 +23,7 @@ use yingqu_core::{
 
 type AppCore = Arc<Core>;
 type TelegramStorageView = yingqu_core::backup::telegram_session::View;
+mod platform_login;
 
 #[derive(Default)]
 struct DesktopLifecycle {
@@ -1180,6 +1181,7 @@ fn request_exit(app: &tauri::AppHandle) {
 fn main() {
     tauri::Builder::default()
         .manage(DesktopLifecycle::default())
+        .manage(platform_login::Login::default())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
@@ -1295,6 +1297,8 @@ fn main() {
             read_clipboard_text,
             copy_cover_image,
             get_profile_cookie,
+            platform_login::login_platform,
+            platform_login::set_platform_auth,
             get_profile_proxy,
             get_task_cover,
             get_author_avatar,

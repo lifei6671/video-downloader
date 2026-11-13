@@ -7,12 +7,6 @@ import pytest
 BODY = b'\x00\x00\x00\x18ftypmp42' + b'payload' * 600
 
 
-@pytest.fixture(autouse=True)
-def no_real_browser_credentials(monkeypatch):
-    import engine
-    monkeypatch.setattr(engine, 'load_default_cookies', lambda *_: None)
-
-
 @pytest.fixture
 def media_bodies():
     return {}

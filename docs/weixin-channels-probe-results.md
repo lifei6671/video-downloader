@@ -1,6 +1,6 @@
 # 微信视频号本地解析与下载验证
 
-2026-11-13，Windows 11（26200），Python 3.12.13，yt-dlp 2026.10.26。直接请求腾讯 HTTPS 接口，使用项目 `GuardedRH`，未配置应用代理。**P0：手动 Cookie 路线通过实施门槛。** 匿名未成功，默认浏览器兼容性仍需单独验收。
+2026-11-13，Windows 11（26200），Python 3.12.13，yt-dlp 2026.10.26。直接请求腾讯 HTTPS 接口，使用项目 `GuardedRH`，未配置应用代理。**P0：手动 Cookie 路线通过实施门槛。** 匿名未成功。默认浏览器读取是当时的探测路径，现已移除。
 
 ## P0 实测
 
@@ -32,7 +32,7 @@ POST https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info?_rid=<
 复现（在 PowerShell 使用有权下载的样本；Cookie 文件仅留本机）：
 
 ```powershell
-.venv/Scripts/python.exe scripts/probe_weixin_channels.py <分享链接> --cookie-file tests/yuanbao.txt --browser --download
+.venv/Scripts/python.exe scripts/probe_weixin_channels.py <分享链接> --cookie-file tests/yuanbao.txt --download
 .venv/Scripts/python.exe scripts/probe_weixin_channels.py <同作品链接1> <同作品链接2> --cookie-file tests/yuanbao.txt --compare-first-two
 ```
 
@@ -59,3 +59,25 @@ POST https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info?_rid=<
 时长与大小补充验证（引擎 0.15.2）：复用预览的 HTTP Range 请求。文件大小来自通过校验的 HTTP 206 `Content-Range` 总字节数，H.264 为 5,112,296 字节，H.265 为 3,290,418 字节，与此前完整下载结果一致。FFprobe 从 MP4 头部的视频轨道读到两档均为 126.583 秒。缺少 FFprobe 时仍可读取大小，缺失的字段保留未知。
 
 长视频补充验证（引擎 0.15.3）：新增样本两档的前置 MP4 元数据分别在约 3.59 MB 和 3.92 MB 处结束，均超过原有 128 KiB 探测范围。按头部标出的边界补读剩余元数据后，实测两档均为 1024×576、5628.746 秒。H.264 总大小为 252,523,576 字节，H.265 为 184,237,953 字节。探测范围最多 8 MiB，超限时保留已从 HTTP 响应确认的大小。此前短视频样本的预览结果也已复验。
+
+默认浏览器复测（Windows 11，系统默认 Edge）：Edge 运行时返回 `COOKIE_DATABASE_COPY_FAILED`，Windows 文件读取确认共享冲突。数据库解锁后，使用同一条视频分享链接运行 `scripts/probe_weixin_channels.py <分享链接> --browser`，返回 `COOKIE_DECRYPT_FAILED`。只读检查发现 `yuanbao.tencent.com` 与 `tencent.com` 合计 12 条相关 Cookie 均使用 `v20` 加密，未输出 Cookie 名称或内容。现有读取器未获得可用 Cookie，因此未发送浏览器认证请求；同次匿名请求返回 HTTP 401。[Microsoft Edge 应用绑定加密说明](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-browser-policies/applicationboundencryptionenabled)
+
+应用内登录可行性验证（Windows 11，Tauri 2.12.3 / WebView2）：独立数据目录的临时窗口成功加载元宝官网及其微信登录页面。另用本地 HTTP 测试服务设置合成 `HttpOnly` Cookie，Rust 从后台线程调用 `cookies_for_url`，读取验证通过。真实元宝登录、使用登录会话解析视频号，以及 macOS 的登录与 Cookie 读取均为 `NOT_RUN`。本次为独立验证，未接入应用的生产流程。
+
+三种认证方式（Windows，引擎 0.15.4）：Playwright 在 1440×900、1280×800、1024×680 验证面板切换、激活、保存和复用凭据。Rust 定向回归验证旧配置迁移、凭据持久化及下载提交时更新认证方式。Python 引擎、视频号、探针和媒体回归 145 项通过，打包引擎握手通过。Windows 隔离预览版编译启动，旧预览数据中的元宝会话迁移后仍为生效方式。此次未发起真实账号登录或在线下载，macOS 原生验证为 `NOT_RUN`。
+
+## 平台登录复测（Windows，引擎 0.15.5）
+
+已移除系统浏览器 Cookie 自动导入。旧版选择默认浏览器的配置升级后进入匿名访问，已保存的两类凭据保留。手动 Cookie 与内置会话独立配置，解析只使用当前生效的凭据。微信视频号仍先尝试匿名，收到明确认证要求后才使用该凭据。
+
+| 平台 | 官方页面实测 | Windows 原生会话验证 |
+| --- | --- | --- |
+| 抖音 | 独立浏览器一次遇到验证码中间页；原生窗口打开官方登录，页面显示扫码入口。 | 合成 HttpOnly 会话保存、自动关窗、清除通过。 |
+| 小红书 | 独立浏览器一次出现网络风险 300012；最终版原生窗口显示扫码和手机号登录。 | 游客态 `web_session` 不保存；合成会话同时有 `web_session` 和 `id_token` 时保存、自动关窗、清除通过。 |
+| TikTok | 原生窗口加载官方二维码及图片，关闭窗口仍为匿名。谷歌登录账号可先在手机端登录 TikTok，再从手机确认网页扫码。 | 合成 HttpOnly 会话保存、自动关窗、清除通过。 |
+| YouTube | 原生按钮打开系统浏览器，官方入口跳转到 Google 登录。认证解析支持手动 Cookie。 | 安全行为由离线测试覆盖，包括匿名和使用显式提供的 Cookie。[Google OAuth 2.0 政策](https://developers.google.com/identity/protocols/oauth2/policies) |
+| 微信视频号 | 原生窗口打开元宝官方登录并显示微信入口。 | 合成三项 HttpOnly 凭据保存、自动关窗、清除通过。 |
+
+本轮未完成真实账号的扫码、短信或 Google 授权流程。登录后使用真实会话解析和下载、macOS 实机均为 `NOT_RUN`。合成测试在隔离数据目录验证应用的会话读取和保存，凭据注入前暂停小窗网络。
+
+自动化结果：Python 全量 542 项通过。Rust 560 个库测试、7 个桌面测试、14 个集成测试通过；31 项按配置跳过。前端类型检查和构建、13 项平台账号及视频号浏览器用例、PyInstaller 引擎握手和独立代码审查通过。额外运行的全站辅助文字用例通过账号部分，随后在关于页的更新说明正文等待超时。

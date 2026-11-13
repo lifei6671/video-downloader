@@ -1,10 +1,8 @@
 import json
-from http.cookiejar import Cookie
 from urllib.request import Request
 
 import pytest
 
-import browser_cookies
 import weixin_channels as wx
 from network import TargetError
 from video_formats import public_formats, select_format
@@ -57,7 +55,6 @@ def test_anonymous_success_never_uses_configured_cookie(monkeypatch, responses):
 
 def test_manual_cookie_used_only_on_one_retry(monkeypatch, responses):
     calls = mock_calls(monkeypatch, wx.WeixinError('WEIXIN_LOGIN_REQUIRED'), *responses)
-    monkeypatch.setattr(wx, 'load_default_cookies_for_url', lambda _: pytest.fail('read browser with manual Cookie'))
     wx.resolve(SHARE, 'UA', 'auth=test', None, None)
     assert [call[3] is None for call in calls] == [True, False, True]
     jar = calls[1][3]
@@ -70,23 +67,18 @@ def test_manual_cookie_used_only_on_one_retry(monkeypatch, responses):
         assert not request.has_header('Cookie')
 
 
-@pytest.mark.parametrize('initial, expected, browser_status, cookies', [
-    ('WEIXIN_LOGIN_REQUIRED', 'WEIXIN_COOKIE_EXPIRED', None, 'test=invalid'),
-    ('WEIXIN_LOGIN_REQUIRED', 'WEIXIN_LOGIN_REQUIRED', 'NO_APPLICABLE_COOKIES', {}),
-    ('WEIXIN_LOGIN_REQUIRED', 'BROWSER_COOKIES_UNAVAILABLE', 'COOKIE_DATABASE_COPY_FAILED', {}),
-    ('WEIXIN_RATE_LIMITED', 'WEIXIN_RATE_LIMITED', None, {}),
-])
-def test_auth_errors_remain_distinct(monkeypatch, initial, expected, browser_status, cookies):
-    calls = mock_calls(monkeypatch, wx.WeixinError(initial), wx.WeixinError(initial))
+def test_anonymous_authentication_failure_makes_only_one_request(monkeypatch):
+    calls = mock_calls(monkeypatch, wx.WeixinError('WEIXIN_LOGIN_REQUIRED'))
+    with pytest.raises(wx.WeixinError, match='^WEIXIN_LOGIN_REQUIRED$'):
+        wx.resolve(SHARE, 'UA', '', None, None)
+    assert len(calls) == 1 and calls[0][3] is None
 
-    def browser(url):
-        assert browser_status is not None and url == wx.PARSE_URL
-        return 'edge', browser_status, None
 
-    monkeypatch.setattr(wx, 'load_default_cookies_for_url', browser)
-    with pytest.raises(wx.WeixinError, match='^' + expected + '$'):
-        wx.resolve(SHARE, 'UA', cookies, None, None)
-    assert len(calls) == (2 if cookies else 1)
+def test_expired_cookie_reports_authentication_failure(monkeypatch):
+    calls = mock_calls(monkeypatch, *[wx.WeixinError('WEIXIN_LOGIN_REQUIRED')] * 2)
+    with pytest.raises(wx.WeixinError, match='^WEIXIN_COOKIE_EXPIRED$'):
+        wx.resolve(SHARE, 'UA', 'auth=invalid', None, None)
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize('reply, expected', [
@@ -136,34 +128,6 @@ def test_api_proxy_resolves_dns_through_socks5(monkeypatch):
     monkeypatch.setattr(wx, 'GuardedRH', Handler)
     with pytest.raises(wx.WeixinError, match='^WEIXIN_LOGIN_REQUIRED$'):
         wx.post_json('weixin-yuanbao', wx.PARSE_URL, {}, 'UA', 'socks5://127.0.0.1:1080', None)
-
-
-def test_default_browser_uses_endpoint_cookie_scope(monkeypatch):
-    def cookie(name, domain, specified, path='/', expires=None):
-        return Cookie(0, name, 'test', None, False, domain, specified, domain.startswith('.'),
-                      path, True, True, expires, expires is None, None, None, {})
-
-    monkeypatch.setattr(browser_cookies, 'default_browser', lambda: 'edge')
-    def extract(browser, logger):
-        assert browser == 'edge'
-        logger.info('Loading fixture browser')
-        logger.debug('Fixture database path')
-        assert logger.progress_bar() is None
-        return [
-            cookie('parent', '.tencent.com', True),
-            cookie('exact', 'yuanbao.tencent.com', False),
-            cookie('host_only_parent', 'tencent.com', True),
-            cookie('other', '.qq.com', True),
-            cookie('wrong_path', 'yuanbao.tencent.com', False, '/chat'),
-            cookie('expired', 'yuanbao.tencent.com', False, expires=1),
-        ]
-
-    monkeypatch.setattr(browser_cookies, 'extract_cookies_from_browser', extract)
-    name, status, jar = browser_cookies.load_default_cookies_for_url(wx.PARSE_URL)
-    assert (name, status) == ('edge', 'COOKIES_LOADED')
-    request = Request(wx.PARSE_URL)
-    jar.add_cookie_header(request)
-    assert set(request.get_header('Cookie').split('; ')) == {'parent=test', 'exact=test'}
 
 
 def test_engine_identifies_online_and_rejects_changed_identity_or_format(monkeypatch, tmp_path, responses):

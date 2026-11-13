@@ -32,6 +32,5 @@ if __name__ == '__main__':
     if os.environ.get('FIXTURE_PID_FILE'):
         Path(os.environ['FIXTURE_PID_FILE']).write_text(str(os.getpid()))
     engine.YoutubeDL = FixtureYDL
-    engine.load_default_cookies = lambda *_: None
     from bridge import main
     os._exit(main())

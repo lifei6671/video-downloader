@@ -1,13 +1,14 @@
 import '@/lib/style-nonce';
 import { RefreshCw } from 'lucide-react';
 import { bytes } from '@/lib/format-bytes';
+import { PlatformAuthSettings, type AccountAuthActions } from '@/components/platform-auth';
 import { BackupSettingsForm } from '@/components/backup-settings';
 import { backupAssetStatus, backupDeletion, BackupDeleteProgress, BackupRestoreProgress, BackupAssetCoverBadge, UnifiedTaskBadge, BackupCardAction, backupCardStatus, BackupTaskStatus, BackupTaskFeedback, BackupTransferMenuItems, BackupAssetRow, canPlayBackupAsset, useBackupTasks } from '@/components/backup-tasks';
 import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ArrowLeft, Download, Play, ListVideo, ListX, CircleCheck, CircleX, Settings as SettingsIcon, Link, FolderOpen, Film, Eye, EyeOff, Copy, ClipboardPaste, AlertCircle, HardDrive, Search, RotateCcw, Trash2, Info, KeyRound, PackageCheck, Monitor, CalendarClock, Images, Maximize2, Minimize2, MoreHorizontal, X } from 'lucide-react';
 import { cn } from 'cn';
-import { api, errorText, mergeTasks, compareTaskInsertion, type AuthorBatch, type AuthorLink, type AuthorScan, type BackupAsset, type Task, type Settings, type Profile, type Resolver } from './api';
+import { api, errorText, mergeTasks, compareTaskInsertion, type AuthorBatch, type AuthorLink, type AuthorScan, type BackupAsset, type Task, type Settings, type Profile, type Resolver, type AccountAuth } from './api';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter, CardAction } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -791,13 +792,7 @@ const settingsSections: { id: SettingsSection; label: string; description: strin
   { id: 'backup', label: '远端备份', description: '备份视频与文案，视频按需下载。', Icon: HardDrive },
   { id: 'dependencies', label: '运行依赖', description: '检查本机运行环境，补齐解析与音视频合并需要的工具。', Icon: PackageCheck },
 ];
-function ProfileForm({ profile, saved }: { profile: Profile; saved: (settings: Settings) => void }) {
-  const weixin = profile.platform === 'weixin';
-  const anonymousFirst = profile.platform === 'xiaohongshu' || weixin;
-  const [cookie, setCookie] = useState('');
-  const [savedCookie, setSavedCookie] = useState('');
-  const [cookieLoaded, setCookieLoaded] = useState(false);
-  const [useBrowserCookies, setUseBrowserCookies] = useState(!profile.cookie_configured);
+function ProfileForm({ profile, saved, auth }: { profile: Profile; saved: (settings: Settings) => void; auth: AccountAuthActions }) {
   const [proxy, setProxy] = useState('');
   const [savedProxy, setSavedProxy] = useState('');
   const [proxyLoaded, setProxyLoaded] = useState(false);
@@ -807,19 +802,15 @@ function ProfileForm({ profile, saved }: { profile: Profile; saved: (settings: S
   const [ua, setUa] = useState(profile.user_agent);
   const [chunkMode, setChunkMode] = useState(profile.http_chunk_size == null ? 'inherit' : profile.http_chunk_size === 0 ? 'disabled' : 'custom');
   const [chunkSize, setChunkSize] = useState(String(profile.http_chunk_size ? profile.http_chunk_size / 1048576 : 10));
-  const [show, setShow] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [cookieError, setCookieError] = useState('');
   const proxyChanged = !bypassProxy && proxyLoaded && (direct !== (savedProxy === '') || (!direct && proxy !== savedProxy));
   const chunkInvalid = profile.platform === 'youtube' && chunkMode === 'custom' &&
     (!Number.isInteger(Number(chunkSize)) || Number(chunkSize) < 1 || Number(chunkSize) > 1024);
   const chunkBytes = chunkMode === 'inherit' ? null : chunkMode === 'disabled' ? 0 : Number(chunkSize) * 1048576;
   const chunkChanged = profile.platform === 'youtube' && chunkBytes !== (profile.http_chunk_size ?? null);
-  const changed = (cookieLoaded && (useBrowserCookies ? '' : cookie) !== savedCookie) || proxyChanged || bypassProxy !== !!profile.bypass_proxy || ua !== profile.user_agent || chunkChanged;
+  const changed = proxyChanged || bypassProxy !== !!profile.bypass_proxy || ua !== profile.user_agent || chunkChanged;
   useEffect(() => {
     let disposed = false;
-    api.cookie(profile.platform).then(value => { if (!disposed) { setCookie(value); setSavedCookie(value); setUseBrowserCookies(value === ''); setCookieLoaded(true); } })
-      .catch(error => { if (!disposed) setCookieError(errorText(error)); });
     api.proxy(profile.platform).then(value => { if (!disposed) { setProxy(value ?? ''); setSavedProxy(value ?? ''); setProxyLoaded(true); } })
       .catch(error => { if (!disposed) setProxyError(errorText(error)); });
     return () => { disposed = true; };
@@ -830,18 +821,12 @@ function ProfileForm({ profile, saved }: { profile: Profile; saved: (settings: S
     setBusy(true);
     try {
       if (proxyChanged && !direct && !proxy.trim()) throw 'CONFIG_INVALID';
-      const nextCookie = useBrowserCookies ? '' : cookie.trim();
       saved(await api.save({ platform: profile.platform,
         bypass_proxy: bypassProxy,
         ...(profile.platform === 'youtube' ? { http_chunk_size: chunkBytes } : {}),
         user_agent: ua,
-        cookie: cookieLoaded ? nextCookie : null,
+        cookie: null,
         proxy: proxyChanged ? direct ? '' : proxy.trim() : null }));
-      if (cookieLoaded) {
-        setSavedCookie(nextCookie);
-        setCookie(nextCookie);
-        setUseBrowserCookies(nextCookie === '');
-      }
       if (proxyChanged) {
         const nextProxy = direct ? '' : proxy.trim();
         setProxy(nextProxy); setSavedProxy(nextProxy);
@@ -850,11 +835,9 @@ function ProfileForm({ profile, saved }: { profile: Profile; saved: (settings: S
     } catch (error) { toast.error(errorText(error), { description: platformName(profile.platform), duration: 8000 }); }
     finally { setBusy(false); }
   }
-  return <Card size="sm" className="flex min-w-0 flex-col [--card-spacing:12px]"><CardHeader><CardTitle className="font-semibold">{platformName(profile.platform)}</CardTitle>{!weixin && <CardDescription>此平台的凭据、代理和浏览器标识独立保存</CardDescription>}<CardAction>{weixin ? <Button type="button" size="sm" variant="outline" onClick={() => void api.openYuanbao().catch(error => toast.error(errorText(error)))}>打开腾讯元宝</Button> : <Badge variant="secondary">{profile.cookie_configured ? '手动 Cookie 已配置' : anonymousFirst ? '默认匿名' : '使用默认浏览器'}</Badge>}</CardAction></CardHeader>
+  return <Card size="sm" className="flex min-w-0 flex-col [--card-spacing:12px]"><CardHeader><CardTitle className="font-semibold">{platformName(profile.platform)}</CardTitle></CardHeader>
     <CardContent className="flex-1"><form id={'profile-' + profile.platform} onSubmit={save} aria-busy={busy}><FieldSet disabled={busy} className="min-w-0"><FieldGroup className="gap-3">
-      <Field data-disabled={useBrowserCookies}><FieldLabel htmlFor={profile.platform + '-cookie'}>{weixin ? '腾讯元宝网页 Cookie' : '网页端 Cookie'}</FieldLabel><InputGroup><InputGroupTextarea id={profile.platform + '-cookie'} autoComplete="off" rows={4} className={cn('field-sizing-fixed h-24 min-h-24 max-h-48 flex-none resize-y break-all', !show && 'cookie-masked')} value={cookie} disabled={useBrowserCookies || !cookieLoaded} onChange={e => setCookie(e.target.value)} placeholder={cookieLoaded ? '粘贴浏览器中的 Cookie' : cookieError ? 'Cookie 读取失败' : '正在读取 Cookie…'} /><InputGroupAddon align="block-end" className="justify-end"><InputGroupButton className="size-7" aria-label={show ? '隐藏 Cookie' : '显示 Cookie'} onClick={() => setShow(!show)}>{show ? <EyeOff /> : <Eye />}</InputGroupButton></InputGroupAddon></InputGroup><FieldDescription>{weixin ? '先尝试匿名；需要登录时优先使用此处的 Cookie，留空则读取默认浏览器。' : anonymousFirst ? '留空时先匿名访问，遇到访问限制时读取系统默认浏览器的 Cookie。' : '手动 Cookie 保存在本机数据库；留空时尝试读取系统默认浏览器，不回写自动读取的 Cookie。'}</FieldDescription></Field>
-      <Field orientation="horizontal"><Checkbox id={profile.platform + '-clear'} disabled={!cookieLoaded} checked={useBrowserCookies} onCheckedChange={value => setUseBrowserCookies(value === true)} /><FieldLabel htmlFor={profile.platform + '-clear'}>{anonymousFirst ? '按需使用系统默认浏览器 Cookie（保存后将清除手动 Cookie）' : '使用系统默认浏览器 Cookie（保存后生效，将清除手动 Cookie）'}</FieldLabel></Field>
-      {cookieError && <Alert variant="destructive" className="border-0 bg-transparent p-0"><AlertCircle aria-hidden="true" /><AlertDescription className="text-xs text-inherit">{cookieError}；保存其他设置将保留已有 Cookie。</AlertDescription></Alert>}
+      <PlatformAuthSettings profile={profile} actions={auth} />
       <Separator />
       <Field orientation="horizontal"><Checkbox id={profile.platform + '-bypass-proxy'} checked={bypassProxy} onCheckedChange={value => setBypassProxy(value === true)} /><FieldContent><FieldLabel htmlFor={profile.platform + '-bypass-proxy'}>解析与下载不走代理</FieldLabel><FieldDescription>开启 TUN／透明代理时启用，保留已保存的代理地址。</FieldDescription></FieldContent></Field>
       <Field><FieldLabel id={profile.platform + '-mode'}>网络代理</FieldLabel><ToggleGroup size="sm" type="single" variant="outline" aria-labelledby={profile.platform + '-mode'} value={direct ? 'direct' : 'proxy'} disabled={!proxyLoaded || bypassProxy} onValueChange={value => { if (value) setDirect(value === 'direct'); }}><ToggleGroupItem value="direct">直连</ToggleGroupItem><ToggleGroupItem value="proxy">自定义代理</ToggleGroupItem></ToggleGroup></Field>
@@ -919,6 +902,7 @@ function App({ initialSettings }: { initialSettings: Settings }) {
   const previewAuthorRef = useRef<HTMLButtonElement>(null);
   const finishRemoval = useCallback((id: string) => setExitingTasks(old => old.filter(task => task.id !== id)), []);
   const [settings, setSettings] = useState(initialSettings);
+  const [authPending, setAuthPending] = useState<{ platform: string; mode: AccountAuth } | null>(null);
   const filenamePreviewCache = useRef<FilenamePreviewCache | null>(null);
   const [input, setInput] = useState('');
   const authorParseGeneration = useRef(0);
@@ -1471,10 +1455,47 @@ function App({ initialSettings }: { initialSettings: Settings }) {
       {page === 'download' && taskMenu(task)}
     </div>;
   }
+  async function updateAccountAuth(platform: string, mode: AccountAuth, action: () => Promise<Settings | null>, success: string) {
+    if (authPending) return false;
+    setAuthPending({platform, mode});
+    try {
+      const next = (await action())?.profiles.find(profile => profile.platform === platform);
+      if (!next) return false;
+      setSettings(current => ({
+        ...current,
+        profiles: current.profiles.map(profile => profile.platform === platform ? {
+          ...profile,
+          account_auth: next.account_auth,
+          login_configured: next.login_configured,
+          cookie_configured: next.cookie_configured,
+        } : profile),
+      }));
+      toast.success(success);
+      return true;
+    } catch (error) {
+      reportActionError(error);
+      return false;
+    } finally {
+      setAuthPending(null);
+    }
+  }
+  function authActions(platform: string): AccountAuthActions {
+    return {
+      pending: authPending?.platform === platform ? authPending.mode : null,
+      login: () => {
+        if (platform === 'youtube') void api.openYoutubeLogin().then(() => toast.success('已打开 YouTube 登录页')).catch(reportActionError);
+        else void updateAccountAuth(platform, 'login', () => api.loginPlatform(platform), platform === 'weixin' ? '已使用元宝登录' : '已保存登录会话');
+      },
+      clearLogin: () => void updateAccountAuth(platform, 'login', () => api.setPlatformAuth(platform, 'login', ''), '已清除登录会话'),
+      apply: (mode, cookie) => updateAccountAuth(platform, mode, () => api.setPlatformAuth(platform, mode, cookie),
+        cookie === '' ? '已清除手动 Cookie' : '认证方式已保存'),
+    };
+  }
+  const yuanbao = authActions('weixin');
   function weixinLoginActions(retry?: () => void) {
     return <div className="flex flex-wrap justify-end gap-2">
-      <Button size="sm" variant="outline" onClick={() => void run(() => api.openYuanbao())}>打开腾讯元宝</Button>
-      <Button size="sm" variant="outline" onClick={() => { setSettingsPlatform('weixin'); setSettingsSection('accounts'); setPage('settings'); }}>配置 Cookie</Button>
+      <Button size="sm" variant="outline" disabled={yuanbao.pending !== null} onClick={yuanbao.login}>{yuanbao.pending === 'login' && <Spinner aria-hidden="true" data-icon="inline-start" />}登录腾讯元宝</Button>
+      <Button size="sm" variant="outline" onClick={() => { setSettingsPlatform('weixin'); setSettingsSection('accounts'); setPage('settings'); }}>认证设置</Button>
       {retry && <Button size="sm" disabled={busy} onClick={retry}>重新解析</Button>}
     </div>;
   }
@@ -1525,7 +1546,7 @@ function App({ initialSettings }: { initialSettings: Settings }) {
       <nav aria-label="设置分类" className="settings-navigation self-stretch border-r pr-4"><SidebarMenu className="gap-2">{settingsSections.map(({ id, label, Icon }) => <SidebarMenuItem key={id}><SidebarMenuButton type="button" className="h-10 gap-3 px-3" isActive={settingsSection === id} aria-label={label} aria-current={settingsSection === id ? 'true' : undefined} aria-controls="settings-operation-area" onClick={() => setSettingsSection(id)}><Icon aria-hidden="true" /><span className="text-sm font-medium">{label}</span></SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></nav>
       <section id="settings-operation-area" aria-label={settingsSectionInfo?.label} className="flex min-h-0 min-w-0 flex-col gap-4">{settingsSection !== 'backup' && <header className="flex shrink-0 flex-col gap-1"><h2 className="text-sm font-semibold">{settingsSectionInfo?.label}</h2><p className="text-xs text-muted-foreground">{settingsSectionInfo?.description}</p>{settingsSection === 'dependencies' && <RuntimeDependenciesToolbar runtime={runtimeDependencies} />}</header>}
         <div hidden={settingsSection !== 'download'} className="flex min-h-0 flex-col gap-4 overflow-y-auto p-px pr-3"><Card size="sm" className="shrink-0 [--card-spacing:12px]"><CardContent><FieldGroup className="gap-3"><Field orientation="horizontal" className="grid grid-cols-[64px_minmax(0,1fr)]"><FieldLabel className="w-16 shrink-0" htmlFor="download-directory">下载目录</FieldLabel><div className="flex min-w-0 flex-1 items-center gap-2"><Input id="download-directory" className="min-h-8" readOnly value={displayPath(settings.download_directory)} /><Button variant="outline" disabled={busy} onClick={() => run(async () => setSettings(await api.directory()))}><FolderOpen data-icon="inline-start" />选择文件夹</Button></div></Field><DownloadConcurrency value={settings.max_downloads} disabled={busy} saved={setSettings} /></FieldGroup></CardContent></Card><FilenameSettings settings={settings} saved={setSettings} previewCache={filenamePreviewCache} /></div>
-        <div hidden={settingsSection !== 'accounts'} className="min-h-0 flex-1"><Tabs value={settingsPlatform} onValueChange={setSettingsPlatform} className="settings-platforms h-full min-h-0 gap-5"><TabsList variant="line" aria-label="配置平台" className={settingsTabsListClassName}>{settings.profiles.filter(profile => profile.platform !== 'telegram').map(profile => <TabsTrigger key={profile.platform} value={profile.platform} className={cn(settingsTabsTriggerClassName, 'max-[1100px]:min-w-0 max-[1100px]:px-2')}>{platformName(profile.platform)}</TabsTrigger>)}<TabsTrigger value="telegram" className={settingsTabsTriggerClassName}>Telegram</TabsTrigger></TabsList>{settings.profiles.filter(profile => profile.platform !== 'telegram').map(profile => <TabsContent key={profile.platform} value={profile.platform} forceMount className="min-h-0 overflow-y-auto p-px pr-3 data-[state=inactive]:hidden"><ProfileForm profile={profile} saved={setSettings} /><Alert className="mt-5"><AlertCircle /><AlertDescription>公开作品解析成功只证明请求成功，不代表登录身份有效。</AlertDescription></Alert></TabsContent>)}<TabsContent value="telegram" className="min-h-0 overflow-y-auto p-px pr-3 data-[state=inactive]:hidden"><TelegramStorageSettings accountOnly active={settingsActive && settingsSection === 'accounts'} network={settings.profiles.find(profile => profile.platform === 'telegram')} networkSaved={setSettings} /></TabsContent></Tabs></div>
+        <div hidden={settingsSection !== 'accounts'} className="min-h-0 flex-1"><Tabs value={settingsPlatform} onValueChange={setSettingsPlatform} className="settings-platforms h-full min-h-0 gap-5"><TabsList variant="line" aria-label="配置平台" className={settingsTabsListClassName}>{settings.profiles.filter(profile => profile.platform !== 'telegram').map(profile => <TabsTrigger key={profile.platform} value={profile.platform} className={cn(settingsTabsTriggerClassName, 'max-[1100px]:min-w-0 max-[1100px]:px-2')}>{platformName(profile.platform)}</TabsTrigger>)}<TabsTrigger value="telegram" className={settingsTabsTriggerClassName}>Telegram</TabsTrigger></TabsList>{settings.profiles.filter(profile => profile.platform !== 'telegram').map(profile => <TabsContent key={profile.platform} value={profile.platform} forceMount className="min-h-0 overflow-y-auto p-px pr-3 [scrollbar-gutter:stable] data-[state=inactive]:hidden"><ProfileForm profile={profile} saved={setSettings} auth={authActions(profile.platform)} /><Alert className="mt-5"><AlertCircle /><AlertDescription>公开作品解析成功只证明请求成功，不代表登录身份有效。</AlertDescription></Alert></TabsContent>)}<TabsContent value="telegram" className="min-h-0 overflow-y-auto p-px pr-3 data-[state=inactive]:hidden"><TelegramStorageSettings accountOnly active={settingsActive && settingsSection === 'accounts'} network={settings.profiles.find(profile => profile.platform === 'telegram')} networkSaved={setSettings} /></TabsContent></Tabs></div>
         {(backupSettingsActive || backupSettingsVisited) && <div hidden={settingsSection !== 'backup'} className={settingsSection === 'backup' ? 'flex min-h-0 flex-1' : 'hidden'}><BackupSettingsForm active={backupSettingsActive} saved={backup.setSettings} /></div>}
         <div hidden={settingsSection !== 'dependencies'} className="flex min-h-0 flex-col gap-4 overflow-y-auto p-px pr-3"><RuntimeDependencies runtime={runtimeDependencies} /></div>
       </section>

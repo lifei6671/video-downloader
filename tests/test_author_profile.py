@@ -8,6 +8,8 @@ from yt_dlp.extractor.youtube import YoutubeTabIE
 
 import author_profile
 import engine
+from cookie_scope import scoped_jar
+from douyin_author import API_URL, guarded_client
 from network import TargetError, validate_target
 
 
@@ -23,6 +25,27 @@ def test_author_identity_nickname_and_avatar_are_separate(platform, node, expect
     assert profile == dict(id=expected, nickname='作者昵称', handle='handle', kind='user')
     assert 'avatar.webp' in author_profile.avatar_url(None, info, platform)
     assert 'https://' not in json.dumps(profile)
+
+
+def test_embedded_login_cookies_stay_on_their_exact_hosts():
+    with YoutubeDL({'quiet': True}) as ydl:
+        ydl.cookiejar = scoped_jar()
+        for platform, sibling in [('douyin', 'sso.douyin.com'), ('xiaohongshu', 'edith.xiaohongshu.com'),
+                                  ('tiktok', 'vm.tiktok.com')]:
+            host = f'www.{platform}.com'
+            engine.add_cookies(ydl.cookiejar, {'sid_tt': 'synthetic'}, platform, login_session=True)
+            assert ydl.cookiejar.get_cookie_header(f'https://{host}/') == 'sid_tt=synthetic'
+            assert not ydl.cookiejar.get_cookie_header(f'https://{sibling}/')
+            assert not ydl.cookiejar.get_cookie_header(f'https://sibling.{host}/')
+            assert not ydl.cookiejar.get_cookie_header(f'http://{host}/')
+        extractor = author_profile.TikTokIE(ydl, login_session=True)
+        extractor._set_cookie('media.tiktokcdn.com', 'sid_tt', 'synthetic')
+        assert not ydl.cookiejar.get_cookie_header('https://media.tiktokcdn.com/video')
+
+    with guarded_client(None, login_session=True) as ydl:
+        engine.add_cookies(ydl.cookiejar, {'sessionid': 'synthetic'}, 'douyin', login_session=True)
+        handler, = ydl._request_director.handlers.values()
+        assert handler.cookiejar.get_cookie_header(API_URL) == 'sessionid=synthetic'
 
 
 def test_tiktok_wrapper_preserves_upstream_result_and_captures_author(monkeypatch):

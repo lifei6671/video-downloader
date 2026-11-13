@@ -97,8 +97,8 @@
 
 | 凭据场景 | 行为 |
 | --- | --- |
-| 手动配置抖音 Cookie | 优先使用；单次扫描冻结对应 UA、代理、CookieJar 及身份作用域 |
-| 未配置手动 Cookie | 沿用默认 HTTPS 浏览器 Cookie 读取，仅复制抖音域、未过期且必要的 Cookie |
+| 已启用内置登录或手动 Cookie | 单次扫描冻结生效的凭据、UA、代理和身份作用域 |
+| 匿名访问 | 提示先在平台账号设置登录 |
 | 仅有游客 Cookie | 不启动声称完整的全量或增量扫描；提示登录 |
 | Cookie 标记存在但会话不可用 | 以真实列表响应判断，按具体错误展示；不得仅凭标记判断登录成功 |
 | HTTP 403 或签名拒绝 | 分离 `signature_refused`、`access_denied`、`login_required` 和未知错误，不自动替换身份、不清空设置 |
@@ -106,12 +106,12 @@
 
 登录候选可参考 DTK 现有标记，如 `sessionid`、`sessionid_ss`、`sid_tt`、`sid_guard`；应核对固定切片对应实现。`/aweme/v1/web/query/user/` 游客也可能返回 `user_uid`，不得据此确认登录。
 
-- Cookie 仅由现有平台设置保存；浏览器 Cookie 不回写 SQLite。子进程运行凭据仅经 JSONL stdin 传入内存。批次记录、任务快照、前端事件和普通日志只保存非凭据数据及不透明身份作用域 ID。
+- 内置会话和手动 Cookie 分开保存在本机平台设置。子进程运行凭据仅经 JSONL stdin 传入内存。批次记录、任务快照、前端事件和普通日志只保存非凭据数据及不透明身份作用域 ID。
 - 保持 Cookie 的域、路径、HTTPS 和过期时间约束。抖音 API 可用的 Cookie 不得自动带到 `iesdouyin.com` 跳转页或媒体 CDN；不得把 Cookie 值、签名 URL、完整请求头、代理密码和上游原始响应写入诊断日志。
 - 已有配置快照中的手动 Cookie 只驻留活动任务内存，不能随着批次持久化。浏览器模式下载时按现有任务契约重新读取默认浏览器；应用重启后重建配置并重新校验可用性。Cookie 改动后从第一页重新扫描。
 - 采集失败按层分类：`author_list`、`content_detail`、`media_cdn`、`local_commit`；CDN 单个 403 不等于整个账号失效。`Retry-After` 仅对来源可信、语义明确的限流响应展示建议重试时间。
 
-参考：[浏览器读取](../python-engine/browser_cookies.py) · [平台设置与快照](../src-tauri/src/settings.rs) · [DTK 登录标记](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/src/dtk/identity/marks.py) · [反馈 #782](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/782) · [反馈 #783](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/783)
+参考：[内置登录](../src-tauri/src/platform_login.rs)、[平台设置与快照](../src-tauri/src/settings.rs) · [DTK 登录标记](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/26299ef8649a12be82c3769b05b316fdeec8d40d/src/dtk/identity/marks.py) · [反馈 #782](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/782) · [反馈 #783](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/issues/783)
 
 ## 7. SQLite 数据模型与事务边界
 

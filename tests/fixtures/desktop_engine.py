@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.15.3", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.15.5", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.buffer.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
@@ -199,8 +199,6 @@ if request["method"] == "resolve_video":
             if params.get('report_resolve_progress'): emit('resolve_progress', phase='loading_author')
             (Path(params['preview_dir'])/'author-avatar').write_bytes(image)
             cover.update(author_avatar_filename='author-avatar',author_avatar_bytes=len(image))
-        if params["input"] == "cookie-warning":
-            cover['cookie_warning'] = 'BROWSER_COOKIES_UNAVAILABLE'
         emit("resolved", result=dict(platform=platform, video_id=video_id,
             canonical_url=params['input'] if platform != 'douyin' else "https://www.douyin.com/video/" + video_id,
             title="离线生命周期验证", author="fixture", author_profile=dict(id='fixture-author',nickname='作者昵称',handle='fixture',kind='user'), duration_ms=1000, resolver=params.get("resolver") if params.get("resolver") in ("dtk","yt-dlp") else "yt-dlp",kind="video", width=1080, height=1920, selected_format_id="1"*24,

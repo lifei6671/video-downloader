@@ -11,10 +11,10 @@ from yt_dlp.networking import Request
 from yt_dlp.networking.exceptions import HTTPError, RequestError
 
 import dtk_adapter
-from browser_cookies import load_default_cookies
 from dtk.core.errors import DtkError
 from dtk.platforms.douyin.parser import detect_risk_control
 from network import GuardedRH, TargetError
+from cookie_scope import scoped_jar
 
 API_URL = 'https://www.douyin.com/aweme/v1/web/aweme/post/'
 LOGIN_MARKERS = {'sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard', 'uid_tt', 'sid_ucp_v1'}
@@ -46,10 +46,12 @@ def has_login(jar):
                for cookie in jar.get_cookies_for_url(API_URL))
 
 
-def guarded_client(proxy):
+def guarded_client(proxy, *, login_session=False):
     from engine import SafeLogger
     ydl = YoutubeDL(dict(quiet=True, logger=SafeLogger(), proxy=proxy or '',
                          socket_timeout=30, cachedir=False, allowed_extractors=[], js_runtimes={}))
+    if login_session:
+        ydl.cookiejar = scoped_jar()
     ydl._request_director = ydl.build_request_director([
         functools.partial(GuardedRH, platform='douyin')])
     return ydl
@@ -146,15 +148,13 @@ def scan(params, emit):
         raise EngineError('AUTHOR_CURSOR_INVALID', 'author_list')
     profile = params['profile']
     ua, cookies, proxy = profile_config(profile)
-    with guarded_client(proxy) as ydl:
+    login_session = profile.get('login_session', False)
+    with guarded_client(proxy, login_session=login_session) as ydl:
         if author_id is None:
             _, author_id = profile_link(expand_share(ydl, url, ua))
             if author_id is None:
                 raise EngineError('INVALID_AUTHOR_LINK', 'author_link')
-        if profile.get('cookie'):
-            add_cookies(ydl.cookiejar, cookies, 'douyin')
-        else:
-            load_default_cookies(ydl.cookiejar, 'douyin', ydl.params['logger'])
+        add_cookies(ydl.cookiejar, cookies, 'douyin', login_session=login_session)
         if not has_login(ydl.cookiejar):
             raise EngineError('AUTHOR_LOGIN_REQUIRED', 'author_list')
 

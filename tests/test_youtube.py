@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 from yt_dlp import YoutubeDL
 
-import browser_cookies
 import engine
 import local_tools
 from network import TargetError, validate_target
@@ -249,60 +248,21 @@ def test_challenge_classification_survives_upstream_errors(monkeypatch, route):
         engine.operate('resolve_video', {'input': URL}, lambda *_a, **_k: None)
 
 
-def test_default_browser_cookies_are_filtered_and_never_saved(monkeypatch):
-    source, target = CookieJar(), CookieJar()
-    engine.add_cookies(source, {'session': 'fixture-youtube'}, 'youtube')
-    engine.add_cookies(source, {'session': 'fixture-tiktok'}, 'tiktok')
-    calls = []
-    monkeypatch.setattr(browser_cookies, 'default_browser', lambda: 'firefox')
-    def extract(browser, **kwargs):
-        calls.append(browser)
-        return source
-    monkeypatch.setattr(browser_cookies, 'extract_cookies_from_browser', extract)
-    assert browser_cookies.load_default_cookies(target, 'youtube', engine.SafeLogger()) is None
-    assert calls == ['firefox'] and [c.value for c in target] == ['fixture-youtube']
-
-
-@pytest.mark.parametrize('browser', [None, 'chrome'])
-def test_default_browser_failure_is_bounded_no_other_browser_retry(monkeypatch, browser):
-    monkeypatch.setattr(browser_cookies, 'default_browser', lambda: browser)
-    calls = []
-    def extract(name, **kwargs):
-        calls.append(name)
-        raise OSError('private user profile path')
-    monkeypatch.setattr(browser_cookies, 'extract_cookies_from_browser', extract)
-    assert browser_cookies.load_default_cookies(CookieJar(), 'youtube', engine.SafeLogger()) == 'BROWSER_COOKIES_UNAVAILABLE'
-    assert calls == ([] if browser is None else ['chrome'])
-
-
-def test_upstream_cookie_warning_does_not_discard_other_cookies(monkeypatch):
-    source = CookieJar()
-    engine.add_cookies(source, {'session': 'fixture'}, 'youtube')
-    monkeypatch.setattr(browser_cookies, 'default_browser', lambda: 'chrome')
-    def extract(browser, logger):
-        logger.warning('one cookie failed decryption', only_once=True)
-        return source
-    monkeypatch.setattr(browser_cookies, 'extract_cookies_from_browser', extract)
-    target = CookieJar()
-    assert browser_cookies.load_default_cookies(target, 'youtube', engine.SafeLogger()) is None
-    assert [cookie.value for cookie in target] == ['fixture']
-
-
 @pytest.mark.parametrize('cookie', ['', 'session=manual'])
-def test_manual_cookie_priority_and_warning(monkeypatch, cookie):
+def test_youtube_uses_only_explicit_cookie(monkeypatch, cookie):
     calls = []
     monkeypatch.setattr(engine, 'javascript_runtime', lambda: {'node': {'path': 'fixture-node'}})
     monkeypatch.setattr(engine, 'installed_tool', lambda _: None)
-    monkeypatch.setattr(engine, 'load_default_cookies', lambda *_: calls.append('default') or 'BROWSER_COOKIES_UNAVAILABLE')
     def extract(self, url, download):
+        calls.append([(c.domain, c.name, c.value) for c in self.cookiejar])
         return self.process_ie_result(dict(id='BaW_jenozKc', title='fixture', webpage_url=URL,
             extractor='fixture', extractor_key='Fixture', formats=formats()), download=False)
     monkeypatch.setattr(YoutubeDL, 'extract_info', extract)
     events = []
     engine.operate('resolve_video', {'input': URL, 'profiles': {'youtube': {'cookie': cookie}}},
                    lambda kind, **data: events.append(data))
-    assert calls == (['default'] if not cookie else [])
-    assert bool(events[-1]['result'].get('cookie_warning')) == (not cookie)
+    assert calls == ([[('.youtube.com', 'session', 'manual')]] if cookie else [[]])
+    assert 'cookie_warning' not in events[-1]['result']
     assert events[-1]['result']['formats'][0]['requires_merge']
     assert 'session' not in json.dumps(events)
 

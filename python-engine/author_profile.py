@@ -120,6 +120,16 @@ def attach(info, node, platform, work=None):
 
 
 class TikTokIE(UpstreamTikTokIE):
+    def __init__(self, downloader=None, *, login_session=False):
+        super().__init__(downloader)
+        self._login_session = login_session
+
+    def _set_cookie(self, domain, name, value, *args, **kwargs):
+        # Upstream copies sid_tt to its API and media hosts. Keep embedded credentials web-only.
+        if self._login_session and name == 'sid_tt' and domain != 'www.tiktok.com':
+            return
+        return super()._set_cookie(domain, name, value, *args, **kwargs)
+
     def _parse_aweme_video_web(self, detail, *args, **kwargs):
         info = super()._parse_aweme_video_web(detail, *args, **kwargs)
         node = next((detail[key] for key in ('authorInfo', 'author') if isinstance(detail.get(key), dict)), detail)

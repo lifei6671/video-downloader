@@ -115,9 +115,7 @@ def test_scan_resume_preserves_cursor_page_number_and_request_delay(monkeypatch)
         douyin_author.scan({**params, 'cursor': None}, lambda *_args, **_kwargs: None)
 
 
-def test_author_scan_does_not_fall_back_to_browser_with_empty_configured_cookie(monkeypatch):
-    monkeypatch.setattr(douyin_author, 'load_default_cookies',
-                        lambda *_args: pytest.fail('saved cookie must not read another identity'))
+def test_author_scan_requires_platform_credentials():
     with pytest.raises(engine.EngineError, match='AUTHOR_LOGIN_REQUIRED'):
         douyin_author.scan({'input': URL, 'profile': {'cookie': ';'}},
                            lambda *_args, **_kwargs: None)
