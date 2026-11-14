@@ -97,17 +97,7 @@ impl TestJournal {
         Self(Mutex::new(db))
     }
     fn entry(&self, source: &MediaSource) -> Entry {
-        let raw: String = self
-            .0
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT entry_json FROM telegram_media_sends WHERE operation_id=?1 AND kind=?2",
-                rusqlite::params![source.operation_id, source.kind],
-                |r| r.get(0),
-            )
-            .unwrap();
-        serde_json::from_str(&raw).unwrap()
+        self.get(&source.operation_id, &source.kind).unwrap().unwrap()
     }
 }
 impl Journal for TestJournal {
@@ -358,6 +348,66 @@ fn io() -> (watch::Sender<bool>, watch::Sender<bool>, Io) {
     let (c, rx) = watch::channel(false);
     let (s, srx) = watch::channel(false);
     (c, s, Io::new(rx, srx, None))
+}
+
+#[tokio::test]
+async fn encrypted_database_uses_standalone_document_and_round_trips() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let sqlite = root.path().join("source.sqlite");
+    Connection::open(&sqlite)
+        .unwrap()
+        .execute_batch("CREATE TABLE example(value); INSERT INTO example VALUES(42);")
+        .unwrap();
+    let key = age::x25519::Identity::generate();
+    let (encrypted, _, _) = crate::backup::database::encrypt(&sqlite, &key, || false).unwrap();
+    let ciphertext = std::fs::read(encrypted.path()).unwrap();
+    let mut source = source(root.path(), "database", &ciphertext);
+    source.asset_id = key.to_public().to_string();
+    source.container = "age".into();
+    let net = Mock::new();
+    let (_cancel, _stop, io) = io();
+    let target = target();
+    let receipt = upload(&net, &journal, &target, source.clone(), &io)
+        .await
+        .unwrap();
+    let entry = journal.entry(&source);
+    assert_eq!(entry.envelope.yingqu_media, 3);
+    assert!(crate::backup::telegram_database::matches(
+        &target,
+        &source.asset_id,
+        &entry.envelope
+    ));
+    assert!(!crate::backup::telegram_database::matches(
+        &target,
+        "other recipient",
+        &entry.envelope
+    ));
+    let downloaded = root.path().join("downloaded.age");
+    restore(
+        &net,
+        &journal,
+        &target,
+        &receipt.reference,
+        &downloaded,
+        &io,
+    )
+    .await
+    .unwrap();
+    let restored = root.path().join("restored.sqlite");
+    assert!(crate::backup::database::decrypt(
+        &downloaded,
+        &restored,
+        &age::x25519::Identity::generate()
+    )
+    .is_err());
+    crate::backup::database::decrypt(&downloaded, &restored, &key).unwrap();
+    let db = Connection::open(restored).unwrap();
+    assert_eq!(
+        db.query_row("SELECT value FROM example", [], |row| row.get::<_, u32>(0))
+            .unwrap(),
+        42
+    );
 }
 
 #[tokio::test]

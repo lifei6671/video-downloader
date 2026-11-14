@@ -196,7 +196,8 @@ impl Library {
                 || event.change.recreate
                 || event.change.operation_id != envelope.operation_id
                 || event.change.device_id != envelope.device_id
-                || envelope.asset_id != self.library_id
+                || (envelope.kind == "library" && envelope.asset_id != self.library_id)
+                || (envelope.kind == "asset_archive" && envelope.asset_id != event.change.asset_id)
             {
                 bail!("TELEGRAM_INDEX_INVALID");
             }
@@ -271,6 +272,9 @@ fn merge_events(events: Vec<(i64, Vec<u8>)>) -> Result<Vec<(i64, Vec<u8>)>> {
 }
 
 impl TelegramProvider {
+    pub(super) fn target(&self) -> &Target {
+        &self.target
+    }
     pub(super) fn new(
         core: &Arc<Core>,
         target: Target,
@@ -289,12 +293,25 @@ impl TelegramProvider {
         work: impl for<'a> FnOnce(&'a Core, &'a GrammersTransport, &'a Io) -> ProviderFuture<'a, T>,
     ) -> Result<T> {
         let core = self.core.upgrade().context("CANCELED")?;
+        self.request_with_cancel(kind, control, core.backup_cancellation(), work).await
+    }
+    pub(super) async fn request_with_cancel<T>(
+        &self,
+        kind: &'static str,
+        control: Option<Arc<TransferControl>>,
+        mut cancel: watch::Receiver<bool>,
+        work: impl for<'a> FnOnce(&'a Core, &'a GrammersTransport, &'a Io) -> ProviderFuture<'a, T>,
+    ) -> Result<T> {
+        let core = self.core.upgrade().context("CANCELED")?;
         let binding = core
             .telegram_accounts
             .binding(crate::telegram_accounts::Purpose::Backup);
         let view = {
             let _ready = super::delete_timing::setup_span("session_ready");
-            binding.session.ready_for_backup(binding.namespace).await?
+            tokio::select! {
+                _ = cancel.wait_for(|value| *value) => bail!("CANCELED"),
+                result = binding.session.ready_for_backup(binding.namespace) => result?,
+            }
         };
         if !matches!(view.phase, super::telegram_session::Phase::Ready) {
             bail!("TELEGRAM_AUTH_REQUIRED");
@@ -309,7 +326,7 @@ impl TelegramProvider {
                 &core,
                 &id,
                 self.target.clone(),
-                core.backup_cancellation(),
+                cancel,
                 (kind, control),
                 work,
             )
@@ -346,21 +363,36 @@ impl TelegramProvider {
     ) -> Result<Option<String>> {
         let (_, documents) = transport.indexes(io).await?;
         let mut library = None;
+        let mut event_library = None;
         for index in documents {
             let document = &index.document;
             let envelope: Envelope =
                 serde_json::from_str(&document.caption).context("TELEGRAM_INDEX_INVALID")?;
-            if envelope.kind != "library" {
+            if !matches!(envelope.kind.as_str(), "library" | "event" | "asset_archive") {
                 continue;
             }
-            let body = transport.index_body(&index, io).await?;
-            let id = Self::descriptor_library_id(target, &envelope, &body)?;
+            let id = if envelope.kind == "library" {
+                let body = transport.index_body(&index, io).await?;
+                Self::descriptor_library_id(target, &envelope, &body)?
+            } else {
+                if event_library.as_ref().is_some_and(|old| old != &envelope.library_id) {
+                    bail!("BACKUP_LIBRARY_MISMATCH");
+                }
+                event_library = Some(envelope.library_id);
+                continue;
+            };
             if library.as_ref().is_some_and(|old| old != &id) {
                 bail!("BACKUP_LIBRARY_MISMATCH");
             }
             library = Some(id);
         }
-        Ok(library)
+        if let Some(event_id) = &event_library {
+            let expected = super::library::target_id(&["telegram", &target.account_id, &target.channel_id]);
+            if event_id != library.as_ref().unwrap_or(&expected) {
+                bail!("BACKUP_LIBRARY_MISMATCH");
+            }
+        }
+        Ok(library.or(event_library))
     }
     async fn projection(&self, kind: &'static str, previous: Option<Cursor>) -> Result<Projection> {
         let target = self.target.clone();
@@ -418,6 +450,13 @@ impl TelegramProvider {
                 serde_json::from_str(&document.caption).context("TELEGRAM_INDEX_INVALID")?;
             if envelope.library_id != target.scope.library_id {
                 bail!("BACKUP_LIBRARY_MISMATCH");
+            }
+            if envelope.kind == "asset_archive" {
+                let archive = Self::asset_archive_records(target, index, &snapshot.media)?;
+                for (revision, body) in archive {
+                    high = high.max(revision);
+                    events.push((revision, body));
+                }
             }
             if envelope.kind == "event" {
                 let id = index.revision;
@@ -485,6 +524,40 @@ impl TelegramProvider {
         let mut plan = Self::collect_archive(io, target, &[(asset, u64::MAX)], snapshot)?;
         plan.library.direct_delete = Some(tombstone);
         plan.encode(target, SEGMENT_TARGET)
+    }
+
+    fn asset_archive_records(
+        target: &Target,
+        index: &super::telegram_transport::IndexDocument,
+        media: &[super::telegram_transfer::RemoteDocument],
+    ) -> Result<Vec<(i64, Vec<u8>)>> {
+        let envelope: Envelope = serde_json::from_str(&index.document.caption)?;
+        let archive: Library = serde_json::from_slice(index.verified_body()?)?;
+        archive.validate(target, &envelope)?;
+        anyhow::ensure!(archive.previous_segment.is_none() && archive.direct_delete.is_some(), "TELEGRAM_INDEX_INVALID");
+        let mut records = Vec::new();
+        archive.append_archived_events_resolved(target, index.document.message_id, &mut 0, &mut records, media)?;
+        for (_, body) in &records {
+            let event = Event::decode_with_documents(target, body, media)?;
+            anyhow::ensure!(event.change.asset_id == envelope.asset_id, "TELEGRAM_INDEX_INVALID");
+        }
+        Ok(records)
+    }
+
+    fn asset_archive_body(target: &Target, asset: &str, tombstone: Vec<u8>, snapshot: &ChannelSnapshot) -> Result<Vec<u8>> {
+        let mut archived_events = Vec::new();
+        for index in &snapshot.indexes {
+            let envelope: Envelope = serde_json::from_str(&index.document.caption)?;
+            if envelope.kind == "event" && envelope.asset_id == asset {
+                archived_events.push(ArchivedEvent { revision: index.revision, body: index.verified_body()?.to_vec() });
+            }
+        }
+        Ok(serde_json::to_vec(&Library {
+            previous_segment: None, direct_delete: Some(tombstone), archived_events,
+            schema_version: 2, provider_type: ProviderType::Telegram, mode: "single_writer".into(),
+            library_id: target.scope.library_id.clone(), account_id: target.account_id.clone(),
+            channel_id: target.channel_id.clone(),
+        })?)
     }
 
     // The complete library can change while a rejected upload is waiting to retry.
@@ -555,7 +628,11 @@ impl TelegramProvider {
         operation: &str,
         snapshot: &ChannelSnapshot,
     ) -> Result<()> {
-        let Some(mut entry) = journal.get(operation, "library")? else {
+        let entry = match journal.get(operation, "asset_archive")? {
+            Some(entry) => Some(entry),
+            None => journal.get(operation, "library")?,
+        };
+        let Some(mut entry) = entry else {
             return Ok(());
         };
         if entry.target != *target {
@@ -589,7 +666,7 @@ impl TelegramProvider {
         snapshot: &ChannelSnapshot,
     ) -> Result<ArchivePlan> {
         let catalog = Catalog::read(target, snapshot, io)?;
-        let parent = catalog.head().parent.clone();
+        let parent = catalog.segments.last_key_value().and_then(|(_, head)| head.parent.clone());
         let mut archive = vec![];
         let mut libraries = vec![];
         let mut sealed = std::collections::BTreeMap::new();
@@ -878,46 +955,17 @@ impl BackupProvider for TelegramProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
     }
-    fn open_library(&self, create: bool) -> ProviderFuture<'_, LibraryDescriptor> {
+    fn open_library(&self, _create: bool) -> ProviderFuture<'_, LibraryDescriptor> {
         let target = self.target.clone();
         Box::pin(async move {
-            self.request("open_library", None, move |core, transport, io| {
+            self.request("open_library", None, move |_, transport, io| {
                 Box::pin(async move {
                     match Self::discover(&target, transport, io).await? {
                         Some(id) if id == target.scope.library_id => {}
                         Some(_) => bail!("BACKUP_LIBRARY_MISMATCH"),
-                        None if create => {
-                            let body = serde_json::to_vec(&Library {
-                                previous_segment: None,
-                                direct_delete: None,
-                                archived_events: vec![],
-                                schema_version: 2,
-                                provider_type: ProviderType::Telegram,
-                                mode: "single_writer".into(),
-                                library_id: target.scope.library_id.clone(),
-                                account_id: target.account_id.clone(),
-                                channel_id: target.channel_id.clone(),
-                            })?;
-                            Self::send_index(
-                                core,
-                                transport,
-                                io,
-                                &target,
-                                "library",
-                                &target.scope.library_id,
-                                &target.scope.library_id,
-                                &core.telegram_storage_device_id()?,
-                                body,
-                                IndexTiming::default(),
-                                ReceiptCheck::ReadBack,
-                            )
-                            .await?;
-                            if Self::discover(&target, transport, io).await?.as_deref()
-                                != Some(&target.scope.library_id)
-                            {
-                                bail!("BACKUP_PUBLICATION_UNCONFIRMED");
-                            }
-                        }
+                        None if target.scope.library_id == super::library::target_id(&[
+                            "telegram", &target.account_id, &target.channel_id,
+                        ]) => {}
                         None => bail!("BACKUP_LIBRARY_NOT_FOUND"),
                     }
                     Ok(LibraryDescriptor {
@@ -959,6 +1007,14 @@ impl BackupProvider for TelegramProvider {
                 .map(|s| telegram_replay::remote(self.scope(), s)))
         })
     }
+    fn read_assets(&self, ids: Vec<String>) -> ProviderFuture<'_, Vec<RemoteAsset>> {
+        Box::pin(async move {
+            if ids.is_empty() { return Ok(Vec::new()); }
+            let mut projection = self.projection("read_asset", self.saved_cursor()?).await?;
+            Ok(ids.into_iter().filter_map(|id| projection.assets.remove(&id))
+                .map(|asset| telegram_replay::remote(self.scope(),asset)).collect())
+        })
+    }
     fn publish_change(
         &self,
         change: AssetChange,
@@ -995,6 +1051,8 @@ impl BackupProvider for TelegramProvider {
                         && CoreJournal(core)
                             .get(&change.operation_id, "event")?
                             .is_some();
+                    let legacy_archive = change.delete && CoreJournal(core)
+                        .get(&change.operation_id, "library")?.is_some();
                     let mut projected =
                         Self::project_snapshot(core, &target, io, previous.as_ref(), &snapshot)?;
                     if !Self::publication_exists(
@@ -1027,26 +1085,25 @@ impl BackupProvider for TelegramProvider {
                             projected.last_deletions.get(&change.asset_id).copied(),
                         )?;
                         if change.delete && !legacy_delete {
-                            let archive = Self::direct_archive_body(
-                                io,
-                                &target,
-                                &change.asset_id,
-                                &snapshot,
-                                body,
-                            )?;
-                            Self::prepare_archive_retry(core, &target, &change, &archive)?;
+                            let (kind, archive_asset, archive) = if legacy_archive {
+                                let archive = Self::direct_archive_body(io, &target, &change.asset_id, &snapshot, body)?;
+                                Self::prepare_archive_retry(core, &target, &change, &archive)?;
+                                ("library", &target.scope.library_id, archive)
+                            } else {
+                                ("asset_archive", &change.asset_id, Self::asset_archive_body(&target, &change.asset_id, body, &snapshot)?)
+                            };
                             Box::pin(Self::send_index(
                                 core,
                                 transport,
                                 io,
                                 &target,
-                                "library",
-                                &target.scope.library_id,
+                                kind,
+                                archive_asset,
                                 &change.operation_id,
                                 &change.device_id,
                                 archive,
                                 timing,
-                                ReceiptCheck::FreshDeleteArchive,
+                                if legacy_archive { ReceiptCheck::FreshDeleteArchive } else { ReceiptCheck::ReadBack },
                             ))
                             .await?;
                         } else {
@@ -1135,7 +1192,7 @@ impl BackupProvider for TelegramProvider {
                             io,
                             Some(&projected.cursor),
                         )));
-                        projected = if change.delete && !legacy_delete {
+                        projected = if legacy_archive {
                             super::telegram_transport::capture_publish_refresh(
                                 &target,
                                 &change.operation_id,
@@ -1440,13 +1497,35 @@ impl BackupProvider for TelegramProvider {
                     if let Some(peer) = &parked {
                         deletions.push((&peer.asset,u64::try_from(peer.revision)?));
                     }
-                    let archive = super::delete_timing::timed(core,&operation,"archive",Box::pin(Self::archive_deleted_events(core,transport,io,&target,&operation,&deletions,snapshot,IndexTiming::new(core,&operation,"archive")))).await?;
-                    let Some((archived,snapshot)) = archive else { return Ok(DeleteCleanup::ArchiveReady) };
+                    let standalone = snapshot.indexes.iter().find(|index|
+                        ((i64::from(index.document.message_id) << 32) | 1) as u64 == deletion
+                        && serde_json::from_str::<Envelope>(&index.document.caption).is_ok_and(|e| e.kind=="asset_archive" && e.asset_id==asset));
+                    let (archived, snapshot) = if let Some(index) = standalone {
+                        let records = Self::asset_archive_records(&target,index,&snapshot.media)?;
+                        let mut owned = std::collections::BTreeMap::<i32,Vec<_>>::new();
+                        for event in &snapshot.indexes {
+                            let envelope: Envelope = serde_json::from_str(&event.document.caption)?;
+                            if envelope.kind == "event" && envelope.asset_id == asset {
+                                let body = event.verified_body()?;
+                                anyhow::ensure!(records.iter().any(|(revision, bytes)| *revision==event.revision && bytes==body),
+                                    "BACKUP_PUBLICATION_UNCONFIRMED");
+                                owned.entry(event.document.message_id).or_default().push(event.document.clone());
+                            }
+                        }
+                        super::telegram_transport::confirm_archive(transport,&target,&index.document,index.verified_body()?,io).await?;
+                        deletions.truncate(1);
+                        (owned.into_iter().collect(), snapshot)
+                    } else {
+                        let archive = super::delete_timing::timed(core,&operation,"archive",Box::pin(Self::archive_deleted_events(core,transport,io,&target,&operation,&deletions,snapshot,IndexTiming::new(core,&operation,"archive")))).await?;
+                        let Some(archive) = archive else { return Ok(DeleteCleanup::ArchiveReady) };
+                        archive
+                    };
                     let media=snapshot.media.clone();
                     let fresh=super::delete_timing::timed(core,&operation,"prepare_cleanup",async {Self::project_snapshot(core,&target,io,Some(&projected.cursor),&snapshot)}).await?;
                     if !fresh.assets.get(&asset).is_some_and(|s|s.deleted&&s.revision==deletion) {bail!("BACKUP_REUPLOAD_STALE");}
+                    let parked = parked.as_ref().filter(|_| deletions.len() > 1);
                     let remove = super::delete_timing::timed_setup(core,&operation,"remove_messages",Box::pin(super::telegram_lifecycle::reconcile_deleted_messages(transport,&target,&deletions,io,&fresh,media,archived)));
-                    let messages = super::delete_timing::with_companion(parked.as_ref().map(|p| p.operation.as_str()),remove).await?;
+                    let messages = super::delete_timing::with_companion(parked.map(|p| p.operation.as_str()),remove).await?;
                     eprintln!("telegram_delete operation={} messages={messages}",operation);
                     let final_state=super::delete_timing::timed_refresh(core,&operation,"verify",Box::pin(Self::project(core,&target,transport,io,Some(&fresh.cursor)))).await?;
                     if !deletions.iter().all(|&(id,rev)| final_state.assets.get(id).is_some_and(|s|s.deleted && s.revision==rev)) {
@@ -1516,6 +1595,46 @@ impl AsyncRead for StreamReader {
 #[cfg(test)]
 mod caption_tests {
     use super::*;
+    #[test]
+    fn video_archive_never_copies_another_videos_events() -> Result<()> {
+        use super::super::telegram_transport::IndexDocument;
+        use super::super::telegram_transfer::RemoteDocument;
+        let id = || uuid::Uuid::new_v4().to_string();
+        let target = Target {
+            scope: Scope { space_id: id(), library_id: id(), provider_type: ProviderType::Telegram, protocol: 2 },
+            account_id: "1".into(), channel_id: "2".into(),
+        };
+        let first = id();
+        let other = id();
+        let change = |asset: &str| AssetChange {
+            recreate:false, resolved_conflicts:vec![], asset_id:asset.into(), base:None,
+            fields:Default::default(),field_bases:Default::default(),media:None,
+            cover:ReferenceChange::Unchanged,transcript:ReferenceChange::Unchanged,
+            delete:true,device_id:id(),operation_id:id(),conflicts:vec![],
+        };
+        let document = |kind: &str, change: &AssetChange, message_id: i32, body: Vec<u8>| -> Result<IndexDocument> {
+            let envelope = Envelope {
+                generation:None,yingqu_media:2,library_id:target.scope.library_id.clone(),
+                asset_id:change.asset_id.clone(),operation_id:change.operation_id.clone(),
+                device_id:change.device_id.clone(),kind:kind.into(),bytes:body.len() as u64,
+                sha256:format!("{:x}", Sha256::digest(&body)),container:"json".into(),
+            };
+            let doc = RemoteDocument { message_id, document_id:i64::from(message_id), bytes:body.len() as u64, caption:envelope.caption()? };
+            Ok(IndexDocument::fixture(i64::from(message_id), doc, body))
+        };
+        let a = change(&first);
+        let b = change(&other);
+        let snapshot = ChannelSnapshot {
+            high:4, indexes:vec![document("event",&a,3,Event::encode(&target,&a)?)?,document("event",&b,4,Event::encode(&target,&b)?)?], media:vec![],
+        };
+        let tombstone = change(&first);
+        let body = TelegramProvider::asset_archive_body(&target,&first,Event::encode(&target,&tombstone)?,&snapshot)?;
+        let archive = document("asset_archive",&tombstone,5,body)?;
+        let records = TelegramProvider::asset_archive_records(&target,&archive,&[])?;
+        assert_eq!(records.iter().map(|entry| entry.0).collect::<Vec<_>>(), [3,(5_i64<<32)|1]);
+        assert!(records.iter().all(|(_, body)| Event::decode(&target,body).unwrap().change.asset_id==first));
+        Ok(())
+    }
     #[test]
     fn thumbnail_uses_captured_original_cover_and_keeps_space_isolation() {
         let db = rusqlite::Connection::open_in_memory().unwrap();

@@ -90,34 +90,10 @@ async (page) => {
     if (await target.getByLabel('Secret Access Key', { exact: true }).inputValue() !== 'new-secret') throw new Error('New draft lost');
     if (await button('设为默认').count()) throw new Error('New draft exposes set-default before saving');
     if (await button('保存配置').count()) throw new Error('New draft still uses save label');
-    const cleanup = target.getByRole('checkbox',{name:'自动清理已删除记录',exact:true});
-    if(await cleanup.getAttribute('aria-checked')!=='false')throw new Error('Cleanup enabled by default');
-    await cleanup.click();
-    const days = target.locator('#backup-retention-days');
-    const beforeInvalidSave = await target.evaluate(()=>window.tabCalls.filter(c=>c.command==='save_backup_settings').length);
-    for(const invalid of ['0','3651','1.5']){
-      await days.fill(invalid);await button('新建配置').click();
-      await target.locator('#backup-retention-days-error').waitFor();
-      if(await target.evaluate(()=>window.tabCalls.filter(c=>c.command==='save_backup_settings').length)!==beforeInvalidSave)throw new Error('Invalid retention days reached IPC');
-    }
-    await days.fill('14');
-    await tab('S3 / space-b').click();await ready();await tab('新建空间').click();await ready();
-    if(await days.inputValue()!=='14'||await cleanup.getAttribute('aria-checked')!=='true')throw new Error('Retention draft lost while browsing spaces');
+    if (await target.getByRole('checkbox', { name: '自动清理已删除记录' }).count()) throw new Error('Legacy archive setting is visible');
     await button('新建配置').click(); await ready();
     await button('保存配置').waitFor();
     if (await button('新建配置').count()) throw new Error('Saved configuration still uses create label');
-    if (await target.locator('#backup-retention-days').inputValue() !== '14') throw new Error('Retention setting not restored after creation');
-    await tab('S3 / space-b').click(); await ready();
-    if (await target.getByRole('checkbox',{name:'自动清理已删除记录',exact:true}).getAttribute('aria-checked') !== 'false') throw new Error('Retention policy leaked to another space');
-    await tab('备用存储').click(); await ready();
-    if (await target.locator('#backup-retention-days').inputValue() !== '14') throw new Error('Saved retention policy lost on switching tabs');
-    await days.fill(''); await cleanup.click();
-    await button('保存配置').click(); await ready();
-    const disabledCleanupSave = await target.evaluate(() => window.tabCalls.filter(c => c.command === 'save_backup_settings').at(-1).args.config);
-    if (disabledCleanupSave.cleanup_deleted_records !== false || disabledCleanupSave.deleted_record_retention_days !== 30) throw new Error('Cleared hidden retention days reached save');
-    if (await target.locator('#backup-retention-days-error').count()) throw new Error('Hidden retention error remained');
-    await cleanup.click();
-    if (await days.inputValue() !== '30') throw new Error('Re-enabled cleanup retained invalid days');
     const saved = tab('备用存储'); await saved.waitFor();
     if (await target.getByRole('tablist', { name: '备份空间' }).getByRole('tab').count() !== 5) throw new Error('New space tab was not appended');
     if (await target.evaluate(() => window.tabCurrent) !== 'b') throw new Error('New config took over default');
@@ -192,7 +168,7 @@ async (page) => {
     const effects = await target.evaluate(() => window.tabCalls.filter(c => ['select_backup_space', 'save_backup_settings', 'upgrade_backup_space'].includes(c.command)));
     if (effects.filter(c => c.command === 'save_backup_settings').some(c => c.args.config.activate !== false)) throw new Error('Save requested activation');
     if (errors.length) throw new Error(errors.join('\n'));
-    return { result: 'PASS', viewports: 3, accountTabStyleMatched: true, inlineRename: true, renameEnterBlurEscapeF2Ime: true, renameFailurePreservesDraft: true, nameReloaded: true, savedTabAdded: true, retentionPolicy: true, disabledCleanupClearedDays: true, browsingDoesNotActivate: true, saveDoesNotActivate: true, draftsPreserved: true, switchFailureSafe: true, singleProtocol: true, effects: effects.length, pageErrors: 0 };
+    return { result: 'PASS', viewports: 3, accountTabStyleMatched: true, inlineRename: true, renameEnterBlurEscapeF2Ime: true, renameFailurePreservesDraft: true, nameReloaded: true, savedTabAdded: true, legacyRetentionHidden: true, browsingDoesNotActivate: true, saveDoesNotActivate: true, draftsPreserved: true, switchFailureSafe: true, singleProtocol: true, effects: effects.length, pageErrors: 0 };
   } catch (error) {
     const state = await target.evaluate(() => ({ selected: [...document.querySelectorAll('[role="tablist"][aria-label="备份空间"] [role="tab"][aria-selected="true"]')].map(e => e.getAttribute('aria-label')), renaming: document.querySelector('.backup-space-name-editor')?.value, renameDisabled: document.querySelector('.backup-space-name-editor')?.disabled, names: window.tabSpaces?.map(s => [s.space_id, s.display_name]), renameCalls: window.tabCalls?.filter(c => c.command === 'rename_backup_space').map(c => c.args) }));
     throw new Error(`${String(error)}; fixture state: ${JSON.stringify(state)}`);

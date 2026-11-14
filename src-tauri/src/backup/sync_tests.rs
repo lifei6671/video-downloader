@@ -18,6 +18,20 @@ use super::*;
 use crate::backup::spaces;
 use crate::backup::{conflicts, sync_read};
 
+#[tokio::test]
+async fn new_r2_space_saves_without_writing_a_library_object() {
+    let (f, _, _) = sync_fixture().await;
+    let store = Memory::default();
+    let vault = Vault::default();
+    let prefix = "without-library/";
+    let saved = spaces::save_with(
+        &f.core, update_for(&f.space.endpoint, &f.space.bucket, prefix, "r2"),
+        &vault, |_, _, _, _| Ok(store.clone()),
+    ).await.unwrap();
+    assert_eq!(saved.library_id, crate::backup::library::target_id(&["s3", &f.space.endpoint, &f.space.bucket, prefix]));
+    assert!(store.0.lock().unwrap().objects.is_empty());
+}
+
 fn stored_fixture_credentials(f: &Fixture, vault: &Vault) {
     vault.0.lock().unwrap().insert(
         "stored-key".into(),
@@ -2459,10 +2473,16 @@ async fn p3_switch_preserves_credentials_queue_ids_and_does_not_migrate_history(
 }
 
 #[tokio::test]
-async fn p3_background_discovers_assets_while_own_media_upload_is_blocked() {
+async fn p3_background_refreshes_known_assets_while_another_upload_is_blocked() {
     let (f, _a, aengine) = sync_fixture().await;
+    aengine.execute_upload(&claim(&aengine, &f.core)).await.unwrap();
     let (_root, bcore, b, _bengine) = second_device(&f).await;
-    // Register B's independent local video without importing A or opening a task page.
+    // Seed the membership B would have after restoring a database snapshot.
+    let a_record = b.read_asset(&f.id).await.unwrap().unwrap();
+    let mut previous = a_record.clone();
+    previous.snapshot.fields.insert("title".into(), serde_json::json!("Snapshot title"));
+    let a_local = bcore.backup_db(|db| sync_engine::import_asset(db, b.scope(), &previous)).unwrap();
+    // Hold B's separate media upload while the background refresh runs.
     let id = uuid::Uuid::new_v4().to_string();
     let path = bcore.settings().download_directory.join("b.mp4");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2481,17 +2501,10 @@ async fn p3_background_discovers_assets_while_own_media_upload_is_blocked() {
     tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
         .await
         .unwrap();
-    let op = claim(&aengine, &f.core);
-    aengine.execute_upload(&op).await.unwrap();
     bcore.wake_backup();
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
-            if bcore
-                .backup_assets()
-                .unwrap()
-                .iter()
-                .any(|a| a.asset_id == f.id)
-            {
+            if bcore.backup_asset(&a_local).unwrap().unwrap().metadata["title"] != "Snapshot title" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -2765,7 +2778,7 @@ async fn p3_maintenance_failure_is_local_to_its_journal_and_shutdown_cancels_wai
 }
 
 #[tokio::test]
-async fn p3_switch_cancels_old_pagination_before_discovering_colliding_id_in_new_space() {
+async fn switching_cancels_old_record_read_and_refreshes_only_known_assets() {
     let (f, a, engine) = sync_fixture().await;
     let op = claim(&engine, &f.core);
     engine.execute_upload(&op).await.unwrap();
@@ -2810,16 +2823,26 @@ async fn p3_switch_cancels_old_pagination_before_discovering_colliding_id_in_new
         .unwrap()
         .key
         .replacen("test/", "new/", 1);
-    store_b.0.lock().unwrap().objects.insert(
-        format!("new/records/{}.json", f.id),
-        (serde_json::to_vec(&wire).unwrap(), None),
-    );
+    let unknown = uuid::Uuid::new_v4().to_string();
+    let mut unrelated = wire.clone();
+    unrelated.asset_id = unknown.clone();
+    unrelated.media.as_mut().unwrap().key = unrelated.media.as_ref().unwrap().key.replace(&f.id, &unknown);
+    {
+        let mut state = store_b.0.lock().unwrap();
+        state.objects.insert(format!("new/records/{}.json", f.id), (serde_json::to_vec(&wire).unwrap(), None));
+        state.objects.insert(format!("new/records/{unknown}.json"), (serde_json::to_vec(&unrelated).unwrap(), None));
+    }
+    // The restored database already has a member for this video in B, with an older title.
+    let remote = b.read_asset(&f.id).await.unwrap().unwrap();
+    let mut previous = remote.clone();
+    previous.snapshot.fields.insert("title".into(), serde_json::json!("Snapshot title"));
+    let local = f.core.backup_db(|db| sync_engine::import_asset(db, b.scope(), &previous)).unwrap();
     f.core
         .backup_db(|db| crate::backup::spaces::select_local(db, &f.space.space_id, true))
         .unwrap();
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    f.store.0.lock().unwrap().hold_list = Some((started.clone(), release));
+    f.store.0.lock().unwrap().hold_record = Some((started.clone(), release));
     let a_id = f.space.space_id.clone();
     let b_id = bspace.space_id.clone();
     let b_resolve = b.clone();
@@ -2846,11 +2869,7 @@ async fn p3_switch_cancels_old_pagination_before_discovering_colliding_id_in_new
     f.core.wake_backup();
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
-            if f.core
-                .backup_db(|db| repository::local_asset_id(db, &bspace.space_id, &f.id))
-                .unwrap()
-                .is_some()
-            {
+            if f.core.backup_asset(&local).unwrap().unwrap().metadata["title"] == "B remote" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -2858,12 +2877,8 @@ async fn p3_switch_cancels_old_pagination_before_discovering_colliding_id_in_new
     })
     .await
     .unwrap();
-    let local = f
-        .core
-        .backup_db(|db| repository::local_asset_id(db, &bspace.space_id, &f.id))
-        .unwrap()
-        .unwrap();
     assert_ne!(local, f.id);
+    assert!(f.core.backup_db(|db| repository::local_asset_id(db, &bspace.space_id, &unknown)).unwrap().is_none());
     assert_eq!(
         crate::backup::sync_read::list(&f.core, &bspace.space_id).unwrap()[0]
             .asset
@@ -3807,6 +3822,13 @@ impl BackupProvider for TelegramReadFixture {
     }
     fn open_library(&self, _: bool) -> ProviderFuture<'_, LibraryDescriptor> {
         panic!("unexpected write/setup")
+    }
+    fn read_assets(&self, ids: Vec<String>) -> ProviderFuture<'_, Vec<RemoteAsset>> {
+        Box::pin(async move {
+            let mut batch = self.pull_changes(None).await?;
+            batch.assets.retain(|asset| ids.contains(&asset.snapshot.asset_id));
+            Ok(batch.assets)
+        })
     }
     fn pull_changes(&self, checkpoint: Option<Checkpoint>) -> ProviderFuture<'_, ChangeBatch> {
         Box::pin(async move {

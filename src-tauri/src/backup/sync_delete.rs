@@ -396,56 +396,6 @@ fn complete_superseded(core: &Core, operation: &str) -> Result<()> {
     core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='completed',phase='superseded',last_error=NULL WHERE operation_id=?",[operation])?;Ok(())})
 }
 
-/// Existing background maintenance handles the current space only; no page or second task queue.
-pub async fn compact_current(
-    core: &Arc<Core>,
-    resolve: sync_engine::ProviderResolver,
-) -> Result<()> {
-    let Some(current) = spaces::get(core)?
-        .filter(|s| s.enabled && !s.connection_pending && s.cleanup_deleted_records)
-    else {
-        return Ok(());
-    };
-    let now = chrono::Utc::now().timestamp().max(0) as u64;
-    let due=core.backup_db(|db|Ok(db.execute("UPDATE backup_record_retention SET next_check_at=?2 WHERE space_id=?1 AND enabled=1 AND next_check_at<=?3",params![current.space_id,i64::try_from(now+300)?,i64::try_from(now)?])?>0))?;
-    if !due {
-        return Ok(());
-    }
-    let work=async {
-        let provider=resolve(core,&current.space_id)?;
-        let candidates:Vec<RemoteAsset>=core.backup_db(|db|{
-            let mut q=db.prepare("SELECT t.record_json,t.version_json FROM backup_tombstones t JOIN backup_space_assets m USING(space_id,remote_asset_id) WHERE t.space_id=? AND m.remote_deleted=1")?;
-            let rows=q.query_map([&current.space_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            rows.into_iter().map(|(snapshot,version)|Ok(RemoteAsset{snapshot:serde_json::from_str(&snapshot)?,version:serde_json::from_str(&version)?})).collect()
-        })?;
-        let engine=sync_engine::SyncEngine::new(core.clone(),provider.clone());
-        let mut cancel=core.backup_cancellation();
-        let verified:bool=core.backup_db(|db|Ok(db.query_row("SELECT delete_verified FROM backup_record_retention WHERE space_id=?",[&current.space_id],|r|r.get(0))?))?;
-        let cleanup=async {
-            if !candidates.is_empty() && !verified {
-                spaces::verify_record_cleanup(core,&current.space_id).await?;
-                core.backup_db(|db|{db.execute("UPDATE backup_record_retention SET delete_verified=1 WHERE space_id=?",[&current.space_id])?;Ok(())})?;
-            }
-            provider.compact_deleted_records(candidates,current.deleted_record_retention_days,now).await
-        };
-        let compacted=sync_engine::scoped(&engine,&mut cancel,async {tokio::time::timeout(std::time::Duration::from_secs(120),cleanup).await.context("BACKUP_TIMEOUT")?}).await?;
-        core.backup_db(|db|{let tx=db.unchecked_transaction()?;for remote in compacted {sync_engine::import_asset(&tx,provider.scope(),&remote)?;}tx.execute("UPDATE backup_record_retention SET next_check_at=?2,last_error=NULL WHERE space_id=?1",params![current.space_id,i64::try_from(now+3600)?])?;tx.commit()?;Ok(())})?;
-        Ok::<_,anyhow::Error>(())
-    }.await;
-    if let Err(error) = &work {
-        if error.to_string() != "CANCELED" {
-            core.backup_db(|db| {
-                db.execute(
-                    "UPDATE backup_record_retention SET last_error=?2 WHERE space_id=?1",
-                    params![current.space_id, error.to_string()],
-                )?;
-                Ok(())
-            })?;
-        }
-    }
-    work
-}
-
 /// Called only after a fresh authoritative tombstone during an actual missing-video read.
 pub async fn confirm_on_read(
     core: &Arc<Core>,

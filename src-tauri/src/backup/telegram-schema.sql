@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS telegram_transfer_cooldowns (
     account_id TEXT PRIMARY KEY,
     retry_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS telegram_extra_sends (
+ operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('database','asset_archive')),
+ entry_json TEXT NOT NULL CHECK(json_valid(entry_json)));
 CREATE TABLE IF NOT EXISTS telegram_spaces (
  space_id TEXT PRIMARY KEY REFERENCES backup_spaces(space_id),
  account_id TEXT NOT NULL,channel_id TEXT NOT NULL,

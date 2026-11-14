@@ -1031,7 +1031,7 @@ impl TelegramSession {
         let mut network_stop = self.network_stop.subscribe();
         if matches!(
             kind,
-            "download_media" | "download_small_media" | "restore_media" | "verify_media"
+            "download_media" | "download_small_media" | "restore_media" | "verify_media" | "database_message"
         ) {
             return self
                 .with_media_reader(
@@ -1832,6 +1832,20 @@ pub(super) async fn bounded<T>(
         result = tokio::time::timeout(REQUEST_TIMEOUT, work) => result.map_err(|_| anyhow::anyhow!("TELEGRAM_TIMEOUT"))?,
     }
 }
+#[derive(Debug)]
+pub(crate) struct RejectedRpc {
+    pub(crate) code: i32,
+    pub(crate) name: String,
+}
+
+impl std::fmt::Display for RejectedRpc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.name, self.code)
+    }
+}
+
+impl std::error::Error for RejectedRpc {}
+
 pub(crate) fn rpc_error(error: InvocationError) -> anyhow::Error {
     // Never forward Display/Debug: RPC errors may carry request or connection context.
     let code = match error {
@@ -1859,7 +1873,17 @@ pub(crate) fn rpc_error(error: InvocationError) -> anyhow::Error {
                 | "CHAT_DELETE_FORBIDDEN" => "TELEGRAM_CHANNEL_FORBIDDEN",
                 "FILE_PART_MISSING" => "TELEGRAM_UPLOAD_PART_MISSING",
                 "FILE_PARTS_INVALID" | "FILE_PART_TOO_BIG" => "TELEGRAM_FILE_TOO_LARGE",
-                _ => "TELEGRAM_RPC_ERROR",
+                _ => {
+                    let name = if (1..=64).contains(&error.name.len())
+                        && error.name.bytes().all(|byte| byte.is_ascii_uppercase() || byte == b'_')
+                    {
+                        error.name
+                    } else {
+                        "UNKNOWN".into()
+                    };
+                    return anyhow::Error::new(RejectedRpc { code: error.code, name })
+                        .context("TELEGRAM_RPC_ERROR");
+                }
             }
         }
         InvocationError::Session(_) => "TELEGRAM_SESSION_STORAGE",
@@ -1880,6 +1904,22 @@ fn sign_in_error(error: SignInError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unknown_rpc_rejection_keeps_only_safe_diagnostic_details() {
+        fn rejection(name: &str) -> anyhow::Error {
+            rpc_error(InvocationError::Rpc(tl::types::RpcError {
+                error_code: 400,
+                error_message: name.into(),
+            }.into()))
+        }
+        let error = rejection("FILE_PART_SIZE_CHANGED");
+        assert_eq!(error.to_string(), "TELEGRAM_RPC_ERROR");
+        let rpc = error.downcast_ref::<RejectedRpc>().unwrap();
+        assert_eq!((rpc.code, rpc.name.as_str()), (400, "FILE_PART_SIZE_CHANGED"));
+        let error = rejection("PAYLOAD https://example.com/");
+        assert_eq!(error.downcast_ref::<RejectedRpc>().unwrap().name, "UNKNOWN");
+    }
+
     #[tokio::test]
     async fn reconnect_feedback_clears_only_recovered_network_errors() {
         for code in [

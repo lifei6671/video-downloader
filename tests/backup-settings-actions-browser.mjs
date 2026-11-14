@@ -43,12 +43,11 @@ async (page) => {
     await control.click();
     if(await control.getAttribute('aria-busy')!=='true'||!await control.isDisabled()||!await control.locator('[data-slot="spinner"]').count())throw new Error('Missing busy feedback: '+name);
     const during=await control.boundingBox();if(Math.abs(before.width-during.width)>1||Math.abs(before.height-during.height)>1)throw new Error('Feedback resized button: '+name+' '+JSON.stringify({before,during}));
-    const visible=await control.locator('.backup-save-progress').evaluate(async el=>{
-      let intermediate=false;const start=performance.now();
-      while(performance.now()-start<180){await new Promise(requestAnimationFrame);const opacity=Number(getComputedStyle(el).opacity);if(opacity>0&&opacity<1)intermediate=true;}
-      return intermediate;
+    const immediate=await control.locator('.backup-save-progress').evaluate(el=>{
+      const style=getComputedStyle(el);
+      return style.transitionDelay==='0s'&&style.transitionDuration==='0.1s';
     });
-    if(!visible)throw new Error('No observed fade frames: '+name);
+    if(!immediate)throw new Error('Busy feedback is delayed: '+name);
     if(heldText){
       await p.waitForFunction(()=>typeof window.finishSpaceRefresh==='function');
       if(await p.locator('.backup-feedback-button[aria-busy="true"] .backup-save-progress').textContent()!==heldText)throw new Error('Toggle feedback reversed during refresh');
@@ -104,7 +103,7 @@ async (page) => {
       if(width===1440)await p.screenshot({path:'output/playwright/backup-settings-validation.png'});
       await p.emulateMedia({reducedMotion:'no-preference'});
       for(const control of [button('新建配置'),button('测试连接'),button('停用远端备份'),tab('主空间')]){
-        if(!await control.evaluate(e=>getComputedStyle(e).transitionDuration.split(',').every(x=>x.trim()==='0.25s')))throw new Error('Button transition missing');
+        if(!await control.evaluate(e=>getComputedStyle(e).transitionDuration.split(',').every(x=>x.trim()==='0.1s')))throw new Error('Button transition missing');
       }
       await p.emulateMedia({reducedMotion:'reduce'});
       if(await button('新建配置').evaluate(e=>getComputedStyle(e).transitionDuration)!=='0s')throw new Error('Reduced motion ignored');
@@ -129,33 +128,32 @@ async (page) => {
     if(await p.evaluate(()=>window.syncEnabled)!==false||!await button('启用远端备份').count())throw new Error('Confirmed disable lost after refresh failure');
     await clickFeedback('启用远端备份');
     if(await p.evaluate(()=>window.syncEnabled)!==true||!await button('停用远端备份').count())throw new Error('Confirmed enable lost after refresh failure');
-    await p.evaluate(()=>window.failSpaceRefresh=false);
-    await p.evaluate(()=>{window.current='a';window.syncEnabled=true;window.spaces[0].enabled=true;});
-    await button('关于软件').click();await button('系统设置').click();await button('远端备份').click();await ready();
+    // Reload the fixture so the saved default also reaches the mounted settings panel.
+    await p.reload();await button('系统设置').click();await button('远端备份').click();await ready();
     await clickFeedback('停用远端备份');await clickFeedback('启用远端备份');
     if(await p.getByRole('alertdialog').count()||await button('查看升级要求').count())throw new Error('Toggle exposed a protocol upgrade flow');
     if((await p.evaluate(()=>window.calls)).some(c=>c.command==='upgrade_backup_space'))throw new Error('Unexpected upgrade IPC');
     if(await p.evaluate(()=>window.current)!=='a')throw new Error('Toggle changed default storage');
     // The local toggle must finish even while the worker has not connected.
     await clickFeedback('停用远端备份');
-    await p.evaluate(()=>{window.spaces[0].connection_pending=true;window.spaces[0].enabled=false;});
+    await p.evaluate(()=>{const current=window.spaces.find(s=>s.space_id===window.current);current.connection_pending=true;current.enabled=false;current.last_error=null;});
     await button('关于软件').click();await button('系统设置').click();await button('远端备份').click();await ready();
     await clickFeedback('启用远端备份');await ready();
     await p.getByRole('status').filter({hasText:'正在连接备份存储…'}).waitFor();
     if(!await button('停用远端备份').isEnabled())throw new Error('Pending connection locked stop');
     await p.locator('#backup-key').fill('unsaved-key');
-    await p.evaluate(()=>window.spaces[0].last_error='BACKUP_TIMEOUT');
+    await p.evaluate(()=>window.spaces.find(s=>s.space_id===window.current).last_error='BACKUP_TIMEOUT');
     await p.getByRole('alert').filter({hasText:'连接备份存储超时，请检查网络后重试'}).waitFor();
     if(await p.locator('#backup-key').inputValue()!=='unsaved-key')throw new Error('Worker state refresh replaced draft');
     await clickFeedback('重新连接');
     await p.getByRole('status').filter({hasText:'正在连接备份存储…'}).waitFor();
     if(await p.evaluate(()=>window.syncEnabled)!==true||await p.evaluate(()=>window.current)!=='a')throw new Error('Retry disabled backup or changed default');
-    await p.evaluate(()=>{window.spaces[0].connection_pending=false;window.spaces[0].enabled=true;});
+    await p.evaluate(()=>{const current=window.spaces.find(s=>s.space_id===window.current);current.connection_pending=false;current.enabled=true;});
     await p.getByRole('status').filter({hasText:'正在连接备份存储…'}).waitFor({state:'hidden'});
     if(await p.locator('#backup-key').inputValue()!=='unsaved-key')throw new Error('Ready state refresh replaced draft');
     // Pending work can be stopped, and local polling stops with it.
     await clickFeedback('停用远端备份');
-    await p.evaluate(()=>{window.spaces[0].connection_pending=true;window.spaces[0].enabled=false;});
+    await p.evaluate(()=>{const current=window.spaces.find(s=>s.space_id===window.current);current.connection_pending=true;current.enabled=false;});
     await clickFeedback('启用远端备份');
     await p.getByRole('status').filter({hasText:'正在连接备份存储…'}).waitFor();
     await clickFeedback('停用远端备份');
@@ -163,12 +161,6 @@ async (page) => {
     const refreshes=await p.evaluate(()=>window.calls.filter(c=>c.command==='list_backup_spaces').length);
     await p.waitForTimeout(1200);
     if(await p.evaluate(()=>window.calls.filter(c=>c.command==='list_backup_spaces').length)!==refreshes)throw new Error('Disabled backup still polls connection');
-    await p.evaluate(()=>{window.spaces[0].connection_pending=false;window.spaces[0].cleanup_deleted_records=true;window.spaces[0].last_error=null;});
-    await clickFeedback('启用远端备份');
-    await p.evaluate(()=>window.spaces[0].last_error='BACKUP_CONDITIONAL_DELETE_UNSUPPORTED');
-    await p.getByRole('alert').filter({hasText:'该存储不支持按版本清理记录，已停止清理'}).waitFor();
-    if(await p.locator('#backup-key').inputValue()!=='unsaved-key')throw new Error('Cleanup error refresh replaced draft');
-    await clickFeedback('停用远端备份');
     if(errors.length)throw new Error(errors.join('\n'));
     return {result:'PASS',viewports:3,toggle:true,pendingConnection:true,connectionErrorRetry:true,preserveDraft:true,cancelPending:true,defaultGate:true,noMigration:true,inlineValidation:true,requiredStars:true,transitions:true,referencedDeleteConfirm:true,deleteFailureRetry:true,referenceRaceGuard:true,emptyDelete:true,pageErrors:0};
   } finally {await p.close();}

@@ -14,6 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction } from '@/components/ui/alert-dialog';
 import { TelegramStorageSettings } from '@/components/telegram-storage-settings';
+import { DatabaseBackupSettings } from '@/components/database-backup-settings';
 
 type Editor = { form: BackupUpdate; key: string; secret: string; credentialsChanged: boolean; savedTarget: string };
 type RenameEditor = { id: string; value: string; saving: boolean; error: string };
@@ -44,27 +45,14 @@ export function BackupSettingsForm({ saved, active = true }: { saved: (value: Ba
   const [showKey, setShowKey] = useState(false), [showSecret, setShowSecret] = useState(false);
   const [savedTarget, setSavedTarget] = useState('');
   const target = (value: Omit<BackupUpdate, 'create_library'>) => JSON.stringify([value.provider_type, value.profile, value.endpoint, value.bucket, value.prefix, value.region, value.path_style, value.telegram]);
-  const retention = (value: Pick<BackupUpdate, 'cleanup_deleted_records' | 'deleted_record_retention_days'>) => JSON.stringify([value.cleanup_deleted_records ?? false, value.deleted_record_retention_days ?? 30]);
   const [credentialsChanged, setCredentialsChanged] = useState(false);
   const [busy, setBusy] = useState<'save' | 'test' | 'load' | 'switch' | 'toggle' | 'retry' | 'delete' | 'telegram' | null>(null), [loaded, setLoaded] = useState(false);
   function validate() {
     const inputs = Array.from(formRef.current?.querySelectorAll<HTMLInputElement>('input') ?? []);
     const invalid = inputs.filter(input => !input.validity.valid);
-    setErrors(Object.fromEntries(invalid.map(input => [input.id, input.validity.valueMissing ? '请填写此项' : input.id === 'backup-retention-days' ? '请输入1到3650之间的整数' : '请输入有效的地址'])));
+    setErrors(Object.fromEntries(invalid.map(input => [input.id, input.validity.valueMissing ? '请填写此项' : '请输入有效的地址'])));
     invalid[0]?.focus();
     return invalid.length === 0;
-  }
-  function setCleanupRecords(enabled: boolean) {
-    setForm(previous => {
-      const days = previous.deleted_record_retention_days;
-      const validDays = Number.isInteger(days) && days >= 1 && days <= 3650;
-      return { ...previous, cleanup_deleted_records: enabled, deleted_record_retention_days: !enabled && !validDays ? 30 : days };
-    });
-    if (!enabled) setErrors(previous => {
-      const next = { ...previous };
-      delete next['backup-retention-days'];
-      return next;
-    });
   }
   function validation(id: string) { return { 'aria-invalid': !!errors[id], 'aria-describedby': errors[id] ? `${id}-error` : undefined }; }
   function fieldError(id: string) { return errors[id] && <FieldError id={`${id}-error`}>{errors[id]}</FieldError>; }
@@ -111,7 +99,7 @@ export function BackupSettingsForm({ saved, active = true }: { saved: (value: Ba
   }
   function editor(): Editor { return { form, key, secret, credentialsChanged, savedTarget }; }
   function remember() {
-    if (!selectedSpace || credentialsChanged || target(form) !== savedTarget || form.enabled !== selectedSpace.enabled || retention(form) !== retention(selectedSpace) || spaceName(form) !== spaceName(selectedSpace)) drafts.current.set(selected, editor());
+    if (!selectedSpace || credentialsChanged || target(form) !== savedTarget || form.enabled !== selectedSpace.enabled || spaceName(form) !== spaceName(selectedSpace)) drafts.current.set(selected, editor());
     else drafts.current.delete(selected);
   }
   function restore(value: Editor) {
@@ -145,7 +133,7 @@ export function BackupSettingsForm({ saved, active = true }: { saved: (value: Ba
   const currentSpace = spaces.find(space => space.space_id === current);
   // Keep Telegram connection feedback current using local status only.
   useEffect(() => {
-    if (!active || !loaded || busy || !enabled || !(currentSpace?.connection_pending || currentSpace?.cleanup_deleted_records || currentSpace?.provider_type === 'telegram')) return;
+    if (!active || !loaded || busy || !enabled || !(currentSpace?.connection_pending || currentSpace?.provider_type === 'telegram')) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
@@ -153,14 +141,14 @@ export function BackupSettingsForm({ saved, active = true }: { saved: (value: Ba
         const [active, all] = await Promise.all([api.backupSettings(), api.backupSpaces()]);
         if (!live) return;
         setSpaces(all); saved(active);
-        if (active?.connection_pending || active?.cleanup_deleted_records || active?.provider_type === 'telegram') timer = setTimeout(() => void refresh(), active.connection_pending || active.last_error === 'TELEGRAM_RECONNECTING' ? 1000 : 5000);
+        if (active?.connection_pending || active?.provider_type === 'telegram') timer = setTimeout(() => void refresh(), active.connection_pending || active.last_error === 'TELEGRAM_RECONNECTING' ? 1000 : 5000);
       } catch (error) {
         if (live) { setActionError(errorText(error)); timer = setTimeout(() => void refresh(), 5000); }
       }
     }
     void refresh();
     return () => { live = false; clearTimeout(timer); };
-  }, [active, loaded, busy, enabled, current, currentSpace?.connection_pending, currentSpace?.cleanup_deleted_records, currentSpace?.provider_type, currentSpace?.last_error, saved]);
+  }, [active, loaded, busy, enabled, current, currentSpace?.connection_pending, currentSpace?.provider_type, currentSpace?.last_error, saved]);
   async function run(kind: 'save' | 'test') {
     if (busy || !loaded || !validate()) return;
     const started = performance.now();
@@ -269,7 +257,7 @@ export function BackupSettingsForm({ saved, active = true }: { saved: (value: Ba
   const saveLabel = selected === 'new' ? '新建配置' : '保存配置';
   const disabled = !!busy || !loaded || !!renaming?.saving;
   const tabsDisabled = !loaded || (!!busy && busy !== 'load') || !!renaming?.saving;
-  const dirty = !selectedSpace || target(form) !== savedTarget || credentialsChanged || retention(form) !== retention(selectedSpace) || spaceName(form) !== spaceName(selectedSpace);
+  const dirty = !selectedSpace || target(form) !== savedTarget || credentialsChanged || spaceName(form) !== spaceName(selectedSpace);
   const switchReason = !enabled ? '请先启用远端备份' : !selectedSpace || target(form) !== target(selectedSpace) ? '请先保存配置' : spaceName(form) !== spaceName(selectedSpace) ? '请先保存名称' : selected === current && selectedSpace.enabled ? '当前默认备份空间' : dirty ? '请先保存配置' : '';
   const providerField = <Field><FieldLabel id="backup-provider-label">备份提供商{!selectedSpace && <Required />}</FieldLabel>{selectedSpace ? <p className="text-sm">{({ r2: 'Cloudflare R2', s3: '通用 S3', telegram: 'Telegram' })[selectedSpace.profile]}</p> : <Select value={form.profile} disabled={disabled} onValueChange={profile => {
     if (profile === 'telegram') changeTarget({ ...draft(), display_name: form.display_name, prefix: '', profile, provider_type: 'telegram' });
@@ -302,17 +290,18 @@ export function BackupSettingsForm({ saved, active = true }: { saved: (value: Ba
       {form.profile === 's3' && <><Field><FieldLabel htmlFor="backup-region">Region<Required /></FieldLabel><Input id="backup-region" {...validation('backup-region')} value={form.region} required disabled={disabled} onChange={e => changeTarget({ ...form, region: e.target.value })} />{fieldError('backup-region')}</Field><Field orientation="horizontal"><FieldLabel htmlFor="backup-path-style">使用路径样式</FieldLabel><Checkbox id="backup-path-style" checked={form.path_style} disabled={disabled} onCheckedChange={v => changeTarget({ ...form, path_style: v === true })} /></Field></>}
       <Field><FieldLabel htmlFor="backup-key">Access Key ID<Required /></FieldLabel><InputGroup><InputGroupInput id="backup-key" required {...validation('backup-key')} type={showKey ? 'text' : 'password'} autoComplete="new-password" spellCheck={false} disabled={disabled} value={key} onChange={e => { setKey(e.target.value); setCredentialsChanged(true); }} /><InputGroupAddon align="inline-end"><InputGroupButton size="icon-xs" disabled={disabled} aria-label={showKey ? '隐藏 Access Key ID' : '显示 Access Key ID'} aria-pressed={showKey} onClick={() => setShowKey(!showKey)}>{showKey ? <EyeOff /> : <Eye />}</InputGroupButton></InputGroupAddon></InputGroup>{fieldError('backup-key')}</Field>
       <Field><FieldLabel htmlFor="backup-secret">Secret Access Key<Required /></FieldLabel><InputGroup><InputGroupInput id="backup-secret" required {...validation('backup-secret')} type={showSecret ? 'text' : 'password'} autoComplete="new-password" spellCheck={false} disabled={disabled} value={secret} onChange={e => { setSecret(e.target.value); setCredentialsChanged(true); }} /><InputGroupAddon align="inline-end"><InputGroupButton size="icon-xs" disabled={disabled} aria-label={showSecret ? '隐藏 Secret Access Key' : '显示 Secret Access Key'} aria-pressed={showSecret} onClick={() => setShowSecret(!showSecret)}>{showSecret ? <EyeOff /> : <Eye />}</InputGroupButton></InputGroupAddon></InputGroup>{fieldError('backup-secret')}</Field>
-      <Field orientation="horizontal"><FieldLabel htmlFor="backup-cleanup-records">自动清理已删除记录</FieldLabel><Checkbox id="backup-cleanup-records" checked={form.cleanup_deleted_records ?? false} disabled={disabled} onCheckedChange={value => setCleanupRecords(value === true)} /></Field>
-      {form.cleanup_deleted_records && <Field><FieldLabel htmlFor="backup-retention-days">保留天数<Required /></FieldLabel><Input id="backup-retention-days" type="number" min={1} max={3650} step={1} required disabled={disabled} {...validation('backup-retention-days')} value={form.deleted_record_retention_days || ''} onChange={event => setForm({ ...form, deleted_record_retention_days: Number(event.target.value) })} />{fieldError('backup-retention-days')}</Field>}
     </FieldGroup>
     <div className="flex flex-wrap gap-2">{selectedSpace && selected !== current && <Tooltip><TooltipTrigger asChild><span className="inline-flex"><Button type="button" className="backup-save-button backup-feedback-button" variant="outline" disabled={disabled || !!switchReason} aria-label="设为默认" aria-busy={busy === 'switch'} onClick={() => void switchSpace()}><span aria-hidden="true" className="backup-save-label" data-visible={busy !== 'switch'}>设为默认</span><span aria-hidden="true" className="backup-save-progress" data-visible={busy === 'switch'}><Spinner />设置中…</span></Button></span></TooltipTrigger><TooltipContent>{switchReason || '设为默认备份渠道'}</TooltipContent></Tooltip>}<Button type="submit" className="backup-save-button" disabled={disabled} aria-busy={busy === 'save'} aria-label={busy === 'save' ? '保存中…' : saveLabel}><span aria-hidden="true" className="backup-save-label" data-visible={busy !== 'save'}>{saveLabel}</span><span aria-hidden="true" className="backup-save-progress" data-visible={busy === 'save'}><Spinner aria-hidden="true" />保存中…</span></Button><Button type="button" variant="outline" className="min-w-28" disabled={disabled || !key || !secret} aria-busy={busy === 'test'} onClick={() => void run('test')}>{busy === 'test' && <Spinner aria-hidden="true" />}{busy === 'test' ? '测试中…' : '测试连接'}</Button>{selectedSpace && <Button type="button" className="backup-save-button backup-feedback-button" variant="destructive" disabled={disabled} aria-label="删除配置" aria-busy={busy === 'delete'} onClick={() => void deleteSpace()}><span aria-hidden="true" className="backup-save-label" data-visible={busy !== 'delete'}><Trash2 />删除配置</span><span aria-hidden="true" className="backup-save-progress" data-visible={busy === 'delete'}><Spinner />删除中…</span></Button>}</div>
-  </form>}</TabsContent>
+  </form>}
+  {active && selectedSpace && selectedSpace.provider_type === form.provider_type && !selectedSpace.connection_pending && target(form) === savedTarget &&
+    <DatabaseBackupSettings key={selectedSpace.space_id} spaceId={selectedSpace.space_id} remoteEnabled={enabled} disabled={disabled} telegram={selectedSpace.telegram ?? undefined} />}
+  </TabsContent>
   <AlertDialog open={active && confirmDelete} onOpenChange={open => { if (!busy) setConfirmDelete(open); }}><AlertDialogContent className="backup-settings-dialog"><AlertDialogHeader><AlertDialogTitle>删除备份配置？</AlertDialogTitle><AlertDialogDescription>此配置仍被视频或同步任务使用。删除后，关联视频将无法通过此配置同步。本机视频、远端文件和未同步文案会保留。</AlertDialogDescription></AlertDialogHeader>{actionError && <p role="alert" className="text-xs text-destructive">{actionError}</p>}<AlertDialogFooter><AlertDialogCancel disabled={disabled}>取消</AlertDialogCancel><AlertDialogAction disabled={disabled} onClick={event => { event.preventDefault(); void deleteSpace(true); }}>{busy === 'delete' && <Spinner aria-hidden="true" />}确认删除</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </Tabs></div></div></div>;
 }
 
 function draft(): BackupUpdate { return { create_library: false, cleanup_deleted_records: false, deleted_record_retention_days: 30, display_name: '', provider_type: 's3', profile: 'r2', endpoint: '', bucket: '', prefix: 'yingqu/', region: 'auto', path_style: true, enabled: true }; }
-function update(v: BackupSettings): BackupUpdate { const { provider_type, profile, endpoint, bucket, prefix, region, path_style, enabled } = v; return { create_library: false, cleanup_deleted_records: v.cleanup_deleted_records ?? false, deleted_record_retention_days: v.deleted_record_retention_days ?? 30, telegram: v.telegram, display_name: v.display_name ?? '', provider_type, profile, endpoint, bucket, prefix, region, path_style, enabled }; }
+function update(v: BackupSettings): BackupUpdate { const { provider_type, profile, endpoint, bucket, prefix, region, path_style, enabled } = v; return { create_library: false, cleanup_deleted_records: false, deleted_record_retention_days: 30, telegram: v.telegram, display_name: v.display_name ?? '', provider_type, profile, endpoint, bucket, prefix, region, path_style, enabled }; }
 function spaceName(v: Pick<BackupUpdate, 'display_name'>) { return v.display_name?.trim() ?? ''; }
 function spaceLabel(v: BackupSettings) { return spaceName(v) || (v.profile === 'telegram' ? 'Telegram' : `${v.profile === 'r2' ? 'R2' : 'S3'} / ${v.bucket}`); }
 

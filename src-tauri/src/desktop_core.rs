@@ -303,6 +303,9 @@ pub struct Core {
     pub(crate) backup_foreground: std::sync::atomic::AtomicBool,
     pub(crate) backup_active_probes: Mutex<HashSet<String>>,
     pub(crate) backup_config_lock: tokio::sync::Mutex<()>,
+    pub(crate) database_backup_lock: tokio::sync::Mutex<()>,
+    pub(crate) database_backup_active: std::sync::Mutex<Option<crate::backup::database::ActiveBackup>>,
+    pub(crate) database_backup_wake: tokio::sync::Notify,
     pub(crate) backup_restore_lock: tokio::sync::Mutex<()>,
     restore_file_locks: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     backup_history_registered: Mutex<HashMap<String, (i64, Option<tokio::time::Instant>)>>,
@@ -505,6 +508,7 @@ impl Core {
             .open(db_path.with_extension("lock"))
             .context("IO_ERROR")?;
         instance_lock.try_lock().context("APP_ALREADY_RUNNING")?;
+        crate::backup::database::apply_pending(db_path)?;
         let mut db = Connection::open(db_path).context("DATABASE_ERROR")?;
         db.pragma_update(None, "foreign_keys", true)?;
         // Snapshot the master database before the single, atomic schema upgrade.
@@ -793,6 +797,9 @@ impl Core {
             backup_foreground: std::sync::atomic::AtomicBool::new(true),
             backup_active_probes: Mutex::new(HashSet::new()),
             backup_config_lock: tokio::sync::Mutex::new(()),
+            database_backup_lock: Default::default(),
+            database_backup_active: Default::default(),
+            database_backup_wake: Default::default(),
             backup_restore_lock: tokio::sync::Mutex::new(()),
             restore_file_locks: Mutex::default(),
             backup_history_registered: Default::default(),
@@ -998,6 +1005,10 @@ impl Core {
         action(&self.inner.lock().unwrap().db)
     }
 
+    pub(crate) fn database_path(&self) -> Result<PathBuf> {
+        self.backup_db(|db| db.path().map(PathBuf::from).context("DATABASE_ERROR"))
+    }
+
     pub(crate) fn backup_display_db<T>(
         &self,
         action: impl FnOnce(&Connection) -> Result<T>,
@@ -1056,6 +1067,11 @@ impl Core {
         inner
             .workers
             .push(tokio::spawn(crate::backup::sync_engine::run(core, cancel)));
+        let core = self.clone();
+        let cancel = inner.backup_cancel.subscribe();
+        inner
+            .workers
+            .push(tokio::spawn(crate::backup::database::run(core, cancel)));
         let recovery_core = self.clone();
         let mut recovery_stop = inner.backup_cancel.subscribe();
         let recovery_epoch = inner.telegram_recovery_epoch;

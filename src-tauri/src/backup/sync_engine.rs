@@ -469,13 +469,58 @@ impl SyncEngine {
             })
             .await;
         }
-        self.pull().await
+        self.pull_known_from("manual_refresh").await
     }
 
+    pub async fn refresh_known_assets(&self) -> Result<usize> {
+        self.check_space()?;
+        let scope = self.provider.scope();
+        let ids = self.core.backup_db(|db| {
+            let mut query = db.prepare("SELECT remote_asset_id FROM backup_space_assets WHERE space_id=? AND version_json IS NOT NULL")?;
+            let rows = query.query_map([&scope.space_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })?;
+        let mut cancel = self.core.backup_cancellation();
+        let assets = scoped(self, &mut cancel, self.provider.read_assets(ids)).await?;
+        self.check_space()?;
+        let count = assets.len();
+        self.core.backup_db(|db| {
+            let tx = db.unchecked_transaction()?;
+            for asset in assets { import_asset(&tx,scope,&asset)?; }
+            tx.commit()?;
+            Ok(())
+        })?;
+        Ok(count)
+    }
+
+    async fn pull_known_from(&self, trigger: &'static str) -> Result<usize> {
+        let space = &self.provider.scope().space_id;
+        let mut timing = super::pull_timing::Run::start(&self.core, space, trigger);
+        let result = self.refresh_known_assets().await;
+        timing.finish(if result.is_ok() { "ok" } else { "error" });
+        let count = result?;
+        self.core.backup_db(|db| {
+            let tx = db.unchecked_transaction()?;
+            tx.execute("INSERT INTO backup_sync_checkpoints(space_id,last_success_at,last_error) VALUES(?1,unixepoch(),NULL)
+                ON CONFLICT(space_id) DO UPDATE SET last_success_at=excluded.last_success_at,last_error=NULL", [space])?;
+            tx.execute("INSERT INTO backup_window_sync(space_id,last_success_ms) VALUES(?1,CAST(unixepoch('subsec')*1000 AS INTEGER))
+                ON CONFLICT(space_id) DO UPDATE SET last_success_ms=excluded.last_success_ms", [space])?;
+            if matches!(trigger, "manual_refresh" | "post_delete") {
+                super::database::resume_discovery(&tx, space)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })?;
+        Ok(count)
+    }
+
+    #[cfg(test)]
     pub async fn pull(&self) -> Result<usize> {
         self.pull_from("manual_refresh").await
     }
 
+    #[cfg(test)]
     async fn pull_from(&self, trigger: &'static str) -> Result<usize> {
         self.check_space()?;
         let space = &self.provider.scope().space_id;
@@ -512,6 +557,9 @@ impl SyncEngine {
             tx.execute("INSERT INTO backup_sync_checkpoints(space_id,checkpoint_json,last_success_at,last_error) VALUES(?1,?2,unixepoch(),NULL) ON CONFLICT(space_id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json,last_success_at=excluded.last_success_at,last_error=NULL",params![space,serde_json::to_string(&batch.checkpoint)?])?;
             tx.execute("INSERT INTO backup_window_sync(space_id,last_success_ms) VALUES(?1,CAST(unixepoch('subsec')*1000 AS INTEGER))
                 ON CONFLICT(space_id) DO UPDATE SET last_success_ms=excluded.last_success_ms", [space])?;
+            if matches!(trigger, "manual_refresh" | "post_delete") {
+                super::database::resume_discovery(&tx, space)?;
+            }
             tx.commit()?;Ok(())
         })?;
         Ok(count)
@@ -1042,7 +1090,7 @@ pub async fn run_with(
             resolve.clone(),
             QueueLane::Upload
         ),
-        maintenance_loop(core, cancel, resolve)
+        maintenance_loop(core, cancel)
     );
 }
 const FOREGROUND_SYNC_SECONDS: u32 = 30;
@@ -1094,6 +1142,13 @@ async fn discovery_loop(
             else {
                 return Ok::<_, anyhow::Error>(false);
             };
+            if super::database::discovery_paused(&core, &settings.space_id)? {
+                let mut pending = core.deferred_pulls.pending.lock().unwrap();
+                if !pending.get(&settings.space_id).is_some_and(|replies| !replies.is_empty()) {
+                    pending.remove(&settings.space_id);
+                    return Ok(true);
+                }
+            }
             if settings.provider_type == ProviderType::Telegram {
                 let binding = core.telegram_accounts.binding(crate::telegram_accounts::Purpose::Backup);
                 if binding.session.reconnect.waiting() {
@@ -1117,7 +1172,7 @@ async fn discovery_loop(
                 let result = async {
                     let provider = resolve(&core, &settings.space_id)?;
                     let engine = SyncEngine::new(core.clone(), provider);
-                    tokio::select! {_=cancel.changed()=>bail!("CANCELED"),result=engine.pull_from(source)=>result}
+                    tokio::select! {_=cancel.changed()=>bail!("CANCELED"),result=engine.pull_known_from(source)=>result}
                 }.await;
                 for reply in replies {
                     let _ = reply.send(result.as_ref().copied().map_err(|e| anyhow::anyhow!(e.to_string())));
@@ -1511,15 +1566,9 @@ pub async fn maintenance_once(
 async fn maintenance_loop(
     core: Arc<Core>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
-    resolve: ProviderResolver,
 ) {
     while !*cancel.borrow() {
-        if let Err(error) = maintenance_once(&mut cancel, async {
-            super::spaces::cleanup_probes(&core).await?;
-            super::sync_delete::compact_current(&core, resolve.clone()).await
-        })
-        .await
-        {
+        if let Err(error) = maintenance_once(&mut cancel, super::spaces::cleanup_probes(&core)).await {
             if error.to_string() != "CANCELED" {
                 eprintln!("backup probe maintenance: {error}");
             }

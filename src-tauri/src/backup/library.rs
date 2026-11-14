@@ -1,6 +1,20 @@
 //! Current portable S3 library metadata. No protocol conversion or migration.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+pub(super) fn target_id(parts: &[&str]) -> String {
+    let mut hash = Sha256::new();
+    for part in parts {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&hash.finalize()[..16]);
+    uuid::Builder::from_custom_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryMetadata {

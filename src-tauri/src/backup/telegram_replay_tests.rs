@@ -342,6 +342,13 @@ impl BackupProvider for Provider {
                 .map(|s| remote(self.scope(), s)))
         })
     }
+    fn read_assets(&self, ids: Vec<String>) -> ProviderFuture<'_, Vec<RemoteAsset>> {
+        Box::pin(async move {
+            let mut batch = self.pull_changes(None).await?;
+            batch.assets.retain(|asset| ids.contains(&asset.snapshot.asset_id));
+            Ok(batch.assets)
+        })
+    }
     fn publish_change(
         &self,
         change: AssetChange,

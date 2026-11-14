@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS backup_record_retention(
  days INTEGER NOT NULL DEFAULT 30 CHECK(days BETWEEN 1 AND 3650),
  next_check_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,delete_verified INTEGER NOT NULL DEFAULT 0);
 
+CREATE TABLE IF NOT EXISTS backup_database_restore(
+ id INTEGER PRIMARY KEY CHECK(id=1),key_ref TEXT NOT NULL,space_id TEXT NOT NULL,
+ discovery_paused INTEGER NOT NULL CHECK(discovery_paused IN (0,1)));
+
 -- Reverse lookups used by history registration and local asset operations.
 CREATE INDEX IF NOT EXISTS backup_space_assets_local ON backup_space_assets(local_asset_id);
 CREATE INDEX IF NOT EXISTS backup_operations_asset ON backup_operations(asset_id);

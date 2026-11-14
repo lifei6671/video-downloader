@@ -66,17 +66,28 @@ impl Journal for CoreJournal<'_> {
 pub(super) fn get(db: &Connection, operation: &str, kind: &str) -> Result<Option<Entry>> {
     let raw: Option<String> = db
         .query_row(
-            "SELECT entry_json FROM telegram_media_sends WHERE operation_id=?1 AND kind=?2",
+            &format!(
+                "SELECT entry_json FROM {} WHERE operation_id=?1 AND kind=?2",
+                send_table(kind)
+            ),
             params![operation, kind],
             |r| r.get(0),
         )
         .optional()?;
     raw.map(|value| decode_entry(&value)).transpose()
 }
+fn send_table(kind: &str) -> &'static str {
+    if matches!(kind, "database" | "asset_archive") {
+        "telegram_extra_sends"
+    } else {
+        "telegram_media_sends"
+    }
+}
 pub(super) fn reserve(db: &Connection, entry: Entry) -> Result<Entry> {
     let tx = db.unchecked_transaction()?;
+    let table = send_table(&entry.envelope.kind);
     tx.execute(
-        "INSERT OR IGNORE INTO telegram_media_sends VALUES(?1,?2,?3)",
+        &format!("INSERT OR IGNORE INTO {table} VALUES(?1,?2,?3)"),
         params![
             entry.envelope.operation_id,
             entry.envelope.kind,
@@ -84,7 +95,7 @@ pub(super) fn reserve(db: &Connection, entry: Entry) -> Result<Entry> {
         ],
     )?;
     let raw: String = tx.query_row(
-        "SELECT entry_json FROM telegram_media_sends WHERE operation_id=?1 AND kind=?2",
+        &format!("SELECT entry_json FROM {table} WHERE operation_id=?1 AND kind=?2"),
         params![entry.envelope.operation_id, entry.envelope.kind],
         |r| r.get(0),
     )?;
@@ -100,7 +111,10 @@ pub(super) fn reserve(db: &Connection, entry: Entry) -> Result<Entry> {
 }
 pub(super) fn save(db: &Connection, entry: &Entry) -> Result<()> {
     if db.execute(
-        "UPDATE telegram_media_sends SET entry_json=?3 WHERE operation_id=?1 AND kind=?2",
+        &format!(
+            "UPDATE {} SET entry_json=?3 WHERE operation_id=?1 AND kind=?2",
+            send_table(&entry.envelope.kind)
+        ),
         params![
             entry.envelope.operation_id,
             entry.envelope.kind,

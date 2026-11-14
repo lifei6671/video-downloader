@@ -122,11 +122,11 @@ export function VideoTranscriptDialog({client, tasks, assets = [], runtime}: {cl
           await (asset ? api.copyAssetTranscript(asset.asset_id) : api.copyTranscript(task!.id));
           if (!scope.active) return;
           setCopied(true);
-          copyResetTimer.current = setTimeout(() => setCopied(false), 1800);
+          copyResetTimer.current = setTimeout(() => setCopied(false), 1000);
         })}>
           <span aria-hidden="true" className="grid">
-            <span className="col-start-1 row-start-1 inline-flex items-center justify-center gap-1.5 transition-opacity duration-250 ease-out group-data-[copied=true]/copy:opacity-0 motion-reduce:transition-none"><Copy />复制全文</span>
-            <span className="col-start-1 row-start-1 inline-flex items-center justify-center gap-1.5 opacity-0 transition-opacity duration-250 ease-out group-data-[copied=true]/copy:opacity-100 motion-reduce:transition-none"><Check />已复制</span>
+            <span className="col-start-1 row-start-1 inline-flex items-center justify-center gap-1.5 transition-opacity duration-100 ease-out group-data-[copied=true]/copy:opacity-0 motion-reduce:transition-none"><Copy />复制全文</span>
+            <span className="col-start-1 row-start-1 inline-flex items-center justify-center gap-1.5 opacity-0 transition-opacity duration-100 ease-out group-data-[copied=true]/copy:opacity-100 motion-reduce:transition-none"><Check />已复制</span>
           </span>
         </Button>
         <Button variant="outline" disabled={pending || !text} onClick={() => void act(async () => { const path = await (asset ? api.exportAssetTranscript(asset.asset_id) : api.exportTranscript(task!.id)); if (path) setNotice(`已导出：${path}`); })}><Download />导出 TXT</Button>

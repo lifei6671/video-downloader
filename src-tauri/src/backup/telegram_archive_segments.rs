@@ -61,10 +61,10 @@ impl<'a> Catalog<'a> {
                 bail!("TELEGRAM_INDEX_INVALID");
             }
         }
-        let (_, mut current) = segments
-            .last_key_value()
-            .context("BACKUP_LIBRARY_MISMATCH")?;
         let mut sealed = BTreeSet::new();
+        let Some((_, mut current)) = segments.last_key_value() else {
+            return Ok(Self { segments, sealed });
+        };
         while let Some(link) = &current.parent {
             if link.message_id >= current.doc.message_id {
                 bail!("TELEGRAM_INDEX_INVALID");

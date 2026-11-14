@@ -324,6 +324,118 @@ async fn save_backup_settings(
         .await
         .map_err(error)
 }
+
+#[tauri::command]
+fn get_database_backup_status(
+    core: State<AppCore>,
+    space_id: String,
+) -> Result<yingqu_core::backup::database::Status, String> {
+    yingqu_core::backup::database::status(&core, &space_id).map_err(error)
+}
+
+#[tauri::command]
+async fn set_database_backup_enabled(
+    core: State<'_, AppCore>,
+    space_id: String,
+    enabled: bool,
+    password: Option<String>,
+    generated: bool,
+) -> Result<yingqu_core::backup::database::Status, String> {
+    yingqu_core::backup::database::set_enabled(&core, &space_id, enabled, password.map(zeroize::Zeroizing::new), generated)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+fn copy_database_backup_password(
+    app: tauri::AppHandle,
+    core: State<AppCore>,
+    space_id: String,
+) -> Result<(), String> {
+    let password = yingqu_core::backup::database::generated_recovery_password(&core, &space_id).map_err(error)?;
+    app.clipboard().write_text(password.as_str()).map_err(|_| "IO_ERROR".into())
+}
+
+#[tauri::command]
+fn start_database_backup(
+    core: State<AppCore>,
+    space_id: String,
+) -> Result<yingqu_core::backup::database::Status, String> {
+    yingqu_core::backup::database::request_backup(&core, &space_id).map_err(error)
+}
+
+#[tauri::command]
+fn cancel_database_backup(
+    core: State<AppCore>,
+    space_id: String,
+) -> Result<yingqu_core::backup::database::Status, String> {
+    yingqu_core::backup::database::cancel_backup(&core, &space_id).map_err(error)
+}
+
+#[tauri::command]
+fn set_database_backup_interval(
+    core: State<AppCore>,
+    space_id: String,
+    hours: u32,
+) -> Result<yingqu_core::backup::database::Status, String> {
+    yingqu_core::backup::database::set_interval(&core, &space_id, hours).map_err(error)
+}
+
+#[tauri::command]
+fn copy_database_backup_link(
+    app: tauri::AppHandle,
+    core: State<AppCore>,
+    space_id: String,
+) -> Result<(), String> {
+    let link = yingqu_core::backup::database::status(&core, &space_id).map_err(error)?
+        .last_message_link.ok_or("DATABASE_BACKUP_LINK_UNAVAILABLE")?;
+    app.clipboard().write_text(link).map_err(|_| "IO_ERROR".into())
+}
+
+#[tauri::command]
+async fn list_database_backups(
+    core: State<'_, AppCore>,
+    space_id: String,
+    recovery_key: String,
+) -> Result<Vec<yingqu_core::backup::database::Snapshot>, String> {
+    yingqu_core::backup::database::list(&core, &space_id, zeroize::Zeroizing::new(recovery_key))
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn inspect_telegram_database_backup(
+    core: State<'_, AppCore>,
+    binding: yingqu_core::backup::spaces::TelegramConfig,
+    message_link: String,
+    recovery_key: String,
+) -> Result<yingqu_core::backup::database::Snapshot, String> {
+    yingqu_core::backup::database::inspect_telegram_snapshot(
+        &core, binding, &message_link, zeroize::Zeroizing::new(recovery_key),
+    ).await.map_err(error)
+}
+
+#[tauri::command]
+async fn restore_database_backup(
+    app: tauri::AppHandle,
+    core: State<'_, AppCore>,
+    space_id: String,
+    snapshot_id: String,
+    recovery_key: String,
+    telegram: Option<yingqu_core::backup::spaces::TelegramConfig>,
+) -> Result<(), String> {
+    yingqu_core::backup::database::stage_restore(
+        &core,
+        &space_id,
+        &snapshot_id,
+        zeroize::Zeroizing::new(recovery_key),
+        telegram,
+    )
+    .await
+    .map_err(error)?;
+    request_exit(&app);
+    Ok(())
+}
 #[tauri::command]
 async fn test_backup_connection(
     core: State<'_, AppCore>,
@@ -1269,6 +1381,16 @@ fn main() {
             get_backup_settings,
             get_backup_credentials,
             save_backup_settings,
+            get_database_backup_status,
+            set_database_backup_enabled,
+            copy_database_backup_password,
+            start_database_backup,
+            cancel_database_backup,
+            set_database_backup_interval,
+            copy_database_backup_link,
+            list_database_backups,
+            inspect_telegram_database_backup,
+            restore_database_backup,
             test_backup_connection,
             get_backup_delete_activity,
             list_backup_operations,

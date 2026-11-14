@@ -4,6 +4,7 @@ mod compatibility_online_audit;
 #[cfg(test)]
 mod compatibility_online_recovery;
 pub mod conflicts;
+pub mod database;
 pub(crate) mod library;
 pub mod lifecycle;
 pub mod model;
@@ -23,6 +24,7 @@ pub mod sync_delete;
 pub mod sync_engine;
 pub mod sync_read;
 mod telegram_lifecycle;
+mod telegram_database;
 #[cfg(test)]
 mod telegram_online_tests;
 pub mod telegram_provider;

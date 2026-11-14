@@ -36,7 +36,7 @@ async page => {
       if(provider==='telegram'){
         await p.getByRole('combobox',{name:'私有频道'}).click();await p.getByRole('option',{name:'测试私有频道',exact:true}).click();
         await button('切换其他账号').waitFor();assert(await button('登录其他账号').count()===0,'Old account action remains');
-        await button('创建备份库').click();
+        await button('保存配置').click();
       }else{
         await p.getByLabel('S3 Endpoint',{exact:true}).fill('https://fixture.s3.example.test');await p.getByLabel('Bucket',{exact:true}).fill(name==='首个备份'?'first':'second');
         await p.getByLabel('Prefix',{exact:true}).fill('media/');await p.getByLabel('Access Key ID',{exact:true}).fill('fixture-key');await p.getByLabel('Secret Access Key',{exact:true}).fill('fixture-secret');

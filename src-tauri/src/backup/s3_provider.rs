@@ -1,6 +1,7 @@
 //! S3 wire format and adapter; object keys and conditional tokens stay in this module.
 use super::{provider::*, record::ObjectRef};
 use anyhow::{bail, Context, Result};
+use futures_util::{stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -592,8 +593,19 @@ impl<S: ObjectStore> S3Provider<S> {
         let object = self
             .store
             .get(&format!("{}library.json", self.space.prefix))
-            .await?
-            .context("BACKUP_LIBRARY_NOT_FOUND")?;
+            .await?;
+        let Some(object) = object else {
+            if self.scope.library_id != super::library::target_id(&[
+                "s3", &self.space.endpoint, &self.space.bucket, &self.space.prefix,
+            ]) {
+                bail!("BACKUP_LIBRARY_NOT_FOUND");
+            }
+            return Ok(LibraryMetadata {
+                deletion_indexes: false, schema_version: 2,
+                library_id: self.scope.library_id.clone(), mode: "multi_writer".into(),
+                created_at: String::new(),
+            });
+        };
         let value: Value =
             serde_json::from_slice(&object.body).context("BACKUP_INVALID_LIBRARY")?;
         let library: LibraryMetadata =
@@ -611,9 +623,12 @@ impl<S: ObjectStore> S3Provider<S> {
     }
     async fn read(&self, asset: &str) -> Result<Option<RemoteAsset>> {
         let library = self.library().await?;
+        self.read_record(asset, library.deletion_indexes).await
+    }
+    async fn read_record(&self, asset: &str, legacy_deletions: bool) -> Result<Option<RemoteAsset>> {
         let key = self.key(asset)?;
         let Some(object) = self.store.get(&key).await? else {
-            return if library.deletion_indexes {
+            return if legacy_deletions {
                 self.read_deleted_index(asset).await
             } else {
                 Ok(None)
@@ -745,9 +760,10 @@ impl<S: ObjectStore> BackupProvider for S3Provider<S> {
         capabilities.resumable_upload = false;
         capabilities
     }
-    fn open_library(&self, create: bool) -> ProviderFuture<'_, LibraryDescriptor> {
+    fn open_library(&self, _create: bool) -> ProviderFuture<'_, LibraryDescriptor> {
         Box::pin(async move {
-            if create {
+            #[cfg(test)]
+            if _create {
                 self.capabilities.require_multi_writer()?;
                 let library = LibraryMetadata {
                     deletion_indexes: false,
@@ -780,6 +796,20 @@ impl<S: ObjectStore> BackupProvider for S3Provider<S> {
     fn read_asset(&self, asset_id: &str) -> ProviderFuture<'_, Option<RemoteAsset>> {
         let asset = asset_id.to_owned();
         Box::pin(async move { self.read(&asset).await })
+    }
+    fn read_assets(&self, ids: Vec<String>) -> ProviderFuture<'_, Vec<RemoteAsset>> {
+        Box::pin(async move {
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let legacy_deletions = self.library().await?.deletion_indexes;
+            stream::iter(ids)
+                .map(|id| async move { self.read_record(&id, legacy_deletions).await })
+                .buffered(8)
+                .try_filter_map(|asset| async { Ok(asset) })
+                .try_collect()
+                .await
+        })
     }
     fn pull_changes(&self, checkpoint: Option<Checkpoint>) -> ProviderFuture<'_, ChangeBatch> {
         Box::pin(async move {
@@ -1060,14 +1090,6 @@ impl<S: ObjectStore> BackupProvider for S3Provider<S> {
             self.store.write(Write::Delete { key: object.key }).await?;
             Ok(())
         })
-    }
-    fn compact_deleted_records(
-        &self,
-        candidates: Vec<RemoteAsset>,
-        retention_days: u32,
-        now: u64,
-    ) -> ProviderFuture<'_, Vec<RemoteAsset>> {
-        Box::pin(async move { self.compact_records(candidates, retention_days, now).await })
     }
     fn reconcile_deleted_asset(
         &self,
@@ -1513,14 +1535,6 @@ pub async fn probe<S: ObjectStore>(
     prefix: &str,
     operation: &str,
 ) -> Result<ProviderCapabilities> {
-    probe_with_cleanup(store, prefix, operation, false).await
-}
-pub(super) async fn probe_with_cleanup<S: ObjectStore>(
-    store: &S,
-    prefix: &str,
-    operation: &str,
-    require_delete: bool,
-) -> Result<ProviderCapabilities> {
     use tokio::io::AsyncReadExt;
     uuid::Uuid::parse_str(operation).context("BACKUP_INVALID_OPERATION")?;
     let key = format!("{prefix}probes/{operation}/conditional");
@@ -1528,7 +1542,7 @@ pub(super) async fn probe_with_cleanup<S: ObjectStore>(
     let body = b"sync-probe-v2-0123456789".to_vec();
     let mut stage = "conditional_create";
     let result=async {
-        let mut etag=store.write(Write::Put {key:key.clone(),body:body.clone(),condition:Condition::Absent}).await?;
+        let etag=store.write(Write::Put {key:key.clone(),body:body.clone(),condition:Condition::Absent}).await?;
         for condition in [Condition::Absent,Condition::Match("invalid-version-token".into())] {
             match store.write(Write::Put {key:key.clone(),body:b"must-not-write".to_vec(),condition}).await {
                 Err(e) if e.to_string()=="BACKUP_PRECONDITION_FAILED"=>{},_=>bail!("BACKUP_CONDITIONAL_WRITE_UNSUPPORTED"),
@@ -1536,18 +1550,6 @@ pub(super) async fn probe_with_cleanup<S: ObjectStore>(
         }
         stage="conditional_read";
         if store.get(&key).await?.context("BACKUP_PROBE_FAILED")?.body!=body {bail!("BACKUP_CONDITIONAL_WRITE_UNSUPPORTED");}
-        if require_delete {
-            stage="conditional_delete";
-            match store.write(Write::DeleteIfMatch{key:key.clone(),etag:"\"invalid-delete-version\"".into()}).await {
-                Err(e) if e.to_string()=="BACKUP_PRECONDITION_FAILED"=>{},
-                Ok(_)=>bail!("BACKUP_CONDITIONAL_DELETE_UNSUPPORTED"),
-                Err(e)=>return Err(e),
-            }
-            if store.get(&key).await?.context("BACKUP_CONDITIONAL_DELETE_UNSUPPORTED")?.body!=body {bail!("BACKUP_CONDITIONAL_DELETE_UNSUPPORTED");}
-            store.write(Write::DeleteIfMatch{key:key.clone(),etag}).await?;
-            if store.head(&key).await?.is_some() {bail!("BACKUP_CONDITIONAL_DELETE_UNSUPPORTED");}
-            etag=store.write(Write::Put{key:key.clone(),body:body.clone(),condition:Condition::Absent}).await?;
-        }
         let a=store.write(Write::Put {key:key.clone(),body:b"probe-writer-a".to_vec(),condition:Condition::Match(etag.clone())});
         let b=store.write(Write::Put {key:key.clone(),body:b"probe-writer-b".to_vec(),condition:Condition::Match(etag)});
         let (a,b)=tokio::join!(a,b);

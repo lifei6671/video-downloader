@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { TelegramNetworkSettings } from '@/components/telegram-network-settings';
 import { TelegramLoginQr } from '@/components/telegram-login-qr';
 import { Spinner } from '@/components/ui/spinner';
+import { TelegramDatabaseRestore } from '@/components/database-backup-settings';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 const networkError = (code: string) => ['TELEGRAM_CONNECTION_ERROR', 'TELEGRAM_TIMEOUT', 'TELEGRAM_NOT_CONNECTED', 'TELEGRAM_TRANSFER_TIMEOUT', 'BACKUP_NETWORK_ERROR'].includes(code);
@@ -133,11 +134,11 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
       }
     }
   }
-  async function connectLibrary(create: boolean) {
+  async function connectSpace() {
     if (busy || !(space?.telegram || status?.account && channel)) return;
     const started = performance.now();
     const current = ++revision.current;
-    setBusy(create ? 'create' : 'connect'); saving?.(true); setError(''); setNotice('');
+    setBusy('connect'); saving?.(true); setError(''); setNotice('');
     try {
       let account = status?.account;
       if (space && phase !== 'ready') {
@@ -147,7 +148,7 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
       }
       if (!account) throw 'TELEGRAM_AUTH_REQUIRED';
       if (space?.telegram && account.id !== space.telegram.account_id) throw 'TELEGRAM_ACCOUNT_MISMATCH';
-      const value = await api.saveBackupSettings({ cleanup_deleted_records: false, deleted_record_retention_days: 30, provider_type: 'telegram', profile: 'telegram', endpoint: '', bucket: '', prefix: '', region: 'auto', path_style: true, enabled: true, telegram: space?.telegram ?? { account_id: account.id, channel_id: channel }, display_name: name?.trim() || space?.display_name || channels.find(value => value.id === channel)?.title || '', create_library: create }, false);
+      const value = await api.saveBackupSettings({ cleanup_deleted_records: false, deleted_record_retention_days: 30, provider_type: 'telegram', profile: 'telegram', endpoint: '', bucket: '', prefix: '', region: 'auto', path_style: true, enabled: true, telegram: space?.telegram ?? { account_id: account.id, channel_id: channel }, display_name: name?.trim() || space?.display_name || channels.find(value => value.id === channel)?.title || '', create_library: false }, false);
       if (live.current && current === revision.current) await connected?.(value);
     } catch (error) { if (live.current && current === revision.current) setError(String(error)); }
     finally { await new Promise(resolve => setTimeout(resolve, Math.max(0, 300 - (performance.now() - started)))); saving?.(false); if (live.current && current === revision.current) { await refreshStatus(current); if (live.current) setBusy(null); } }
@@ -198,11 +199,11 @@ export function TelegramStorageSettings({ space, name, connected, saving, action
         <SelectContent>{channels.map(value => <SelectItem key={value.id} value={value.id}>{value.title}{value.can_post ? '' : '（只读）'}</SelectItem>)}</SelectContent>
       </Select></Field>}
       {connected && <div className="flex flex-wrap gap-2">
-        <Button type="button" className="min-w-28" aria-busy={busy === 'connect'} disabled={!!busy || !status?.configured || !!space?.telegram && phase === 'ready' && status?.account?.id !== space.telegram.account_id || !space && (phase !== 'ready' || !channel)} onClick={() => void connectLibrary(false)}>{busy === 'connect' && <Spinner aria-hidden="true" />}{space ? '重新连接' : '保存配置'}</Button>
-        {!space && <Button type="button" variant="outline" className="min-w-28" aria-busy={busy === 'create'} disabled={!!busy || phase !== 'ready' || !channel || !channels.find(value => value.id === channel)?.can_post} onClick={() => void connectLibrary(true)}>{busy === 'create' && <Spinner aria-hidden="true" />}创建备份库</Button>}
+        <Button type="button" className="min-w-28" aria-busy={busy === 'connect'} disabled={!!busy || !status?.configured || !!space?.telegram && phase === 'ready' && status?.account?.id !== space.telegram.account_id || !space && (phase !== 'ready' || !channel)} onClick={() => void connectSpace()}>{busy === 'connect' && <Spinner aria-hidden="true" />}{space ? '重新连接' : '保存配置'}</Button>
+        {!space && <TelegramDatabaseRestore telegram={phase === 'ready' && status?.account && channel ? { account_id: status.account.id, channel_id: channel } : null} disabled={!!busy} />}
         {actions}
       </div>}
-      {!loginOpen && (busy || phase === 'connecting') && <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground"><Spinner />{busy === 'channels' ? '正在读取频道…' : busy === 'create' ? '正在创建备份库…' : busy === 'connect' ? '正在连接备份库…' : busy === 'logout' ? '正在退出账号…' : busy === 'cancel' ? '正在取消…' : '正在连接 Telegram…'}</p>}
+      {!loginOpen && (busy || phase === 'connecting') && <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground"><Spinner />{busy === 'channels' ? '正在读取频道…' : busy === 'connect' ? '正在连接备份空间…' : busy === 'logout' ? '正在退出账号…' : busy === 'cancel' ? '正在取消…' : '正在连接 Telegram…'}</p>}
       <Dialog open={active && loginOpen} onOpenChange={open => { if (open) setLoginOpen(true); else closeLogin(); }}>
         <DialogContent className="telegram-login-dialog max-h-[85dvh] overflow-y-auto" showCloseButton={false} onEscapeKeyDown={event => { if (busy && !id) event.preventDefault(); }}>
           <DialogHeader><DialogTitle>{accountOnly ? '登录 Telegram' : '登录 Telegram 存储'}</DialogTitle><DialogDescription>在手机 Telegram 的“设置 → 设备 → 连接桌面设备”中扫描二维码。</DialogDescription></DialogHeader>

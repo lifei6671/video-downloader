@@ -38,7 +38,7 @@ pub(super) fn binding(core: &Core, id: &str) -> Result<Option<(TelegramConfig, b
             .optional()?)
     })
 }
-fn target(space: &Space, binding: TelegramConfig) -> Target {
+pub(super) fn target(space: &Space, binding: TelegramConfig) -> Target {
     Target {
         scope: Scope {
             space_id: space.space_id.clone(),
@@ -55,18 +55,26 @@ pub(super) fn provider(
     space: &Space,
     cfg: Config,
 ) -> Result<Arc<dyn BackupProvider>> {
+    Ok(Arc::new(telegram_provider(core, space, cfg)?))
+}
+
+pub(super) fn telegram_provider(
+    core: &Arc<Core>,
+    space: &Space,
+    cfg: Config,
+) -> Result<TelegramProvider> {
     let binding = binding(core, &space.space_id)?
         .context("BACKUP_INVALID_SPACE")?
         .0;
     let target = target(space, binding);
     target.validate()?;
-    Ok(Arc::new(TelegramProvider::new(
+    Ok(TelegramProvider::new(
         core,
         target,
         cfg.capabilities.context("BACKUP_CAPABILITIES_UNVERIFIED")?,
-    )))
+    ))
 }
-fn pending_caps() -> ProviderCapabilities {
+pub(super) fn pending_caps() -> ProviderCapabilities {
     ProviderCapabilities {
         change_coordination: ChangeCoordination::EventReplay,
         incremental_discovery: false,
@@ -106,16 +114,10 @@ pub(super) async fn connect(core: &Arc<Core>, mut update: Update, save: bool) ->
         .backup_db(repository::spaces)?
         .into_iter()
         .find(|s| Some(&s.space_id) == old_id.as_ref());
-    let initializing = old_id
-        .as_deref()
-        .map(|id| self::binding(core, id))
-        .transpose()?
-        .flatten()
-        .is_some_and(|(_, initializing)| initializing);
-    let create = old.is_none() && update.create_library || initializing;
+    let initializing = old_id.as_deref().map(|id| self::binding(core,id)).transpose()?.flatten().is_some_and(|(_, pending)| pending);
     let mut space = old.clone().unwrap_or_else(|| Space {
         space_id: uuid::Uuid::new_v4().to_string(),
-        library_id: uuid::Uuid::new_v4().to_string(),
+        library_id: super::library::target_id(&["telegram", &binding.account_id, &binding.channel_id]),
         endpoint: String::new(),
         bucket: String::new(),
         prefix: String::new(),
@@ -139,12 +141,14 @@ pub(super) async fn connect(core: &Arc<Core>, mut update: Update, save: bool) ->
         })
         .await?;
     if let Some(id) = found {
-        if old.as_ref().is_some_and(|s| s.library_id != id) {
+        if !initializing && old.as_ref().is_some_and(|s| s.library_id != id) {
             bail!("BACKUP_LIBRARY_MISMATCH");
         }
         space.library_id = id;
-    } else if !save || !create {
-        bail!("BACKUP_LIBRARY_NOT_FOUND");
+    } else {
+        let expected = super::library::target_id(&["telegram", &binding.account_id, &binding.channel_id]);
+        if initializing { space.library_id = expected.clone(); }
+        if space.library_id != expected { bail!("BACKUP_LIBRARY_NOT_FOUND"); }
     }
     if !save {
         return Ok(View {
@@ -170,21 +174,17 @@ pub(super) async fn connect(core: &Arc<Core>, mut update: Update, save: bool) ->
             deleted_record_retention_days: 30,
         });
     }
-    // Reserve stable library/operation identity before the first remotely visible descriptor.
+    // Persist the verified channel binding before activating it.
     core.backup_db(|db|{
         let tx=db.unchecked_transaction()?;
         if old.is_none() {repository::save_space(&tx,&space)?;}
-        tx.execute("INSERT INTO telegram_spaces VALUES(?1,?2,?3,?4) ON CONFLICT(space_id) DO UPDATE SET initializing=excluded.initializing",params![space.space_id,binding.account_id,binding.channel_id,create])?;
+        if initializing { tx.execute("UPDATE backup_spaces SET library_id=?2 WHERE space_id=?1",params![space.space_id,space.library_id])?; }
+        tx.execute("INSERT INTO telegram_spaces VALUES(?1,?2,?3,0) ON CONFLICT(space_id) DO UPDATE SET initializing=0",params![space.space_id,binding.account_id,binding.channel_id])?;
         tx.execute("INSERT INTO telegram_space_labels(space_id,channel_title) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET channel_title=excluded.channel_title",params![space.space_id,channel_title])?;
         tx.execute("UPDATE backup_provider_config SET provider_type='telegram',profile='telegram',protocol=2 WHERE space_id=?",[&space.space_id])?;
         if let Some(name)=&name {spaces::write_name(&tx,&space.space_id,name)?;}
         tx.commit()?;Ok(())
     })?;
-    let provider = TelegramProvider::new(core, target(&space, binding), caps.clone());
-    if let Err(error) = provider.open_library(create).await {
-        core.backup_db(|db|{db.execute("INSERT INTO backup_sync_checkpoints(space_id,last_error) VALUES(?1,?2) ON CONFLICT(space_id) DO UPDATE SET last_error=excluded.last_error",params![space.space_id,error.to_string()])?;Ok(())})?;
-        return Err(error);
-    }
     let enabled = spaces::enabled(core)?;
     core.backup_db(|db|{
         let tx=db.unchecked_transaction()?;

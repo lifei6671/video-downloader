@@ -89,7 +89,7 @@ async (page) => {
     assert(await button('保存配置').isDisabled(), 'Saving was enabled without a private channel');
     await p.getByRole('combobox', { name: '私有频道' }).click();
     await p.getByRole('option', { name: '隔离验证专用私有频道', exact: true }).click();
-    await button('创建备份库').waitFor();
+    await button('保存配置').waitFor();
     for (const [width, height] of [[1440, 900], [1280, 800], [1024, 680]]) {
       await p.setViewportSize({ width, height });
       await button('退出存储账号').scrollIntoViewIfNeeded();

@@ -288,7 +288,8 @@
 :is(button, a)[data-variant][data-size][data-variant="link"] { height: auto; border: 0; padding: 0; color: var(--primary); }
 :is(button, a)[data-variant][data-size][data-variant="default"], [data-slot="alert-dialog-action"] { background: var(--primary); color: var(--primary-foreground); }
 :is(button, a)[data-variant][data-size][data-variant="default"]:hover, [data-slot="alert-dialog-action"]:hover { background: var(--primary-hover); }
-:is(button, a)[data-variant][data-size][data-variant="default"]:active, [data-slot="alert-dialog-action"]:active { background: var(--primary-pressed); }
+:is(button, a)[data-variant][data-size][data-variant="default"]:active:not(:where(.backup-settings-actions *, .backup-settings-dialog *)),
+[data-slot="alert-dialog-action"]:active:not(:where(.backup-settings-dialog *)) { background: var(--primary-pressed); }
 :is(button, a)[data-variant][data-size][data-variant="outline"], [data-slot="alert-dialog-cancel"] { background: var(--surface); border-color: var(--border-input); }
 :is(button, a)[data-variant][data-size][data-variant="secondary"] { background: var(--surface-control); color: var(--foreground); }
 :is(button, a)[data-variant][data-size][data-variant="ghost"] { background: transparent; color: var(--on-surface-secondary); }
@@ -391,16 +392,25 @@ button[data-variant][data-size][data-author-action]:active { background: color-m
 .backup-space-name-editor[aria-busy="true"] { padding-right: 28px; }
 .backup-settings-form .backup-save-button[data-variant][data-size] { display: inline-grid; min-width: 112px; }
 .backup-settings-form .backup-save-button[data-variant][data-size]:disabled { opacity: 1; }
-.backup-save-label, .backup-save-progress { grid-area: 1 / 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; opacity: 0; transition: opacity 250ms ease-out; }
+.backup-save-label, .backup-save-progress { grid-area: 1 / 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; opacity: 0; transition: opacity 100ms ease-out; }
 .backup-save-button [data-visible="true"] { opacity: 1; }
 .backup-settings-actions .backup-feedback-button[data-variant][data-size] { display: inline-grid; }
 .backup-feedback-button[aria-busy="true"]:disabled { opacity: 1; }
-.backup-settings-actions button[data-slot][data-slot], .backup-settings-dialog button[data-slot][data-slot] {
-  transition: background-color 250ms ease-out, color 250ms ease-out, border-color 250ms ease-out, opacity 250ms ease-out, transform 250ms ease-out;
+:is(.backup-settings-actions, .backup-settings-dialog) button,
+:is(.backup-settings-actions, .backup-settings-dialog) button[data-slot][data-slot] {
+  transition: background-color 100ms ease-out, color 100ms ease-out, border-color 100ms ease-out, opacity 100ms ease-out;
+  translate: none;
 }
-.backup-settings-actions button[data-slot][data-slot]:not(:disabled):active, .backup-settings-dialog button[data-slot][data-slot]:not(:disabled):active {
-  transform: scale(.98);
-}
+.backup-settings-actions .backup-copy-button[data-variant][data-size],
+.backup-settings-dialog .backup-restore-submit[data-variant][data-size] { display: inline-grid; }
+.backup-settings-dialog .backup-restore-submit { min-inline-size: 116px; }
+:is(.backup-copy-button, .backup-restore-submit) > span { grid-area: 1 / 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; transition: opacity 100ms ease-out; }
+.backup-action-pending, .backup-action-success { opacity: 0; }
+:is(.backup-copy-button[data-copy-phase="copying"], .backup-restore-submit[aria-busy="true"]) .backup-action-label { opacity: 0; }
+:is(.backup-copy-button[data-copy-phase="copying"], .backup-restore-submit[aria-busy="true"]) .backup-action-pending { opacity: 1; }
+.backup-copy-button[data-copy-phase="copied"] .backup-action-label { opacity: 0; }
+.backup-copy-button[data-copy-phase="copied"] .backup-action-success { opacity: 1; color: var(--primary); }
+.backup-settings-actions .backup-copy-button[data-copy-phase="copied"][data-variant][data-size] { background-color: var(--primary-tint-hover); }
 .backup-settings-form [data-slot="field-error"] { font-size: 12px; line-height: 18px; }
 .backup-required-mark::after { content: "*"; }
 [data-slot="tabs-trigger"] { font-size: 12px; transition: none; }

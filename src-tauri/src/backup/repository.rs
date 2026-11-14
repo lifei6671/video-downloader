@@ -31,6 +31,7 @@ pub(crate) fn init_in_transaction(
     super::schema_migration::check_unchanged(tx, &prepared)?;
     tx.execute_batch(include_str!("schema.sql"))?;
     tx.execute_batch(include_str!("sync-schema.sql"))?;
+    super::database::init_schema(tx)?;
     tx.execute_batch(include_str!("telegram-schema.sql"))?;
     tx.execute_batch(include_str!("operation-display.sql"))?;
     cover_store::init(tx)?;

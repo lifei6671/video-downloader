@@ -15,6 +15,8 @@ type Upload = (String, String, BTreeMap<u32, Vec<u8>>);
 mod sync_online_tests;
 #[path = "sync_tests.rs"]
 mod sync_tests;
+#[path = "database_tests.rs"]
+mod database_tests;
 
 #[derive(Default)]
 struct R2Audit {
@@ -101,7 +103,7 @@ struct State {
     edit_during_file: Option<(std::sync::Weak<Core>, String, String, serde_json::Value)>,
     hold_upload: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     hold_probe: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-    hold_list: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    hold_record: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     hold_stream: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     objects: BTreeMap<String, (Vec<u8>, Option<String>)>,
     uploads: BTreeMap<String, Upload>,
@@ -161,7 +163,14 @@ impl ObjectStore for Memory {
             body: body.clone(),
             etag: tag(body),
         });
-        Box::pin(async move { Ok(v) })
+        let gate = if key.contains("/records/") { s.hold_record.take() } else { None };
+        Box::pin(async move {
+            if let Some((started, release)) = gate {
+                started.notify_one();
+                release.notified().await;
+            }
+            Ok(v)
+        })
     }
     fn head(&self, key: &str) -> StoreFuture<'_, Option<ObjectInfo>> {
         let mut state = self.0.lock().unwrap();
@@ -175,7 +184,6 @@ impl ObjectStore for Memory {
         Box::pin(async move { Ok(v) })
     }
     fn list(&self, prefix: &str, token: Option<String>) -> StoreFuture<'_, Page> {
-        let gate = self.0.lock().unwrap().hold_list.take();
         if self.0.lock().unwrap().fail_list {
             return Box::pin(async { bail!("BACKUP_NETWORK_ERROR") });
         }
@@ -196,13 +204,7 @@ impl ObjectStore for Memory {
         let offset = token.and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
         let next = (offset + 1 < all.len()).then(|| (offset + 1).to_string());
         let objects = all.into_iter().skip(offset).take(1).collect();
-        Box::pin(async move {
-            if let Some((started, release)) = gate {
-                started.notify_one();
-                release.notified().await;
-            }
-            Ok(Page { objects, next })
-        })
+        Box::pin(async move { Ok(Page { objects, next }) })
     }
     fn stream(
         &self,

@@ -335,6 +335,15 @@ pub trait BackupProvider: Send + Sync {
     fn open_library(&self, create: bool) -> ProviderFuture<'_, LibraryDescriptor>;
     fn pull_changes(&self, checkpoint: Option<Checkpoint>) -> ProviderFuture<'_, ChangeBatch>;
     fn read_asset(&self, asset_id: &str) -> ProviderFuture<'_, Option<RemoteAsset>>;
+    fn read_assets(&self, ids: Vec<String>) -> ProviderFuture<'_, Vec<RemoteAsset>> {
+        Box::pin(async move {
+            let mut assets = Vec::new();
+            for id in ids {
+                assets.extend(self.read_asset(&id).await?);
+            }
+            Ok(assets)
+        })
+    }
     fn publish_change(
         &self,
         change: AssetChange,
@@ -354,15 +363,6 @@ pub trait BackupProvider: Send + Sync {
     fn download_media(&self, reference: MediaRef, offset: u64) -> ProviderFuture<'_, MediaStream>;
     fn verify_media(&self, reference: MediaRef) -> ProviderFuture<'_, ()>;
     fn delete_media(&self, reference: MediaRef, operation_id: &str) -> ProviderFuture<'_, ()>;
-    /// Compact confirmed deleted records; implementations retain portable deletion evidence.
-    fn compact_deleted_records(
-        &self,
-        _candidates: Vec<RemoteAsset>,
-        _retention_days: u32,
-        _now: u64,
-    ) -> ProviderFuture<'_, Vec<RemoteAsset>> {
-        Box::pin(async { bail!("BACKUP_CLEANUP_UNSUPPORTED") })
-    }
     fn reconcile_deleted_asset(
         &self,
         asset_id: &str,

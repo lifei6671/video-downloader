@@ -4,7 +4,7 @@ async page => {
   const failures = []; p.on('pageerror', error => failures.push(error.message));
   await p.addInitScript(() => {
     const s3 = { space_id: 's3', library_id: 's3-lib', display_name: '对象存储', provider_type: 's3', profile: 'r2', endpoint: 'https://fixture.r2.cloudflarestorage.com', bucket: 'bucket', prefix: 'yingqu/', region: 'auto', path_style: true, enabled: true, credentials_configured: false, connection_pending: false, last_error: null };
-    window.spaces = [s3]; window.current = 's3'; window.enabled = true; window.noLibrary = true; window.calls = [];
+    window.spaces = [s3]; window.current = 's3'; window.enabled = true; window.calls = [];
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
     window.__TAURI_INTERNALS__ = { convertFileSrc: value => value, transformCallback: () => 1, unregisterCallback: () => {}, invoke: async (command, args) => {
       const config = args?.config;
@@ -20,8 +20,7 @@ async page => {
       if (command === 'save_backup_settings') {
         if (config.provider_type !== 'telegram' || config.endpoint || config.bucket || config.prefix || config.credentials) throw new Error('Telegram received S3 configuration');
         if (window.holdSave) await new Promise(resolve => { window.releaseSave = resolve; });
-        if (!config.create_library && window.noLibrary) throw 'BACKUP_LIBRARY_NOT_FOUND';
-        window.noLibrary = false;
+        if (config.create_library) throw new Error('Telegram attempted to publish a library descriptor');
         const value = { ...config, credentials: undefined, create_library: undefined, space_id: 'tg', library_id: 'telegram-lib', telegram_channel_title: config.telegram.channel_id === '777' ? '专用私有频道' : '只读频道', enabled: window.current === 'tg' && window.enabled, credentials_configured: false, connection_pending: false, last_error: window.spaceError ?? null };
         window.spaces = [...window.spaces.filter(s => s.space_id !== 'tg'), value]; return structuredClone(value);
       }
@@ -43,9 +42,8 @@ async page => {
     assert(Math.abs((await p.locator('#backup-space-name').boundingBox()).y - nameTop) < 1, 'Provider switch moved the space name');
     assert(await button('保存配置').isDisabled(), 'Missing channel can be saved'); await p.getByRole('combobox', { name: '私有频道' }).click(); await p.getByRole('option', { name: '专用私有频道', exact: true }).click();
     assert(await p.locator('#backup-key').count() === 0, 'Telegram exposed S3 credentials');
-    await button('保存配置').click(); await p.getByRole('alert').filter({ hasText: '备份库' }).waitFor();
-    assert((await p.evaluate(() => window.spaces)).length === 1, 'Read-only connection silently created a library');
-    await p.evaluate(() => { window.holdSave = true; }); await button('创建备份库').click();
+    assert(await button('创建备份库').count() === 0, 'Legacy library creation action is visible');
+    await p.evaluate(() => { window.holdSave = true; }); await button('保存配置').click();
     await p.waitForFunction(() => typeof window.releaseSave === 'function');
     assert(await p.getByRole('tab', { name: /对象存储/ }).isDisabled(), 'Space tab remained active while saving');
     assert(await button('停用远端备份').isDisabled(), 'Global toggle remained active while saving');
@@ -86,7 +84,7 @@ async page => {
     for(let i=0;i<3;i++) {
       await button('下载任务').click();await button('系统设置').click();await button('远端备份').click();
       await p.getByRole('tab',{name:'知识库测试',exact:true}).click();
-      await p.getByText('频道 777',{exact:true}).waitFor();
+      await p.getByText(/^(频道 777|专用私有频道)$/).waitFor();
       assert(await button('重新连接').isEnabled(),'Saved config waits for channel enumeration');
       assert(await p.getByText('正在连接 Telegram…',{exact:true}).count()===0,'Menu switch falsely shows connection');
     }
@@ -111,7 +109,7 @@ async page => {
     await p.evaluate(() => { window.signedOut = false; window.unconfigured = false; });
     await p.getByRole('tab', { name: '新建空间', exact: true }).click(); await provider('Telegram');
     await p.getByRole('combobox', { name: '私有频道' }).click(); await p.getByRole('option', { name: '只读频道（只读）', exact: true }).click();
-    assert(await button('创建备份库').isDisabled(), 'Read-only channel can create a library');
+    assert(await button('保存配置').isEnabled(), 'Read-only channel cannot save a restore connection');
     await p.getByRole('tab', { name: '知识库测试', exact: true }).click();
     await button('删除配置').click(); await p.waitForFunction(() => window.spaces.length === 1);
     assert(await p.evaluate(() => window.current) === 's3', 'Deleting Telegram changed the S3 selection');
@@ -120,6 +118,6 @@ async page => {
     assert(calls.filter(c => c.command === 'save_backup_settings').every(c => c.provider === 'telegram' && c.activate === false), 'Saving violated activation or provider isolation');
     assert(!calls.some(c => ['login_tdl', 'telegram_storage_logout', 'delete_asset', 'release_asset'].includes(c.command)), 'Configuration flow touched account or media lifecycle');
     assert(failures.length === 0, failures.join('\n'));
-    return { passed: true, viewports: 3, flows: ['connect-missing-library', 'explicit-create', 'busy-feedback', 'save-without-activation', 'switch-telegram-s3', 'readonly-channel', 'saved-target-readonly', 'account-mismatch-binding-preserved', 'persistent-space-error', 'local-config-delete', 'no-credential-access'] };
+    return { passed: true, viewports: 3, flows: ['save-without-library-descriptor', 'busy-feedback', 'save-without-activation', 'switch-telegram-s3', 'readonly-channel', 'saved-target-readonly', 'account-mismatch-binding-preserved', 'persistent-space-error', 'local-config-delete', 'no-credential-access'] };
   } finally { await p.close(); }
 }

@@ -157,7 +157,7 @@ playwright-cli --session csp-components run-code --filename tests/csp-components
 
 `tests/backup-settings-actions-browser.mjs` 使用隔离 IPC 覆盖启停、后台连接中仍可停用、错误重试/成功状态刷新且不覆盖草稿、停用后停止本机轮询、默认空间启用门槛、不迁移历史视频、必填星号与字段错误、三视口按钮过渡及减少动态效果、引用删除确认/取消/失败重试、确认前新引用保护和空配置直接删除。Rust `cargo test --manifest-path src-tauri/Cargo.toml settings_actions -- --test-threads=1` 验证启停持久化、队列断点、配置引用、凭据清理、本机视频和未同步文案保留，以及同目标显式重连。
 
-`tests/backup-space-tabs-browser.mjs` 对生产预览验证空间 Tab、新建后增加 Tab、草稿保留、后续保存不切换默认、显式切换及失败保持原默认、三视口键盘、Tab 名称 Tooltip 及无升级弹窗；同时逐项比较与平台账号 Tab 的字号、内边距、颜色及高度。名称覆盖双击/F2 原位编辑、Enter/失焦只保存一次、Esc 取消、输入法选字不提交、失败保留输入并重试、跨 Tab 保存与凭据草稿隔离，以及重新打开后的持久化；只有新建表单显示独立名称输入框。`tests/backup-first-default-browser.mjs` 另验证 Telegram / S3 分别作为首个配置时自动成为默认、保留全局启停、后续配置不替换默认，以及账号按钮的“切换其他账号”文案。`tests/csp-components-browser.mjs` 在严格 CSP 下验证原位输入框的定位、字号和高度。后端相关回归为 `cargo test --manifest-path src-tauri/Cargo.toml p3_ -- --test-threads=1`；设置页显式提交必填 `activate=false`、建库与清理策略参数。`cargo test --manifest-path src-tauri/Cargo.toml single_protocol -- --test-threads=1` 验证保存/启用直接使用已有凭据、原身份与媒体保留、中断恢复，以及连接测试不改写库。名称通过随备份 schema v1 首次创建的本机 `backup_space_names` 表持久化，不为旧表补结构或回填数据。保留天数清空后关闭自动清理，会恢复有效默认值 30，保存仍显式提交完整策略参数。
+`tests/backup-space-tabs-browser.mjs` 对生产预览验证空间 Tab、新建后增加 Tab、草稿保留、后续保存不切换默认、显式切换及失败保持原默认、三视口键盘、Tab 名称 Tooltip 及无升级弹窗；同时逐项比较与平台账号 Tab 的字号、内边距、颜色及高度。名称覆盖双击/F2 原位编辑、Enter/失焦只保存一次、Esc 取消、输入法选字不提交、失败保留输入并重试、跨 Tab 保存与凭据草稿隔离，以及重新打开后的持久化；只有新建表单显示独立名称输入框。`tests/backup-first-default-browser.mjs` 另验证 Telegram / S3 分别作为首个配置时自动成为默认、保留全局启停、后续配置不替换默认，以及账号按钮的“切换其他账号”文案。`tests/csp-components-browser.mjs` 在严格 CSP 下验证原位输入框的定位、字号和高度。后端相关回归为 `cargo test --manifest-path src-tauri/Cargo.toml p3_ -- --test-threads=1`；设置页提交 `activate=false`，通过目标信息保存空间身份。`cargo test --manifest-path src-tauri/Cargo.toml single_protocol -- --test-threads=1` 验证保存/启用直接使用已有凭据、原身份与媒体保留、中断恢复，以及连接测试不改写库。名称通过随备份 schema v1 首次创建的本机 `backup_space_names` 表持久化，不为旧表补结构或回填数据。
 
 ## 界面构建版本
 
@@ -275,7 +275,7 @@ CMake 不在 PATH 时使用 `--cmake <绝对路径>`。构建沿用 `.local/sens
 
 提供商配置、空间切换、连接初始化与隔离在线用例见[多设备同步维护](multi-device-sync-operations.md)。本轮实际结果见[验证记录](r2-sync-validation.md)，R2、通用 S3、浏览器和原生结果分别记录。
 
-删除记录清理回归：`cargo test --manifest-path src-tauri/Cargo.toml retention_ -- --test-threads=1`。使用两个独立数据库、设备ID、本地目录和Memory对象库验证保留期限、无时间记录、索引CAS并发/失败、删除结果未知、活动记录保护、保留本机未同步文案后重新上传、旧删除任务停止、策略隔离、后台维护与空间切换取消/恢复。`cargo test --manifest-path src-tauri/Cargo.toml content_type_tests -- --test-threads=1` 使用localhost HTTP fixture直接观察AWS SDK的普通PUT、文件PUT、分片创建Content-Type以及条件删除If-Match请求头；不访问真实云端。MKV使用IANA注册的`video/matroska`（[RFC 9559](https://www.rfc-editor.org/rfc/rfc9559.html#section-27.18)）。浏览器Tab用例同时验证清理默认关闭、非法保留天数不提交、草稿/空间隔离和保存；多设备浏览器验证保留本机视频可以显式重新上传。
+删除记录清理回归：`cargo test --manifest-path src-tauri/Cargo.toml retention_ -- --test-threads=1`。使用两个独立数据库、设备ID、本地目录和Memory对象库验证单视频墓碑、历史删除操作隔离、活动记录保护，以及保留本机未同步文案后重新上传。`cargo test --manifest-path src-tauri/Cargo.toml content_type_tests -- --test-threads=1` 使用localhost HTTP fixture直接观察AWS SDK的普通PUT、文件PUT、分片创建Content-Type以及条件删除If-Match请求头；不访问真实云端。MKV使用IANA注册的`video/matroska`（[RFC 9559](https://www.rfc-editor.org/rfc/rfc9559.html#section-27.18)）。浏览器 Tab 用例同时验证旧清理选项已移除、草稿与空间隔离和保存；多设备浏览器验证保留本机视频可以显式重新上传。
 
 
 ### 个人备份浅层目录验证

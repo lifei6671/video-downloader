@@ -112,7 +112,7 @@ impl Envelope {
     fn source(target: &Target, source: &MediaSource) -> Result<Self> {
         if !matches!(
             source.kind.as_str(),
-            "video" | "cover" | "transcript" | "library" | "event"
+            "video" | "cover" | "transcript" | "library" | "event" | "database" | "asset_archive"
         ) || source.operation_id.is_empty()
             || source.asset_id.is_empty()
             || source.device_id.is_empty()
@@ -127,7 +127,7 @@ impl Envelope {
         }
         Ok(Self {
             generation: source.recreate_revision,
-            yingqu_media: 2,
+            yingqu_media: if source.kind == "database" { 3 } else { 2 },
             library_id: target.scope.library_id.clone(),
             asset_id: source.asset_id.clone(),
             operation_id: source.operation_id.clone(),
@@ -137,6 +137,9 @@ impl Envelope {
             sha256: source.sha256.clone(),
             container: source.container.clone(),
         })
+    }
+    pub(super) fn has_supported_version(&self) -> bool {
+        self.yingqu_media == if self.kind == "database" { 3 } else { 2 }
     }
     pub(super) fn caption(&self) -> Result<String> {
         let text = serde_json::to_string(self)?;
@@ -833,7 +836,7 @@ pub(super) async fn restore(
                 .await?;
             let envelope: Envelope =
                 serde_json::from_str(&document.caption).context("TELEGRAM_MEDIA_CHANGED")?;
-            if envelope.yingqu_media != 2
+            if !envelope.has_supported_version()
                 || envelope.library_id != target.scope.library_id
                 || envelope.bytes != reference.bytes
                 || envelope.sha256 != reference.sha256

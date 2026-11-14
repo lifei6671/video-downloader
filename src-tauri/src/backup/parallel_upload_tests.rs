@@ -92,14 +92,6 @@ impl BackupProvider for ParallelProvider {
     ) -> ProviderFuture<'_, DeleteCleanup> {
         self.inner.reconcile_deleted_asset(asset, operation)
     }
-    fn compact_deleted_records(
-        &self,
-        candidates: Vec<RemoteAsset>,
-        days: u32,
-        now: u64,
-    ) -> ProviderFuture<'_, Vec<RemoteAsset>> {
-        self.inner.compact_deleted_records(candidates, days, now)
-    }
 }
 
 fn add_asset(f: &Fixture) -> String {

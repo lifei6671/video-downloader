@@ -112,8 +112,6 @@ pub fn list(core: &Core) -> Result<Vec<View>> {
                     .unwrap_or_default();
                 Ok((last_error, display_name))
             })?;
-            let (cleanup_deleted_records, deleted_record_retention_days, cleanup_error) =
-                retention(core, &s.space_id)?;
             let last_error = if c.provider_type == ProviderType::Telegram
                 && enabled(core)?
                 && current_id(core)?.as_deref() == Some(&s.space_id)
@@ -155,33 +153,12 @@ pub fn list(core: &Core) -> Result<Vec<View>> {
                 credentials_configured: s.credential_ref.is_some(),
                 protocol: c.protocol,
                 connection_pending: c.capabilities.is_none(),
-                last_error: last_error.or(cleanup_error),
-                cleanup_deleted_records,
-                deleted_record_retention_days,
+                last_error,
+                cleanup_deleted_records: false,
+                deleted_record_retention_days: 30,
             })
         })
         .collect()
-}
-pub fn retention(core: &Core, id: &str) -> Result<(bool, u32, Option<String>)> {
-    core.backup_db(|db| {
-        Ok(db
-            .query_row(
-                "SELECT enabled,days,last_error FROM backup_record_retention WHERE space_id=?",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?
-            .unwrap_or((false, 30, None)))
-    })
-}
-fn write_retention(
-    db: &rusqlite::Connection,
-    id: &str,
-    update: &Update,
-    verified: bool,
-) -> Result<()> {
-    db.execute("INSERT INTO backup_record_retention(space_id,enabled,days,delete_verified) VALUES(?1,?2,?3,?4) ON CONFLICT(space_id) DO UPDATE SET enabled=excluded.enabled,days=excluded.days,next_check_at=CASE WHEN enabled<>excluded.enabled OR days<>excluded.days THEN 0 ELSE next_check_at END,last_error=NULL,delete_verified=MAX(backup_record_retention.delete_verified,excluded.delete_verified)",params![id,update.cleanup_deleted_records,update.deleted_record_retention_days,verified && update.cleanup_deleted_records])?;
-    Ok(())
 }
 
 pub fn current_id(core: &Core) -> Result<Option<String>> {
@@ -246,7 +223,7 @@ pub fn get(core: &Core) -> Result<Option<View>> {
         .into_iter()
         .find(|s| Some(&s.space_id) == current.as_ref()))
 }
-fn saved_space(core: &Core, id: &str) -> Result<Space> {
+pub(super) fn saved_space(core: &Core, id: &str) -> Result<Space> {
     if removed(core, id)? {
         bail!("BACKUP_SPACE_NOT_FOUND");
     }
@@ -285,6 +262,7 @@ pub async fn set_enabled(core: &Arc<Core>, enabled: bool) -> Result<bool> {
         tx.commit()?; Ok(())
     })?;
     core.wake_backup();
+    core.database_backup_wake.notify_one();
     Ok(enabled)
 }
 pub async fn prepare_current(core: &Arc<Core>) -> Result<()> {
@@ -436,6 +414,7 @@ pub async fn remove_with(
         tx.execute("INSERT OR IGNORE INTO backup_sync_preference VALUES(1,?)", [sync_enabled])?;
         tx.execute("INSERT OR IGNORE INTO backup_removed_spaces VALUES(?)", [id])?;
         tx.execute("UPDATE backup_spaces SET enabled=0,credential_ref=NULL WHERE space_id=?", [id])?;
+        tx.execute("UPDATE backup_databases SET enabled=0 WHERE space_id=?", [id])?;
         tx.execute("DELETE FROM backup_current_space WHERE space_id=?", [id])?;
         tx.execute("UPDATE backup_operations SET state='blocked',last_error='BACKUP_SPACE_INACTIVE' WHERE space_id=? AND state IN ('pending','running','retry_wait')", [id])?;
         if let Some(reference) = &space.credential_ref {
@@ -460,14 +439,7 @@ pub fn provider(core: &Arc<Core>, id: &str) -> Result<Arc<dyn BackupProvider>> {
     if cfg.provider_type == ProviderType::Telegram {
         return super::telegram_spaces::provider(core, &space, cfg);
     }
-    let credentials = settings::credentials(core, id, &SystemVault)?;
-    let store = S3Store::configured(
-        &space,
-        &credentials.access_key_id,
-        &credentials.secret_access_key,
-        &cfg.region,
-        cfg.path_style,
-    )?;
+    let store = s3_store(core, &space, &cfg)?;
     let caps = cfg.capabilities.context("BACKUP_CAPABILITIES_UNVERIFIED")?;
     caps.require_multi_writer()?;
     Ok(Arc::new(S3Provider::new(
@@ -476,6 +448,17 @@ pub fn provider(core: &Arc<Core>, id: &str) -> Result<Arc<dyn BackupProvider>> {
         caps,
         core.backup_db(repository::device_id)?,
     )))
+}
+
+pub(super) fn s3_store(core: &Core, space: &Space, cfg: &Config) -> Result<S3Store> {
+    let credentials = settings::credentials(core, &space.space_id, &SystemVault)?;
+    S3Store::configured(
+        space,
+        &credentials.access_key_id,
+        &credentials.secret_access_key,
+        &cfg.region,
+        cfg.path_style,
+    )
 }
 
 /// Freeze old work without changing IDs, payloads, credentials or asset memberships.
@@ -703,7 +686,6 @@ async fn connect_locked<S: ObjectStore>(
                     })?;
                     core.wake_backup();
                 }
-                core.backup_db(|db| write_retention(db, &old.space_id, &update, false))?;
                 if let Some(name) = &update.display_name {
                     core.backup_db(|db| write_name(db, &old.space_id, name))?;
                 }
@@ -728,7 +710,7 @@ async fn connect_locked<S: ObjectStore>(
         library_id: old
             .as_ref()
             .map(|s| s.library_id.clone())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            .unwrap_or_else(|| super::library::target_id(&["s3", &update.endpoint, &update.bucket, &update.prefix])),
         endpoint: update.endpoint.clone(),
         bucket: update.bucket.clone(),
         prefix: update.prefix.clone(),
@@ -781,7 +763,7 @@ async fn connect_locked<S: ObjectStore>(
         vault.delete(&reference)?;
         return Err(error);
     }
-    let probe = tokio::select! {_=shutdown.changed()=>Err(anyhow::anyhow!("CANCELED")),result=probe_with_retention_timeout(&store,&space.prefix,&operation,std::time::Duration::from_secs(30),update.cleanup_deleted_records)=>result};
+    let probe = tokio::select! {_=shutdown.changed()=>Err(anyhow::anyhow!("CANCELED")),result=probe_with_timeout(&store,&space.prefix,&operation,std::time::Duration::from_secs(30))=>result};
     let capabilities = match probe {
         Ok(c) => c,
         Err(error) => {
@@ -807,7 +789,7 @@ async fn connect_locked<S: ObjectStore>(
         return Ok(None);
     }
     let provider = S3Provider::new(store, space.clone(), capabilities.clone(), device);
-    let opened = tokio::select! {_=shutdown.changed()=>Err(anyhow::anyhow!("CANCELED")),result=provider.open_library(existing.is_none())=>result};
+    let opened = tokio::select! {_=shutdown.changed()=>Err(anyhow::anyhow!("CANCELED")),result=provider.open_library(false)=>result};
     if let Err(error) = opened {
         finish_probe(core, &operation, &reference, vault, false)?;
         return Err(error);
@@ -820,7 +802,6 @@ async fn connect_locked<S: ObjectStore>(
         let desired=if update.activate {update.enabled} else {enabled_in(&tx)?};
         space.enabled=select_saved && desired;
         repository::save_space(&tx,&space)?;
-        write_retention(&tx,&space.space_id,&update,true)?;
         tx.execute("DELETE FROM backup_removed_spaces WHERE space_id=?",[&space.space_id])?;
         if update.activate {tx.execute("INSERT INTO backup_sync_preference VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled",[update.enabled])?;}
         if let Some(name)=&update.display_name {write_name(&tx,&space.space_id,name)?;}
@@ -843,30 +824,6 @@ async fn connect_locked<S: ObjectStore>(
     Ok(list(core)?
         .into_iter()
         .find(|s| s.space_id == space.space_id))
-}
-
-pub(super) async fn verify_record_cleanup(core: &Arc<Core>, id: &str) -> Result<()> {
-    let mut update = saved_update(core, id, true)?;
-    update.activate = false;
-    update.cleanup_deleted_records = true;
-    test_draft(core, update).await
-}
-async fn probe_with_retention_timeout<S: ObjectStore>(
-    store: &S,
-    prefix: &str,
-    operation: &str,
-    timeout: std::time::Duration,
-    cleanup: bool,
-) -> Result<ProviderCapabilities> {
-    if !cleanup {
-        return probe_with_timeout(store, prefix, operation, timeout).await;
-    }
-    tokio::time::timeout(
-        timeout,
-        s3_provider::probe_with_cleanup(store, prefix, operation, true),
-    )
-    .await
-    .context("BACKUP_TIMEOUT")?
 }
 
 pub(crate) async fn probe_with_timeout<S: ObjectStore>(

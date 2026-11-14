@@ -102,7 +102,7 @@ fn message_documents(
     };
     let envelope: Envelope =
         serde_json::from_str(&evidence.caption).context("TELEGRAM_INDEX_INVALID")?;
-    if envelope.kind != "library" {
+    if !matches!(envelope.kind.as_str(), "library" | "database" | "asset_archive") {
         bail!("TELEGRAM_INDEX_INVALID");
     }
     let Some(tl::enums::Document::Document(raw)) = document.raw.document else {
@@ -133,10 +133,10 @@ fn select_document(
 fn check_standalone_read(evidence: &RemoteDocument, document_id: i64) -> Result<()> {
     let envelope: Envelope =
         serde_json::from_str(&evidence.caption).context("TELEGRAM_INDEX_INVALID")?;
-    if envelope.yingqu_media != 2
+    if !envelope.has_supported_version()
         || !matches!(
             envelope.kind.as_str(),
-            "video" | "cover" | "transcript" | "event" | "library"
+            "video" | "cover" | "transcript" | "event" | "library" | "database" | "asset_archive"
         )
     {
         bail!("TELEGRAM_INDEX_INVALID");
@@ -340,6 +340,10 @@ pub(super) struct IndexDocument {
     source: IndexSource,
 }
 impl IndexDocument {
+    #[cfg(test)]
+    pub(super) fn fixture(revision: i64, document: RemoteDocument, body: Vec<u8>) -> Self {
+        Self { revision, document, source: IndexSource::Verified(std::sync::Arc::new(body)) }
+    }
     pub(super) fn verified_body(&self) -> Result<&[u8]> {
         match &self.source {
             IndexSource::Verified(bytes) => Ok(bytes),
@@ -443,7 +447,7 @@ fn checked_channel_reply(
 
 async fn check_read_access(kind: &str, probe: impl Future<Output = Result<()>>) -> Result<()> {
     // Both deletion stages read the actual mapped index before any remote mutation.
-    if matches!(kind, "publish_delete" | "remote_cleanup") {
+    if matches!(kind, "publish_delete" | "remote_cleanup" | "database_message") {
         return Ok(());
     }
     let _access = super::delete_timing::setup_span("channel_read_probe");
@@ -492,6 +496,27 @@ impl GrammersTransport {
     }
     pub(super) fn channel_title(&self) -> &str {
         &self.channel_title
+    }
+    pub(super) async fn database_message(&self, id: i32, io: &Io) -> Result<(RemoteDocument, i64)> {
+        let message = io.run(self.message(id)).await?;
+        Ok((document(&message)?.0, message.date().as_second()))
+    }
+    pub(super) async fn database_documents(
+        &self, target: &Target, recipient: &str, io: &Io,
+    ) -> Result<Vec<(RemoteDocument, Envelope, i64)>> {
+        let mut history = self.client.iter_messages(self.peer);
+        let mut snapshots = Vec::new();
+        while let Some(message) = io.run(async { history.next().await.map_err(rpc_error) }).await? {
+            io.touch();
+            let Ok(envelope) = serde_json::from_str::<Envelope>(message.text()) else { continue; };
+            if !super::telegram_database::matches(target, recipient, &envelope) {
+                continue;
+            }
+            let evidence = document(&message)?.0;
+            evidence.check(&envelope)?;
+            snapshots.push((evidence, envelope, message.date().as_second()));
+        }
+        Ok(snapshots)
     }
     #[cfg(test)]
     pub(super) fn test_client(&self) -> Client {
@@ -644,7 +669,7 @@ impl GrammersTransport {
             for (evidence, original) in documents {
                 let envelope: Envelope =
                     serde_json::from_str(&evidence.caption).context("TELEGRAM_INDEX_INVALID")?;
-                if matches!(envelope.kind.as_str(), "event" | "library") {
+                if matches!(envelope.kind.as_str(), "event" | "library" | "asset_archive") {
                     snapshot.indexes.push(IndexDocument {
                         revision: if envelope.kind == "event" {
                             bundle::event_revision(&message, &envelope)?
@@ -676,7 +701,7 @@ impl GrammersTransport {
         if evidence.bytes != envelope.bytes {
             bail!("TELEGRAM_MEDIA_CHANGED");
         }
-        if !matches!(envelope.kind.as_str(), "library" | "event") {
+        if !matches!(envelope.kind.as_str(), "library" | "event" | "asset_archive") {
             if !matches!(envelope.kind.as_str(), "video" | "cover" | "transcript") {
                 bail!("TELEGRAM_INDEX_INVALID");
             }
@@ -763,7 +788,7 @@ impl GrammersTransport {
         {
             bail!("TELEGRAM_MEDIA_CHANGED");
         }
-        if envelope.yingqu_media != 2
+        if !envelope.has_supported_version()
             || envelope.library_id != target.scope.library_id
             || envelope.bytes != reference.bytes
             || envelope.sha256 != reference.sha256
@@ -1013,7 +1038,7 @@ impl Transport for GrammersTransport {
         io: &'a Io,
     ) -> ProviderFuture<'a, Self::Prepared> {
         Box::pin(async move {
-            if envelope.kind == "library" {
+            if matches!(envelope.kind.as_str(), "library" | "database" | "asset_archive") {
                 return Ok(None);
             }
             self.prepare_bundle(envelope, io).await.map(Some)
@@ -1051,7 +1076,7 @@ impl Transport for GrammersTransport {
             }
             let envelope: Envelope =
                 serde_json::from_str(&expected.caption).context("TELEGRAM_INDEX_INVALID")?;
-            if envelope.kind != "library" {
+            if !matches!(envelope.kind.as_str(), "library" | "database" | "asset_archive") {
                 bail!("TELEGRAM_INDEX_INVALID");
             }
             let actual = document(&message)?.0;
@@ -1124,7 +1149,7 @@ impl Transport for GrammersTransport {
         Box::pin(async move {
             let envelope: Envelope =
                 serde_json::from_str(&caption).context("BACKUP_INVALID_MEDIA")?;
-            if envelope.kind != "library" {
+            if !matches!(envelope.kind.as_str(), "library" | "database" | "asset_archive") {
                 return self
                     .send_bundle(
                         uploaded,
@@ -1243,7 +1268,7 @@ impl Transport for GrammersTransport {
                     };
                     evidence
                 } else {
-                    if envelope.kind != "library" || message.text() != caption {
+                    if !matches!(envelope.kind.as_str(), "library" | "database" | "asset_archive") || message.text() != caption {
                         continue;
                     }
                     document(&message)?.0

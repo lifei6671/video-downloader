@@ -64,6 +64,29 @@ export interface FilenamePreview { path: string; segments: { text: string; varia
 export type TelegramPurpose = 'download' | 'backup';
 export interface BackupUpdate { telegram?: { account_id: string; channel_id: string } | null; create_library: boolean; cleanup_deleted_records: boolean; deleted_record_retention_days: number; display_name?: string; provider_type: 's3' | 'telegram'; profile: 'r2' | 's3' | 'telegram'; endpoint: string; bucket: string; prefix: string; region: string; path_style: boolean; enabled: boolean; credentials?: { access_key_id: string; secret_access_key: string } }
 export interface BackupSettings extends Omit<BackupUpdate, 'credentials' | 'create_library'> { telegram_channel_title?: string | null; can_delete_owned_media?: boolean; space_id: string; library_id: string; credentials_configured: boolean; connection_pending?: boolean; last_error: string | null }
+export interface DatabaseBackupStatus {
+  enabled: boolean;
+  generated_password: boolean;
+  queued: boolean;
+  interval_hours: number;
+  next_attempt_at: number | null;
+  last_success_at: number | null;
+  last_message_link: string | null;
+  last_error: string | null;
+  last_canceled: boolean;
+  last_speed_bps: number | null;
+  progress: {
+    phase: 'preparing' | 'encrypting' | 'uploading' | 'confirming' | 'finishing' | 'canceling';
+    uploaded_bytes: number;
+    total_bytes: number | null;
+    speed_bps: number | null;
+  } | null;
+}
+export interface DatabaseBackupSnapshot {
+  id: string;
+  created_at: number;
+  bytes: number;
+}
 export interface BackupConflict { image: number[] | null; id: string; field: string; value: string; device_id: string; can_adopt: boolean }
 export interface BackupLocalData { title: string; transcript: string | null; pending: boolean; remote_deleted: boolean; conflicts: BackupConflict[] }
 export interface DeleteActivity { operation_id: string; companion: string | null; step: string }
@@ -110,6 +133,16 @@ export const api = {
   exportBackupLocalData: (spaceId: string, assetId: string) => invoke<string | null>('export_backup_local_data', { spaceId, assetId }),
   backupSettings: () => invoke<BackupSettings | null>('get_backup_settings'),
   saveBackupSettings: (config: BackupUpdate, activate: boolean) => invoke<BackupSettings>('save_backup_settings', { config: { ...config, activate } }),
+  databaseBackupStatus: (spaceId: string) => invoke<DatabaseBackupStatus>('get_database_backup_status', { spaceId }),
+  setDatabaseBackupEnabled: (spaceId: string, enabled: boolean, password?: string, generated = false) => invoke<DatabaseBackupStatus>('set_database_backup_enabled', { spaceId, enabled, password, generated }),
+  setDatabaseBackupInterval: (spaceId: string, hours: number) => invoke<DatabaseBackupStatus>('set_database_backup_interval', { spaceId, hours }),
+  copyDatabaseBackupPassword: (spaceId: string) => invoke<void>('copy_database_backup_password', { spaceId }),
+  copyDatabaseBackupLink: (spaceId: string) => invoke<void>('copy_database_backup_link', { spaceId }),
+  startDatabaseBackup: (spaceId: string) => invoke<DatabaseBackupStatus>('start_database_backup', { spaceId }),
+  cancelDatabaseBackup: (spaceId: string) => invoke<DatabaseBackupStatus>('cancel_database_backup', { spaceId }),
+  listDatabaseBackups: (spaceId: string, recoveryKey: string) => invoke<DatabaseBackupSnapshot[]>('list_database_backups', { spaceId, recoveryKey }),
+  inspectTelegramDatabaseBackup: (binding: NonNullable<BackupSettings['telegram']>, messageLink: string, recoveryKey: string) => invoke<DatabaseBackupSnapshot>('inspect_telegram_database_backup', { binding, messageLink, recoveryKey }),
+  restoreDatabaseBackup: (spaceId: string | null, snapshotId: string, recoveryKey: string, telegram?: NonNullable<BackupSettings['telegram']>) => invoke<void>('restore_database_backup', { spaceId: spaceId ?? '', snapshotId, recoveryKey, telegram }),
   backupCredentials: (spaceId: string) => invoke<{ access_key_id: string; secret_access_key: string }>('get_backup_credentials', { spaceId }),
   testBackupConnection: (config: BackupUpdate) => invoke<void>('test_backup_connection', { config: { ...config, activate: false } }),
   deleteActivity: () => invoke<DeleteActivity | null>('get_backup_delete_activity'),
@@ -311,6 +344,24 @@ const errors: Record<string, string> = {
   BACKUP_PROVIDER_UNAVAILABLE: '此备份提供商尚未实现',
   BACKUP_UNSUPPORTED_PROVIDER: '此备份提供商尚未实现',
   BACKUP_STORAGE_NOT_VALIDATED: '请保存配置以校验备份存储',
+  DATABASE_BACKUP_DISABLED: '请先启用数据库备份',
+  DATABASE_BACKUP_IN_PROGRESS: '已有数据库备份正在排队或执行',
+  DATABASE_BACKUP_INVALID_INTERVAL: '请选择支持的备份频率',
+  DATABASE_BACKUP_LINK_UNAVAILABLE: '本机没有最近备份的消息链接',
+  DATABASE_BACKUP_KEY_MISSING: '本机缺少数据库备份凭据',
+  DATABASE_BACKUP_PASSWORD_REQUIRED: '请先设置数据库恢复密码',
+  DATABASE_BACKUP_INVALID_PASSWORD: '恢复密码须为 12 至 128 个字符，且不能全为空格',
+  DATABASE_BACKUP_ALREADY_ENABLED: '此空间已开启数据库自动备份',
+  DATABASE_BACKUP_PASSWORD_NOT_COPYABLE: '此空间未使用自动生成的备份密码',
+  DATABASE_BACKUP_INVALID_MESSAGE_LINK: '请输入 Telegram 私有频道的快照消息链接',
+  DATABASE_BACKUP_WRONG_CHANNEL: '快照消息不在所选频道内',
+  DATABASE_BACKUP_INVALID_SNAPSHOT: '数据库快照无效、版本不兼容或与此备份空间不匹配',
+  DATABASE_BACKUP_DECRYPT_FAILED: '无法解密备份，请检查恢复密码',
+  DATABASE_BACKUP_FAILED: '数据库备份失败，请重试',
+  DATABASE_BACKUP_TOO_LARGE: '数据库快照超过 4 GiB',
+  DATABASE_RESTORE_FAILED: '无法准备数据库恢复，请重试',
+  DATABASE_RESTORE_PENDING: '已有数据库等待恢复，请退出并重新打开映取',
+  DATABASE_RESTORE_INTERRUPTED: '快照中的任务尚未完成，可手动重试',
   BACKUP_ATOMIC_WRITES_UNSUPPORTED: '此 S3 服务不支持原子条件写入，无法启用多设备同步',
   BACKUP_CONDITIONAL_WRITE_UNSUPPORTED: '此 S3 服务不支持原子条件写入，无法启用多设备同步',
   BACKUP_LOCAL_CHANGES_PENDING: '本机还有未同步变更，请等待确认后再处理冲突',
@@ -429,5 +480,7 @@ const errors: Record<string, string> = {
 };
 export const errorText = (error: unknown) => {
   const wait = /^TELEGRAM_FLOOD_WAIT:(\d+)$/.exec(String(error));
+  const rejected = /^DATABASE_BACKUP_TELEGRAM_REJECTED:(-?\d+):([A-Z_]+)$/.exec(String(error));
+  if (rejected) return `Telegram 拒绝了数据库备份请求（${rejected[2]}，${rejected[1]}）`;
   return wait ? `Telegram 请求受限，请在 ${wait[1]} 秒后重试` : errors[String(error)] ?? '操作失败，请重试';
 };
