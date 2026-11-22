@@ -48,8 +48,6 @@ export function taskCardStatus({ task, asset, assetId, operations = [], spaceId,
   if (restore?.phase === 'reconnecting' && restore.state === 'running') return status('等待连接', 'warning');
   if (restoring || restore && ['pending', 'running'].includes(restore.state)) return status(restore?.state === 'running' ? '下载中' : '等待中', restore?.state === 'running' ? 'info' : 'warning');
   if (restore && ['blocked', 'retry_wait'].includes(restore.state)) return status('下载失败', 'destructive');
-  if (task?.video?.kind === 'image_album') return status('已完成', 'success');
-
   const uploads = scoped.filter(op => op.kind === 'upload' && !(op.state === 'blocked' && op.phase === 'cancel_cleaned'));
   const op = uploads.find(op => !['completed', 'canceled'].includes(op.state)) ?? uploads[0];
   const cleanup = backupUploadCleanup(op, operations, spaceId);

@@ -401,7 +401,12 @@ if (scenario.startsWith('unified-card-status')) {
   ];
   tasks=definitions.map(([id,status,operation,merging],index)=>{
     const task={...structuredClone(original),id,asset_id:'asset-'+id,status,created_at:1000-index,download_requested:true,merging:!!merging,canceling:id==='canceling',error:id==='reconnecting'?'TELEGRAM_RECONNECTING':id==='interrupted'?'INTERRUPTED':status==='failed'?'NETWORK_ERROR':null,path:status==='completed'?'C:\\TestVideos\\'+id+'.mp4':null,video:{...structuredClone(video),video_id:'video-'+id,title:id,formats:[{format_id:'original',container:'mp4',width:1920,height:1080}],width:1920,height:1080},bytes:status==='completed'?100:30,total_bytes:100};
-    if(id!=='unregistered')qa.assets.push({asset_id:task.asset_id,task_id:id,metadata:task.video,original_filename:id+'.mp4',content_sha256:'a'.repeat(64),content_bytes:100,asset_state:'active',path:task.path,local_state:task.path?'present':'missing',space_id:qa.settings.space_id,remote_state:['done','foreign','restore','old-operation'].includes(id)?'backed_up':'pending',has_cover:false,has_transcript:false,remote_revision:1,remote_deleted:false,has_pending_local_changes:false,conflict_count:0,in_current_space:id!=='foreign',backup_locations:[]});
+    const album=scenario.endsWith('-album');
+    if(album){
+      Object.assign(task.video,{platform:'douyin',resolver:'dtk',kind:'image_album',selected_format_id:null,formats:[],images:[{quality_source:'original',width:640,height:480}]});
+      task.path=status==='completed'?'C:\\TestVideos\\'+id:null;
+    }
+    if(id!=='unregistered')qa.assets.push({asset_id:task.asset_id,task_id:id,metadata:task.video,original_filename:id+(album?'':'.mp4'),content_sha256:'a'.repeat(64),content_bytes:100,asset_state:'active',path:task.path,local_state:task.path?'present':'missing',space_id:qa.settings.space_id,remote_state:['done','foreign','restore','old-operation'].includes(id)?'backed_up':'pending',has_cover:false,has_transcript:false,remote_revision:1,remote_deleted:false,has_pending_local_changes:false,conflict_count:0,in_current_space:id!=='foreign',backup_locations:[]});
     if(operation)qa.operations.push({operation_id:'op-'+id,space_id:qa.settings.space_id,asset_id:task.asset_id,kind:'upload',state:operation[0],phase:operation[1],last_error:operation[2]??null,payload:{operation_nonce:'nonce-'+id,...operation[3]},attempt:1});
     return task;
   });

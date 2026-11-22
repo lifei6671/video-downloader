@@ -17,38 +17,40 @@ async page => {
     await waitLabel('pending',mode==='off'?'已完成':'待备份');
   };
   for(const [width,height] of [[1440,900],[1280,800],[1024,680]]){
-    await page.setViewportSize({width,height});await load();
-    for(const [id,label] of Object.entries(expected)){
-      await waitLabel(id,label);
-      check(await row(id).locator('.task-feed-status').count()===1,`${id} has duplicate corner badges`);
-      check(await row(id).locator('.task-row-footer').count()===0,`${id} added a footer`);
+    for(const media of ['', 'album']){
+      await page.setViewportSize({width,height});await load(media);
+      for(const [id,label] of Object.entries(expected)){
+        await waitLabel(id,label);
+        check(await row(id).locator('.task-feed-status').count()===1,`${id} has duplicate corner badges`);
+        check(await row(id).locator('.task-row-footer').count()===0,`${id} added a footer`);
+      }
+      const infoHeights=await page.locator('[data-task-id] .task-row-information').evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().height));
+      check(Math.max(...infoHeights)-Math.min(...infoHeights)<1,'status changed fixed card information height');
+      for(const [id,label] of [['cloud-only','已完成'],['remote-upload','备份中'],['cloud-unavailable','待备份']]){
+        await assetRow(id).locator('.task-feed-status').filter({hasText:label}).waitFor();
+        check(await assetRow(id).locator('.task-feed-status').count()===1,`${id} has duplicate asset badges`);
+        check(await assetRow(id).locator('.task-row-footer').count()===0,`${id} added an asset footer`);
+        const info=await assetRow(id).locator('.task-row-information').evaluate(n=>n.getBoundingClientRect().height);
+        check(Math.abs(info-infoHeights[0])<1,`${id} asset information height differs from task cards`);
+      }
+      check(await assetRow('cloud-unavailable').locator('.task-feed-play').isDisabled(),'unavailable remote asset exposed playback');
+      check(await assetRow('remote-upload').locator('.task-feed-play').getAttribute('aria-label')==='取消备份','unlinked upload lost its cancel action');
+      const notice=row('download-failed').getByRole('alert');
+      check(await notice.evaluate(n=>!!n.closest('.task-row-information .task-card-feedback')),'error moved away from the reserved metadata slot');
+      check(await row('done').getByRole('alert').count()===0,'completed card inherited an unrelated error');
+      for(const [id,label] of [['upload','取消备份'],['unknown','重试确认'],['backup-failed','重试备份'],['backup-canceled','重试备份']]){
+        const button=row(id).getByRole('button',{name:label,exact:true}).filter({has:page.locator('svg')});
+        const corner=row(id).locator('.task-feed-play');
+        check(await corner.getAttribute('aria-label')===label,`${id} lost its matching corner action`);
+        check(await button.count()>=1,`${id} action unavailable`);
+        const b=await corner.boundingBox(),c=await row(id).locator('.task-row-cover').boundingBox();
+        check(b.y<c.y+12&&b.x+b.width>c.x+c.width-12,`${id} action moved from top right`);
+      }
+      check(await page.evaluate(()=>window.unifiedTest.calls.length)===0,'rendering statuses issued a write command');
+      check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'horizontal overflow');
+      await page.screenshot({path:`.local/unified-card-status/states-${media||'video'}-${width}.png`});
+      results.push(`${media||'video'} ${width}: ${Object.keys(expected).length} task + 3 unlinked asset projections, one badge, fixed heights/error slot, matching top-right actions`);
     }
-    const infoHeights=await page.locator('[data-task-id] .task-row-information').evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().height));
-    check(Math.max(...infoHeights)-Math.min(...infoHeights)<1,'status changed fixed card information height');
-    for(const [id,label] of [['cloud-only','已完成'],['remote-upload','备份中'],['cloud-unavailable','待备份']]){
-      await assetRow(id).locator('.task-feed-status').filter({hasText:label}).waitFor();
-      check(await assetRow(id).locator('.task-feed-status').count()===1,`${id} has duplicate asset badges`);
-      check(await assetRow(id).locator('.task-row-footer').count()===0,`${id} added an asset footer`);
-      const info=await assetRow(id).locator('.task-row-information').evaluate(n=>n.getBoundingClientRect().height);
-      check(Math.abs(info-infoHeights[0])<1,`${id} asset information height differs from task cards`);
-    }
-    check(await assetRow('cloud-unavailable').locator('.task-feed-play').isDisabled(),'unavailable remote asset exposed playback');
-    check(await assetRow('remote-upload').locator('.task-feed-play').getAttribute('aria-label')==='取消备份','unlinked upload lost its cancel action');
-    const notice=row('download-failed').getByRole('alert');
-    check(await notice.evaluate(n=>!!n.closest('.task-row-information .task-card-feedback')),'error moved away from the reserved metadata slot');
-    check(await row('done').getByRole('alert').count()===0,'completed card inherited an unrelated error');
-    for(const [id,label] of [['upload','取消备份'],['unknown','重试确认'],['backup-failed','重试备份'],['backup-canceled','重试备份']]){
-      const button=row(id).getByRole('button',{name:label,exact:true}).filter({has:page.locator('svg')});
-      const corner=row(id).locator('.task-feed-play');
-      check(await corner.getAttribute('aria-label')===label,`${id} lost its matching corner action`);
-      check(await button.count()>=1,`${id} action unavailable`);
-      const b=await corner.boundingBox(),c=await row(id).locator('.task-row-cover').boundingBox();
-      check(b.y<c.y+12&&b.x+b.width>c.x+c.width-12,`${id} action moved from top right`);
-    }
-    check(await page.evaluate(()=>window.unifiedTest.calls.length)===0,'rendering statuses issued a write command');
-    check(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'horizontal overflow');
-    await page.screenshot({path:`.local/unified-card-status/states-${width}.png`});
-    results.push(`${width}: ${Object.keys(expected).length} task + 3 unlinked asset projections, one badge, fixed heights/error slot, matching top-right actions`);
   }
   await load();
   const before=await row('upload').evaluate(n=>n.getBoundingClientRect().height);
@@ -132,7 +134,7 @@ async page => {
     };
   });
   check(pure.unknown==='待备份'&&pure.pendingChange==='待备份'&&pure.foreign==='待备份','missing/dirty/other-space facts falsely completed');
-  check(pure.oldDependency==='已完成'&&pure.cleanedOldGeneration==='已完成'&&pure.wait==='等待中'&&pure.album==='已完成','terminal, resource wait or supported media priority regressed');
+  check(pure.oldDependency==='已完成'&&pure.cleanedOldGeneration==='已完成'&&pure.wait==='等待中'&&pure.album==='待备份','terminal, resource wait or album backup priority regressed');
   results.push('unknown configuration, dirty and foreign-space facts stay pending; obsolete cleanup cannot mask completion');
   await load('connecting');await waitLabel('done','待备份');
   check(await page.evaluate(()=>window.unifiedTest.assets.some(a=>a.asset_id==='asset-done'&&a.remote_state==='backed_up')),'connecting fixture lacks retained backup evidence');
@@ -144,5 +146,24 @@ async page => {
   await load('off');await waitLabel('pending','已完成');await waitLabel('done','已完成');
   check(await page.evaluate(()=>window.unifiedTest.calls.length)===0,'disabled backup created operations');
   results.push('backup disabled: completed download is terminal without scheduling writes');
+  await load('album');
+  await page.evaluate(()=>window.unifiedTest.change('op-preparing',{phase:'captured',payload:{completed_bytes:40,transfer_started:true}}));
+  await waitLabel('preparing','备份中');
+  await page.evaluate(()=>window.unifiedTest.change('op-preparing',{phase:'publishing',payload:{completed_bytes:100,transfer_started:true}}));
+  await waitLabel('preparing','确认备份');
+  await page.evaluate(()=>window.unifiedTest.change('op-preparing',{state:'completed',phase:'completed'}));
+  await waitLabel('preparing','待备份');
+  await page.evaluate(()=>Object.assign(window.unifiedTest.assets.find(a=>a.asset_id==='asset-preparing'),{remote_state:'backed_up',has_pending_local_changes:false}));
+  await waitLabel('preparing','已完成');
+  await row('upload').locator('.task-feed-play').focus();
+  await page.keyboard.press('Enter');
+  await waitLabel('upload','清理中');
+  await page.evaluate(()=>window.unifiedTest.change('op-upload',{phase:'cancel_cleaned'}));
+  await waitLabel('upload','备份已取消');
+  await row('unknown').locator('.task-feed-play').click();
+  await waitLabel('unknown','待备份');
+  check(await page.evaluate(()=>window.unifiedTest.calls.filter(c=>c.type==='cancel'&&c.id==='op-upload').length)===1,'album keyboard cancellation did not use its upload operation');
+  check(await page.evaluate(()=>window.unifiedTest.calls.filter(c=>c.type==='retry'&&c.id==='op-unknown').length)===1,'album receipt retry did not retain its upload operation');
+  results.push('album prepare → upload → confirm → authoritative completion; keyboard cancel/cleanup and receipt retry use the same video backup actions');
   return {passed:results.length,results};
 }
