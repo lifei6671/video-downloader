@@ -36,6 +36,44 @@ WEIXIN_TARGETS = {
     'weixin-avatar': ('wx.qlogo.cn', None),
 }
 
+# Browser identity belongs to the first-party site that issued the session.
+IDENTITY_DOMAINS = {
+    'douyin': ('douyin.com',), 'tiktok': ('tiktok.com',),
+    'xiaohongshu': ('xiaohongshu.com',), 'youtube': ('youtube.com',),
+    'bilibili': ('bilibili.com',),
+    'weixin-yuanbao': ('yuanbao.tencent.com',),
+    'weixin-feed': ('channels.weixin.qq.com',),
+}
+CLIENT_HINTS = {'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform',
+                'sec-ch-ua-platform-version', 'sec-ch-ua-arch', 'sec-ch-ua-bitness',
+                'sec-ch-ua-full-version-list'}
+
+
+def validate_client_hints(value):
+    if (not isinstance(value, dict) or set(value) - CLIENT_HINTS
+            or any(not isinstance(v, str) or not v or len(v) > 2048
+                   or any(ord(c) < 32 or ord(c) > 126 for c in v) for v in value.values())):
+        raise ValueError('CONFIG_INVALID')
+    return value
+
+
+def validate_browser_environment(value):
+    allowed = {'platform', 'language', 'timezone', 'screen_width', 'screen_height',
+               'hardware_concurrency', 'device_memory'}
+    if not isinstance(value, dict) or set(value) - allowed:
+        raise ValueError('CONFIG_INVALID')
+    for name, v in value.items():
+        if name in ('platform', 'language', 'timezone'):
+            valid = isinstance(v, str) and len(v) <= 128 and all(32 <= ord(c) <= 126 for c in v)
+        elif name in ('screen_width', 'screen_height'):
+            valid = type(v) is int and 0 <= v <= 32768
+        elif name == 'hardware_concurrency':
+            valid = v is None or type(v) is int and 1 <= v <= 1024
+        else:
+            valid = v is None or type(v) in (int, float) and 0 < v <= 1024
+        if not valid: raise ValueError('CONFIG_INVALID')
+    return value
+
 
 class TargetError(ValueError):
     def __init__(self, message='NETWORK_TARGET_REJECTED', *, code='INVALID_INPUT'):
@@ -124,14 +162,21 @@ def direct_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_ad
 class TargetGuard(urllib.request.BaseHandler):
     handler_order = 50
 
-    def __init__(self, platform):
+    def __init__(self, platform, client_hints=None):
         self.platform = platform
+        self.client_hints = validate_client_hints(client_hints or {})
 
     def http_request(self, request):
         validate_target(request.full_url, self.platform)
         # Authentication belongs to the scoped CookieJar or configured proxy only.
         request.remove_header('Authorization')
         request.remove_header('Cookie')
+        # Remove previous-hop hints before applying this origin's identity.
+        for name in CLIENT_HINTS:
+            request.remove_header(name.capitalize())
+        host = urlsplit(request.full_url).hostname or ''
+        if any(host == domain or host.endswith('.' + domain) for domain in IDENTITY_DOMAINS.get(self.platform, ())):
+            for name, value in self.client_hints.items(): request.add_header(name, value)
         return request
 
     https_request = http_request
@@ -196,9 +241,10 @@ class GuardedRH(UrllibRH):
     _SUPPORTED_URL_SCHEMES = ('http', 'https')
     _SUPPORTED_PROXY_SCHEMES = ('http', 'socks5', 'socks5h')  # yt-dlp normalizes socks5 to socks5h
 
-    def __init__(self, *, platform, **kwargs):
+    def __init__(self, *, platform, client_hints=None, **kwargs):
         super().__init__(**kwargs)
         self.platform = platform
+        self.client_hints = validate_client_hints(client_hints or {})
 
     def _send(self, request):
         response = super()._send(request)
@@ -209,7 +255,7 @@ class GuardedRH(UrllibRH):
         # Guard each URL hop and connect directly to the OS resolver's addresses.
         opener = urllib.request.OpenerDirector()
         for handler in (
-            TargetGuard(self.platform), ExplicitProxyHandler(proxies),
+            TargetGuard(self.platform, self.client_hints), ExplicitProxyHandler(proxies),
             GuardedHTTPHandler(direct=not any(proxies.values()),
                 context=self._make_sslcontext(legacy_ssl_support=legacy_ssl_support)),
             urllib.request.HTTPCookieProcessor(cookiejar),

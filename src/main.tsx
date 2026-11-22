@@ -872,7 +872,7 @@ function ProfileForm({ profile, saved, auth }: { profile: Profile; saved: (setti
         {chunkMode === 'custom' && <Field data-invalid={chunkInvalid || undefined}><FieldLabel htmlFor="youtube-chunk-size">自定义分块大小（MiB）</FieldLabel><Input id="youtube-chunk-size" type="number" inputMode="numeric" min={1} max={1024} step={1} value={chunkSize} onChange={event => setChunkSize(event.target.value)} aria-invalid={chunkInvalid} aria-describedby="youtube-chunk-size-help" className="max-w-48" /><FieldDescription id="youtube-chunk-size-help">1–1024 MiB 的整数，10 MiB 可作为起始测试值。</FieldDescription>{chunkInvalid && <FieldError>请输入 1–1024 之间的整数。</FieldError>}</Field>}
         <Separator />
       </>}
-      <Field><FieldLabel htmlFor={profile.platform + '-ua'}>User-Agent</FieldLabel><Textarea id={profile.platform + '-ua'} rows={3} value={ua} onChange={e => setUa(e.target.value)} /><FieldDescription>使用与 Cookie 来源一致的浏览器标识。</FieldDescription></Field>
+      <Field><FieldLabel htmlFor={profile.platform + '-ua'}>User-Agent</FieldLabel><Textarea id={profile.platform + '-ua'} rows={3} value={ua} onChange={e => setUa(e.target.value)} /><FieldDescription>{profile.account_auth === 'login' && profile.login_device ? '内置登录使用已绑定的浏览器标识；此项用于手动 Cookie。' : '手动 Cookie 使用来源浏览器的标识。'}</FieldDescription></Field>
     </FieldGroup></FieldSet></form></CardContent><CardFooter className="justify-end py-2"><Button type="submit" form={'profile-' + profile.platform} disabled={busy || !changed || chunkInvalid}>{busy && <Spinner aria-hidden="true" data-icon="inline-start" />}{busy ? '保存中…' : '保存平台配置'}</Button></CardFooter>
   </Card>;
 }
@@ -1490,6 +1490,7 @@ function App({ initialSettings }: { initialSettings: Settings }) {
           ...profile,
           account_auth: next.account_auth,
           login_configured: next.login_configured,
+          login_device: next.login_device,
           cookie_configured: next.cookie_configured,
         } : profile),
       }));

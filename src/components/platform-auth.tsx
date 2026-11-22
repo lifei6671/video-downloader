@@ -73,7 +73,7 @@ export function PlatformAuthSettings({ profile, actions }: { profile: Profile; a
         <TabsTrigger value="manual" disabled={busy}>手动 Cookie</TabsTrigger>
       </TabsList>}
       {!external && <TabsContent value="login" className="flex min-w-0 flex-wrap items-center justify-between gap-3 data-[state=inactive]:hidden">
-        <FieldDescription>{profile.login_configured ? '已保存登录会话' : profile.platform === 'tiktok'
+        <FieldDescription>{profile.login_configured ? profile.login_device ? '已绑定登录浏览器' : '重新登录以绑定当前设备。' : profile.platform === 'tiktok'
           ? '请用已登录的 TikTok 手机客户端扫码。'
           : profile.platform === 'weixin' ? '使用微信扫码或快捷登录。' : `在官方页面登录${name}。`}</FieldDescription>
         <div className="flex flex-wrap gap-2">

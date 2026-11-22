@@ -61,7 +61,7 @@ def parse_manual_cookie(raw):
     return manual_jar(cookies)
 
 
-def post_json(target, url, payload, ua, proxy, logger, cookies=None):
+def post_json(target, url, payload, ua, proxy, logger, cookies=None, client_hints=None):
     request = Request(url, data=json.dumps(payload).encode('utf-8'), headers={
         'Accept': 'application/json', 'Content-Type': 'application/json',
         'Origin': YUANBAO if target == 'weixin-yuanbao' else CHANNELS,
@@ -70,7 +70,7 @@ def post_json(target, url, payload, ua, proxy, logger, cookies=None):
     })
     proxies = {'all': proxy} if proxy else {}
     clean_proxies(proxies, request.headers)
-    with GuardedRH(platform=target, proxies=proxies,
+    with GuardedRH(platform=target, proxies=proxies, client_hints=client_hints,
                    cookiejar=scoped_jar() if cookies is None else cookies,
                    timeout=15, logger=logger) as client:
         try:
@@ -230,11 +230,11 @@ def probe_media_metadata(ydl, formats, ffprobe):
             continue
 
 
-def resolve(url, ua, cookies, proxy, logger):
+def resolve(url, ua, cookies, proxy, logger, client_hints=None):
     payload = {'type': 'video_channel_url', 'url': url, 'scene': 1}
 
     def parse(cookiejar=None):
-        return post_json('weixin-yuanbao', PARSE_URL, payload, ua, proxy, logger, cookiejar)
+        return post_json('weixin-yuanbao', PARSE_URL, payload, ua, proxy, logger, cookiejar, client_hints=client_hints)
 
     try:
         result = parse()
@@ -260,7 +260,7 @@ def resolve(url, ua, cookies, proxy, logger):
     if not isinstance(export, str) or not 0 < len(export) <= 4096 or not export.strip():
         raise WeixinError('WEIXIN_UPSTREAM_CHANGED')
     endpoint, payload = feed_call(*play_params(playable))
-    result = post_json('weixin-feed', endpoint, payload, ua, proxy, logger)
+    result = post_json('weixin-feed', endpoint, payload, ua, proxy, logger, client_hints=client_hints)
     details = object_or_empty(result.get('data'))
     err_type = object_or_empty(details.get('errMsg')).get('type')
     if err_type == 4:

@@ -55,7 +55,7 @@ pub fn init(db: &Connection) -> Result<bool> {
     Ok(!existed)
 }
 
-fn revision(resolver: &str) -> String {
+fn revision(resolver: &str, platform: &str) -> String {
     if resolver == "weixin" {
         return "weixin:4".into();
     }
@@ -66,9 +66,14 @@ fn revision(resolver: &str) -> String {
         .expect("bundled manifest");
     // Handshake changes can add platforms without changing saved previews.
     const PREVIEW_FORMAT_VERSION: &str = "0.14.4";
+    let format_version = if platform == "bilibili" {
+        "bilibili-author:1"
+    } else {
+        PREVIEW_FORMAT_VERSION
+    };
     format!(
         "{}:{}:{}",
-        PREVIEW_FORMAT_VERSION,
+        format_version,
         crate::python_bridge::YTDLP_VERSION,
         dtk["upstream_commit"].as_str().expect("bundled commit")
     )
@@ -157,7 +162,7 @@ pub fn get(db: &Connection, platform: &str, id: &str, resolver: &str) -> Result<
           author_avatar IS NOT NULL FROM parse_cache
          WHERE platform=?1 AND video_id=?2 AND revision=?4 AND
            (resolver=?3 OR (?3='auto' AND resolver=CASE WHEN kind='image_album' AND platform<>'xiaohongshu' THEN 'dtk' ELSE 'yt-dlp' END))",
-        params![platform,id,resolver,revision(resolver)],
+        params![platform,id,resolver,revision(resolver, platform)],
         |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,bool>(3)?,r.get::<_,bool>(4)?)),
     ).optional().context("DATABASE_ERROR")?;
     let Some((stored_key, metadata, saved_at, has_cover, has_avatar)) = row else {
@@ -415,7 +420,7 @@ pub fn save(
             identity.kind,
             metadata.to_string(),
             i64::try_from(saved_at).context("DATABASE_ERROR")?,
-            revision(&identity.resolver)
+            revision(&identity.resolver, &identity.platform)
         ],
     )
     .context("DATABASE_ERROR")?;
@@ -476,7 +481,7 @@ pub(crate) fn update_telegram_metadata(db: &Connection, video: &Value) -> Result
     let cached: Option<String> = db
         .query_row(
             "SELECT metadata FROM parse_cache WHERE cache_key=?1 AND revision=?2",
-            params![cache_key, revision("grammers")],
+            params![cache_key, revision("grammers", "telegram")],
             |row| row.get(0),
         )
         .optional()
@@ -521,7 +526,15 @@ pub fn save_cover(db: &Connection, video: &Value, body: &[u8]) -> Result<bool> {
     let exists: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM parse_cache WHERE cache_key=?1 AND revision=?2)",
-            params![cache_key, revision(resolver)],
+            params![
+                cache_key,
+                revision(
+                    resolver,
+                    video["platform"]
+                        .as_str()
+                        .context("INVALID_ENGINE_RESULT")?
+                )
+            ],
             |row| row.get(0),
         )
         .context("DATABASE_ERROR")?;
@@ -603,6 +616,33 @@ fn cached_image(db: &Connection, video: &Value, query: &str, limit: usize) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bilibili_old_previews_refresh_author_details_without_invalidating_other_platforms() {
+        let mut db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let bili = serde_json::json!({"platform":"bilibili","video_id":"BV1mMWu6wEwH_p1",
+            "canonical_url":"https://www.bilibili.com/video/BV1mMWu6wEwH/?p=1","kind":"video","resolver":"yt-dlp"});
+        let youtube = serde_json::json!({"platform":"youtube","video_id":"test1234567",
+            "canonical_url":"https://www.youtube.com/watch?v=test1234567","kind":"video","resolver":"yt-dlp"});
+        for video in [&bili, &youtube] {
+            save(&mut db, video, vec![], None, 1).unwrap();
+        }
+        db.execute(
+            "UPDATE parse_cache SET revision=? WHERE platform='bilibili'",
+            [revision("yt-dlp", "youtube")],
+        )
+        .unwrap();
+        assert!(get(&db, "bilibili", "BV1mMWu6wEwH_p1", "auto")
+            .unwrap()
+            .is_none());
+        assert!(get(&db, "youtube", "test1234567", "auto")
+            .unwrap()
+            .is_some());
+        save(&mut db, &bili, vec![], None, 2).unwrap();
+        assert!(get(&db, "bilibili", "BV1mMWu6wEwH_p1", "auto")
+            .unwrap()
+            .is_some());
+    }
     use serde_json::json;
 
     #[test]

@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod browser_identity;
 mod cover_store;
 pub mod desktop_core;
 pub mod files;

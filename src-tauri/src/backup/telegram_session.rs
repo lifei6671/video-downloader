@@ -178,7 +178,6 @@ impl Connection {
             session.clone(),
             api_id,
             ConnectionParams {
-                device_model: "Yingqu Telegram Storage".into(),
                 app_version: env!("CARGO_PKG_VERSION").into(),
                 retry_policy: Box::new(NoRetries),
                 proxy_url: proxy_url.clone(),

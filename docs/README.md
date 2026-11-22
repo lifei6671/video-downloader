@@ -15,6 +15,7 @@
 - [S3 备份验收记录](s3-backup-validation.md)：离线、浏览器、原生与真实 R2 分开记录。
 - [S3 备份运维与接管](s3-backup-operations.md)：凭据、删除恢复、手动主设备迁移与专用测试。
 - [B 站视频下载](bilibili-integration.md)：BV/短链、分 P 身份、音视频合并、Cookie 与内置登录及真实样例验证。
+- [登录与下载设备信息](platform-device-identity.md)：原生浏览器身份绑定、平台独立存储、第一方 Client Hints 和手动 Cookie 边界。
 - [图集备份与恢复](album-backup.md)：原图、Live Photo 配套视频、S3/R2 与 Telegram 无损归档及验收边界。
 - [数据库单次升级](backup-schema-migration.md)：以 master 为基线一次升级到本分支最终结构、完整备份、事务回滚和开发库归并边界。
 - [备份网络与列表性能验证](backup-network-performance-validation.md)：媒体超时、分片重试、Telegram 发布与连接恢复、轻量操作投影和本地测量。

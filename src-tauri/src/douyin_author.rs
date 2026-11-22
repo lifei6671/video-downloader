@@ -510,10 +510,12 @@ impl Core {
                 }
                 let profile = if short {
                     let profile = settings::douyin_snapshot(&inner.settings)?;
-                    json!({
+                    let mut public = json!({
                         "user_agent": profile["douyin"]["user_agent"],
                         "proxy": profile["douyin"]["proxy"],
-                    })
+                    });
+                    if let Some(hints) = profile["douyin"].get("client_hints") { public["client_hints"] = hints.clone(); }
+                    public
                 } else {
                     json!({})
                 };

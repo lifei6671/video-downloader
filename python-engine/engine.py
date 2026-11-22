@@ -18,7 +18,7 @@ from yt_dlp.networking.exceptions import RequestError, HTTPError, IncompleteRead
 from yt_dlp.networking import Request
 from yt_dlp.version import __version__
 
-from network import GuardedRH, TargetError, MediaRangeError
+from network import GuardedRH, TargetError, MediaRangeError, validate_client_hints, validate_browser_environment
 from cookie_scope import scoped_jar
 from douyin import DouyinIE
 from local_tools import installed_tool, javascript_runtime
@@ -37,7 +37,7 @@ import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.16.1'
+ENGINE_VERSION = '0.17.0'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.10.26'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -243,9 +243,14 @@ def parse_input(text):
 
 
 def profile_config(profile, *, defer_cookie=False):
-    if not isinstance(profile, dict) or set(profile) - {'cookie', 'user_agent', 'proxy', 'http_chunk_size', 'login_session'}:
+    if not isinstance(profile, dict) or set(profile) - {'cookie', 'user_agent', 'proxy', 'http_chunk_size', 'login_session', 'client_hints', 'browser_environment'}:
         raise EngineError('CONFIG_INVALID', 'config')
     ua, cookie, proxy = profile.get('user_agent', DEFAULT_UA), profile.get('cookie', ''), profile.get('proxy')
+    try:
+        validate_client_hints(profile.get('client_hints', {}))
+        validate_browser_environment(profile.get('browser_environment', {}))
+    except ValueError:
+        raise EngineError('CONFIG_INVALID', 'config') from None
     if (not isinstance(ua, str) or not ua or not isinstance(cookie, str)
             or type(profile.get('login_session', False)) is not bool
             or any(c in ua for c in '\r\n')):
@@ -411,7 +416,8 @@ def operate_weixin(method, params, emit, phase, url, ua, cookies, proxy, preview
             raise EngineError('FFMPEG_UNAVAILABLE', 'media_validation')
         for attempt in range(2 if downloading else 1):
             phase('resolving_link' if method == 'identify_input' else 'fetching_metadata')
-            info = weixin_channels.resolve(url, ua, cookies, proxy, logger)
+            hints = params.get('profiles', {}).get('weixin', {}).get('client_hints', {})
+            info = weixin_channels.resolve(url, ua, cookies, proxy, logger, **({'client_hints': hints} if hints else {}))
             identity = dict(platform='weixin', video_id=info['id'], canonical_url=url,
                             kind='video', resolver='weixin', source_url=url)
             if method == 'identify_input':
@@ -607,6 +613,7 @@ def operate(method, params, emit):
         options['ffmpeg_location'] = installed_tool('ffmpeg')
     try:
         with YoutubeDL(options) as ydl:
+            ydl._yingqu_browser_environment = profile.get('browser_environment', {})
             if login_session:
                 ydl.cookiejar = scoped_jar()
             if cookies:
@@ -616,7 +623,7 @@ def operate(method, params, emit):
             elif platform == 'tiktok':
                 ydl.add_info_extractor(author_profile.TikTokIE(login_session=login_session))
             ydl._request_director = ydl.build_request_director(
-                [functools.partial(GuardedRH, platform=platform)])
+                [functools.partial(GuardedRH, platform=platform, client_hints=profile.get('client_hints', {}))])
             note = None
             if platform == 'xiaohongshu':
                 if short:
@@ -708,6 +715,7 @@ def operate(method, params, emit):
                 raise EngineError('UPSTREAM_CHANGED', 'detail')
             if platform == 'bilibili':
                 bilibili.normalize_thumbnails(info)
+                bilibili.attach_author(ydl, info)
             # Selected stream fields can overwrite top-level language with None.
             # Keep the same captured preference for the public choices and selector.
             phase('selecting_formats')
@@ -750,7 +758,7 @@ def operate(method, params, emit):
             file = Path(ydl.prepare_filename(info))
             if file.parent != stage or file.is_symlink() or not file.is_file() or file.stat().st_size == 0:
                 raise EngineError('IO_ERROR', 'output')
-            if fetch_batch_avatar:
+            if fetch_batch_avatar or platform == 'bilibili':
                 avatar = author_profile.avatar_url(ydl, info, platform)
             profile = None if batch_author else author_profile.downloaded_profile(result)
             emit('download_finished', platform=platform, video_id=result['video_id'],

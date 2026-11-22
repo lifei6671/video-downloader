@@ -67,10 +67,15 @@ def image_choices(content):
 
 def request_json(ydl, adapter, endpoint, ua, cookies, proxy, **arguments):
     from engine import EngineError
+    environment = getattr(ydl, '_yingqu_browser_environment', {})
+    memory = environment.get('device_memory', 8)
+    if type(memory) is float and memory.is_integer(): memory = int(memory)
+    screen = (f"{environment['screen_width']}x{environment['screen_height']}"
+              if environment.get('screen_width') and environment.get('screen_height') else '1920x1080')
     profile = adapter.profile_for(SimpleNamespace(
-        user_agent=ua, platform='MacIntel' if 'Macintosh' in ua else 'Win32',
-        screen='1920x1080', language='zh-CN', timezone='Asia/Shanghai',
-        hardware_concurrency=8, device_memory=8))
+        user_agent=ua, platform=environment.get('platform') or ('MacIntel' if 'Macintosh' in ua else 'Win32'),
+        screen=screen, language=environment.get('language') or 'zh-CN', timezone=environment.get('timezone') or 'Asia/Shanghai',
+        hardware_concurrency=environment.get('hardware_concurrency', 8), device_memory=memory))
     request = adapter.build_request(endpoint, profile=profile, **arguments)
     spec = RequestSpec(request['method'], request['url'], request['params'], request['headers'])
     if cookies is None:

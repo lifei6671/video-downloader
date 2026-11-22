@@ -1,9 +1,45 @@
 """Canonical single-part Bilibili identities; extraction stays in pinned yt-dlp."""
+import json
 import re
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 HOSTS = ('www.bilibili.com', 'bilibili.com', 'm.bilibili.com')
 VIDEO_ID = r'BV[0-9A-Za-z]{10}'
+
+
+def attach_author(ydl, info):
+    from author_profile import normalize_bio, text
+    from network import TargetError
+    from yt_dlp.networking import Request
+    from yt_dlp.networking.exceptions import RequestError
+    from yt_dlp.utils import DownloadError
+    mid = info.get('uploader_id')
+    if not isinstance(mid, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', mid):
+        return
+    try:
+        with ydl.urlopen(Request(f'https://api.bilibili.com/x/web-interface/card?mid={mid}',
+                                headers={'Referer': 'https://www.bilibili.com/'},
+                                extensions={'timeout': 5})) as response:
+            body = response.read(1024 * 1024 + 1)
+        if len(body) > 1024 * 1024:
+            return
+        data = json.loads(body)
+        card = data.get('data') if isinstance(data, dict) and data.get('code') == 0 else None
+        card = card.get('card') if isinstance(card, dict) else None
+        if not isinstance(card, dict) or str(card.get('mid')) != mid:
+            return
+        info['_yingqu_author'] = dict(id=mid, nickname=text(card.get('name')), kind='user')
+        bio = normalize_bio(card.get('sign'))
+        if bio is not None:
+            info['_yingqu_author']['bio'] = bio
+        avatar = card.get('face')
+        if isinstance(avatar, str):
+            image = {'thumbnail': avatar}
+            normalize_thumbnails(image)
+            info['_yingqu_author_avatar'] = image['thumbnail']
+    except (OSError, ValueError, RequestError, TargetError, DownloadError):
+        # Optional public profile failures must not fail video extraction/download.
+        return
 
 
 def parse_link(parts):

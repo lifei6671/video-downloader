@@ -149,13 +149,15 @@ def metadata(info, platform):
         result = {key: extracted.get(key) or value for key, value in result.items()}
         if platform in ('douyin', 'tiktok'):
             result.update({key: extracted[key] for key in DETAIL_FIELDS if key in extracted})
+        elif platform == 'bilibili' and 'bio' in extracted:
+            result['bio'] = extracted['bio']
     return result
 
 
 def downloaded_profile(video):
     profile = video.get('author_profile') or {}
     details = {key: profile[key] for key in DETAIL_FIELDS if profile.get(key) is not None}
-    if profile.get('id') and details:
+    if profile.get('id') and (details or video.get('platform') == 'bilibili'):
         return {'id': profile['id'], **details}
     return None
 

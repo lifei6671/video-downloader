@@ -1,3 +1,4 @@
+use crate::browser_identity::BrowserIdentity;
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,8 @@ pub struct Profile {
     cookie: String,
     #[serde(default, skip_serializing)]
     login_cookie: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_device: Option<BrowserIdentity>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -91,7 +94,10 @@ pub(crate) fn init(db: &rusqlite::Transaction<'_>) -> Result<()> {
         .prepare("PRAGMA table_info(platform_settings)")?
         .query_map([], |r| r.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    if !platform_columns.iter().any(|name| name == "http_chunk_size") {
+    if !platform_columns
+        .iter()
+        .any(|name| name == "http_chunk_size")
+    {
         db.execute_batch("ALTER TABLE platform_settings ADD COLUMN http_chunk_size INTEGER")
             .context("DATABASE_ERROR")?;
     }
@@ -102,16 +108,23 @@ pub(crate) fn init(db: &rusqlite::Transaction<'_>) -> Result<()> {
     if !platform_columns.iter().any(|name| name == "login_cookie") {
         let legacy_session = platform_columns.iter().any(|name| name == "yuanbao_cookie");
         if legacy_session {
-            db.execute_batch("ALTER TABLE platform_settings RENAME COLUMN yuanbao_cookie TO login_cookie")
-                .context("DATABASE_ERROR")?;
+            db.execute_batch(
+                "ALTER TABLE platform_settings RENAME COLUMN yuanbao_cookie TO login_cookie",
+            )
+            .context("DATABASE_ERROR")?;
         } else {
-            db.execute_batch("ALTER TABLE platform_settings ADD COLUMN login_cookie TEXT NOT NULL DEFAULT ''")
-                .context("DATABASE_ERROR")?;
+            db.execute_batch(
+                "ALTER TABLE platform_settings ADD COLUMN login_cookie TEXT NOT NULL DEFAULT ''",
+            )
+            .context("DATABASE_ERROR")?;
         }
     }
     if !platform_columns.iter().any(|name| name == "account_auth") {
-        db.execute_batch("ALTER TABLE platform_settings ADD COLUMN account_auth TEXT
-            CHECK(account_auth IN ('login','manual'))").context("DATABASE_ERROR")?;
+        db.execute_batch(
+            "ALTER TABLE platform_settings ADD COLUMN account_auth TEXT
+            CHECK(account_auth IN ('login','manual'))",
+        )
+        .context("DATABASE_ERROR")?;
         if platform_columns.iter().any(|name| name == "weixin_auth") {
             db.execute_batch(
                 "UPDATE platform_settings SET account_auth = CASE weixin_auth
@@ -126,8 +139,12 @@ pub(crate) fn init(db: &rusqlite::Transaction<'_>) -> Result<()> {
                 "UPDATE platform_settings SET account_auth = CASE
                     WHEN login_cookie <> '' THEN 'login' WHEN cookie <> '' THEN 'manual' END
                  WHERE platform <> 'telegram';",
-            ).context("DATABASE_ERROR")?;
+            )
+            .context("DATABASE_ERROR")?;
         }
+    }
+    if !platform_columns.iter().any(|name| name == "login_device") {
+        db.execute_batch("ALTER TABLE platform_settings ADD COLUMN login_device TEXT CHECK(login_device IS NULL OR json_valid(login_device));")?;
     }
     // Rotate an opaque scope in the same transaction as an effective profile edit.
     db.execute_batch(
@@ -138,9 +155,12 @@ pub(crate) fn init(db: &rusqlite::Transaction<'_>) -> Result<()> {
            WHEN NEW.platform='douyin' BEGIN
              UPDATE douyin_author_scope SET scope=lower(hex(randomblob(16))) WHERE id=1;
            END;
-         CREATE TRIGGER IF NOT EXISTS douyin_author_profile_update AFTER UPDATE ON platform_settings
+         DROP TRIGGER IF EXISTS douyin_author_profile_update;
+         CREATE TRIGGER douyin_author_profile_update AFTER UPDATE ON platform_settings
            WHEN NEW.platform='douyin' AND (
              OLD.cookie IS NOT NEW.cookie OR OLD.user_agent IS NOT NEW.user_agent
+             OR OLD.login_cookie IS NOT NEW.login_cookie OR OLD.account_auth IS NOT NEW.account_auth
+             OR OLD.login_device IS NOT NEW.login_device
              OR OLD.proxy IS NOT NEW.proxy OR OLD.credential_ref IS NOT NEW.credential_ref
              OR OLD.bypass_proxy IS NOT NEW.bypass_proxy) BEGIN
              UPDATE douyin_author_scope SET scope=lower(hex(randomblob(16))) WHERE id=1;
@@ -261,7 +281,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
 
 pub(crate) fn read_profile(db: &Connection, platform: &str) -> Result<Profile> {
     let row = db.query_row(
-        "SELECT user_agent,proxy,cookie,credential_ref,http_chunk_size,bypass_proxy,login_cookie,account_auth FROM platform_settings WHERE platform=?",
+        "SELECT user_agent,proxy,cookie,credential_ref,http_chunk_size,bypass_proxy,login_cookie,account_auth,login_device FROM platform_settings WHERE platform=?",
         [platform],
         |r| {
             let cookie: String = r.get(2)?;
@@ -282,6 +302,11 @@ pub(crate) fn read_profile(db: &Connection, platform: &str) -> Result<Profile> {
                 account_auth,
                 cookie,
                 login_cookie,
+                login_device: r.get::<_, Option<String>>(8)?.map(|json| {
+                    let identity: BrowserIdentity = serde_json::from_str(&json).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    identity.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    Ok::<_, rusqlite::Error>(identity)
+                }).transpose()?,
                 credential_ref: r.get(3)?,
                 http_chunk_size: r.get::<_, Option<u32>>(4)?.map(u64::from),
             })
@@ -292,7 +317,7 @@ pub(crate) fn read_profile(db: &Connection, platform: &str) -> Result<Profile> {
         Err(rusqlite::Error::QueryReturnedNoRows) => Profile {
             platform: platform.into(),
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0".into(),
-            proxy: None, bypass_proxy: false, cookie_configured: false, cookie: String::new(), login_configured: false, login_cookie: String::new(), account_auth: None, credential_ref: None, http_chunk_size: None,
+            proxy: None, bypass_proxy: false, cookie_configured: false, cookie: String::new(), login_configured: false, login_cookie: String::new(), login_device: None, account_auth: None, credential_ref: None, http_chunk_size: None,
         },
         Err(_) => bail!("DATABASE_ERROR"),
     })
@@ -364,8 +389,23 @@ impl Profile {
     }
 
     fn write_auth_snapshot(&self, value: &mut Value) {
+        value["user_agent"] = self.user_agent.clone().into();
+        if let Some(object) = value.as_object_mut() {
+            object.remove("client_hints");
+            object.remove("browser_environment");
+        }
+        if self.account_auth == Some(AccountAuth::Login) {
+            if let Some(device) = &self.login_device {
+                value["user_agent"] = device.user_agent.clone().into();
+                value["client_hints"] = json!(device.client_hints);
+                if let Some(environment) = &device.environment {
+                    value["browser_environment"] = json!(environment);
+                }
+            }
+        }
         value["cookie"] = json!(self.active_cookie());
-        value["login_session"] = json!(self.account_auth == Some(AccountAuth::Login) && self.platform != "weixin");
+        value["login_session"] =
+            json!(self.account_auth == Some(AccountAuth::Login) && self.platform != "weixin");
     }
 }
 
@@ -382,14 +422,21 @@ fn valid_manual_cookie(cookie: &str) -> bool {
     if cookie.len() > 60_000 || cookie.contains(['\r', '\n']) {
         return false;
     }
-    let mut pairs = cookie.split(';').map(str::trim).filter(|part| !part.is_empty()).peekable();
-    pairs.peek().is_some() && pairs.all(|part| {
-        part.split_once('=').is_some_and(|(name, value)| {
-            !name.is_empty()
-                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+.^_`|~-".contains(&b))
-                && value.bytes().all(|b| matches!(b, 32..=126))
+    let mut pairs = cookie
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .peekable();
+    pairs.peek().is_some()
+        && pairs.all(|part| {
+            part.split_once('=').is_some_and(|(name, value)| {
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+.^_`|~-".contains(&b))
+                    && value.bytes().all(|b| matches!(b, 32..=126))
+            })
         })
-    })
 }
 
 fn normalize_manual_cookie<'a>(platform: &str, cookie: &'a str) -> Result<&'a str> {
@@ -406,7 +453,9 @@ fn normalize_manual_cookie<'a>(platform: &str, cookie: &'a str) -> Result<&'a st
         return Ok(cookie);
     }
     let header = header.trim();
-    if cookie.len() > 60_000 || cookie.contains(['\r', '\n']) || header.is_empty()
+    if cookie.len() > 60_000
+        || cookie.contains(['\r', '\n'])
+        || header.is_empty()
         || !valid_manual_cookie(header)
     {
         bail!("CONFIG_INVALID");
@@ -439,8 +488,12 @@ pub(crate) fn update_account_auth(
     }
     // Clearing an active credential leaves the account unconfigured.
     let active = match mode {
-        AccountAuth::Login if login.is_empty() => profile.account_auth.filter(|active| *active != mode),
-        AccountAuth::Manual if manual.is_empty() => profile.account_auth.filter(|active| *active != mode),
+        AccountAuth::Login if login.is_empty() => {
+            profile.account_auth.filter(|active| *active != mode)
+        }
+        AccountAuth::Manual if manual.is_empty() => {
+            profile.account_auth.filter(|active| *active != mode)
+        }
         _ => Some(mode),
     };
     if credential.is_none() && active != Some(mode) {
@@ -448,18 +501,48 @@ pub(crate) fn update_account_auth(
     }
     db.execute(
         "INSERT INTO platform_settings(platform,user_agent,cookie,login_cookie,account_auth) VALUES (?1,?2,?3,?4,?5)
-         ON CONFLICT(platform) DO UPDATE SET cookie=excluded.cookie,login_cookie=excluded.login_cookie,account_auth=excluded.account_auth",
-        rusqlite::params![platform, profile.user_agent, manual, login, active.map(AccountAuth::as_str)],
+         ON CONFLICT(platform) DO UPDATE SET cookie=excluded.cookie,login_cookie=excluded.login_cookie,account_auth=excluded.account_auth,
+         login_device=CASE WHEN ?6 THEN NULL ELSE platform_settings.login_device END",
+        rusqlite::params![platform, profile.user_agent, manual, login, active.map(AccountAuth::as_str), mode==AccountAuth::Login && credential.as_deref()==Some("")],
     )
     .context("DATABASE_ERROR")?;
     profile.cookie_configured = !manual.is_empty();
     profile.login_configured = !login.is_empty();
     profile.account_auth = active;
+    if mode == AccountAuth::Login && credential.as_deref() == Some("") {
+        profile.login_device = None;
+    }
     match (mode, credential.as_ref()) {
         (AccountAuth::Login, Some(cookie)) => profile.login_cookie.clone_from(cookie),
         (AccountAuth::Manual, Some(_)) => profile.cookie = manual.to_owned(),
         _ => {}
     }
+    Ok(())
+}
+
+pub(crate) fn save_login_session(
+    db: &Connection,
+    settings: &mut Settings,
+    platform: &str,
+    cookie: String,
+    identity: BrowserIdentity,
+) -> Result<()> {
+    identity.validate()?;
+    let tx = db.unchecked_transaction().context("DATABASE_ERROR")?;
+    let mut next = settings.clone();
+    update_account_auth(&tx, &mut next, platform, AccountAuth::Login, Some(cookie))?;
+    tx.execute(
+        "UPDATE platform_settings SET login_device=?2 WHERE platform=?1",
+        rusqlite::params![platform, serde_json::to_string(&identity)?],
+    )
+    .context("DATABASE_ERROR")?;
+    tx.commit().context("DATABASE_ERROR")?;
+    next.profiles
+        .iter_mut()
+        .find(|p| p.platform == platform)
+        .context("CONFIG_INVALID")?
+        .login_device = Some(identity);
+    *settings = next;
     Ok(())
 }
 
@@ -552,7 +635,9 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
         .to_owned();
     let account_auth = if update.platform != "telegram" && update.cookie.is_some() {
         if cookie.is_empty() {
-            profile.account_auth.filter(|mode| *mode != AccountAuth::Manual)
+            profile
+                .account_auth
+                .filter(|mode| *mode != AccountAuth::Manual)
         } else {
             Some(AccountAuth::Manual)
         }
@@ -623,6 +708,7 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
         account_auth,
         cookie,
         login_cookie: std::mem::take(&mut profile.login_cookie),
+        login_device: profile.login_device.take(),
         credential_ref: reference.clone(),
         http_chunk_size,
     };
@@ -637,21 +723,138 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
 #[cfg(test)]
 mod tests {
     #[test]
+    fn login_identity_is_atomic_persistent_isolated_and_separate_from_manual_cookie() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Connection::open(root.path().join("device.sqlite")).unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        let identity: BrowserIdentity =
+            serde_json::from_value(json!({"user_agent":"Native Edge/149",
+            "client_hints":{"sec-ch-ua-platform":"\"Windows\""}}))
+            .unwrap();
+        for platform in ["douyin", "xiaohongshu", "tiktok", "bilibili", "weixin"] {
+            let manual_ua = format!("manual/{platform}");
+            update_account_auth(
+                &db,
+                &mut settings,
+                platform,
+                AccountAuth::Manual,
+                Some("session=manual".into()),
+            )
+            .unwrap();
+            save_login_session(
+                &db,
+                &mut settings,
+                platform,
+                "session=login".into(),
+                identity.clone(),
+            )
+            .unwrap();
+            save_profile(
+                &db,
+                &mut settings,
+                ProfileUpdate {
+                    platform: platform.into(),
+                    user_agent: manual_ua.clone(),
+                    cookie: None,
+                    proxy: None,
+                    bypass_proxy: None,
+                    http_chunk_size: None,
+                },
+            )
+            .unwrap();
+            let frozen = snapshot(&settings).unwrap();
+            assert_eq!(frozen[platform]["user_agent"], "Native Edge/149");
+            assert_eq!(frozen[platform]["cookie"], "session=login");
+            assert_eq!(
+                frozen[platform]["client_hints"]["sec-ch-ua-platform"],
+                "\"Windows\""
+            );
+            update_account_auth(&db, &mut settings, platform, AccountAuth::Manual, None).unwrap();
+            let manual = snapshot(&settings).unwrap();
+            assert_eq!(manual[platform]["user_agent"], manual_ua);
+            assert_eq!(manual[platform]["cookie"], "session=manual");
+            assert!(manual[platform].get("client_hints").is_none());
+            assert_eq!(frozen[platform]["user_agent"], "Native Edge/149");
+            update_account_auth(&db, &mut settings, platform, AccountAuth::Login, None).unwrap();
+        }
+        let restored = load(&db, PathBuf::new()).unwrap();
+        assert_eq!(snapshot(&restored).unwrap(), snapshot(&settings).unwrap());
+        assert!(profile_for(&restored, "youtube").login_device.is_none());
+        assert!(profile_for(&restored, "telegram").login_device.is_none());
+        update_account_auth(
+            &db,
+            &mut settings,
+            "bilibili",
+            AccountAuth::Login,
+            Some(String::new()),
+        )
+        .unwrap();
+        assert!(profile_for(&settings, "bilibili").login_device.is_none());
+        assert_eq!(
+            profile_for(&settings, "douyin").login_device,
+            Some(identity.clone())
+        );
+        let before = serde_json::to_value(&settings).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_identity BEFORE UPDATE OF login_device ON platform_settings BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        assert!(save_login_session(
+            &db,
+            &mut settings,
+            "douyin",
+            "session=failed".into(),
+            identity
+        )
+        .is_err());
+        assert_eq!(serde_json::to_value(&settings).unwrap(), before);
+        assert_eq!(
+            snapshot(&load(&db, PathBuf::new()).unwrap()).unwrap(),
+            snapshot(&settings).unwrap()
+        );
+    }
+    #[test]
     fn bilibili_manual_and_login_cookies_survive_restart_with_platform_isolation() {
         use super::*;
         let db = Connection::open_in_memory().unwrap();
         let mut settings = load(&db, PathBuf::new()).unwrap();
-        update_account_auth(&db, &mut settings, "bilibili", AccountAuth::Manual, Some("SESSDATA=fixture-manual".into())).unwrap();
-        update_account_auth(&db, &mut settings, "bilibili", AccountAuth::Login, Some("SESSDATA=fixture-login; DedeUserID=123".into())).unwrap();
+        update_account_auth(
+            &db,
+            &mut settings,
+            "bilibili",
+            AccountAuth::Manual,
+            Some("SESSDATA=fixture-manual".into()),
+        )
+        .unwrap();
+        update_account_auth(
+            &db,
+            &mut settings,
+            "bilibili",
+            AccountAuth::Login,
+            Some("SESSDATA=fixture-login; DedeUserID=123".into()),
+        )
+        .unwrap();
         let mut restored = load(&db, PathBuf::new()).unwrap();
         let captured = snapshot(&restored).unwrap();
-        assert_eq!(captured["bilibili"]["cookie"], "SESSDATA=fixture-login; DedeUserID=123");
+        assert_eq!(
+            captured["bilibili"]["cookie"],
+            "SESSDATA=fixture-login; DedeUserID=123"
+        );
         assert_eq!(captured["bilibili"]["login_session"], true);
         assert_eq!(captured["youtube"]["cookie"], "");
-        assert!(!serde_json::to_string(&restored).unwrap().contains("fixture-login"));
+        assert!(!serde_json::to_string(&restored)
+            .unwrap()
+            .contains("fixture-login"));
         update_account_auth(&db, &mut restored, "bilibili", AccountAuth::Manual, None).unwrap();
-        assert_eq!(snapshot(&restored).unwrap()["bilibili"]["cookie"], "SESSDATA=fixture-manual");
-        assert!(restored.profiles.iter().find(|p| p.platform == "bilibili").unwrap().login_configured);
+        assert_eq!(
+            snapshot(&restored).unwrap()["bilibili"]["cookie"],
+            "SESSDATA=fixture-manual"
+        );
+        assert!(
+            restored
+                .profiles
+                .iter()
+                .find(|p| p.platform == "bilibili")
+                .unwrap()
+                .login_configured
+        );
     }
     use super::*;
 
@@ -934,7 +1137,14 @@ mod tests {
     fn cookie_boundary_whitespace_is_trimmed_for_all_platforms() {
         let db = Connection::open_in_memory().unwrap();
         let mut settings = load(&db, PathBuf::new()).unwrap();
-        for platform in ["douyin", "xiaohongshu", "tiktok", "youtube", "weixin", "bilibili"] {
+        for platform in [
+            "douyin",
+            "xiaohongshu",
+            "tiktok",
+            "youtube",
+            "weixin",
+            "bilibili",
+        ] {
             for (input, expected) in [
                 (
                     "\r\n \t session=fixture; preference=a b \r\n\t",
@@ -977,8 +1187,14 @@ mod tests {
         let header = "sessionid=synthetic; fpk1=abc+/==; SEARCH_RESULT_LIST_TYPE=%22single%22;";
         for host in ["douyin.com", ".douyin.com", "WWW.DOUYIN.COM"] {
             let input = format!(" {host}; {header} ");
-            update_account_auth(&db, &mut settings, "douyin", AccountAuth::Manual, Some(input))
-                .unwrap();
+            update_account_auth(
+                &db,
+                &mut settings,
+                "douyin",
+                AccountAuth::Manual,
+                Some(input),
+            )
+            .unwrap();
             assert_eq!(super::cookie(&settings, "douyin").unwrap(), header);
         }
         for invalid in [
@@ -989,15 +1205,28 @@ mod tests {
             "douyin.com;\nsessionid=synthetic",
         ] {
             assert!(update_account_auth(
-                &db, &mut settings, "douyin", AccountAuth::Manual, Some(invalid.into()),
-            ).is_err());
+                &db,
+                &mut settings,
+                "douyin",
+                AccountAuth::Manual,
+                Some(invalid.into()),
+            )
+            .is_err());
         }
         assert!(update_account_auth(
-            &db, &mut settings, "tiktok", AccountAuth::Manual, Some(format!("douyin.com; {header}")),
-        ).is_err());
+            &db,
+            &mut settings,
+            "tiktok",
+            AccountAuth::Manual,
+            Some(format!("douyin.com; {header}")),
+        )
+        .is_err());
         let restored = load(&db, PathBuf::new()).unwrap();
         assert_eq!(super::cookie(&restored, "douyin").unwrap(), header);
-        assert_eq!(douyin_snapshot(&restored).unwrap()["douyin"]["cookie"], header);
+        assert_eq!(
+            douyin_snapshot(&restored).unwrap()["douyin"]["cookie"],
+            header
+        );
 
         save_profile(
             &db,
@@ -1010,8 +1239,12 @@ mod tests {
                 http_chunk_size: None,
                 bypass_proxy: None,
             },
-        ).unwrap();
-        assert_eq!(super::cookie(&settings, "douyin").unwrap(), "sessionid=updated");
+        )
+        .unwrap();
+        assert_eq!(
+            super::cookie(&settings, "douyin").unwrap(),
+            "sessionid=updated"
+        );
     }
 
     #[test]
@@ -1073,13 +1306,24 @@ mod tests {
             http_chunk_size: None,
         };
         save_profile(&db, &mut settings, update("original", Some(manual.into()))).unwrap();
-        update_account_auth(&db, &mut settings, "weixin", AccountAuth::Login, Some(imported.into())).unwrap();
+        update_account_auth(
+            &db,
+            &mut settings,
+            "weixin",
+            AccountAuth::Login,
+            Some(imported.into()),
+        )
+        .unwrap();
         save_profile(&db, &mut settings, update("new-agent", None)).unwrap();
 
         let mut restored = load(&db, PathBuf::new()).unwrap();
         let public = serde_json::to_value(&restored).unwrap();
-        let weixin = public["profiles"].as_array().unwrap().iter()
-            .find(|p| p["platform"] == "weixin").unwrap();
+        let weixin = public["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["platform"] == "weixin")
+            .unwrap();
         assert_eq!(weixin["login_configured"], true);
         assert_eq!(weixin["account_auth"], "login");
         assert!(!public.to_string().contains("fixture"));
@@ -1089,14 +1333,28 @@ mod tests {
         assert_eq!(captured["weixin"]["user_agent"], "new-agent");
         assert_eq!(captured["douyin"]["cookie"], "");
 
-        assert!(update_account_auth(&db, &mut restored, "weixin", AccountAuth::Manual, Some("invalid header".into())).is_err());
+        assert!(update_account_auth(
+            &db,
+            &mut restored,
+            "weixin",
+            AccountAuth::Manual,
+            Some("invalid header".into())
+        )
+        .is_err());
         let mut restored = load(&db, PathBuf::new()).unwrap();
         assert_eq!(snapshot(&restored).unwrap()["weixin"]["cookie"], imported);
         update_account_auth(&db, &mut restored, "weixin", AccountAuth::Manual, None).unwrap();
         assert_eq!(snapshot(&restored).unwrap()["weixin"]["cookie"], manual);
         update_account_auth(&db, &mut restored, "weixin", AccountAuth::Login, None).unwrap();
         assert_eq!(snapshot(&restored).unwrap()["weixin"]["cookie"], imported);
-        update_account_auth(&db, &mut restored, "weixin", AccountAuth::Login, Some(String::new())).unwrap();
+        update_account_auth(
+            &db,
+            &mut restored,
+            "weixin",
+            AccountAuth::Login,
+            Some(String::new()),
+        )
+        .unwrap();
         let restored = load(&db, PathBuf::new()).unwrap();
         assert_eq!(snapshot(&restored).unwrap()["weixin"]["cookie"], "");
         assert_eq!(profile_for(&restored, "weixin").account_auth, None);
@@ -1108,7 +1366,12 @@ mod tests {
         for (manual, yuanbao, legacy_mode, expected) in [
             ("", None, None, None),
             ("manual=test", None, None, Some(AccountAuth::Manual)),
-            ("manual=test", Some("yuanbao=test"), Some("yuanbao"), Some(AccountAuth::Login)),
+            (
+                "manual=test",
+                Some("yuanbao=test"),
+                Some("yuanbao"),
+                Some(AccountAuth::Login),
+            ),
             ("manual=test", Some("yuanbao=test"), Some("browser"), None),
         ] {
             let db = Connection::open_in_memory().unwrap();
@@ -1122,11 +1385,14 @@ mod tests {
             ).unwrap();
             if let Some(yuanbao) = yuanbao {
                 db.execute_batch("ALTER TABLE platform_settings ADD COLUMN yuanbao_cookie TEXT NOT NULL DEFAULT '';").unwrap();
-                db.execute("UPDATE platform_settings SET yuanbao_cookie=?1", [yuanbao]).unwrap();
+                db.execute("UPDATE platform_settings SET yuanbao_cookie=?1", [yuanbao])
+                    .unwrap();
             }
             if let Some(mode) = legacy_mode {
-                db.execute_batch("ALTER TABLE platform_settings ADD COLUMN weixin_auth TEXT;").unwrap();
-                db.execute("UPDATE platform_settings SET weixin_auth=?1", [mode]).unwrap();
+                db.execute_batch("ALTER TABLE platform_settings ADD COLUMN weixin_auth TEXT;")
+                    .unwrap();
+                db.execute("UPDATE platform_settings SET weixin_auth=?1", [mode])
+                    .unwrap();
             }
             let restored = load(&db, PathBuf::new()).unwrap();
             assert_eq!(profile_for(&restored, "weixin").account_auth, expected);

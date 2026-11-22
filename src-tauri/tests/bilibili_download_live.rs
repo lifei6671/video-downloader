@@ -56,6 +56,16 @@ async fn bilibili_author_task_download_and_restart() -> Result<()> {
         let ready = wait(&core, &task.id, Status::Ready).await?;
         let video = ready.video.as_ref().context("missing preview")?;
         ensure!(video["platform"] == "bilibili");
+        ensure!(
+            video["author_profile"]["bio"]
+                .as_str()
+                .is_some_and(|bio| !bio.is_empty()),
+            "sample author biography missing"
+        );
+        ensure!(
+            !core.author_avatar(&task.id)?.is_empty(),
+            "preview avatar missing"
+        );
         ensure!(video["author_profile"]["id"]
             .as_str()
             .is_some_and(|id| !id.is_empty()));
@@ -66,14 +76,24 @@ async fn bilibili_author_task_download_and_restart() -> Result<()> {
     core.shutdown().await;
     drop(core);
     let completed = result?;
+    let avatar_before = {
+        let db = rusqlite::Connection::open(run.path().join("qa.sqlite"))?;
+        db.query_row(
+            "SELECT avatar FROM authors WHERE platform='bilibili'",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?
+    };
     let original = std::fs::read(completed.path.as_ref().context("missing media path")?)?;
     ensure!(!original.is_empty());
     let restarted = open(run.path())?;
     let recovered = restarted.list().into_iter().find(|t| t.id == completed.id);
+    let avatar_after = restarted.author_avatar(&completed.id)?;
     restarted.shutdown().await;
     drop(restarted);
     let recovered = recovered.context("task missing after restart")?;
     ensure!(recovered.status == Status::Completed && !recovered.file_missing);
+    ensure!(avatar_before == avatar_after && !avatar_after.is_empty());
     ensure!(
         recovered.video.as_ref().context("missing restored video")?["author_profile"]
             == completed

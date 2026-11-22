@@ -51,6 +51,7 @@ def test_bilibili_cookie_reaches_official_api_but_not_media_or_other_platforms(l
 
 
 def test_bilibili_network_boundaries_and_dash_selection(monkeypatch):
+    monkeypatch.setattr(bilibili, 'attach_author', lambda *_: None)
     for host in ['www.bilibili.com', 'api.bilibili.com', 'i0.hdslb.com', 'v.bilivideo.com']:
         validate_target('https://' + host + '/fixture', 'bilibili')
     for host in ['bilivideo.com.evil.test', 'www.youtube.com', '127.0.0.1']:
@@ -106,3 +107,46 @@ def test_bilibili_official_mcdn_https_port_is_scoped_to_media():
     request = urllib.request.Request(url)
     jar.add_cookie_header(request)
     assert request.get_header('Cookie') is None
+
+
+def test_bilibili_author_card_supplies_bio_and_avatar_without_persisting_url():
+    import io
+    import author_profile
+    class Client:
+        def urlopen(self, request):
+            assert request.url == 'https://api.bilibili.com/x/web-interface/card?mid=123'
+            assert request.extensions['timeout'] == 5
+            return io.BytesIO(json.dumps({'code': 0, 'data': {'card': {
+                'mid': '123', 'name': '作者', 'face': 'http://i0.hdslb.com/avatar.jpg',
+                'sign': ' 简介第一行\n第二行 '}}}).encode())
+    info = {'uploader_id': '123', 'uploader': '原昵称'}
+    bilibili.attach_author(Client(), info)
+    profile = author_profile.metadata(info, 'bilibili')
+    assert profile['id'] == '123' and profile['nickname'] == '作者'
+    assert profile['bio'] == '简介第一行\n第二行'
+    assert author_profile.avatar_url(None, info, 'bilibili') == 'https://i0.hdslb.com/avatar.jpg'
+    assert 'https://' not in json.dumps(profile)
+    assert author_profile.downloaded_profile({'author_profile': profile}) == {
+        'id': '123', 'bio': '简介第一行\n第二行'}
+    assert author_profile.downloaded_profile({'platform': 'bilibili', 'author_profile': {'id': '123'}}) == {'id': '123'}
+
+
+@pytest.mark.parametrize('payload', [b'<html>blocked</html>', b'x' * (1024 * 1024 + 1),
+    b'{"code":-403}', b'{"code":0,"data":{"card":{"mid":456,"sign":"wrong"}}}',
+    b'{"code":0,"data":{"card":[]}}'], ids=['html', 'oversized', 'denied', 'wrong-author', 'bad-card'])
+def test_bilibili_optional_author_failures_keep_video_metadata(payload):
+    import io
+    class Client:
+        def urlopen(self, request): return io.BytesIO(payload)
+    info = {'uploader_id': '123', 'uploader': '原昵称'}
+    bilibili.attach_author(Client(), info)
+    assert info == {'uploader_id': '123', 'uploader': '原昵称'}
+
+
+def test_bilibili_author_request_failure_is_optional_and_invalid_ids_are_not_queried():
+    from yt_dlp.networking.exceptions import TransportError
+    class Client:
+        def urlopen(self, request): raise TransportError('fixture unavailable')
+    bilibili.attach_author(Client(), {'uploader_id': '123'})
+    for mid in [None, '../123', '123?other=1', True]:
+        bilibili.attach_author(None, {'uploader_id': mid})

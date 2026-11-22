@@ -58,7 +58,8 @@ export type ResolvePhase = 'checking_link' | 'checking_cache' | 'starting_engine
 export interface ResolveProgress { phase: ResolvePhase; steps: ResolvePhase[] }
 export interface Task { resolve_progress?: ResolveProgress | null; insertion_id?: number; asset_id?: string | null; total_bytes_estimate?: number | null; telegram_link?: string | null; eta_seconds?: number | null; merging?: boolean; id: string; revision: number; status: Status; video: Video | null; bytes: number; total_bytes: number | null; speed_bps: number | null; error: string | null; path: string | null; created_at: number; download_requested_at?: number | null; completed_at: number | null; canceling: boolean; file_missing: boolean; queue_order: number | null; download_requested: boolean; duplicate_confirmed?: boolean; cover_path: string | null; cover_error: string | null; files: ImageMeta[]; completed_items: number | null; total_items: number | null; cache_hit: boolean; cached_at: number | null; cover_cached: boolean }
 export type AccountAuth = 'login' | 'manual';
-export interface Profile { http_chunk_size?: number | null; bypass_proxy?: boolean; platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean; login_configured?: boolean; account_auth?: AccountAuth | null }
+export interface BrowserIdentity { user_agent: string; client_hints: Record<string, string>; environment?: { platform: string; language: string; timezone: string; screen_width: number; screen_height: number; hardware_concurrency: number | null; device_memory: number | null } }
+export interface Profile { http_chunk_size?: number | null; bypass_proxy?: boolean; platform: string; user_agent: string; proxy: string | null; cookie_configured: boolean; login_configured?: boolean; account_auth?: AccountAuth | null; login_device?: BrowserIdentity }
 export interface Settings { download_directory: string; filename_template: string; max_downloads: number; profiles: Profile[] }
 export interface FilenamePreview { path: string; segments: { text: string; variable: string | null }[] }
 export type TelegramPurpose = 'download' | 'backup';
@@ -447,6 +448,7 @@ const errors: Record<string, string> = {
   UPSTREAM_CHANGED: '平台响应已变化，暂时无法解析此作品',
   WEIXIN_LOGIN_REQUIRED: '请登录腾讯元宝后重试，或填写腾讯元宝网页 Cookie',
   WEIXIN_COOKIE_EXPIRED: '腾讯元宝登录已失效，请更新登录或 Cookie 后重试',
+  PLATFORM_LOGIN_DEVICE_FAILED: '无法读取登录浏览器信息，请重新登录',
   PLATFORM_LOGIN_WINDOW_FAILED: '无法打开平台登录窗口，请重试',
   PLATFORM_LOGIN_REQUIRED: '此方式缺少已保存的登录信息，请先登录或填写 Cookie',
   PLATFORM_LOGIN_BUSY: '已有平台登录正在进行',

@@ -1,6 +1,6 @@
 # 作者资料
 
-抖音、TikTok、YouTube、小红书和 Telegram 的头像字节保存在 SQLite。Telegram 使用频道身份和频道头像。
+抖音、TikTok、YouTube、小红书、B 站和 Telegram 的头像字节保存在 SQLite。Telegram 使用频道身份和频道头像。
 
 - Tauri 返回的 `author_profile` 为可选对象，包含 `id`、`nickname`、`handle`、`kind`、`bio` 和 `avatar_cached`。旧记录可继续显示原有 `author`，历史任务迁移只读本地数据。
 - 抖音沿用 DTK 的 `sec_uid` 身份语义，账号名另存 `handle`；TikTok 使用数字作者 ID；YouTube 使用 `UC…` 频道 ID，`@handle` 单独保存。昵称不再统一加 `@`。
@@ -8,6 +8,7 @@
 - 抖音和 TikTok 直接从作品详情的 `signature` 提取简介，写入 `authors.bio`。空白或缺失时保留旧简介。普通下载使用已校验的作品回包补齐简介，也能为缺少稳定作者 ID 的旧任务建立关联。全程无需请求作者主页。
 - 抖音从作品作者节点读取粉丝、关注和获赞计数，TikTok 按字段优先读取 `authorStatsV2`，其次读取 `authorStats`。年龄仅使用作者节点给出的有效年龄值。平台明确关闭年龄展示时，清除已保存的年龄。抖音地区与 IP 属地分开保存，TikTok 地区仅取作者节点给出的地区代码。以上字段沿用现有作品请求。
 - 小红书从笔记详情的 `user` 对象读取 `userId` 和 `avatar`。网页分享链接和 App 短链共用视频及图集的头像缓存流程。
+- B 站根据视频已确认的 UID 调用官方作者卡片接口，核对 `mid` 后读取 `face` 和 `sign`。预览和下载共用现有平台网络、5 秒超时、头像校验及 SQLite 缓存；简介写入共享作者表。预览与任务列表显示摘要，悬停或键盘聚焦可查看全文，作者主页保留完整简介。旧 B 站缓存下次解析时更新，其他平台缓存保持原修订。
 - YouTube 只根据单视频解析得到的频道 ID读取 `/channel/<id>/about` 的频道头像元数据，不枚举频道视频。复用锁定版本 yt-dlp 的页面/缩略图解析能力，并核对频道 ID；网络通过 GuardedRH、使用该平台配置。头像额外允许 `yt3.ggpht.com`、`yt3.googleusercontent.com`。
 - Python 引擎的头像资料请求和下载各使用 5 秒网络超时，并使用固定暂存名 `author-avatar`。Telegram SDK 读取小头像的整个阶段限时 5 秒，直接返回图片字节。头像上限 2 MiB，只接受 JPEG、PNG 和 WebP。Rust 校验后按作者保存；身份不足时沿用单作品缓存。远程头像 URL 不进入事件、任务快照或 SQLite。
 - 头像是可选资源。资料缺失、网络失败或头像无效时，作品仍可解析和下载。作品预览、下载任务和任务详情通过 `get_author_avatar(taskId)` 读取缓存字节，在署名前显示头像，缺失时显示占位。可用作者昵称或 ID 搜索本地记录。

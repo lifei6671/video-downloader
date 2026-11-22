@@ -89,7 +89,7 @@ flowchart TD
 | yt-dlp | 短链展开、平台提取、详情与媒体网络请求、流式保存暂存视频或图集 | 只启用支持的平台与媒体类型；DTK 仅用于单作品解析 |
 | SQLite | 任务、路径、元数据、设置与 Cookie | 用户批准 Cookie 直接保存；不保存代理密码或签名 API/媒体地址；小红书仅在本机保留重新解析所需的分享链接参数 |
 
-解析使用任务创建时的平台配置快照。用户提交视频下载时更新该平台的认证方式和凭据，排队和运行时沿用提交时的选择。bridge 只使用对应平台配置，凭据经 stdin 进入专属子进程内存。内置登录 Cookie 限定到登录时读取凭据的 HTTPS 主机，手动 Cookie 沿用平台域范围。
+解析使用任务创建时的平台配置快照。用户提交视频下载时更新该平台的认证方式和凭据，排队和运行时沿用提交时的选择。bridge 只使用对应平台配置，凭据经 stdin 进入专属子进程内存。内置登录 Cookie 沿用平台允许的 HTTPS 作用域，手动 Cookie 沿用平台域范围。内置会话把浏览器真实 UA、Client Hints 和可获取的环境信息一起绑定；手动 UA 编辑不改写内置身份，详见[设备信息](platform-device-identity.md)。
 
 ## 4. yt-dlp 适配方式
 
@@ -126,7 +126,7 @@ Rust 保存句柄并持续读取 stdout/stderr。UTF-8 JSONL，一行一条消�
 | `download_video` 请求 | `id`、规范作品链接、预期 platform/video_id/kind/image_count、实际 resolver、原任务配置快照、Rust 创建的专属 staging 目录 |
 | `resolved` | 同一 `id`、platform、video_id、canonical_url、title、author、可选 `author_profile`、cover_url、duration_ms、width、height、filesize、filesize_approx、kind/resolver、images（尺寸/来源/本地相对预览名）、music（title/author）。可选字段可空。作者资料字段及头像暂存方式见 [作者资料](author-profile.md) |
 | `progress` | 同一 `id`、downloaded_bytes、total_bytes、speed_bps、completed_items/total_items；不包含上游原始 dict |
-| `download_finished` | 同一 `id`、平台/作品身份、staging 内相对文件名、实际字节数与容器。图集返回 files 清单（每文件 bytes/hash/尺寸/来源）。抖音和 TikTok 普通下载可附带 `author_profile`，包含作者 ID 与作品回包提供的简介或公开资料。该事件不含媒体 URL，仅表示引擎文件写入结束 |
+| `download_finished` | 同一 `id`、平台/作品身份、staging 内相对文件名、实际字节数与容器。图集返回 files 清单（每文件 bytes/hash/尺寸/来源）。抖音、TikTok 和 B 站普通下载可附带 `author_profile`，包含作者 ID 与已校验回包提供的简介或公开资料。B 站下载可携带 `author-avatar` 暂存图片，Rust 仅在返回作者 UID 与当前视频作者一致时保存。该事件不含媒体 URL，仅表示引擎文件写入结束 |
 | `error` | 同一 `id`、稳定 code、脱敏 message、stage；可可靠获得时附 HTTP 状态 |
 
 请求和响应均包含 `protocol_version`。每个操作最多一个终端结果：身份识别以 `identified` 结束、解析以 `resolved` 结束、下载以 `download_finished` 结束，或以 `error` 结束。成功还必须伴随正常进程退出；EOF、超限、错 ID、错版本、重复终端消息、非零退出或缺失结果都明确失败。单条消息上限 1 MiB。
@@ -301,7 +301,7 @@ Windows 验证 WebView2、无终端窗口、非管理员、中文/空格路径�
 
 用户批准先做单任务桌面闭环：Tauri 2 + React/TypeScript + shadcn/ui 亮色界面、分平台 Cookie/UA/代理、SQLite 任务记录、真实预览/下载/取消、重启记录恢复。本卡按当时默认并发 2、上限 3 的首版契约规划下一卡；当前默认值与上限见上文并发契约；本卡不显示并发、队列、重试、移除或文件删除按钮。
 
-当前数据库实现采用 `download_tasks(id,snapshot)` 保存白名单展示快照，`commit_intents` 保存文件提交意图，`task_staging` 保存本应用独占暂存路径，`platform_settings` 保存平台 UA、Cookie、去凭据代理与系统凭据引用，`app_settings` 保存目录。Cover URL 仅在内存展示，不持久化短期 token。任务创建时复制两平台配置；下载使用该快照。与上文首版拟定列模型职责一致，并发阶段按实际查询需要扩展，不维护两套任务状态。
+当前数据库实现采用 `download_tasks(id,snapshot)` 保存白名单展示快照，`commit_intents` 保存文件提交意图，`task_staging` 保存本应用独占暂存路径，`platform_settings` 保存平台手动 UA、Cookie、可空 `login_device` 设备绑定、去凭据代理与系统凭据引用，`app_settings` 保存目录。Cover URL 仅在内存展示，不持久化短期 token。任务创建时复制两平台配置；下载使用该快照。与上文首版拟定列模型职责一致，并发阶段按实际查询需要扩展，不维护两套任务状态。
 
 M2 开发可执行文件从仓库 `python-engine/dist/video-engine/` 启动既有打包引擎，无生产 Python 源码 fallback；Release 已通过 `tauri.release.conf.json` 将整个引擎目录映射到应用资源目录，GitHub Actions 按正式版本标签同步版本并构建三平台安装包；全新无 Python Windows 与两种 macOS 验收仍待完成。详情见 `m2-validation.md`。
 

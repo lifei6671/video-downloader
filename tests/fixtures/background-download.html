@@ -35,6 +35,12 @@ if (scenario.startsWith('author-')) {
     video:{...structuredClone(tasks[0].video),video_id:'100_8'}});
   api.authorAvatar = async id => {control.calls.push({type:'avatar',id}); if(scenario === 'author-broken') throw 'FILE_MISSING'; return api.cover(id)};
 }
+if (scenario === 'author-bilibili') {
+  for (const task of tasks) Object.assign(task.video, {platform:'bilibili', video_id:'BV1mMWu6wEwH_p1',
+    canonical_url:'https://www.bilibili.com/video/BV1mMWu6wEwH/?p=1',
+    author_profile:{id:'3707038739728761',nickname:'B站作者',kind:'user',avatar_cached:true,
+      bio:'B站作者的简介，记录生活与创作。\n这是第二行简介。'}});
+}
 if (scenario === 'author-results') {
   const make = (id, platform, authorId, nickname, title) => ({...structuredClone(tasks[0]),id,status:'completed',download_requested:true,
     bytes:65536,completed_at:Math.floor(new Date(2026,9,16,20,48).getTime()/1000),path:'C:\\TestVideos\\'+id+'.mp4',

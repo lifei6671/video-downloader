@@ -8,6 +8,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::sync::watch;
 
 use super::{error, AppCore};
+use yingqu_core::browser_identity::BrowserIdentity;
 use yingqu_core::settings::{AccountAuth, Settings};
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -155,7 +156,7 @@ async fn wait_for_session(
     window: &WebviewWindow,
     site: std::sync::Arc<Site>,
     mut closed: watch::Receiver<bool>,
-) -> Result<Option<String>, &'static str> {
+) -> Result<Option<(String, BrowserIdentity)>, &'static str> {
     let url: tauri::Url = site
         .cookie_url
         .parse()
@@ -170,19 +171,19 @@ async fn wait_for_session(
             _ = &mut deadline => return Err("PLATFORM_LOGIN_TIMEOUT"),
             _ = tick.tick() => {}
         }
-        let window = window.clone();
+        let cookie_window = window.clone();
         let url = url.clone();
-        let site = site.clone();
+        let cookie_site = site.clone();
         // WebView2 dispatches Cookie reads back to the UI thread.
         let read = tokio::task::spawn_blocking(move || {
             #[cfg(target_os = "macos")]
             // WKWebView's URL lookup omits parent-domain cookies.
-            let cookies = window.cookies();
+            let cookies = cookie_window.cookies();
             #[cfg(not(target_os = "macos"))]
-            let cookies = window.cookies_for_url(url.clone());
+            let cookies = cookie_window.cookies_for_url(url.clone());
             let cookies = cookies.map_err(|_| "PLATFORM_COOKIE_READ_FAILED")?;
             Ok::<_, &'static str>(session_header(
-                &site,
+                &cookie_site,
                 &cookies,
                 &url,
                 chrono::Utc::now().timestamp(),
@@ -194,10 +195,161 @@ async fn wait_for_session(
             _ = &mut deadline => return Err("PLATFORM_LOGIN_TIMEOUT"),
             result = read => result.map_err(|_| "PLATFORM_COOKIE_READ_FAILED")??,
         };
-        if header.is_some() {
-            return Ok(header);
+        if let Some(header) = header {
+            let identity = tokio::select! {
+                biased;
+                _ = closed.wait_for(|closed| *closed) => return Ok(None),
+                _ = &mut deadline => return Err("PLATFORM_LOGIN_TIMEOUT"),
+                identity = browser_identity(window.clone(), &site) => identity?,
+            };
+            if let Some(identity) = identity {
+                return Ok(Some((header, identity)));
+            }
         }
     }
+}
+
+async fn browser_identity(
+    window: WebviewWindow,
+    site: &Site,
+) -> Result<Option<BrowserIdentity>, &'static str> {
+    #[derive(serde::Deserialize)]
+    struct Reading {
+        url: String,
+        identity: Option<BrowserIdentity>,
+    }
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    window
+        .eval_with_callback(
+            "({url:location.href,identity:window.__yingquBrowserIdentity||null})",
+            move |json| {
+                let _ = sender.try_send(json);
+            },
+        )
+        .map_err(|_| "PLATFORM_LOGIN_DEVICE_FAILED")?;
+    let json = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+        .await
+        .map_err(|_| "PLATFORM_LOGIN_DEVICE_FAILED")?
+        .ok_or("PLATFORM_LOGIN_DEVICE_FAILED")?;
+    let reading: Reading =
+        serde_json::from_str(&json).map_err(|_| "PLATFORM_LOGIN_DEVICE_FAILED")?;
+    let url = reading
+        .url
+        .parse()
+        .map_err(|_| "PLATFORM_LOGIN_DEVICE_FAILED")?;
+    if !login_navigation(site, &url) {
+        return Ok(None);
+    }
+    if let Some(identity) = &reading.identity {
+        identity
+            .validate()
+            .map_err(|_| "PLATFORM_LOGIN_DEVICE_FAILED")?;
+    }
+    Ok(reading.identity)
+}
+
+fn build_login_window(
+    main: &WebviewWindow,
+    platform: &str,
+    site: std::sync::Arc<Site>,
+    clear: bool,
+) -> Result<WebviewWindow, String> {
+    let app = main.app_handle();
+    let url = if clear { "about:blank" } else { site.login_url }
+        .parse()
+        .map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED")?;
+    let directory = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED")?
+        .join("platform-browser")
+        .join(platform);
+    std::fs::create_dir_all(&directory).map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED")?;
+    let opener = app.clone();
+    let navigation_site = site.clone();
+    let builder = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
+        .title(site.title)
+        .inner_size(
+            if platform == "weixin" { 440.0 } else { 980.0 },
+            if platform == "weixin" { 560.0 } else { 700.0 },
+        )
+        .resizable(platform != "weixin")
+        .visible(!clear)
+        .skip_taskbar(true)
+        .devtools(false)
+        .incognito(false)
+        .data_directory(directory)
+        .initialization_script(include_str!("browser-identity.js"))
+        .parent(main)
+        .map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED")?
+        .center()
+        .on_navigation(move |url| {
+            clear && url.as_str() == "about:blank" || login_navigation(&navigation_site, url)
+        })
+        .on_new_window(move |url, _| {
+            if matches!(
+                https_host(&url),
+                Some("rule.tencent.com" | "privacy.qq.com")
+            ) {
+                let _ = opener.opener().open_url(url.as_str(), None::<&str>);
+            }
+            NewWindowResponse::Deny
+        });
+    #[cfg(target_os = "macos")]
+    let builder = {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(format!("me.disign.yingqu.platform-browser.{platform}"));
+        let mut identifier = [0; 16];
+        identifier.copy_from_slice(&hash[..16]);
+        // Wry uses this isolated store on macOS14+, and the native origin-scoped
+        // persistent store on13.3. Never clear the shared store globally.
+        builder.data_store_identifier(identifier)
+    };
+    builder
+        .build()
+        .map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED".into())
+}
+
+fn should_clear_cookie(site: &Site, cookie: &Cookie<'_>, auth_only: bool) -> bool {
+    let domain = cookie.domain().unwrap_or_default().trim_start_matches('.');
+    site.cookie_domains
+        .iter()
+        .any(|root| domain == *root || domain.ends_with(&format!(".{root}")))
+        && (!auth_only || site.auth_cookies.contains(&cookie.name()))
+}
+
+async fn remove_site_cookies(
+    window: &WebviewWindow,
+    site: std::sync::Arc<Site>,
+    auth_only: bool,
+) -> Result<(), &'static str> {
+    let reader = window.clone();
+    tokio::task::spawn_blocking(move || {
+        let cookies = reader
+            .cookies()
+            .map_err(|_| "PLATFORM_COOKIE_READ_FAILED")?;
+        for cookie in cookies {
+            if should_clear_cookie(&site, &cookie, auth_only) {
+                reader
+                    .delete_cookie(cookie)
+                    .map_err(|_| "PLATFORM_COOKIE_READ_FAILED")?;
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "PLATFORM_COOKIE_READ_FAILED")?
+}
+
+async fn clear_site_cookies(
+    main: &WebviewWindow,
+    platform: &str,
+    site: std::sync::Arc<Site>,
+) -> Result<(), String> {
+    let window = build_login_window(main, platform, site.clone(), true)?;
+    let result = remove_site_cookies(&window, site, false).await;
+    let _ = window.destroy();
+    result.map_err(str::to_owned)
 }
 
 #[tauri::command]
@@ -213,38 +365,8 @@ pub(super) async fn login_platform(
     let _guard = login.0.try_lock().map_err(|_| "PLATFORM_LOGIN_BUSY")?;
     let site = std::sync::Arc::new(site(&platform).ok_or("CONFIG_INVALID")?);
     let app = main.app_handle();
-    let url = site
-        .login_url
-        .parse()
-        .map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED")?;
-    let opener = app.clone();
-    let navigation_site = site.clone();
     let (closed, closed_rx) = watch::channel(false);
-    let window = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
-        .title(site.title)
-        .inner_size(
-            if platform == "weixin" { 440.0 } else { 980.0 },
-            if platform == "weixin" { 560.0 } else { 700.0 },
-        )
-        .resizable(platform != "weixin")
-        .skip_taskbar(true)
-        .devtools(false)
-        .incognito(true)
-        .parent(&main)
-        .map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED")?
-        .center()
-        .on_navigation(move |url| login_navigation(&navigation_site, url))
-        .on_new_window(move |url, _| {
-            if matches!(
-                https_host(&url),
-                Some("rule.tencent.com" | "privacy.qq.com")
-            ) {
-                let _ = opener.opener().open_url(url.as_str(), None::<&str>);
-            }
-            NewWindowResponse::Deny
-        })
-        .build()
-        .map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED")?;
+    let window = build_login_window(&main, &platform, site.clone(), true)?;
     window.on_window_event(move |event| {
         if matches!(
             event,
@@ -253,10 +375,25 @@ pub(super) async fn login_platform(
             closed.send_replace(true);
         }
     });
-    let result = wait_for_session(&window, site, closed_rx.clone()).await;
+    let result = async {
+        // Force a fresh authentication result while retaining device cookies and
+        // LocalStorage. A stale persisted session must not close the login page.
+        remove_site_cookies(&window, site.clone(), true).await?;
+        window
+            .navigate(
+                site.login_url
+                    .parse()
+                    .map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED")?,
+            )
+            .map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED")?;
+        window.show().map_err(|_| "PLATFORM_LOGIN_WINDOW_FAILED")?;
+        let _ = window.set_focus();
+        wait_for_session(&window, site, closed_rx.clone()).await
+    }
+    .await;
     let outcome = match result {
-        Ok(Some(cookie)) if !*closed_rx.borrow() => core
-            .update_account_auth(&platform, AccountAuth::Login, Some(cookie))
+        Ok(Some((cookie, identity))) if !*closed_rx.borrow() => core
+            .save_login_session(&platform, cookie, identity)
             .map(Some)
             .map_err(error),
         Ok(_) => Ok(None),
@@ -287,6 +424,10 @@ pub(super) async fn set_platform_auth(
         return Err("CONFIG_INVALID".into());
     }
     let _guard = login.0.try_lock().map_err(|_| "PLATFORM_LOGIN_BUSY")?;
+    if mode == AccountAuth::Login && cookie.as_deref() == Some("") {
+        let site = std::sync::Arc::new(site(&platform).ok_or("CONFIG_INVALID")?);
+        clear_site_cookies(&main, &platform, site).await?;
+    }
     core.update_account_auth(&platform, mode, cookie)
         .map_err(error)
 }
@@ -294,6 +435,47 @@ pub(super) async fn set_platform_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relogin_removes_authentication_but_preserves_device_cookies_and_other_sites() {
+        let bili = site("bilibili").unwrap();
+        let cookie = |name, domain| {
+            Cookie::build((name, "fixture"))
+                .domain(domain)
+                .path("/")
+                .build()
+        };
+        assert!(should_clear_cookie(
+            &bili,
+            &cookie("SESSDATA", ".bilibili.com"),
+            true
+        ));
+        assert!(!should_clear_cookie(
+            &bili,
+            &cookie("buvid3", ".bilibili.com"),
+            true
+        ));
+        assert!(!should_clear_cookie(
+            &bili,
+            &cookie("SESSDATA", "bilibili.com.evil.test"),
+            false
+        ));
+        assert!(!should_clear_cookie(
+            &bili,
+            &cookie("sessionid", ".douyin.com"),
+            false
+        ));
+        assert!(should_clear_cookie(
+            &bili,
+            &cookie("buvid3", ".bilibili.com"),
+            false
+        ));
+        assert!(should_clear_cookie(
+            &bili,
+            &cookie("SESSDATA", "passport.bilibili.com"),
+            true
+        ));
+    }
 
     #[test]
     fn platform_sessions_require_login_markers_and_keep_only_same_site_cookies() {
@@ -391,11 +573,19 @@ mod tests {
             Cookie::parse("SESSDATA=expired; Domain=.bilibili.com; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT").unwrap(),
         ];
         assert!(session_header(&site, &cookies, &url, 2).is_none());
-        cookies.push(Cookie::parse("SESSDATA=fixture-session; Domain=.bilibili.com; Path=/; Secure; HttpOnly").unwrap());
+        cookies.push(
+            Cookie::parse(
+                "SESSDATA=fixture-session; Domain=.bilibili.com; Path=/; Secure; HttpOnly",
+            )
+            .unwrap(),
+        );
         cookies.push(Cookie::parse("DedeUserID=123; Domain=.bilibili.com; Path=/").unwrap());
         let header = session_header(&site, &cookies, &url, 2).unwrap();
         assert!(header.contains("SESSDATA=fixture-session") && header.contains("DedeUserID=123"));
         assert!(!header.contains("passport-only") && !header.contains("expired"));
-        assert!(login_navigation(&site, &"https://passport.bilibili.com/login".parse().unwrap()));
+        assert!(login_navigation(
+            &site,
+            &"https://passport.bilibili.com/login".parse().unwrap()
+        ));
     }
 }

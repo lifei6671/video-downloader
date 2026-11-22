@@ -8,13 +8,23 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 dtk = json.loads((Path(__file__).resolve().parents[2] / "vendor/dtk/manifest.json").read_text())
-print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.16.1", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
+print(json.dumps(dict(protocol_version=3, type="ready", engine_version="0.17.0", yt_dlp_version="2026.10.26", dtk_version=dtk["upstream_version"], dtk_commit=dtk["upstream_commit"])), flush=True)
 request = json.loads(sys.stdin.buffer.readline())
 params = request["params"]
 source = urlsplit(params.get('input', ''))
 platform = 'youtube' if source.hostname == 'www.youtube.com' else 'tiktok' if source.hostname == 'www.tiktok.com' else 'douyin'
 def emit(event_type, **data):
     print(json.dumps(dict(protocol_version=3, id=request["id"], type=event_type, **data)), flush=True)
+if source.hostname == 'www.bilibili.com' and request['method'] in ('identify_input', 'resolve_video'):
+    # No avatar or biography during preview: the download must fill both later.
+    result = dict(platform='bilibili', video_id='BV1mMWu6wEwH_p1',
+                  canonical_url='https://www.bilibili.com/video/BV1mMWu6wEwH/?p=1', resolver='yt-dlp', kind='video')
+    if request['method'] == 'resolve_video':
+        result.update(title='Bilibili download-only author', selected_format_id='1'*24,
+                      author_profile=dict(id='123',nickname='Bili fixture',kind='user'),
+                      formats=[dict(format_id='1'*24,container='mp4',width=1080,height=1920)])
+    emit('identified' if request['method'] == 'identify_input' else 'resolved', result=result)
+    sys.exit(0)
 if source.hostname == 'weixin.qq.com' and request['method'] in ('identify_input', 'resolve_video'):
     result = dict(platform='weixin', video_id='a'*64, canonical_url='https://weixin.qq.com'+source.path,
                   resolver='weixin', kind='video')
@@ -34,7 +44,7 @@ if source.hostname == 'weixin.qq.com' and request['method'] in ('identify_input'
              **avatar))
     sys.exit(0)
 if request['method'] == 'identify_douyin_link':
-    assert set(params['profile']) <= {'user_agent', 'proxy'}
+    assert set(params['profile']) <= {'user_agent', 'proxy', 'client_hints'}
     if source.path == '/fixture-block/':
         time.sleep(120)
     if source.path in ('/fixture-work/', '/fixture-work-alias/'):
@@ -271,8 +281,17 @@ else:
         if metadata is not None:
             format_id = '1' * 24
             metadata['selected_format_id'] = format_id
+        if params['expected']['platform'] == 'bilibili':
+            mode_file = stage.parent.parent.parent / 'bilibili-author-mode'
+            mode = mode_file.read_text() if mode_file.exists() else 'matching'
+            body_avatar = b'\x89PNG\r\n\x1a\nBili download avatar'
+            (stage / 'author-avatar').write_bytes(body_avatar)
+            profile = {'id':'999' if mode == 'wrong-author' else '123'}
+            if mode != 'avatar-only': profile['bio'] = '下载取得的B站简介'
+            avatar = dict(author_avatar_filename='author-avatar', author_avatar_bytes=len(body_avatar),
+                          author_profile=profile)
         emit("download_finished", platform=params['expected']['platform'], video_id=video_id,
             filename="video.mp4", container="mp4", bytes=len(body), format_id=format_id,
             **({'metadata': metadata} if metadata is not None else {}),
-            **({'transferred_bytes':len(body)} if params['expected']['platform']=='youtube' else {}),
+            **({'transferred_bytes':len(body)} if params['expected']['platform'] in ('youtube','bilibili') else {}),
             width=720 if params.get("format_id")=="2"*24 else 1080,height=1280 if params.get("format_id")=="2"*24 else 1920, **cover, **avatar)

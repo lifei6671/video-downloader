@@ -464,7 +464,9 @@ pub(super) fn downloaded_profile<'a>(
     result: &'a Value,
 ) -> Option<DownloadedProfile<'a>> {
     let incoming = key(result)?;
-    if !matches!(incoming.platform, "douyin" | "tiktok") || video["platform"] != incoming.platform {
+    if !matches!(incoming.platform, "douyin" | "tiktok" | "bilibili")
+        || video["platform"] != incoming.platform
+    {
         return None;
     }
     let profile = &result["author_profile"];
@@ -689,6 +691,41 @@ mod tests {
                 .get::<_, i64>(0))
                 .unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn bilibili_download_fills_shared_bio_and_rejects_another_author() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);",
+        )
+        .unwrap();
+        parse_cache::init(&db).unwrap();
+        migrate(&db).unwrap();
+        let mut task = bilibili_task();
+        super::super::persist(&db, &task).unwrap();
+        let mut older = task.clone();
+        older.id = "older-bilibili-task".into();
+        super::super::persist(&db, &older).unwrap();
+        let video = task.video.as_mut().unwrap();
+        let result = json!({"platform":"bilibili", "author_profile":{"id":"3707038739728761","bio":"新版简介"}});
+        let profile = downloaded_profile(&db, video, &result).unwrap();
+        save_downloaded_profile(&db, profile, 30).unwrap();
+        let avatar = b"\x89PNG\r\n\x1a\nfixture";
+        save_avatar(&db, video, avatar, 30).unwrap();
+        for id in ["bilibili-task", "older-bilibili-task"] {
+            let displayed = &display_profiles(&db).unwrap()[id];
+            assert_eq!(displayed["bio"], "新版简介");
+            assert_eq!(displayed["avatar_cached"], true);
+        }
+        let wrong = json!({"platform":"bilibili", "author_profile":{"id":"999","bio":"其他作者"}});
+        assert!(downloaded_profile(&db, video, &wrong).is_none());
+        let missing = json!({"platform":"bilibili", "author_profile":{"id":"3707038739728761"}});
+        assert!(downloaded_profile(&db, video, &missing).is_none());
+        assert_eq!(
+            display_profiles(&db).unwrap()["bilibili-task"]["bio"],
+            "新版简介"
         );
     }
 

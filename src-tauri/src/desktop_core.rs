@@ -1481,6 +1481,13 @@ impl Core {
     pub fn proxy(&self, platform: &str) -> Result<Option<String>> {
         settings::proxy(&self.inner.lock().unwrap().settings, platform)
     }
+    pub fn save_login_session(&self, platform: &str, cookie: String, identity: crate::browser_identity::BrowserIdentity) -> Result<Settings> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closing { bail!("CANCELED"); }
+        let Inner { db, settings, .. } = &mut *inner;
+        settings::save_login_session(db, settings, platform, cookie, identity)?;
+        Ok(settings.clone())
+    }
 
     pub fn cancel_dependency(&self) -> Result<()> {
         self.inner
@@ -3402,9 +3409,12 @@ impl Core {
                             video["filesize_approx"] = Value::Null;
                         }
                     }
-                    if author_batch.is_some() {
+                    let matching_bilibili_author = identity.platform == "bilibili"
+                        && task.video.as_ref().and_then(authors::key)
+                            .is_some_and(|key| Some(key) == authors::key(&result));
+                    if author_batch.is_some() || matching_bilibili_author {
                         if let Some(video) = task.video.as_mut() {
-                            // The validated detail supplies the author ID for both videos and albums.
+                            // Only the same verified author may receive the staged avatar.
                             let _ = authors::save_staged_avatar(&inner.db, video, &result, &media, now());
                             video["author_profile"]["avatar_cached"] = authors::has_avatar(&inner.db, video).into();
                         }
@@ -4256,6 +4266,47 @@ mod tests {
         assert!(name.starts_with("douyin_601.cover."));
         assert_eq!(bytes, app.image(&album.id, 0).unwrap());
         app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bilibili_download_fills_missing_preview_avatar_and_bio() {
+        for mode in ["matching", "wrong-author", "avatar-only"] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("bilibili-author-mode"), mode).unwrap();
+            let app = core(root.path());
+            let task = app
+                .resolve("https://www.bilibili.com/video/BV1mMWu6wEwH/".into())
+                .unwrap();
+            let ready = wait(&app, &task.id, Status::Ready).await;
+            assert!(ready.video.as_ref().unwrap()["author_profile"]["bio"].is_null());
+            assert!(app.author_avatar(&task.id).is_err());
+            app.download(&task.id, false).unwrap();
+            let done = wait(&app, &task.id, Status::Completed).await;
+            let bio = &done.video.as_ref().unwrap()["author_profile"]["bio"];
+            if mode == "matching" {
+                assert_eq!(bio, "下载取得的B站简介");
+            } else {
+                assert!(bio.is_null());
+            }
+            let avatar = app.author_avatar(&task.id).ok();
+            if mode == "wrong-author" {
+                assert!(avatar.is_none());
+            } else {
+                assert_eq!(
+                    avatar.as_deref(),
+                    Some(b"\x89PNG\r\n\x1a\nBili download avatar".as_slice())
+                );
+            }
+            app.shutdown().await;
+            drop(app);
+            let app = core(root.path());
+            assert_eq!(app.author_avatar(&task.id).ok(), avatar);
+            assert_eq!(
+                &app.list()[0].video.as_ref().unwrap()["author_profile"]["bio"],
+                bio
+            );
+            app.shutdown().await;
+        }
     }
 
     #[tokio::test]

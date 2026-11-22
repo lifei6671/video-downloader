@@ -45,12 +45,13 @@ export function AuthorInfo({ task, compact = false, showId = true, showAvatar = 
   const name = profile?.nickname?.trim() || (telegram
     ? channelName
     : (!showId && authorId) || profile?.handle || task.video.author || '作者未知');
+  const bio = task.video.platform === 'bilibili' ? profile?.bio?.trim() : undefined;
   return <div data-author-info="" role="group" aria-label={telegram ? '频道信息' : '作者信息'} className="flex min-w-0 items-center gap-2">
     {showAvatar && <AuthorAvatar task={task} name={name} compact={compact} />}
-    <div className="flex min-w-0 flex-1 items-baseline gap-2">
+    <div className="min-w-0 flex-1"><div className="flex min-w-0 items-baseline gap-2">
       <Tooltip><TooltipTrigger asChild>{onAuthorClick ? <Button ref={triggerRef} variant="link" aria-label={`查看${name}的作品`} onClick={event => onAuthorClick(event.currentTarget)} className={cn('h-auto min-w-0 justify-start p-0', id && 'max-w-[40%] shrink-0', compact ? 'text-xs font-normal' : 'text-sm font-medium')}><span className="truncate">{name}</span></Button>
         : <span tabIndex={0} className={cn('truncate', id && 'max-w-[40%] shrink-0', compact ? 'text-xs' : 'text-sm font-medium')}>{name}</span>}</TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">{name}</TooltipContent></Tooltip>
       {id && <Tooltip><TooltipTrigger asChild><span tabIndex={0} className="max-w-full truncate text-xs text-muted-foreground">ID: {id}</span></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(20rem,var(--radix-tooltip-content-available-width))] overflow-y-auto break-all">ID: {id}</TooltipContent></Tooltip>}
-    </div>
+    </div>{bio && <Tooltip><TooltipTrigger asChild><p tabIndex={0} aria-label="作者简介" className={cn('text-xs text-muted-foreground', compact ? 'line-clamp-1' : 'line-clamp-2')}>{bio}</p></TooltipTrigger><TooltipContent collisionPadding={8} className="max-h-[var(--radix-tooltip-content-available-height)] max-w-[min(24rem,var(--radix-tooltip-content-available-width))] overflow-y-auto whitespace-pre-wrap break-words">{bio}</TooltipContent></Tooltip>}</div>
   </div>;
 }

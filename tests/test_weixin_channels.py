@@ -28,7 +28,7 @@ def mock_calls(monkeypatch, *responses):
     queue = iter(responses)
     calls = []
 
-    def post(target, url, payload, ua, proxy, logger, cookies=None):
+    def post(target, url, payload, ua, proxy, logger, cookies=None, client_hints=None):
         calls.append((target, url, payload, cookies))
         result = next(queue)
         if isinstance(result, Exception):

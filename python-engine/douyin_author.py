@@ -46,14 +46,15 @@ def has_login(jar):
                for cookie in jar.get_cookies_for_url(API_URL))
 
 
-def guarded_client(proxy, *, login_session=False):
+def guarded_client(proxy, *, login_session=False, client_hints=None, browser_environment=None):
     from engine import SafeLogger
     ydl = YoutubeDL(dict(quiet=True, logger=SafeLogger(), proxy=proxy or '',
                          socket_timeout=30, cachedir=False, allowed_extractors=[], js_runtimes={}))
     if login_session:
         ydl.cookiejar = scoped_jar()
+    ydl._yingqu_browser_environment = browser_environment or {}
     ydl._request_director = ydl.build_request_director([
-        functools.partial(GuardedRH, platform='douyin')])
+        functools.partial(GuardedRH, platform='douyin', client_hints=client_hints)])
     return ydl
 
 
@@ -78,7 +79,7 @@ def identify_link(params, emit):
         author_id = None
     if author_id is None:
         ua, _, proxy = profile_config(params.get('profile', {}))
-        with guarded_client(proxy) as ydl:
+        with guarded_client(proxy, client_hints=params.get('profile', {}).get('client_hints')) as ydl:
             url = expand_share(ydl, url, ua)
         try:
             _, author_id = profile_link(url)
@@ -149,7 +150,7 @@ def scan(params, emit):
     profile = params['profile']
     ua, cookies, proxy = profile_config(profile)
     login_session = profile.get('login_session', False)
-    with guarded_client(proxy, login_session=login_session) as ydl:
+    with guarded_client(proxy, login_session=login_session, client_hints=profile.get('client_hints'), browser_environment=profile.get('browser_environment')) as ydl:
         if author_id is None:
             _, author_id = profile_link(expand_share(ydl, url, ua))
             if author_id is None:

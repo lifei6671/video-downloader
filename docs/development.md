@@ -80,7 +80,7 @@ TikTok 便捷入口默认读取 `tests/TikTok.txt`、Edge 150 UA 和 SOCKS5 `127
 .venv/Scripts/python.exe scripts/run_m1.py .local/probe.json
 ```
 
-默认 UA 为 Edge 150；可在各 profile 中设置 `user_agent`。`proxy: null` 明确直连，不继承环境代理。没有 Cookie 时省略 `cookie_file`。相对路径按执行时工作目录解释；Cookie 文件是单行 `name=value; name=value`，仅在内存读取，经 stdin 传递，不进入命令参数或日志。`tests/douyin.txt`、`tests/TikTok.txt` 已忽略，其他私有文件放在 `.local/` 或仓库外，不得提交。
+匿名与手动 Cookie 的回退 UA 为 Edge 150；可在各 profile 中设置 `user_agent`。内置登录使用会话绑定的原生浏览器信息，见[设备信息](platform-device-identity.md)。`proxy: null` 明确直连，不继承环境代理。没有 Cookie 时省略 `cookie_file`。相对路径按执行时工作目录解释；Cookie 文件是单行 `name=value; name=value`，仅在内存读取，经 stdin 传递，不进入命令参数或日志。`tests/douyin.txt`、`tests/TikTok.txt` 已忽略，其他私有文件放在 `.local/` 或仓库外，不得提交。
 
 探针串行处理输入，每次解析和下载分别启动一个 Python 操作进程。下载重新解析规范链接，核对作品身份后写入任务暂存目录；Rust 验证并提交 `平台_作品ID.mp4/webm`，已有同名文件不覆盖，重复验证使用新输出目录。支持直接 HTTP(S) 单文件视频及图集；图集保存为任务独占目录，按实际格式编号，不转码。直播、分轨、HLS/DASH、转码或断点续传不支持。
 
