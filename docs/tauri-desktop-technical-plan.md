@@ -8,14 +8,14 @@
 
 目标技术栈：**Tauri 2 + React + TypeScript + Rust 应用核心 + Python/yt-dlp + DTK sidecar + SQLite**。界面名称“映取”，视觉与交互以 `DESIGN.md` 为准。
 
-抖音与 TikTok 默认由 yt-dlp 解析视频、DTK 底层切片解析图集。小红书的单视频和图集使用 yt-dlp 适配。表单允许选择适用引擎，失败时保持所选引擎。yt-dlp 承担共用详情/媒体请求及 HTTP 下载；Rust 负责任务管理与文件最终提交。DTK 仅使用已固定的底层切片。
+抖音与 TikTok 默认由 yt-dlp 解析视频、DTK 底层切片解析图集。小红书的单视频和图集使用 yt-dlp 适配。B 站视频使用固定 yt-dlp 提取器，支持单分 P、音视频无转码合并、手动 Cookie 与内置登录后自动保存，见[B 站接入说明](bilibili-integration.md)。表单允许选择适用引擎，失败时保持所选引擎。yt-dlp 承担共用详情/媒体请求及 HTTP 下载；Rust 负责任务管理与文件最终提交。DTK 仅使用已固定的底层切片。
 
 | 能力 | 首版行为 |
 | --- | --- |
 | 输入 | 统一输入一个作品链接或抖音主页链接，支持长链、短链和包含一条链接的分享文案 |
 | 抖音作者 | 每次解析抖音主页后使用 DTK 从第一页扫描，支持重置和按会话内游标继续。扫描结束后选择全量下载或增量下载，视频与图集进入现有队列。见[抖音作者作品方案](douyin-author-download-plan.md)。 |
 | 预览 | 标题、作者、封面、时长；可选字段缺失不阻止下载 |
-| 平台设置 | 抖音、小红书、TikTok、YouTube 各自独立 Cookie、User-Agent、可选 HTTP/SOCKS5 代理 |
+| 平台设置 | 抖音、小红书、B 站、TikTok、YouTube 各自独立 Cookie、User-Agent、可选 HTTP/SOCKS5 代理 |
 | 下载 | 实际下载字节、速度；总大小未知时显示不确定进度 |
 | 并发 | 同时下载默认 5，可配置 1–10；超出容量进入 FIFO 等待队列 |
 | 任务操作 | 取消、手动重试、打开文件夹、移除记录 |

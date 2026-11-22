@@ -238,6 +238,7 @@ pub fn load(db: &Connection, default_directory: PathBuf) -> Result<Settings> {
         "xiaohongshu",
         "tiktok",
         "youtube",
+        "bilibili",
         "telegram",
         "weixin",
     ]
@@ -635,6 +636,23 @@ pub fn save_profile(db: &Connection, settings: &mut Settings, update: ProfileUpd
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bilibili_manual_and_login_cookies_survive_restart_with_platform_isolation() {
+        use super::*;
+        let db = Connection::open_in_memory().unwrap();
+        let mut settings = load(&db, PathBuf::new()).unwrap();
+        update_account_auth(&db, &mut settings, "bilibili", AccountAuth::Manual, Some("SESSDATA=fixture-manual".into())).unwrap();
+        update_account_auth(&db, &mut settings, "bilibili", AccountAuth::Login, Some("SESSDATA=fixture-login; DedeUserID=123".into())).unwrap();
+        let mut restored = load(&db, PathBuf::new()).unwrap();
+        let captured = snapshot(&restored).unwrap();
+        assert_eq!(captured["bilibili"]["cookie"], "SESSDATA=fixture-login; DedeUserID=123");
+        assert_eq!(captured["bilibili"]["login_session"], true);
+        assert_eq!(captured["youtube"]["cookie"], "");
+        assert!(!serde_json::to_string(&restored).unwrap().contains("fixture-login"));
+        update_account_auth(&db, &mut restored, "bilibili", AccountAuth::Manual, None).unwrap();
+        assert_eq!(snapshot(&restored).unwrap()["bilibili"]["cookie"], "SESSDATA=fixture-manual");
+        assert!(restored.profiles.iter().find(|p| p.platform == "bilibili").unwrap().login_configured);
+    }
     use super::*;
 
     fn profile_for<'a>(settings: &'a Settings, platform: &str) -> &'a Profile {
@@ -916,7 +934,7 @@ mod tests {
     fn cookie_boundary_whitespace_is_trimmed_for_all_platforms() {
         let db = Connection::open_in_memory().unwrap();
         let mut settings = load(&db, PathBuf::new()).unwrap();
-        for platform in ["douyin", "xiaohongshu", "tiktok", "youtube", "weixin"] {
+        for platform in ["douyin", "xiaohongshu", "tiktok", "youtube", "weixin", "bilibili"] {
             for (input, expected) in [
                 (
                     "\r\n \t session=fixture; preference=a b \r\n\t",
@@ -1259,6 +1277,7 @@ mod tests {
                 "xiaohongshu",
                 "tiktok",
                 "youtube",
+                "bilibili",
                 "telegram",
                 "weixin"
             ]

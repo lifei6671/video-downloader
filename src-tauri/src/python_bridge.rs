@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const MAX_LINE: u64 = 1024 * 1024;
-pub const ENGINE_VERSION: &str = "0.15.5";
+pub const ENGINE_VERSION: &str = "0.16.1";
 pub const YTDLP_VERSION: &str = "2026.10.26";
 
 async fn cancellation() -> Result<()> {
@@ -259,7 +259,7 @@ impl PythonBridge {
         let mut downloaded = 0;
         let mut known_total = None;
         let mut saw_progress = false;
-        let youtube = params["expected"]["platform"] == "youtube";
+        let youtube = matches!(params["expected"]["platform"].as_str(), Some("youtube" | "bilibili"));
         let mut merging = false;
         let mut recognizing = false;
         let mut transcription_segments: Option<(u64, u64)> = None;

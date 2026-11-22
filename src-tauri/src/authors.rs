@@ -25,6 +25,9 @@ pub(super) fn key(video: &Value) -> Option<Key<'_>> {
         "tiktok" => profile_id.filter(|id| id.bytes().all(|c| c.is_ascii_digit()))?,
         "xiaohongshu" => profile_id?,
         "youtube" => profile_id.filter(|id| id.len() == 24 && id.starts_with("UC"))?,
+        "bilibili" => {
+            profile_id.filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))?
+        }
         "telegram" => {
             let video_id = video["video_id"].as_str()?;
             let canonical = video["canonical_url"].as_str()?;
@@ -52,7 +55,17 @@ pub(super) fn key(video: &Value) -> Option<Key<'_>> {
 pub(super) enum Migration {
     Create,
     AddPublicDetails,
+    AddBilibili,
     Current,
+}
+
+fn supports_bilibili(db: &Connection) -> Result<bool> {
+    let schema: String = db.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='authors'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(schema.contains("'bilibili'"))
 }
 
 pub(super) fn prepare(db: &Connection, already_backed_up: bool) -> Result<Migration> {
@@ -70,7 +83,13 @@ pub(super) fn prepare(db: &Connection, already_backed_up: bool) -> Result<Migrat
         )?;
         ensure!(matches!(details, 0 | 7), "AUTHOR_SCHEMA_INVALID");
         if details == 7 {
-            return Ok(Migration::Current);
+            if supports_bilibili(db)? {
+                return Ok(Migration::Current);
+            }
+            if !already_backed_up {
+                crate::backup::schema_migration::snapshot(db, "before-authors-v3")?;
+            }
+            return Ok(Migration::AddBilibili);
         }
         if !already_backed_up {
             crate::backup::schema_migration::snapshot(db, "before-authors-v2")?;
@@ -106,10 +125,42 @@ pub(super) fn apply_migration(db: &Connection, migration: Migration) -> Result<(
         Migration::Create => migrate(db),
         Migration::AddPublicDetails => {
             add_public_details(db)?;
+            add_bilibili(db)?;
+            adopt_legacy_tasks(db)
+        }
+        Migration::AddBilibili => {
+            add_bilibili(db)?;
             adopt_legacy_tasks(db)
         }
         Migration::Current => adopt_legacy_tasks(db),
     }
+}
+
+fn add_bilibili(db: &Connection) -> Result<()> {
+    if supports_bilibili(db)? {
+        return Ok(());
+    }
+    // SQLite cannot alter a CHECK constraint. Rebuild both sides of the foreign
+    // key inside the startup transaction, keeping foreign_keys enabled.
+    db.execute_batch(
+        "ALTER TABLE task_authors RENAME TO task_authors_before_bilibili;
+         ALTER TABLE authors RENAME TO authors_before_bilibili;
+         DROP INDEX authors_platform_nickname;
+         DROP INDEX task_authors_author;",
+    )?;
+    create_tables(db)?;
+    db.execute_batch(
+        "INSERT INTO authors(platform,author_id,kind,nickname,handle,bio,avatar,profile_updated_at,
+            follower_count,following_count,likes_count,age,region,ip_location,age_observed_at)
+         SELECT platform,author_id,kind,nickname,handle,bio,avatar,profile_updated_at,
+            follower_count,following_count,likes_count,age,region,ip_location,age_observed_at
+         FROM authors_before_bilibili;
+         INSERT INTO task_authors(task_id,platform,author_id)
+         SELECT task_id,platform,author_id FROM task_authors_before_bilibili;
+         DROP TABLE task_authors_before_bilibili;
+         DROP TABLE authors_before_bilibili;",
+    )?;
+    Ok(())
 }
 
 // Older builds can add tasks to a database that already has the author tables.
@@ -123,7 +174,9 @@ fn adopt_legacy_tasks(db: &Connection) -> Result<()> {
          ORDER BY d.rowid DESC",
     )?;
     let tasks = query
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let has_batch_cache: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='douyin_author_avatars')",
@@ -160,7 +213,11 @@ fn adopt_legacy_tasks(db: &Connection) -> Result<()> {
             .query_row(
                 "SELECT metadata FROM parse_cache
                  WHERE platform=?1 AND video_id=?2 AND resolver=?3 AND author_avatar IS NOT NULL",
-                params![author.platform, video["video_id"].as_str(), video["resolver"].as_str()],
+                params![
+                    author.platform,
+                    video["video_id"].as_str(),
+                    video["resolver"].as_str()
+                ],
                 |row| row.get(0),
             )
             .optional()?;
@@ -174,10 +231,10 @@ fn adopt_legacy_tasks(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn migrate(db: &Connection) -> Result<()> {
+fn create_tables(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE authors (
-            platform TEXT NOT NULL CHECK(platform IN ('douyin','tiktok','xiaohongshu','youtube','telegram')),
+            platform TEXT NOT NULL CHECK(platform IN ('douyin','tiktok','xiaohongshu','youtube','telegram','bilibili')),
             author_id TEXT NOT NULL CHECK(length(author_id) BETWEEN 1 AND 256),
             kind TEXT NOT NULL CHECK(kind IN ('user','channel')),
             nickname TEXT, handle TEXT, bio TEXT,
@@ -193,7 +250,11 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
          ) WITHOUT ROWID;
          CREATE INDEX task_authors_author ON task_authors(platform,author_id);",
     )?;
-    add_public_details(db)?;
+    add_public_details(db)
+}
+
+pub(super) fn migrate(db: &Connection) -> Result<()> {
+    create_tables(db)?;
 
     let mut tasks = db.prepare("SELECT id,snapshot FROM download_tasks ORDER BY rowid")?;
     let mut rows = tasks.query([])?;
@@ -597,6 +658,188 @@ pub(super) fn display_task(db: &Connection, mut task: Task) -> Task {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bilibili_task() -> Task {
+        serde_json::from_value(json!({
+            "id":"bilibili-task", "revision":1, "status":"ready", "bytes":0,
+            "created_at":20, "canceling":false,
+            "video":{"platform":"bilibili", "video_id":"BV1mMWu6wEwH_p1",
+                "canonical_url":"https://www.bilibili.com/video/BV1mMWu6wEwH/?p=1",
+                "author_profile":{"id":"3707038739728761", "nickname":"测试作者"}}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn bilibili_task_persists_with_its_author() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON;
+            CREATE TABLE download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);",
+        )
+        .unwrap();
+        parse_cache::init(&db).unwrap();
+        migrate(&db).unwrap();
+        super::super::persist(&db, &bilibili_task()).unwrap();
+        let profile = &display_profiles(&db).unwrap()["bilibili-task"];
+        assert_eq!(profile["id"], "3707038739728761");
+        assert_eq!(profile["nickname"], "测试作者");
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM download_tasks", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    fn legacy_author_schema(db: &Connection, public_details: bool) {
+        db.execute_batch("PRAGMA foreign_keys=ON;
+            CREATE TABLE download_tasks(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL);
+            CREATE TABLE authors (
+                platform TEXT NOT NULL CHECK(platform IN ('douyin','tiktok','xiaohongshu','youtube','telegram')),
+                author_id TEXT NOT NULL CHECK(length(author_id) BETWEEN 1 AND 256),
+                kind TEXT NOT NULL CHECK(kind IN ('user','channel')),
+                nickname TEXT, handle TEXT, bio TEXT,
+                avatar BLOB CHECK(avatar IS NULL OR (typeof(avatar)='blob' AND length(avatar) BETWEEN 1 AND 2097152)),
+                profile_updated_at INTEGER NOT NULL CHECK(profile_updated_at>=0),
+                PRIMARY KEY(platform,author_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX authors_platform_nickname ON authors(platform,nickname);
+            CREATE TABLE task_authors (
+                task_id TEXT PRIMARY KEY NOT NULL REFERENCES download_tasks(id) ON DELETE CASCADE,
+                platform TEXT NOT NULL, author_id TEXT NOT NULL,
+                FOREIGN KEY(platform,author_id) REFERENCES authors(platform,author_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX task_authors_author ON task_authors(platform,author_id);
+            INSERT INTO download_tasks VALUES('legacy','{}');
+            INSERT INTO authors VALUES('tiktok','123','user','原作者','handle','简介',X'010203',10);
+            INSERT INTO task_authors VALUES('legacy','tiktok','123');").unwrap();
+        if public_details {
+            add_public_details(db).unwrap();
+            db.execute_batch(
+                "UPDATE authors SET follower_count=100,following_count=20,
+                likes_count=300,age=25,region='CN',ip_location='上海',age_observed_at=10;",
+            )
+            .unwrap();
+        }
+    }
+
+    fn stored_author(db: &Connection) -> Vec<rusqlite::types::Value> {
+        db.query_row(
+            "SELECT * FROM authors WHERE platform='tiktok' AND author_id='123'",
+            [],
+            |row| {
+                (0..row.as_ref().column_count())
+                    .map(|i| row.get(i))
+                    .collect()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bilibili_migration_preserves_legacy_authors_links_and_snapshots() {
+        for public_details in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("authors.sqlite");
+            let mut db = Connection::open(&path).unwrap();
+            legacy_author_schema(&db, public_details);
+            let before = stored_author(&db);
+            let migration = prepare(&db, false).unwrap();
+            assert!(if public_details {
+                matches!(migration, Migration::AddBilibili)
+            } else {
+                matches!(migration, Migration::AddPublicDetails)
+            });
+            let tx = db.transaction().unwrap();
+            apply_migration(&tx, migration).unwrap();
+            tx.commit().unwrap();
+            let after = stored_author(&db);
+            assert_eq!(before, after[..before.len()]);
+            if !public_details {
+                assert!(after[before.len()..]
+                    .iter()
+                    .all(|v| *v == rusqlite::types::Value::Null));
+            }
+            assert_eq!(display_profiles(&db).unwrap()["legacy"]["id"], "123");
+            assert_eq!(
+                db.query_row(
+                    "SELECT snapshot FROM download_tasks WHERE id='legacy'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "{}"
+            );
+            super::super::persist(&db, &bilibili_task()).unwrap();
+            assert_eq!(
+                display_profiles(&db).unwrap()["bilibili-task"]["id"],
+                "3707038739728761"
+            );
+            assert!(db
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .query([])
+                .unwrap()
+                .next()
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            drop(db);
+            let db = Connection::open(&path).unwrap();
+            assert!(matches!(prepare(&db, false).unwrap(), Migration::Current));
+            assert_eq!(stored_author(&db), after);
+            assert_eq!(
+                display_profiles(&db).unwrap()["bilibili-task"]["id"],
+                "3707038739728761"
+            );
+            let backups: Vec<_> = std::fs::read_dir(root.path())
+                .unwrap()
+                .map(|p| p.unwrap().path())
+                .filter(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .contains(".before-authors-")
+                })
+                .collect();
+            assert_eq!(backups.len(), 1);
+            let backup = Connection::open(&backups[0]).unwrap();
+            assert!(!supports_bilibili(&backup).unwrap());
+            assert_eq!(stored_author(&backup), before);
+        }
+    }
+
+    #[test]
+    fn bilibili_migration_failure_rolls_back_table_renames() {
+        let mut db = Connection::open_in_memory().unwrap();
+        legacy_author_schema(&db, true);
+        let before = stored_author(&db);
+        db.execute_batch("CREATE TABLE authors_before_bilibili(block INTEGER);")
+            .unwrap();
+        {
+            let tx = db.transaction().unwrap();
+            assert!(apply_migration(&tx, Migration::AddBilibili).is_err());
+        }
+        assert!(!supports_bilibili(&db).unwrap());
+        assert_eq!(stored_author(&db), before);
+        assert_eq!(display_profiles(&db).unwrap()["legacy"]["id"], "123");
+        assert!(db
+            .prepare("SELECT * FROM task_authors_before_bilibili")
+            .is_err());
+        assert!(db
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query([])
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn downloaded_bio_updates_only_the_matching_author_and_survives_missing_signature() {

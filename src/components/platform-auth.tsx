@@ -7,7 +7,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 
-const siteNames: Record<string, string> = { weixin: '腾讯元宝', douyin: '抖音', xiaohongshu: '小红书', tiktok: 'TikTok', youtube: 'YouTube' };
+const siteNames: Record<string, string> = { weixin: '腾讯元宝', douyin: '抖音', xiaohongshu: '小红书', tiktok: 'TikTok', youtube: 'YouTube', bilibili: 'B 站' };
 
 export type AccountAuthActions = {
   pending: AccountAuth | null;

@@ -265,6 +265,7 @@ fn canonical_source(video: &Value) -> Option<String> {
     let host = url.host_str()?;
     let valid = match video["platform"].as_str()? {
         "youtube" => matches!(host, "www.youtube.com" | "youtube.com" | "youtu.be"),
+        "bilibili" => crate::files::valid_bilibili_identity(video["video_id"].as_str()?, url.as_str()),
         "douyin" => matches!(host, "www.douyin.com" | "douyin.com"),
         "xiaohongshu" => host == "www.xiaohongshu.com",
         "weixin" => crate::files::valid_weixin_share(url.as_str()),
@@ -282,11 +283,15 @@ fn canonical_source(video: &Value) -> Option<String> {
     } else {
         None
     };
+    let bilibili_page = if video["platform"] == "bilibili" {
+        url.query_pairs().find(|(key, _)| key == "p").map(|(_, value)| value.into_owned())
+    } else { None };
     url.set_query(None);
     url.set_fragment(None);
     if let Some(id) = youtube_id {
         url.query_pairs_mut().append_pair("v", &id);
     }
+    if let Some(page) = bilibili_page { url.query_pairs_mut().append_pair("p", &page); }
     Some(url.into())
 }
 

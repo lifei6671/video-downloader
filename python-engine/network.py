@@ -17,6 +17,8 @@ from yt_dlp.networking.exceptions import TransportError, IncompleteRead
 # Platform web/API and media CDN suffixes used by the supported extractors.
 # This is application policy, not a generated dtk asset or a general-site downloader.
 DOMAINS = {
+    'bilibili': ('bilibili.com', 'b23.tv', 'bilivideo.com', 'bilivideo.cn', 'bilivideo.net',
+                 'hdslb.com', 'biliimg.com'),
     'youtube': ('youtube.com', 'youtu.be', 'youtube-nocookie.com', 'googlevideo.com',
                 'ytimg.com', 'youtubei.googleapis.com', 'yt3.ggpht.com', 'yt3.googleusercontent.com'),
     'douyin': ('douyin.com', 'iesdouyin.com', 'amemv.com', 'douyinvod.com',
@@ -72,8 +74,11 @@ def validate_target(url, platform):
     try:
         parts = urlsplit(url)
         host = parts.hostname or ''
+        bilibili_media_port = (platform == 'bilibili' and parts.scheme == 'https'
+                               and host.endswith('.mcdn.bilivideo.cn') and parts.port == 8082)
         if (parts.scheme not in ('http', 'https') or parts.username or parts.password
-                or parts.port not in (None, 80 if parts.scheme == 'http' else 443)):
+                or (parts.port not in (None, 80 if parts.scheme == 'http' else 443)
+                    and not bilibili_media_port)):
             raise ValueError()
         # Reject Google's YouTube challenge redirect without misreporting the input link.
         # This classifies the failure; it does not allow requests to google.com.

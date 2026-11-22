@@ -21,6 +21,23 @@ use crate::backup::spaces;
 use crate::backup::{conflicts, sync_read};
 
 #[tokio::test]
+async fn bilibili_backup_keeps_the_bv_part_identity_and_rebuilds_it_on_another_device() {
+    let (f, provider, engine) = sync_fixture().await;
+    f.core.backup_db(|db| {
+        db.execute("UPDATE media_assets SET metadata_json=?2 WHERE asset_id=?1",params![f.id,
+            serde_json::json!({"platform":"bilibili","video_id":"BV13XH56SEYt_p2","canonical_url":"https://www.bilibili.com/video/BV13XH56SEYt/?p=2","title":"B站分P"}).to_string()])?;
+        db.execute("DELETE FROM backup_space_assets", [])?;
+        sync_engine::register_download(db, &f.id)
+    }).unwrap();
+    engine.execute_upload(&claim(&engine, &f.core)).await.unwrap();
+    let record = provider.read_asset(&f.id).await.unwrap().unwrap().snapshot;
+    assert_eq!(record.fields["source"]["video_id"], "BV13XH56SEYt_p2");
+    assert_eq!(record.fields["source"]["canonical_url"], "https://www.bilibili.com/video/BV13XH56SEYt/?p=2");
+    let (_root, other, _, _) = second_device(&f).await;
+    assert_eq!(other.backup_assets().unwrap()[0].metadata["platform"], "bilibili");
+}
+
+#[tokio::test]
 async fn new_r2_space_saves_without_writing_a_library_object() {
     let (f, _, _) = sync_fixture().await;
     let store = Memory::default();

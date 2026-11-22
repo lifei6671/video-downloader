@@ -1930,7 +1930,7 @@ impl Core {
         if platform.is_some_and(|p| {
             !matches!(
                 p,
-                "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram" | "weixin"
+                "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram" | "weixin" | "bilibili"
             )
         }) {
             bail!("CONFIG_INVALID");
@@ -3199,7 +3199,7 @@ impl Core {
                     params![id,stage.path().to_string_lossy()]).context("DATABASE_ERROR")?;
                 let mut cadence = DownloadProgressCadence::default();
                 let mut transfer_rate = YoutubeTransferRate::default();
-                let youtube = video["platform"] == "youtube";
+                let youtube = matches!(video["platform"].as_str(), Some("youtube" | "bilibili"));
                 let progress = |mut event: Value| {
                         if event["reconnecting"].is_boolean() { core.telegram_connection_progress(&id, &event); return; }
                         if youtube { transfer_rate.update(&mut event, Instant::now()); }

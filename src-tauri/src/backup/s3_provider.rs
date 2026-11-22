@@ -143,7 +143,7 @@ fn validate_source(value: &serde_json::Value) -> Result<()> {
         serde_json::from_value(value.clone()).context("BACKUP_INVALID_SOURCE")?;
     if !matches!(
         source.platform.as_str(),
-        "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram" | "weixin"
+        "douyin" | "xiaohongshu" | "tiktok" | "youtube" | "telegram" | "weixin" | "bilibili"
     ) || source.video_id.is_empty()
         || source.video_id.len() > 128
     {
@@ -157,6 +157,7 @@ fn validate_source(value: &serde_json::Value) -> Result<()> {
                 Some("www.youtube.com" | "youtube.com" | "youtu.be")
             ),
             "douyin" => matches!(url.host_str(), Some("www.douyin.com" | "douyin.com")),
+            "bilibili" => crate::files::valid_bilibili_identity(&source.video_id, &raw),
             "xiaohongshu" => url.host_str() == Some("www.xiaohongshu.com"),
             "weixin" => crate::files::valid_weixin_share(&raw),
             "tiktok" => matches!(url.host_str(), Some("www.tiktok.com" | "tiktok.com")),
@@ -170,7 +171,11 @@ fn validate_source(value: &serde_json::Value) -> Result<()> {
             || url.fragment().is_some()
             || url
                 .query_pairs()
-                .any(|(k, v)| source.platform != "youtube" || k != "v" || v != source.video_id)
+                .any(|(k, v)| match source.platform.as_str() {
+                    "youtube" => k != "v" || v != source.video_id,
+                    "bilibili" => k != "p" || Some(v.as_ref()) != source.video_id.rsplit_once("_p").map(|(_, page)| page),
+                    _ => true,
+                })
         {
             bail!("BACKUP_INVALID_SOURCE");
         }

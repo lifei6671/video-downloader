@@ -28,6 +28,13 @@ fn default_resolver() -> String {
 
 impl Video {
     pub fn validate(&self) -> Result<()> {
+        if self.platform == "bilibili" {
+            if self.kind != "video" || self.resolver != "yt-dlp"
+                || !valid_bilibili_identity(&self.video_id, &self.canonical_url) {
+                bail!("INVALID_ENGINE_RESULT");
+            }
+            return Ok(());
+        }
         if self.platform == "weixin" {
             if self.kind != "video"
                 || self.resolver != "weixin"
@@ -110,6 +117,16 @@ pub(crate) fn valid_weixin_share(raw: &str) -> bool {
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
         })
+}
+
+pub(crate) fn valid_bilibili_identity(id: &str, raw: &str) -> bool {
+    let Some((bvid, page)) = id.rsplit_once("_p") else { return false; };
+    if bvid.len() != 12 || !bvid.starts_with("BV") || !bvid[2..].bytes().all(|b| b.is_ascii_alphanumeric())
+        || page.is_empty() || page.len() > 4 || page.starts_with('0') || !page.bytes().all(|b| b.is_ascii_digit()) { return false; }
+    let Ok(url) = url::Url::parse(raw) else { return false; };
+    url.scheme() == "https" && url.host_str() == Some("www.bilibili.com")
+        && url.username().is_empty() && url.password().is_none() && url.port().is_none() && url.fragment().is_none()
+        && url.path() == format!("/video/{bvid}/") && url.query() == Some(format!("p={page}").as_str())
 }
 
 #[derive(Serialize)]
@@ -515,6 +532,18 @@ pub(crate) fn finalize_album_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bilibili_identity_binds_bv_and_part_to_a_single_official_url() {
+        use super::*;
+        let mut video = Video { platform:"bilibili".into(),video_id:"BV13XH56SEYt_p1".into(),
+            canonical_url:"https://www.bilibili.com/video/BV13XH56SEYt/?p=1".into(),kind:"video".into(),resolver:"yt-dlp".into() };
+        video.validate().unwrap();
+        for url in ["https://www.bilibili.com/video/BV13XH56SEYt/?p=2",
+            "https://www.bilibili.com.evil.test/video/BV13XH56SEYt/?p=1",
+            "https://www.bilibili.com/video/BV13XH56SEYt/?p=1&SESSDATA=fixture"] {
+            video.canonical_url = url.into(); assert!(video.validate().is_err());
+        }
+    }
     use super::*;
     use serde_json::json;
     fn video() -> Video {

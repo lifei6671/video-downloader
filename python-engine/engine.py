@@ -30,13 +30,14 @@ import douyin_cover
 import media_album
 import xiaohongshu
 import weixin_channels
+import bilibili
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/dtk/upstream/src'))
 import dtk_adapter
 from video_formats import select_format, public_formats
 from dtk.core.errors import DtkError
 
-ENGINE_VERSION = '0.15.5'
+ENGINE_VERSION = '0.16.1'
 PROTOCOL_VERSION = 3
 YTDLP_VERSION = '2026.10.26'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -215,6 +216,8 @@ def parse_input(text):
                 raise EngineError(str(error), 'input') from None
         if host in (*xiaohongshu.NOTE_HOSTS, *xiaohongshu.SHORT_HOSTS):
             return xiaohongshu.parse_link(parts)
+        if host in (*bilibili.HOSTS, 'b23.tv'):
+            return bilibili.parse_link(parts)
         platform = ('douyin' if host in ('douyin.com', 'www.douyin.com', 'v.douyin.com')
                     else 'tiktok' if host in ('www.tiktok.com', 'tiktok.com', 'vt.tiktok.com', 'vm.tiktok.com')
                     else None)
@@ -273,10 +276,12 @@ def parse_cookie_header(cookie):
 
 
 def add_cookies(jar, cookies, platform, *, login_session=False):
-    domain = ('www.' if login_session else '.') + platform + '.com'
+    # Bilibili authentication is also required by api.bilibili.com.
+    scoped_login = login_session and platform != 'bilibili'
+    domain = ('www.' if scoped_login else '.') + platform + '.com'
     for name, value in cookies.items():
-        jar.set_cookie(Cookie(0, name, value, None, False, domain, not login_session,
-                             not login_session, '/', True, True, None, True, None, None, {}))
+        jar.set_cookie(Cookie(0, name, value, None, False, domain, not scoped_login,
+                             not scoped_login, '/', True, True, None, True, None, None, {}))
 
 
 def cover_url(info):
@@ -341,7 +346,7 @@ def publication_metadata(info):
 
 def metadata(info, platform):
     video_id = info.get('id')
-    id_pattern = {'youtube': r'[A-Za-z0-9_-]{11}', 'xiaohongshu': r'[0-9a-f]{24}',
+    id_pattern = {'bilibili': bilibili.VIDEO_ID + r'_p[1-9][0-9]{0,3}', 'youtube': r'[A-Za-z0-9_-]{11}', 'xiaohongshu': r'[0-9a-f]{24}',
                   'weixin': r'[0-9a-f]{64}'}
     if (info.get('_type', 'video') != 'video' or info.get('is_live') or info.get('live_status') == 'is_live'
             or not isinstance(video_id, str) or not re.fullmatch(
@@ -366,7 +371,7 @@ def metadata(info, platform):
                 title=info.get('title'), author=info.get('uploader'), cover_url=cover,
                 author_profile=author_profile.metadata(info, platform),
                 duration_ms=duration_ms, resolver='yt-dlp', kind='video',
-                formats=public_formats(info, platform == 'youtube'), selected_format_id=info.get('_yingqu_format_id'),
+                formats=public_formats(info, platform in ('youtube', 'bilibili')), selected_format_id=info.get('_yingqu_format_id'),
                 **selected, **publication_metadata(info))
 
 
@@ -375,12 +380,14 @@ def input_identity(platform, url, resolver, source_url):
         raise EngineError('CONFIG_INVALID', 'resolver')
     album = '/note/' in url or '/photo/' in url
     actual = 'dtk' if resolver == 'dtk' or (resolver == 'auto' and album) else 'yt-dlp'
-    if platform in ('youtube', 'xiaohongshu') and actual != 'yt-dlp':
+    if platform in ('youtube', 'xiaohongshu', 'bilibili') and actual != 'yt-dlp':
         raise EngineError('UNSUPPORTED_CONTENT', 'resolver')
     if actual == 'yt-dlp' and album:
         raise EngineError('UNSUPPORTED_CONTENT', 'resolver')
     parts = urlsplit(url)
     video_id = parse_qs(parts.query)['v'][0] if platform == 'youtube' else parts.path.rstrip('/').rsplit('/', 1)[-1]
+    if platform == 'bilibili':
+        video_id = bilibili.identity(url)
     return dict(platform=platform, video_id=video_id, canonical_url=url,
                 kind='image_album' if album else 'video', resolver=actual, source_url=source_url)
 
@@ -581,9 +588,9 @@ def operate(method, params, emit):
     logger = SafeLogger()
     options = dict(proxy=proxy or '', http_headers={'User-Agent': ua},
         logger=logger, quiet=True, noprogress=True, cachedir=False, noplaylist=True,
-        allowed_extractors={'douyin': ['Douyin$'], 'youtube': ['Youtube$'],
+        allowed_extractors={'douyin': ['Douyin$'], 'youtube': ['Youtube$'], 'bilibili': ['BiliBili$'],
                             'xiaohongshu': ['XiaoHongShu$'], 'tiktok': ['TikTok$', r'vm\.tiktok$']}[platform],
-        format=lambda context: select_format({**context, **audio_context}, params.get('format_id') if downloading else None, platform == 'youtube'), match_filter=match_filter, progress_hooks=[progress] if downloading else [],
+        format=lambda context: select_format({**context, **audio_context}, params.get('format_id') if downloading else None, platform in ('youtube', 'bilibili')), match_filter=match_filter, progress_hooks=[progress] if downloading else [],
         postprocessor_hooks=[progress.postprocess],
         outtmpl=str(stage / 'video.%(ext)s') if stage else 'unused.%(ext)s',
         overwrites=False, continuedl=False, socket_timeout=30, retries=1,
@@ -595,6 +602,8 @@ def operate(method, params, emit):
         options['js_runtimes'] = javascript_runtime()
         if not options['js_runtimes']:
             raise EngineError('JS_RUNTIME_UNAVAILABLE', 'runtime')
+        options['ffmpeg_location'] = installed_tool('ffmpeg')
+    elif platform == 'bilibili':
         options['ffmpeg_location'] = installed_tool('ffmpeg')
     try:
         with YoutubeDL(options) as ydl:
@@ -697,6 +706,8 @@ def operate(method, params, emit):
                 return
             if not isinstance(info, dict):
                 raise EngineError('UPSTREAM_CHANGED', 'detail')
+            if platform == 'bilibili':
+                bilibili.normalize_thumbnails(info)
             # Selected stream fields can overwrite top-level language with None.
             # Keep the same captured preference for the public choices and selector.
             phase('selecting_formats')
@@ -747,7 +758,7 @@ def operate(method, params, emit):
                  format_id=result['selected_format_id'], width=result['width'], height=result['height'],
                  **({'metadata': result} if batch_author else {}),
                  **({'author_profile': profile} if profile is not None else {}),
-                 **({'transferred_bytes': progress.transferred} if platform == 'youtube' else {}),
+                 **({'transferred_bytes': progress.transferred} if platform in ('youtube', 'bilibili') else {}),
                  **(author_profile.download_avatar(ydl, avatar, stage) if avatar else {}),
                  **download_cover(ydl, info, stage))
     except DtkError as error:

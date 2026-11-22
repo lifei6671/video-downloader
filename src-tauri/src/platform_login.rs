@@ -26,6 +26,13 @@ struct Site {
 
 fn site(platform: &str) -> Option<Site> {
     Some(match platform {
+        "bilibili" => Site {
+            title: "登录 B 站",
+            login_url: "https://passport.bilibili.com/login",
+            cookie_url: "https://www.bilibili.com/",
+            cookie_domains: &["www.bilibili.com", "bilibili.com"],
+            auth_cookies: &["SESSDATA"],
+        },
         "weixin" => Site {
             title: "登录腾讯元宝",
             login_url: "https://yuanbao.tencent.com/open/login",
@@ -75,6 +82,7 @@ fn login_navigation(site: &Site, url: &tauri::Url) -> bool {
                 "yuanbao.tencent.com" => host == "open.weixin.qq.com",
                 "www.douyin.com" => host == "sso.douyin.com",
                 "www.xiaohongshu.com" => host == "passport.xiaohongshu.com",
+                "www.bilibili.com" => host == "passport.bilibili.com",
                 _ => false,
             }
     })
@@ -293,6 +301,7 @@ mod tests {
             ("douyin", "sessionid"),
             ("xiaohongshu", "web_session"),
             ("tiktok", "sessionid_ss"),
+            ("bilibili", "SESSDATA"),
         ] {
             let site = site(platform).unwrap();
             let url = site.cookie_url.parse().unwrap();
@@ -354,7 +363,7 @@ mod tests {
 
     #[test]
     fn login_windows_only_admit_official_https_origins() {
-        for platform in ["weixin", "douyin", "xiaohongshu", "tiktok"] {
+        for platform in ["weixin", "douyin", "xiaohongshu", "tiktok", "bilibili"] {
             let site = site(platform).unwrap();
             assert!(login_navigation(&site, &site.login_url.parse().unwrap()));
             for url in [
@@ -371,5 +380,22 @@ mod tests {
             }
         }
         assert!(site("youtube").is_none());
+    }
+
+    #[test]
+    fn bilibili_login_collects_parent_session_and_excludes_passport_only_or_expired_cookies() {
+        let site = site("bilibili").unwrap();
+        let url = site.cookie_url.parse().unwrap();
+        let mut cookies = vec![
+            Cookie::parse("SESSDATA=passport-only; Domain=passport.bilibili.com; Path=/; Secure; HttpOnly").unwrap(),
+            Cookie::parse("SESSDATA=expired; Domain=.bilibili.com; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT").unwrap(),
+        ];
+        assert!(session_header(&site, &cookies, &url, 2).is_none());
+        cookies.push(Cookie::parse("SESSDATA=fixture-session; Domain=.bilibili.com; Path=/; Secure; HttpOnly").unwrap());
+        cookies.push(Cookie::parse("DedeUserID=123; Domain=.bilibili.com; Path=/").unwrap());
+        let header = session_header(&site, &cookies, &url, 2).unwrap();
+        assert!(header.contains("SESSDATA=fixture-session") && header.contains("DedeUserID=123"));
+        assert!(!header.contains("passport-only") && !header.contains("expired"));
+        assert!(login_navigation(&site, &"https://passport.bilibili.com/login".parse().unwrap()));
     }
 }
