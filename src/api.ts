@@ -92,7 +92,7 @@ export interface BackupLocalData { title: string; transcript: string | null; pen
 export interface DeleteActivity { operation_id: string; companion: string | null; step: string }
 export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number; transfer_started?: boolean; local_cleanup_done?: boolean; archive_next?: string; cleanup_dependency?: string; cleanup_error?: string; cleanup_blocked?: boolean }; attempt: number; last_error: string | null }
 export interface BackupLocation { space_id: string; profile: 'r2' | 's3' | 'telegram'; display_name: string; channel_title: string | null }
-export interface BackupAsset { in_current_space?: boolean; backup_locations?: BackupLocation[]; asset_id: string; task_id: string | null; metadata: Partial<Video>; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean; remote_revision: number; remote_deleted: boolean; has_pending_local_changes: boolean; conflict_count: number }
+export interface BackupAsset { in_current_space?: boolean; backup_locations?: BackupLocation[]; asset_id: string; task_id: string | null; metadata: Partial<Video> & { album_files?: ImageMeta[] }; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean; remote_revision: number; remote_deleted: boolean; has_pending_local_changes: boolean; conflict_count: number }
 export interface AssetTranscript { asset_id: string; content_sha256: string | null; text: string; model_revision: string; model_name: string | null; pipeline_revision: string; completed_at: number }
 export interface TelegramStorageStatus { configured: boolean; operation_id: string | null; phase: 'disconnected' | 'signed_out' | 'connecting' | 'qr' | 'password' | 'ready'; account: { id: string; name: string } | null; last_error: string | null; qr: boolean[][] | null; qr_expires_at: number | null }
 export interface TelegramStorageChannel { id: string; title: string; can_post: boolean; can_delete: boolean }
@@ -463,6 +463,7 @@ const errors: Record<string, string> = {
   DATABASE_ERROR: '无法保存任务记录，请检查磁盘空间并重启应用',
   INTERRUPTED: '上次任务已中断，请重新解析并从头下载',
   IO_ERROR: '文件操作失败，请检查目录权限、文件占用和磁盘空间',
+  BACKUP_INVALID_ALBUM: '图集备份内容无效或文件清单不匹配',
   INCOMPLETE_MEDIA: '作品文件不完整，请重新解析并下载',
   INVALID_MEDIA_CONTENT: '下载内容不是有效的媒体文件',
   INVALID_ENGINE_RESULT: '下载结果校验失败',

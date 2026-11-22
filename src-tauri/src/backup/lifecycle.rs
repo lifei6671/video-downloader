@@ -25,7 +25,9 @@ pub(crate) async fn remove_local_checked(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?)
     })?;
-    if let (Some(path), None, Some(source)) = registered {
+    let asset = core.backup_asset(id)?.context("BACKUP_ASSET_NOT_FOUND")?;
+    let album = super::album::is_album(&asset);
+    if let (false, (Some(path), None, Some(source))) = (album, registered) {
         let path = std::path::Path::new(&path);
         if restore::regular(path)?.is_some()
             && serde_json::to_string(&crate::desktop_core::transcription::Source::read(path)?)?
@@ -34,26 +36,37 @@ pub(crate) async fn remove_local_checked(
             bail!("BACKUP_LOCAL_CHANGED");
         }
     }
-    // local() verifies the registered source and content before unlinking it.
-    if let Some(path) = restore::local(core, id).await? {
-        core.backup_db(|db| {
+    // Album cleanup also accepts members already removed by an interrupted attempt.
+    let local = if album {
+        asset.path.clone()
+    } else {
+        restore::local(core, id).await?
+    };
+    if let Some(path) = local {
+        let shared = core.backup_db(|db| {
             check(db)?;
             let shared: bool = db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM asset_local_files WHERE asset_id<>?1 AND path=?2)",
                 params![id, path.to_string_lossy()],
                 |r| r.get(0),
             )?;
-            if !shared {
+            Ok(shared)
+        })?;
+        if !shared {
+            if album {
+                super::album::remove(&path, &super::album::files(&asset.metadata)?)?;
+            } else {
                 std::fs::remove_file(&path).context("IO_ERROR")?;
             }
-            Ok(())
-        })?;
+        }
     }
     cleanup_restore_files(core, id).await?;
     core.mark_asset_missing(id)
 }
 
 async fn cleanup_restore_files(core: &Core, id: &str) -> Result<()> {
+    let asset = core.backup_asset(id)?.context("BACKUP_ASSET_NOT_FOUND")?;
+    let album = super::album::is_album(&asset);
     for op in scheduler::unfinished_restores(core, id)? {
         let Some(raw) = op.payload["part"].as_str() else {
             continue;
@@ -71,14 +84,15 @@ async fn cleanup_restore_files(core: &Core, id: &str) -> Result<()> {
                 if target.parent() != directory.parent() {
                     bail!("BACKUP_UNSAFE_FILE");
                 }
-                if restore::regular(&target)?.is_some() {
+                if album {
+                    super::album::remove(&target, &super::album::files(&asset.metadata)?)?;
+                } else if restore::regular(&target)?.is_some() {
                     let path = target.clone();
                     let cancel = core.backup_cancellation();
                     let (hash, source) = tokio::task::spawn_blocking(move || {
                         repository::fingerprint_with_cancel(&path, || *cancel.borrow())
                     })
                     .await??;
-                    let asset = core.backup_asset(id)?.context("BACKUP_ASSET_NOT_FOUND")?;
                     if asset.content_sha256.as_deref() != Some(&hash)
                         || source["size"].as_u64() != Some(asset.content_bytes)
                     {

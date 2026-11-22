@@ -53,7 +53,7 @@ impl FilePresence {
             let value = self
                 .0
                 .entry(path.clone())
-                .or_insert_with(|| (now, path.is_file()));
+                .or_insert_with(|| (now, super::album::present(asset)));
             if !value.1 {
                 asset.path = None;
                 asset.local_state = "missing".into();

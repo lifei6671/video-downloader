@@ -305,6 +305,30 @@ if (scenario.startsWith('visual')) {
     api.albumVideoSource=async(id,index)=>{control.calls.push({type:'album-video',id,index});return index===0?'/tests/fixtures/media/player-portrait.webm':'/tests/fixtures/media/player.webm'};
     api.image=async()=>Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));
   }
+  if (scenario.startsWith('visual-album-backup')) {
+    tasks = [];
+    const files = [{filename:'001.jpeg',quality_source:'original',width:90,height:160,video:{filename:'001.mp4',bytes:24,sha256:'a'.repeat(64)}},
+      {filename:'002.jpeg',quality_source:'original',width:900,height:900}];
+    const cloud = {asset_id:'album-cloud',task_id:null,space_id:'album-space',metadata:{platform:'douyin',video_id:'123',kind:'image_album',title:'完整备份图集',album_files:files},
+      original_filename:'完整备份图集',content_bytes:4096,path:null,local_state:'missing',asset_state:'active',remote_state:'backed_up',remote_deleted:false,in_current_space:true,has_cover:false,has_transcript:false,backup_locations:[]};
+    api.backupSettings=async()=>({space_id:'album-space',provider_type:'telegram',enabled:true});
+    api.backupSyncEnabled=async()=>true; api.backupAssets=async()=>[structuredClone(cloud)];
+    control.restorePending=scenario.endsWith('-task');
+    api.backupOperations=async()=>control.restorePending ? [{operation_id:'restore-album',space_id:cloud.space_id,asset_id:cloud.asset_id,kind:'restore',state:'blocked',phase:'verification_failed',last_error:'BACKUP_CHECKSUM_MISMATCH',attempt:1,payload:{}}] : [];
+    api.onBackupAssetDeleted=async()=>()=>{};
+    if(scenario.endsWith('-task')) {
+      cloud.task_id='album-task';
+      tasks=[{...structuredClone(original),id:'album-task',asset_id:cloud.asset_id,revision:2,status:'completed',video:{...cloud.metadata,images:files},files,path:null,file_missing:true,download_requested:true,bytes:4096,completed_at:20}];
+    }
+    api.ensureAsset=async id=>{
+      control.calls.push({type:'restore-album',id}); if(control.restoreFailure)throw 'BACKUP_CHECKSUM_MISMATCH';
+      cloud.path='C:\\TestVideos\\完整备份图集';cloud.local_state='present';control.restorePending=false;
+      if(tasks[0]) {Object.assign(tasks[0],{path:cloud.path,file_missing:false,revision:3});listener(structuredClone(tasks[0]));}
+      return cloud.path;
+    };
+    api.albumVideoSource=async(id,index)=>{control.calls.push({type:'album-video',id,index});return '/tests/fixtures/media/player-portrait.webm';};
+    api.image=async(id,index)=>{control.calls.push({type:'album-image',id,index});return Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));};
+  }
   api.cookie=async()=>''; api.proxy=async()=>null;
   api.cover=async()=>Array.from(new Uint8Array(await(await fetch(photo)).arrayBuffer()));
   api.saveCover=async id=>{control.calls.push({type:'save-cover',id});return true};

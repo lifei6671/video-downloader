@@ -902,11 +902,12 @@ impl Core {
             .iter()
             .filter(|task| {
                 task.status == Status::Completed
-                    && task.files.is_empty()
-                    && task
-                        .video
-                        .as_ref()
-                        .is_some_and(|v| v["kind"].as_str().unwrap_or("video") == "video")
+                    && task.video.as_ref().is_some_and(|v| {
+                        matches!(
+                            v["kind"].as_str().unwrap_or("video"),
+                            "video" | "image_album"
+                        )
+                    })
                     && task
                         .asset_id
                         .as_ref()
@@ -936,18 +937,37 @@ impl Core {
             } else if task.asset_id.is_some() {
                 continue;
             }
-            let Some(path) = task.path.as_ref().filter(|p| p.is_file()) else {
+            let Some(path) = task.path.as_ref().filter(|p| {
+                if task
+                    .video
+                    .as_ref()
+                    .is_some_and(|v| v["kind"] == "image_album")
+                {
+                    p.is_dir()
+                } else {
+                    p.is_file()
+                }
+            }) else {
                 missing_file = true;
                 continue;
             };
-            let source = transcription::Source::read(path)?;
+            let source = if !task.video.as_ref().is_some_and(|v| v["kind"] == "image_album") {
+                Some(transcription::Source::read(path)?)
+            } else {
+                None
+            };
             crate::backup::repository::associate(&tx, &mut task)?;
             let Some(id) = task.asset_id.as_ref() else {
+                missing_file = true;
                 continue;
             };
             if crate::backup::repository::transcript(&tx, id)?.is_none() {
                 if let Some(snapshot) = transcription::load(&tx, &task.id)? {
-                    if snapshot.result.as_ref().is_some_and(|r| r.source == source) {
+                    if snapshot
+                        .result
+                        .as_ref()
+                        .is_some_and(|r| Some(&r.source) == source.as_ref())
+                    {
                         crate::backup::repository::preserve_transcript(&tx, &snapshot)?;
                     }
                 }
@@ -1032,16 +1052,19 @@ impl Core {
         id: &str,
         extra: watch::Receiver<bool>,
     ) -> Result<()> {
-        let (path, cancel) = {
+        let (asset, cancel) = {
             let inner = self.inner.lock().unwrap();
             let asset = crate::backup::repository::asset(&inner.db, id)?
                 .context("BACKUP_ASSET_NOT_FOUND")?;
-            (
-                asset.path.context("FILE_MISSING")?,
-                inner.backup_cancel.subscribe(),
-            )
+            (asset, inner.backup_cancel.subscribe())
         };
         let (hash, source) = tokio::task::spawn_blocking(move || {
+            if crate::backup::album::is_album(&asset) {
+                return crate::backup::album::fingerprint(&asset, || {
+                    *cancel.borrow() || *extra.borrow() || extra.has_changed().is_err()
+                });
+            }
+            let path = asset.path.context("FILE_MISSING")?;
             crate::backup::repository::fingerprint_with_cancel(&path, || {
                 *cancel.borrow() || *extra.borrow() || extra.has_changed().is_err()
             })
@@ -1784,6 +1807,13 @@ impl Core {
     }
 
     pub fn image(&self, id: &str, index: usize) -> Result<Vec<u8>> {
+        if let Some(asset) = self
+            .backup_asset(id)?
+            .filter(crate::backup::album::is_album)
+            .filter(|_| !self.inner.lock().unwrap().tasks.iter().any(|task| task.id == id))
+        {
+            return crate::files::read_image(&crate::backup::album::member(&asset, index, false)?);
+        }
         let path = {
             let inner = self.inner.lock().unwrap();
             let task = inner
@@ -2090,6 +2120,15 @@ impl Core {
     }
 
     pub fn album_video_path(&self, id: &str, index: usize) -> Result<PathBuf> {
+        if let Some(asset) = self
+            .backup_asset(id)?
+            .filter(crate::backup::album::is_album)
+            .filter(|_| !self.inner.lock().unwrap().tasks.iter().any(|task| task.id == id))
+        {
+            let path = crate::backup::album::member(&asset, index, true)?;
+            crate::backup::restore::regular(&path)?.context("FILE_MISSING")?;
+            return Ok(path);
+        }
         let inner = self.inner.lock().unwrap();
         let task = inner
             .tasks

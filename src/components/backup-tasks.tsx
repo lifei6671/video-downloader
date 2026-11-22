@@ -451,9 +451,9 @@ function BackupAssetMenuItems({ asset, backup, transcript, context = false, play
   if (backupDeletion(backup, asset.asset_id)) return <BackupTransferMenuItems backup={backup} assetId={asset.asset_id} context={context} />;
   const hasTransfers = backup.settings?.enabled && !(asset.remote_state === 'pending_delete' && !asset.remote_deleted);
   return <>
-    {play && <Item onSelect={play}><Play />播放视频</Item>}
-    {stream && <Item onSelect={stream}><ListVideo />流式播放</Item>}
-    <Item onSelect={transcript}><FileText />查看文案</Item>
+    {play && <Item onSelect={play}><Play />{asset.metadata.kind === 'image_album' ? '查看图集' : '播放视频'}</Item>}
+    {stream && asset.metadata.kind !== 'image_album' && <Item onSelect={stream}><ListVideo />流式播放</Item>}
+    {asset.metadata.kind !== 'image_album' && <Item onSelect={transcript}><FileText />查看文案</Item>}
     <Separator />
     <BackupTransferMenuItems backup={backup} assetId={asset.asset_id} context={context} />
     {hasTransfers && <Separator />}
@@ -498,7 +498,7 @@ export function BackupAssetRow({ asset, backup, play, openTranscript, syncStatus
   const resolution = width > 0 && height > 0 ? `${Math.min(width, height)}P` : '清晰度未知';
   const location = deletion ? deletion.failed ? '删除失败' : deletion.phase === 'complete' ? '删除完成' : '删除中' : status === 'queued' ? '待下载' : status === 'downloading' ? '下载中' : status === 'failed' ? '下载失败' : asset.local_state === 'present' ? '本机有副本' : asset.remote_state === 'pending_delete' ? '远端待删除' : asset.remote_deleted ? '本机待处理' : '仅云端';
   const playDisabled = !canPlayBackupAsset(asset, !!deletion, feed && restoring);
-  const playAction = <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className={feed ? 'task-feed-play cursor-pointer' : undefined} aria-label={feed && restoring ? '正在下载' : feed && status === 'failed' ? '重试下载' : '播放视频'} disabled={playDisabled} onClick={e => play(e.currentTarget)}>{feed && restoring ? <Spinner aria-hidden="true" /> : feed && status === 'failed' ? <RotateCcw aria-hidden="true" /> : <Play aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent>{feed && restoring ? '正在下载' : feed && status === 'failed' ? '下载失败，点击重试下载' : '在应用内播放'}</TooltipContent></Tooltip>;
+  const playAction = <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className={feed ? 'task-feed-play cursor-pointer' : undefined} aria-label={feed && restoring ? '正在下载' : feed && status === 'failed' ? '重试下载' : asset.metadata.kind === 'image_album' ? '查看图集' : '播放视频'} disabled={playDisabled} onClick={e => play(e.currentTarget)}>{feed && restoring ? <Spinner aria-hidden="true" /> : feed && status === 'failed' ? <RotateCcw aria-hidden="true" /> : <Play aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent>{feed && restoring ? '正在下载' : feed && status === 'failed' ? '下载失败，点击重试下载' : asset.metadata.kind === 'image_album' ? '查看图集' : '在应用内播放'}</TooltipContent></Tooltip>;
   return <ContextMenu><ContextMenuTrigger asChild><Card ref={row} size="sm" className="task-row task-context-target task-row-asset" data-asset-id={asset.asset_id} tabIndex={0} aria-label="远端视频操作" onKeyDown={event => {
     if (event.target !== event.currentTarget || !(event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey)) return;
     event.preventDefault();

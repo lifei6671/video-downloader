@@ -75,7 +75,10 @@ fn object_generation(prefix: &str, key: &str, asset: &str) -> Result<Option<u64>
 }
 fn validate_object(reference: &ObjectRef, prefix: &str, asset: &str, kind: &str) -> Result<()> {
     let valid = match kind {
-        "video" => matches!(reference.container.as_str(), "mp4" | "mov" | "webm" | "mkv"),
+        "video" => matches!(
+            reference.container.as_str(),
+            "mp4" | "mov" | "webm" | "mkv" | "tar"
+        ),
         "cover" => matches!(
             reference.container.as_str(),
             "jpg" | "jpeg" | "png" | "webp"
@@ -129,6 +132,13 @@ fn validate_object(reference: &ObjectRef, prefix: &str, asset: &str, kind: &str)
     Ok(())
 }
 fn validate_source(value: &serde_json::Value) -> Result<()> {
+    if let Some(kind) = value.get("kind") {
+        if kind == "image_album" {
+            super::album::files(value)?;
+        } else if kind != "video" {
+            bail!("BACKUP_INVALID_SOURCE");
+        }
+    }
     let source: super::record::Source =
         serde_json::from_value(value.clone()).context("BACKUP_INVALID_SOURCE")?;
     if !matches!(
@@ -1213,7 +1223,7 @@ impl UploadState {
                 .context("BACKUP_INVALID_RESUME_STATE")?;
             if !matches!(
                 (kind, container),
-                ("video", "mp4" | "mov" | "mkv" | "webm")
+                ("video", "mp4" | "mov" | "mkv" | "webm" | "tar")
                     | ("cover", "jpg" | "jpeg" | "png" | "webp")
                     | ("transcript", "json")
             ) || self.key
@@ -1327,7 +1337,7 @@ impl<S: ObjectStore> S3Provider<S> {
         uuid::Uuid::parse_str(&source.device_id).context("BACKUP_INVALID_OPERATION")?;
         if !matches!(
             (source.kind.as_str(), source.container.as_str()),
-            ("video", "mp4" | "mov" | "mkv" | "webm")
+            ("video", "mp4" | "mov" | "mkv" | "webm" | "tar")
                 | ("cover", "jpg" | "jpeg" | "png" | "webp")
                 | ("transcript", "json")
         ) || source.bytes == 0

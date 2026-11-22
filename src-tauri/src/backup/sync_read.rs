@@ -438,6 +438,14 @@ async fn transfer_once(
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<PathBuf> {
     let scope = provider.scope();
+    let album = record
+        .fields
+        .get("source")
+        .is_some_and(|s| s["kind"] == "image_album");
+    anyhow::ensure!(
+        album == (reference.container == "tar"),
+        "BACKUP_INVALID_ALBUM"
+    );
     let directory = restore::staging_directory(&core.settings().download_directory)?;
     let part = directory.join(format!("{operation}.part"));
     if payload["part"]
@@ -451,14 +459,33 @@ async fn transfer_once(
         if target.parent() != directory.parent() {
             bail!("BACKUP_UNSAFE_FILE");
         }
-        if restore::regular(&target)?.is_some() {
-            let (hash, source) = restore::fingerprint(
-                target.clone(),
-                core.backup_cancellation(),
-                cancel.clone(),
-                reference.container.clone(),
-            )
-            .await?;
+        if if album {
+            target.exists()
+        } else {
+            restore::regular(&target)?.is_some()
+        } {
+            let (hash, source) = if album {
+                let mut asset = core
+                    .backup_asset(local)?
+                    .context("BACKUP_ASSET_NOT_FOUND")?;
+                asset.path = Some(target.clone());
+                let shutdown = core.backup_cancellation();
+                let stop = cancel.clone();
+                tokio::task::spawn_blocking(move || {
+                    super::album::fingerprint(&asset, || {
+                        *shutdown.borrow() || *stop.borrow() || stop.has_changed().is_err()
+                    })
+                })
+                .await??
+            } else {
+                restore::fingerprint(
+                    target.clone(),
+                    core.backup_cancellation(),
+                    cancel.clone(),
+                    reference.container.clone(),
+                )
+                .await?
+            };
             if hash != reference.sha256 || source["size"] != reference.bytes {
                 bail!("BACKUP_LOCAL_CHANGED");
             }
@@ -466,7 +493,13 @@ async fn transfer_once(
             if newest.snapshot.deleted {
                 bail!("BACKUP_ASSET_DELETED");
             }
+            if newest.snapshot.media.as_ref() != Some(reference) {
+                bail!("BACKUP_SOURCE_CHANGED");
+            }
             core.commit_asset_file(local, &target, &hash, &source)?;
+            if album && part.is_file() {
+                std::fs::remove_file(&part)?;
+            }
             core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='completed',phase='completed',last_error=NULL WHERE operation_id=?",[operation])?;Ok(())})?;
             return Ok(target);
         }
@@ -541,7 +574,7 @@ async fn transfer_once(
     let (hash, mut source) = match restore::fingerprint(
         part.clone(),
         core.backup_cancellation(),
-        cancel,
+        cancel.clone(),
         reference.container.clone(),
     )
     .await
@@ -573,18 +606,51 @@ async fn transfer_once(
         .get("original_filename")
         .and_then(Value::as_str)
         .context("BACKUP_INVALID_FILENAME")?;
-    let stem = Path::new(filename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("video");
+    let stem = if album {
+        Some(filename)
+    } else {
+        Path::new(filename).file_stem().and_then(|s| s.to_str())
+    }
+    .unwrap_or("video");
     let name = crate::naming::render("{content}", &json!({"title":stem}), "")?;
     let target = crate::naming::destination(
         directory.parent().context("IO_ERROR")?,
         &name,
-        Some(&reference.container),
+        if album {
+            None
+        } else {
+            Some(&reference.container)
+        },
     )?;
     payload["target"] = target.to_string_lossy().into_owned().into();
     checkpoint(core, scope, operation, "committing", payload)?;
+    if album {
+        let files = super::album::files(
+            record
+                .fields
+                .get("source")
+                .context("BACKUP_INVALID_ALBUM")?,
+        )?;
+        let staged = tempfile::tempdir_in(&directory)?;
+        let archive = part.clone();
+        let shutdown = core.backup_cancellation();
+        let stop = cancel.clone();
+        let files_for_extract = files.clone();
+        let staged = tokio::task::spawn_blocking(move || {
+            super::album::extract(&archive, &files_for_extract, staged.path(), || {
+                *shutdown.borrow() || *stop.borrow() || stop.has_changed().is_err()
+            })?;
+            Ok::<_, anyhow::Error>(staged)
+        })
+        .await??;
+        active(core, scope, operation)?;
+        crate::files::move_noclobber(staged.path(), &target)?;
+        std::fs::remove_file(&part)?;
+        source = super::album::source(&target, &files, reference.bytes)?;
+        core.commit_asset_file(local, &target, &hash, &source)?;
+        core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='completed',phase='completed',last_error=NULL WHERE operation_id=?",[operation])?;Ok(())})?;
+        return Ok(target);
+    }
     tempfile::TempPath::try_from_path(part)?
         .persist_noclobber(&target)
         .map_err(|e| {
@@ -603,7 +669,7 @@ pub fn list(core: &Core, space: &str) -> Result<Vec<super::reconcile::Entry>> {
         let tx = db.unchecked_transaction()?;
         let mut assets = super::repository::list_assets(&tx)?;
         for asset in &mut assets {
-            if asset.path.as_ref().is_some_and(|p| !p.is_file()) {
+            if asset.path.is_some() && !super::album::present(asset) {
                 asset.path = None;
                 asset.local_state = "missing".into();
             }

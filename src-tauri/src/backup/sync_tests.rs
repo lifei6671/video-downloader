@@ -1,3 +1,5 @@
+#[path = "album_tests.rs"]
+mod album_tests;
 #[path = "cleanup_isolation_tests.rs"]
 mod cleanup_isolation_tests;
 #[path = "delete_flow_tests.rs"]

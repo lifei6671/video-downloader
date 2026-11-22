@@ -46,7 +46,7 @@ pub(crate) async fn fingerprint(
         std::fs::File::open(&path)?
             .read_exact(&mut head)
             .context("INVALID_MEDIA_CONTENT")?;
-        if !crate::files::video_header_valid(&container, &head) {
+        if container != "tar" && !crate::files::video_header_valid(&container, &head) {
             bail!("INVALID_MEDIA_CONTENT");
         }
         repository::fingerprint_with_cancel(&path, || {
@@ -58,6 +58,33 @@ pub(crate) async fn fingerprint(
 
 pub async fn local(core: &Core, id: &str) -> Result<Option<PathBuf>> {
     let asset = core.backup_asset(id)?.context("BACKUP_ASSET_NOT_FOUND")?;
+    if super::album::is_album(&asset) {
+        let Some(path) = asset.path.as_ref().filter(|p| p.exists()).cloned() else {
+            return Ok(None);
+        };
+        let cancel = core.backup_cancellation();
+        let (_sender, stop) = watch::channel(false);
+        let expected = asset.content_sha256.clone();
+        let (hash, source) = tokio::task::spawn_blocking(move || {
+            let stopped = || *cancel.borrow() || stop.has_changed().is_err();
+            if let Some(hash) = asset.content_sha256.as_ref() {
+                let files = super::album::files(&asset.metadata)?;
+                let path = asset.path.as_deref().context("FILE_MISSING")?;
+                super::album::verify(path, &files, stopped)?;
+                return Ok((
+                    hash.clone(),
+                    super::album::source(path, &files, asset.content_bytes)?,
+                ));
+            }
+            super::album::fingerprint(&asset, stopped)
+        })
+        .await??;
+        if expected.is_some_and(|old| old != hash) {
+            bail!("BACKUP_LOCAL_CHANGED");
+        }
+        core.commit_asset_file(id, &path, &hash, &source)?;
+        return Ok(Some(path));
+    }
     let Some(path) = asset.path else {
         return Ok(None);
     };

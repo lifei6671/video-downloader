@@ -8,6 +8,61 @@ use std::{
 
 struct TestJournal(Mutex<Connection>);
 #[tokio::test]
+async fn album_backup_telegram_document_preserves_originals_and_live_video_without_transcoding() {
+    use crate::files::{AlbumFile, AlbumVideoFile};
+    let root = tempfile::tempdir().unwrap();
+    let album = root.path().join("album");
+    std::fs::create_dir(&album).unwrap();
+    let still = b"\xff\xd8\xff-original-photo";
+    let clip = b"\0\0\0\x18ftypisom\0\0\0\0isommp42";
+    std::fs::write(album.join("001.jpeg"), still).unwrap();
+    std::fs::write(album.join("001.mp4"), clip).unwrap();
+    let files = vec![AlbumFile {
+        filename: "001.jpeg".into(),
+        bytes: still.len() as u64,
+        sha256: format!("{:x}", Sha256::digest(still)),
+        width: Some(800),
+        height: Some(600),
+        quality_source: "original".into(),
+        video: Some(AlbumVideoFile {
+            filename: "001.mp4".into(),
+            bytes: clip.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(clip)),
+        }),
+    }];
+    let archive = crate::backup::album::pack(&album, &files, || false).unwrap();
+    let body = std::fs::read(archive.path()).unwrap();
+    let mut media = source(root.path(), "video", &body);
+    media.container = "tar".into();
+    media.video = None;
+    let net = Mock::new();
+    let journal = TestJournal::open(&root.path().join("journal.sqlite"));
+    let target = target();
+    let (_cancel, _stop, io) = io();
+    let receipt = upload(&net, &journal, &target, media.clone(), &io)
+        .await
+        .unwrap();
+    assert!(net.video_attributes.lock().unwrap()[0].is_none());
+    let again = upload(&net, &journal, &target, media, &io).await.unwrap();
+    assert_eq!(receipt.reference, again.reference);
+    assert_eq!(net.sends.load(Ordering::SeqCst), 1);
+    let restored = root.path().join("restored.tar");
+    restore(&net, &journal, &target, &receipt.reference, &restored, &io)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&restored).unwrap(), body);
+    let destination = tempfile::tempdir().unwrap();
+    crate::backup::album::extract(&restored, &files, destination.path(), || false).unwrap();
+    assert_eq!(
+        std::fs::read(destination.path().join("001.jpeg")).unwrap(),
+        still
+    );
+    assert_eq!(
+        std::fs::read(destination.path().join("001.mp4")).unwrap(),
+        clip
+    );
+}
+#[tokio::test]
 async fn preparation_failure_keeps_prepared_and_retry_publishes_once() {
     let root = tempfile::tempdir().unwrap();
     let journal = TestJournal::open(&root.path().join("journal.sqlite"));

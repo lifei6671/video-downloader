@@ -549,7 +549,7 @@ pub(super) async fn prepare_video(
     source: &mut MediaSource,
     io: &Io,
 ) -> Result<()> {
-    if source.kind != "video" || source.video.is_some() {
+    if source.kind != "video" || source.container == "tar" || source.video.is_some() {
         return Ok(());
     }
     io.check()?;
@@ -672,7 +672,7 @@ pub(super) async fn upload_with_timing(
             }
             let prepared = io.run(transport.prepare(&entry.envelope, io)).await?;
             source_unchanged(&source, io).await?;
-            let mut video = if source.kind == "video" {
+            let mut video = if source.kind == "video" && source.container != "tar" {
                 Some(source.video.clone().context("VIDEO_METADATA_UNAVAILABLE")?)
             } else {
                 None

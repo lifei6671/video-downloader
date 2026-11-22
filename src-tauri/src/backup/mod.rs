@@ -1,4 +1,5 @@
 //! Space-scoped multi-device synchronization with one canonical storage format.
+pub mod album;
 #[cfg(test)]
 mod compatibility_online_audit;
 #[cfg(test)]
@@ -23,8 +24,8 @@ pub mod store;
 pub mod sync_delete;
 pub mod sync_engine;
 pub mod sync_read;
-mod telegram_lifecycle;
 mod telegram_database;
+mod telegram_lifecycle;
 #[cfg(test)]
 mod telegram_online_tests;
 pub mod telegram_provider;

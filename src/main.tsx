@@ -216,7 +216,7 @@ type AlbumSelection = { index: number; image?: AlbumImage; previous?: AlbumStill
 type MediaDirection = -1 | 1;
 type AlbumNavigation = { step: (direction: MediaDirection) => boolean };
 function albumMedia(task: Task) {
-  if (task.video?.kind !== 'image_album' || task.file_missing) return;
+  if (task.video?.kind !== 'image_album' || task.file_missing && !task.asset_id) return;
   return task.video.images?.length ? task.video.images : task.files;
 }
 function AlbumGallery({ task, expanded = false, open = true, slideshow = false, startAtLast, navigation, onMediaReady }: {
@@ -552,12 +552,32 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
   const open = !!entry && (entry.kind === 'asset' || !!task);
   if (open) last.current = { task, entry, playable };
   const current = last.current;
-  const currentTask = current?.task;
+  const [restoredAlbum, setRestoredAlbum] = useState<{ id: string; path?: string; error?: string }>();
+  const remoteAlbum = entry?.kind === 'asset' && entry.asset.video?.kind === 'image_album' ? entry.asset : undefined;
+  const albumRestoreId = remoteAlbum?.id ?? (task?.video?.kind === 'image_album' && task.asset_id && (!task.path || task.file_missing) ? task.asset_id : undefined);
+  useEffect(() => {
+    if (!albumRestoreId) return;
+    let live = true;
+    setRestoredAlbum({ id: albumRestoreId });
+    void api.ensureAsset(albumRestoreId).then(path => { if (live) setRestoredAlbum({ id: albumRestoreId, path }); })
+      .catch(error => { if (live) setRestoredAlbum({ id: albumRestoreId, error: errorText(error) }); });
+    return () => { live = false; };
+  }, [albumRestoreId]);
+  const restored = restoredAlbum?.id === albumRestoreId ? restoredAlbum : undefined;
+  const albumTask = useMemo<Task | undefined>(() => {
+    if (!remoteAlbum?.video) return;
+    return { id: remoteAlbum.id, asset_id: remoteAlbum.id, revision: 0, status: 'completed', video: remoteAlbum.video as Task['video'],
+      path: restored?.path ?? null, file_missing: !restored?.path, files: remoteAlbum.video.album_files ?? [],
+      bytes: 0, total_bytes: null, speed_bps: null, error: null, created_at: 0, completed_at: null,
+      canceling: false, queue_order: null, download_requested: true, cover_path: null, cover_error: null,
+      completed_items: null, total_items: null, cache_hit: false, cached_at: null, cover_cached: false };
+  }, [remoteAlbum, restored?.path]);
+  const currentTask = current?.task ?? albumTask;
   const streaming = current?.entry.streamStep !== undefined;
   const albumImages = currentTask && albumMedia(currentTask);
   const album = !!albumImages?.length;
   const standalone = current?.entry.kind === 'asset';
-  const video = standalone ? current.entry.asset : current?.playable ? current.entry.asset ?? currentTask : undefined;
+  const video = standalone ? album ? undefined : current.entry.asset : current?.playable ? current.entry.asset ?? currentTask : undefined;
   const mediaEntry = video || album ? current?.entry : undefined;
   const taskId = currentTask?.id;
   const onMediaReady = useCallback((ready: boolean) => {
@@ -670,7 +690,7 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
   }, [albumImages, streaming]);
   const waitingForAlbumSize = !!(albumBounds?.missing.length && measured?.entry !== mediaEntry);
   useEffect(() => {
-    if (!open || !waitingForAlbumSize || !mediaEntry || !taskId || !albumBounds) return;
+    if (!open || !waitingForAlbumSize || !mediaEntry || !taskId || !albumBounds || albumRestoreId && !restored?.path) return;
     let active = true;
     void (async () => {
       const size = { ...albumBounds.size };
@@ -688,7 +708,7 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
       if (active) setMeasured({ entry: mediaEntry, size });
     })();
     return () => { active = false; };
-  }, [open, waitingForAlbumSize, mediaEntry, taskId, albumBounds]);
+  }, [open, waitingForAlbumSize, mediaEntry, taskId, albumBounds, albumRestoreId, restored?.path]);
   const mediaSize = measured?.entry === mediaEntry ? measured?.size : albumBounds?.size;
   const onMediaSize = useCallback((size: MediaSize) => {
     if (!streaming && mediaEntry && size.width > 0 && size.height > 0) {
@@ -699,16 +719,19 @@ function TaskMediaDialog({ task, entry, playable, preload, coverOperations, remo
     '--task-media-intrinsic-width': `${mediaSize.width}px`,
     '--task-media-aspect': mediaSize.width / mediaSize.height,
   } as React.CSSProperties : undefined;
-  const albumGallery = currentTask && current?.entry.kind === 'task' && album && (waitingForAlbumSize
+  const albumGallery = currentTask && album && (albumRestoreId && !restored?.path
+    ? restored?.error ? <Alert variant="destructive"><AlertDescription>{restored.error}</AlertDescription></Alert> : <Spinner className="m-auto" aria-label="正在恢复图集" />
+    : waitingForAlbumSize
     ? <Spinner className="m-auto" aria-label="正在加载图集" />
-    : <AlbumGallery key={currentTask.id} task={currentTask} expanded open={open} slideshow startAtLast={current.entry.startAtLast} navigation={albumNavigation} onMediaReady={streaming ? onMediaReady : undefined} />);
-  const videoTitle = video?.video?.title?.trim() || '视频播放';
-  const taskDetails = currentTask ? <TaskDetails key={currentTask.id} task={currentTask} regionRef={details}
-    coverTools={!streaming && (video || album) && <VideoCover task={currentTask} mode="actions" operations={coverOperations} />} />
+    : <AlbumGallery key={currentTask.id} task={currentTask} expanded open={open} slideshow startAtLast={current?.entry.kind === 'task' && current.entry.startAtLast} navigation={albumNavigation} onMediaReady={streaming ? onMediaReady : undefined} />);
+  const videoTitle = currentTask?.video?.title?.trim() || video?.video?.title?.trim() || (album ? '图集' : '视频播放');
+  const detailsSubject = standalone ? current.entry.asset : video;
+  const taskDetails = currentTask && !standalone ? <TaskDetails key={currentTask.id} task={currentTask} regionRef={details}
+    coverTools={!standalone && !streaming && (video || album) && <VideoCover task={currentTask} mode="actions" operations={coverOperations} />} />
     : <div key={video?.id} ref={details} className="task-details-content" role="region" aria-label="任务详细信息" tabIndex={0}>
       <h2 className="task-details-title text-sm font-semibold">{videoTitle}</h2>
-      <PublicationTime timestamp={video?.video?.published_at} date={video?.video?.published_date} />
-      {video?.video?.width && video.video.height && <dl className="task-details-fields"><dt>分辨率</dt><dd>{video.video.width} × {video.video.height}</dd></dl>}
+      <PublicationTime timestamp={detailsSubject?.video?.published_at} date={detailsSubject?.video?.published_date} />
+      {detailsSubject?.video?.width && detailsSubject.video.height && <dl className="task-details-fields"><dt>分辨率</dt><dd>{detailsSubject.video.width} × {detailsSubject.video.height}</dd></dl>}
     </div>;
   const renderLayout = (media: React.ReactNode, tools?: React.ReactNode) => <>
     <div className="task-media-panel">{media}</div>
@@ -1403,14 +1426,14 @@ function App({ initialSettings }: { initialSettings: Settings }) {
     const restore = asset ? backupAssetStatus(backup, asset) : null;
     if (task.status === 'completed' && asset && !backupDeletion(backup, asset.asset_id) && ['queued','downloading','failed'].includes(restore ?? '')) {
       const restoring = restore !== 'failed';
-      return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="task-feed-play" aria-label={restoring ? '正在下载' : '重试下载'} disabled={busy || restoring} onClick={event => void playTask(task, event.currentTarget)}>{restoring ? <Spinner aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent>{restoring ? '正在下载' : '下载失败，点击重试下载'}</TooltipContent></Tooltip>;
+      return <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="task-feed-play" aria-label={restoring ? '正在下载' : '重试下载'} disabled={busy || restoring} onClick={event => task.video?.kind === 'image_album' ? setMediaEntry({kind:'task',id:task.id,returnFocus:event.currentTarget}) : void playTask(task, event.currentTarget)}>{restoring ? <Spinner aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}</Button></TooltipTrigger><TooltipContent>{restoring ? '正在下载' : '下载失败，点击重试下载'}</TooltipContent></Tooltip>;
     }
     if (task.status === 'completed' && task.asset_id && !backupDeletion(backup, task.asset_id)) {
       const state = backupCardStatus(backup, task.asset_id, task);
       if (state.action || ['清理中','待确认','正在取消'].includes(state.label)) return <BackupCardAction backup={backup} assetId={task.asset_id} />;
     }
     if (canPlayTask(task)) return playAction(task, true);
-    if (task.status === 'completed' && task.video?.kind === 'image_album' && !task.file_missing) return albumAction(task, true);
+    if (task.status === 'completed' && task.video?.kind === 'image_album' && (!task.file_missing || asset && !asset.remote_deleted)) return albumAction(task, true);
     return null;
   }
   function cancelProgress(task: Task) {

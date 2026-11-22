@@ -259,6 +259,10 @@ pub fn fields(asset: &Asset) -> FieldPatch {
         .map(|k| (k.into(), m[k].clone()))
         .collect();
     let mut source = json!({"platform":m["platform"],"video_id":m["video_id"],"canonical_url":m["canonical_url"]});
+    if super::album::is_album(asset) {
+        source["kind"] = "image_album".into();
+        source["album_files"] = m["album_files"].clone();
+    }
     if let Some((field, value)) = super::model::publication_field(m) {
         source[field] = value;
     }
@@ -711,16 +715,44 @@ impl SyncEngine {
                 .clone()
                 .context("BACKUP_HASH_PENDING")?;
             let path = capture.asset.path.clone().context("FILE_MISSING")?;
-            let container = std::path::Path::new(&capture.asset.original_filename)
-                .extension()
-                .and_then(|v| v.to_str())
-                .context("BACKUP_INVALID_FILENAME")?
-                .to_ascii_lowercase();
+            let album = super::album::is_album(&capture.asset);
+            let packed = if album {
+                let files = super::album::files(&capture.asset.metadata)?;
+                let cancel = self.core.backup_cancellation();
+                let (_guard, stop) = tokio::sync::watch::channel(false);
+                Some(
+                    tokio::task::spawn_blocking(move || {
+                        super::album::pack(&path, &files, || {
+                            *cancel.borrow() || stop.has_changed().is_err()
+                        })
+                    })
+                    .await??,
+                )
+            } else {
+                None
+            };
+            let path = packed
+                .as_ref()
+                .map(|p| p.path().to_owned())
+                .unwrap_or_else(|| capture.asset.path.clone().unwrap());
+            let container = if album {
+                "tar".into()
+            } else {
+                std::path::Path::new(&capture.asset.original_filename)
+                    .extension()
+                    .and_then(|v| v.to_str())
+                    .context("BACKUP_INVALID_FILENAME")?
+                    .to_ascii_lowercase()
+            };
             let receipt = self
                 .upload_source(
                     operation,
                     "video",
-                    VideoAttributes::from_metadata(&capture.asset.metadata),
+                    if album {
+                        None
+                    } else {
+                        VideoAttributes::from_metadata(&capture.asset.metadata)
+                    },
                     path,
                     capture.asset.content_bytes,
                     hash,
@@ -955,6 +987,12 @@ pub fn import_asset(db: &Connection, scope: &Scope, remote: &RemoteAsset) -> Res
     let snapshot = &remote.snapshot;
     if snapshot.library_id != scope.library_id {
         bail!("BACKUP_LIBRARY_MISMATCH");
+    }
+    if !snapshot.deleted {
+        let source = snapshot.fields.get("source");
+        let album = source.is_some_and(|s| s["kind"] == "image_album");
+        if album { super::album::files(source.context("BACKUP_INVALID_ALBUM")?)?; }
+        if album != snapshot.media.as_ref().is_some_and(|m| m.container == "tar") { bail!("BACKUP_INVALID_ALBUM"); }
     }
     let local = repository::bind_remote_asset(db, &scope.space_id, &snapshot.asset_id)?;
     let (previous,deleted,pending):(Option<String>,bool,String)=db.query_row("SELECT baseline_json,remote_deleted,pending_json FROM backup_space_assets WHERE space_id=?1 AND remote_asset_id=?2",params![scope.space_id,snapshot.asset_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
@@ -1596,7 +1634,7 @@ pub fn request_upload_with(
         let deleted = if let Some(deleted) = member { deleted } else {
             let asset=repository::asset(db, local)?.context("BACKUP_ASSET_NOT_FOUND")?;
             if asset.asset_state != "active" { bail!("BACKUP_ASSET_DELETED"); }
-            if !asset.path.as_ref().is_some_and(|p|p.is_file()) { bail!("FILE_MISSING"); }
+            if !super::album::present(&asset) { bail!("FILE_MISSING"); }
             // Only this explicit upload request joins an existing video to another target.
             join_asset(db, space, &asset)?;
             false
@@ -1604,7 +1642,7 @@ pub fn request_upload_with(
         let deleting:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM backup_operations WHERE space_id=?1 AND asset_id=?2 AND kind='delete' AND state NOT IN ('completed','canceled'))",params![space,local],|r|r.get(0))?;
         if deleted {
             let asset=repository::asset(db, local)?.context("BACKUP_ASSET_NOT_FOUND")?;
-            if asset.path.as_ref().is_none_or(|p|!p.is_file()) {bail!("FILE_MISSING");}
+            if !super::album::present(&asset) {bail!("FILE_MISSING");}
             let (revision,raw):(u64,String)=db.query_row("SELECT local_revision,pending_json FROM backup_space_assets WHERE space_id=?1 AND local_asset_id=?2",params![space,local],|r|Ok((r.get::<_,i64>(0)? as u64+1,r.get(1)?)))?;
             let mut pending:PendingChanges=serde_json::from_str(&raw)?;
             for (name,value) in fields(&asset) {pending.fields.entry(name).or_insert(FieldEdit{value,revision,base:FieldBaseline::Missing});}

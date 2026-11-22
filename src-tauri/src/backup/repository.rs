@@ -136,14 +136,15 @@ pub fn spaces(db: &Connection) -> Result<Vec<Space>> {
 
 /// Called within the same transaction that persists the completed task.
 pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
-    if task.status != Status::Completed || !task.files.is_empty() {
+    if task.status != Status::Completed {
         return Ok(());
     }
-    let Some(video) = task
-        .video
-        .as_ref()
-        .filter(|v| v["kind"].as_str().unwrap_or("video") == "video")
-    else {
+    let Some(video) = task.video.as_ref().filter(|v| {
+        matches!(
+            v["kind"].as_str().unwrap_or("video"),
+            "video" | "image_album"
+        )
+    }) else {
         return Ok(());
     };
     let Some(path) = task.path.as_ref() else {
@@ -152,9 +153,22 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
     let Ok(file) = fs::symlink_metadata(path) else {
         return Ok(());
     };
-    if !file.is_file() || file.file_type().is_symlink() || file.len() == 0 {
+    let album = video["kind"] == "image_album";
+    if file.file_type().is_symlink()
+        || if album {
+            !file.is_dir()
+        } else {
+            !file.is_file() || file.len() == 0
+        }
+    {
         return Ok(());
     }
+    let bytes = if album {
+        let Ok(bytes) = crate::files::validate_album(path, &task.files) else { return Ok(()); };
+        bytes
+    } else {
+        file.len()
+    };
     let asset_id = task.asset_id.clone().unwrap_or_else(|| task.id.clone());
     let is_new: bool = !db.query_row(
         "SELECT EXISTS(SELECT 1 FROM media_assets WHERE asset_id=?)",
@@ -166,6 +180,10 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
         .and_then(|v| v.to_str())
         .context("BACKUP_INVALID_FILENAME")?;
     let mut metadata = serde_json::Map::new();
+    if album {
+        metadata.insert("kind".into(), "image_album".into());
+        metadata.insert("album_files".into(), serde_json::to_value(&task.files)?);
+    }
     // Never serialize arbitrary extractor data, signed URLs, or the task snapshot.
     for field in [
         "platform",
@@ -189,7 +207,7 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
     }
     metadata.insert("completed_at".into(), task.completed_at.into());
     db.execute("INSERT INTO media_assets(asset_id,task_id,metadata_json,original_filename,content_bytes,asset_state) VALUES(?1,?2,?3,?4,?5,'active') ON CONFLICT(asset_id) DO UPDATE SET task_id=excluded.task_id",
-        params![asset_id,task.id,Value::Object(metadata).to_string(),filename,i64::try_from(file.len())?])?;
+        params![asset_id,task.id,Value::Object(metadata).to_string(),filename,i64::try_from(bytes)?])?;
     if !is_new && video["platform"] == "telegram" {
         let raw: String = db.query_row(
             "SELECT metadata_json FROM media_assets WHERE asset_id=?",
@@ -214,9 +232,14 @@ pub fn associate(db: &Connection, task: &mut Task) -> Result<()> {
             super::sync_engine::mark_local(db, &asset_id, patch, false)?;
         }
     }
-    let source = serde_json::to_string(&crate::desktop_core::transcription::Source::read(path)?)?;
+    let source = if album {
+        super::album::source(path, &task.files, bytes)?
+    } else {
+        serde_json::to_value(crate::desktop_core::transcription::Source::read(path)?)?
+    }
+    .to_string();
     db.execute("INSERT OR IGNORE INTO asset_local_files(asset_id,path,bytes,source_json,local_state) VALUES(?1,?2,?3,?4,'present')",
-        params![asset_id,path.to_string_lossy(),i64::try_from(file.len())?,source])?;
+        params![asset_id,path.to_string_lossy(),i64::try_from(bytes)?,source])?;
     // Keep an asset reference before history can release its cache reference.
     let cover = crate::parse_cache::cover(db, video)
         .ok()
