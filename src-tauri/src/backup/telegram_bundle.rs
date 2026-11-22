@@ -28,6 +28,36 @@ struct Loaded {
     documents: Vec<tl::types::Document>,
     photos: Vec<tl::types::Photo>,
 }
+impl Loaded {
+    fn album_member(&self, message: i32, envelope: &Envelope) -> Result<Option<RemoteDocument>> {
+        let first = &self.bundle.attachments[0].envelope;
+        if self.bundle.legacy
+            || envelope.kind != "album_file"
+            || first.kind != "album_file"
+            || first.library_id != envelope.library_id
+            || first.asset_id != envelope.asset_id
+        {
+            bail!("BACKUP_SCOPE_MISMATCH");
+        }
+        let Some(member) = self
+            .bundle
+            .attachments
+            .iter()
+            .find(|a| a.envelope.operation_id == envelope.operation_id)
+        else {
+            return Ok(None);
+        };
+        if member.envelope != *envelope {
+            bail!("TELEGRAM_OPERATION_MISMATCH");
+        }
+        Ok(Some(RemoteDocument {
+            message_id: message,
+            document_id: member.document_id,
+            bytes: envelope.bytes,
+            caption: envelope.caption()?,
+        }))
+    }
+}
 pub(crate) struct PreparedBundle {
     id: Option<i32>,
     loaded: Loaded,
@@ -432,6 +462,9 @@ fn rich_input(loaded: &Loaded) -> Result<tl::enums::InputRichMessage> {
                     }
                     .into(),
                 );
+                // The video block already carries the original document. Referencing it
+                // again as a generic file is rejected by Telegram rich messages.
+                continue;
             } else {
                 blocks.push(document_block);
                 continue;
@@ -611,6 +644,15 @@ impl crate::backup::telegram_lifecycle::OwnedMessageRemoval for GrammersTranspor
 }
 
 impl GrammersTransport {
+    pub(super) async fn album_member(
+        &self,
+        message: i32,
+        envelope: &Envelope,
+    ) -> Result<Option<RemoteDocument>> {
+        let message = self.message(message).await?;
+        let loaded = read(&message)?.context("TELEGRAM_INDEX_INVALID")?;
+        loaded.album_member(message.id(), envelope)
+    }
     async fn operation_bundle(
         &self,
         envelope: &Envelope,
@@ -676,7 +718,7 @@ impl GrammersTransport {
         io: &Io,
     ) -> Result<PreparedBundle> {
         // prepare is called only for a durable Prepared send. New album members
-        // need no history scan; uncertain Sending sends still reconcile via find.
+        // need no history scan; uncertain edits read their known album message by ID.
         let existing = if self.preferred_message.is_some()
             || envelope.kind == "album_file"
             || (envelope.kind == "event"
@@ -988,6 +1030,30 @@ impl GrammersTransport {
 mod tests {
     use super::*;
     #[test]
+    fn album_member_reconciliation_requires_matching_owner_and_complete_envelope() {
+        let mut loaded = fixture();
+        loaded.bundle.attachments[0].envelope.kind = "album_file".into();
+        let mut envelope = loaded.bundle.attachments[0].envelope.clone();
+        let found = loaded.album_member(42, &envelope).unwrap().unwrap();
+        assert_eq!(found.message_id, 42);
+        found.check(&envelope).unwrap();
+        envelope.operation_id = "missing-member".into();
+        assert!(loaded.album_member(42, &envelope).unwrap().is_none());
+        envelope.asset_id = "another-asset".into();
+        assert_eq!(
+            loaded.album_member(42, &envelope).unwrap_err().to_string(),
+            "BACKUP_SCOPE_MISMATCH"
+        );
+        envelope = loaded.bundle.attachments[0].envelope.clone();
+        envelope.sha256 = "cd".repeat(32);
+        assert_eq!(
+            loaded.album_member(42, &envelope).unwrap_err().to_string(),
+            "TELEGRAM_OPERATION_MISMATCH"
+        );
+        loaded.bundle.legacy = true;
+        assert!(loaded.album_member(42, &envelope).is_err());
+    }
+    #[test]
     fn album_photo_rejection_keeps_original_documents_in_one_rich_message() {
         for name in [
             "PHOTO_INVALID_DIMENSIONS",
@@ -1238,13 +1304,18 @@ mod tests {
             })
             .unwrap();
         assert!(!folded.open);
+        assert!(
+            !folded.blocks.iter().any(|block| matches!(block,
+            tl::enums::PageBlock::Document(document) if document.document_id == 101)),
+            "the playable original video must not also be rendered as a generic document"
+        );
         assert_eq!(
             folded
                 .blocks
                 .iter()
                 .filter(|b| matches!(b, tl::enums::PageBlock::Document(_)))
                 .count(),
-            4
+            3
         );
         let round_trip = load(manifest(&received).unwrap().unwrap(), &received, false).unwrap();
         assert_eq!(round_trip.photos.len(), 2);

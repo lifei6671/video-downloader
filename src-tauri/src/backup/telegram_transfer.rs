@@ -273,6 +273,14 @@ pub(super) trait Transport: Send + Sync {
             Ok(document)
         })
     }
+    // Only a complete, validated read of the known album message may prove absence.
+    fn find_album_member<'a>(
+        &'a self,
+        message: i32,
+        envelope: &'a Envelope,
+    ) -> ProviderFuture<'a, Option<RemoteDocument>> {
+        Box::pin(async move { self.inspect_envelope(message, envelope).await.map(Some) })
+    }
     fn inspect_reference<'a>(
         &'a self,
         target: &'a Target,
@@ -690,7 +698,14 @@ async fn upload_inner(
         state: SendState::Prepared,
         document: None,
         last_error: None,
+        first_error: None,
     })?;
+    if entry.first_error.is_none() {
+        entry.first_error = entry
+            .last_error
+            .clone()
+            .filter(|error| error != "TELEGRAM_SEND_UNCONFIRMED");
+    }
     if let Some(control) = &source.control {
         (control.checkpoint)(super::provider::OpaqueState {scope:target.scope.clone(),value:serde_json::json!({"operation_id":source.operation_id,"asset_id":source.asset_id,"kind":source.kind,"device_id":source.device_id}).to_string()})?;
     }
@@ -713,6 +728,24 @@ async fn upload_inner(
             return Ok(receipt(target, &entry, &document));
         }
         let mut sent_message = None;
+        if entry.state == SendState::Sending {
+            if let Some((Some(message), _)) = album {
+                if let Some(document) = io
+                    .run(transport.find_album_member(message, &entry.envelope))
+                    .await?
+                {
+                    document.check(&entry.envelope)?;
+                    if document.message_id != message {
+                        bail!("TELEGRAM_MEDIA_CHANGED");
+                    }
+                    sent_message = Some(message);
+                } else {
+                    // Re-edit this same owned message; never create a second album post.
+                    entry.state = SendState::Prepared;
+                    journal.save(&entry)?;
+                }
+            }
+        }
         if entry.state == SendState::Prepared {
             if !transport.can_upload() {
                 bail!("TELEGRAM_CHANNEL_FORBIDDEN");
@@ -810,6 +843,9 @@ async fn upload_inner(
                     ) || code
                         .strip_prefix("TELEGRAM_FLOOD_WAIT:")
                         .is_some_and(|v| v.parse::<u32>().is_ok())
+                        || error
+                            .downcast_ref::<super::telegram_session::RejectedRpc>()
+                            .is_some_and(|rpc| (400..500).contains(&rpc.code))
                     {
                         entry.state = SendState::Prepared;
                     }
@@ -856,7 +892,14 @@ async fn upload_inner(
     }
     .await;
     if let Err(error) = &result {
-        entry.last_error = Some(error.to_string());
+        let detail = match error.downcast_ref::<super::telegram_session::RejectedRpc>() {
+            Some(rpc) => format!("{error}: {rpc}"),
+            None => error.to_string(),
+        };
+        if entry.first_error.is_none() && detail != "TELEGRAM_SEND_UNCONFIRMED" {
+            entry.first_error = Some(detail.clone());
+        }
+        entry.last_error = Some(detail);
         journal.save(&entry)?;
         journal.failure(&target.account_id, &error.to_string())?;
     }

@@ -1291,6 +1291,13 @@ impl Transport for GrammersTransport {
             async move { Ok(select_document(&self.message(id).await?, None, Some(envelope))?.0) },
         )
     }
+    fn find_album_member<'a>(
+        &'a self,
+        message: i32,
+        envelope: &'a Envelope,
+    ) -> ProviderFuture<'a, Option<RemoteDocument>> {
+        Box::pin(self.album_member(message, envelope))
+    }
     fn find<'a>(
         &'a self,
         envelope: &'a Envelope,

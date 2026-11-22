@@ -8,6 +8,200 @@ use std::{
 
 struct TestJournal(Mutex<Connection>);
 #[tokio::test]
+async fn album_member_unconfirmed_edit_resumes_same_message_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let core = crate::desktop_core::Core::open(
+        &root.path().join("core.sqlite"),
+        root.path().join("downloads"),
+        "unused".into(),
+        vec![],
+        |_| {},
+    )
+    .unwrap();
+    let path = root.path().join("journal.sqlite");
+    let journal = TestJournal::open(&path);
+    let net = Mock::new();
+    let target = target();
+    let (_cancel, _stop, io) = io();
+    let mut photo = source(root.path(), "photo", b"original photo");
+    photo.kind = "album_file".into();
+    photo.container = "jpeg".into();
+    let receipt = upload_album_member(&net, &journal, &target, photo, &io, None, &core)
+        .await
+        .unwrap();
+    let message = target.message_id(&receipt.reference).unwrap();
+    let mut clip = source(root.path(), "clip", b"original live photo video");
+    clip.kind = "album_file".into();
+    clip.operation_id = "clip-operation".into();
+    clip.container = "mp4".into();
+    *net.reject_once.lock().unwrap() = Some("TELEGRAM_RPC_ERROR".into());
+    assert!(upload_album_member(
+        &net,
+        &journal,
+        &target,
+        clip.clone(),
+        &io,
+        Some(message),
+        &core
+    )
+    .await
+    .is_err());
+    assert_eq!(journal.entry(&clip).state, SendState::Sending);
+    // Simulate a pre-fix journal whose original RPC rejection was already overwritten.
+    let mut historical = journal.entry(&clip);
+    historical.first_error = None;
+    historical.last_error = Some("TELEGRAM_SEND_UNCONFIRMED".into());
+    journal.save(&historical).unwrap();
+    drop(journal);
+    let journal = TestJournal::open(&path);
+    *net.rpc_reject_once.lock().unwrap() = Some(super::super::telegram_session::RejectedRpc {
+        code: 400,
+        name: "RICH_MESSAGE_INVALID".into(),
+    });
+    assert_eq!(
+        upload_album_member(
+            &net,
+            &journal,
+            &target,
+            clip.clone(),
+            &io,
+            Some(message),
+            &core
+        )
+        .await
+        .unwrap_err()
+        .to_string(),
+        "TELEGRAM_RPC_ERROR"
+    );
+    assert_eq!(
+        journal.entry(&clip).first_error.as_deref(),
+        Some("TELEGRAM_RPC_ERROR: RICH_MESSAGE_INVALID (400)")
+    );
+    assert_eq!(
+        journal.entry(&clip).last_error.as_deref(),
+        Some("TELEGRAM_RPC_ERROR: RICH_MESSAGE_INVALID (400)")
+    );
+    // Keep the uncertain-send path to verify that a read failure cannot trigger a resend.
+    let mut uncertain = journal.entry(&clip);
+    uncertain.state = SendState::Sending;
+    journal.save(&uncertain).unwrap();
+    net.hidden.store(true, Ordering::SeqCst);
+    assert_eq!(
+        upload_album_member(
+            &net,
+            &journal,
+            &target,
+            clip.clone(),
+            &io,
+            Some(message),
+            &core
+        )
+        .await
+        .unwrap_err()
+        .to_string(),
+        "TELEGRAM_CONNECTION_ERROR"
+    );
+    assert_eq!(journal.entry(&clip).state, SendState::Sending);
+    assert_eq!(
+        net.uploads.load(Ordering::SeqCst),
+        3,
+        "a failed read must never prove absence"
+    );
+    net.hidden.store(false, Ordering::SeqCst);
+    let receipt = upload_album_member(
+        &net,
+        &journal,
+        &target,
+        clip.clone(),
+        &io,
+        Some(message),
+        &core,
+    )
+    .await
+    .unwrap();
+    assert_eq!(target.message_id(&receipt.reference).unwrap(), message);
+    assert_eq!(journal.entry(&clip).state, SendState::Confirmed);
+    assert_eq!(
+        journal.entry(&clip).first_error.as_deref(),
+        Some("TELEGRAM_RPC_ERROR: RICH_MESSAGE_INVALID (400)")
+    );
+    assert_eq!(net.album_posts.load(Ordering::SeqCst), 1);
+    assert_eq!(net.album_edits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        net.finds.load(Ordering::SeqCst),
+        0,
+        "known album edits must not scan channel history"
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn album_member_lost_edit_reply_reconciles_by_id_without_reupload() {
+    let root = tempfile::tempdir().unwrap();
+    let core = crate::desktop_core::Core::open(
+        &root.path().join("core.sqlite"),
+        root.path().join("downloads"),
+        "unused".into(),
+        vec![],
+        |_| {},
+    )
+    .unwrap();
+    let path = root.path().join("journal.sqlite");
+    let journal = TestJournal::open(&path);
+    let net = Mock::new();
+    let target = target();
+    let (_cancel, _stop, io) = io();
+    let mut photo = source(root.path(), "photo", b"original photo");
+    photo.kind = "album_file".into();
+    photo.container = "jpeg".into();
+    let receipt = upload_album_member(&net, &journal, &target, photo, &io, None, &core)
+        .await
+        .unwrap();
+    let message = target.message_id(&receipt.reference).unwrap();
+    let mut clip = source(root.path(), "clip", b"original live photo video");
+    clip.kind = "album_file".into();
+    clip.operation_id = "clip-operation".into();
+    clip.container = "mp4".into();
+    net.lost_response.store(true, Ordering::SeqCst);
+    assert!(upload_album_member(
+        &net,
+        &journal,
+        &target,
+        clip.clone(),
+        &io,
+        Some(message),
+        &core
+    )
+    .await
+    .is_err());
+    drop(journal);
+    let journal = TestJournal::open(&path);
+    std::fs::remove_file(&clip.path).unwrap();
+    net.lost_response.store(false, Ordering::SeqCst);
+    let receipt = upload_album_member(
+        &net,
+        &journal,
+        &target,
+        clip.clone(),
+        &io,
+        Some(message),
+        &core,
+    )
+    .await
+    .unwrap();
+    assert_eq!(target.message_id(&receipt.reference).unwrap(), message);
+    assert_eq!(net.uploads.load(Ordering::SeqCst), 2);
+    assert_eq!(net.sends.load(Ordering::SeqCst), 2);
+    assert_eq!(net.finds.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        journal.entry(&clip).first_error.as_deref(),
+        Some("TELEGRAM_CONNECTION_ERROR")
+    );
+    assert!(journal.entry(&clip).last_error.is_none());
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn album_backup_telegram_document_preserves_originals_and_live_video_without_transcoding() {
     use crate::files::{AlbumFile, AlbumVideoFile};
     let root = tempfile::tempdir().unwrap();
@@ -197,6 +391,7 @@ struct Mock {
     network_on_send: Mutex<Option<watch::Sender<()>>>,
     source_edit: Mutex<Option<PathBuf>>,
     reject_once: Mutex<Option<String>>,
+    rpc_reject_once: Mutex<Option<super::super::telegram_session::RejectedRpc>>,
     random_ids: Mutex<Vec<i64>>,
     video_attributes: Mutex<Vec<Option<crate::backup::provider::VideoAttributes>>>,
     finds: AtomicUsize,
@@ -278,6 +473,9 @@ impl Transport for Mock {
             let id = self.sends.fetch_add(1, Ordering::SeqCst) as i32 + 1;
             self.random_ids.lock().unwrap().push(random_id);
             self.video_attributes.lock().unwrap().push(video);
+            if let Some(rpc) = self.rpc_reject_once.lock().unwrap().take() {
+                return Err(anyhow::Error::new(rpc).context("TELEGRAM_RPC_ERROR"));
+            }
             if let Some(code) = self.reject_once.lock().unwrap().take() {
                 bail!(code);
             }
@@ -364,6 +562,26 @@ impl Transport for Mock {
             let d = self.inspect(id).await?;
             d.check(envelope)?;
             Ok(d)
+        })
+    }
+    fn find_album_member<'a>(
+        &'a self,
+        message: i32,
+        envelope: &'a Envelope,
+    ) -> ProviderFuture<'a, Option<RemoteDocument>> {
+        Box::pin(async move {
+            if self.hidden.load(Ordering::SeqCst) {
+                bail!("TELEGRAM_CONNECTION_ERROR");
+            }
+            let documents = self.album_documents.lock().unwrap();
+            if !documents.values().any(|(d, _)| d.message_id == message) {
+                bail!("TELEGRAM_MEDIA_MISSING");
+            }
+            let caption = envelope.caption()?;
+            Ok(documents
+                .values()
+                .find(|(d, _)| d.message_id == message && d.caption == caption)
+                .map(|(d, _)| d.clone()))
         })
     }
     fn find<'a>(
@@ -817,7 +1035,56 @@ async fn telegram_transfer_unknown_outcome_remains_unconfirmed_and_does_not_blin
     }
     assert_eq!(net.sends.load(Ordering::SeqCst), 1);
     assert_eq!(journal.entry(&source).state, SendState::Sending);
+    assert_eq!(
+        journal.entry(&source).first_error.as_deref(),
+        Some("TELEGRAM_CONNECTION_ERROR")
+    );
+    assert_eq!(
+        journal.entry(&source).last_error.as_deref(),
+        Some("TELEGRAM_SEND_UNCONFIRMED")
+    );
     assert!(source.path.is_file());
+}
+#[tokio::test]
+async fn telegram_transfer_rpc_rejection_preserves_first_diagnostic_after_restart_and_later_retries(
+) {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("journal.sqlite");
+    let journal = TestJournal::open(&path);
+    let net = Mock::new();
+    let (_cancel, _stop, io) = io();
+    let source = source(root.path(), "cover", b"original bytes");
+    *net.rpc_reject_once.lock().unwrap() = Some(super::super::telegram_session::RejectedRpc {
+        code: 400,
+        name: "RICH_MESSAGE_INVALID".into(),
+    });
+    assert!(upload(&net, &journal, &target(), source.clone(), &io)
+        .await
+        .is_err());
+    assert_eq!(journal.entry(&source).state, SendState::Prepared);
+    drop(journal);
+    let journal = TestJournal::open(&path);
+    *net.reject_once.lock().unwrap() = Some("TELEGRAM_CONNECTION_ERROR".into());
+    assert!(upload(&net, &journal, &target(), source.clone(), &io)
+        .await
+        .is_err());
+    assert_eq!(
+        journal.entry(&source).last_error.as_deref(),
+        Some("TELEGRAM_CONNECTION_ERROR")
+    );
+    upload(&net, &journal, &target(), source.clone(), &io)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        journal.entry(&source).last_error.as_deref(),
+        Some("TELEGRAM_SEND_UNCONFIRMED")
+    );
+    // The first RPC rejection remains available even when reconciliation fails later.
+    assert_eq!(
+        journal.entry(&source).first_error.as_deref(),
+        Some("TELEGRAM_RPC_ERROR: RICH_MESSAGE_INVALID (400)")
+    );
+    assert_eq!(net.sends.load(Ordering::SeqCst), 2);
 }
 #[tokio::test]
 async fn telegram_transfer_definite_rejection_retries_after_durable_cooldown_with_same_random_id() {
@@ -1264,6 +1531,7 @@ async fn telegram_uncertain_send_does_not_probe_or_require_the_local_video_again
             state: SendState::Prepared,
             document: None,
             last_error: None,
+            first_error: None,
         })
         .unwrap();
     entry.state = SendState::Sending;

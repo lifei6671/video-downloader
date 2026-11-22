@@ -21,6 +21,8 @@ pub(super) struct Entry {
     pub state: SendState,
     pub document: Option<RemoteDocument>,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_error: Option<String>,
 }
 fn decode_entry(raw: &str) -> Result<Entry> {
     let mut value: serde_json::Value =

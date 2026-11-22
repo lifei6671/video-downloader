@@ -774,6 +774,7 @@ async fn telegram_t4_owned_cleanup_keeps_published_replaced_foreign_and_next_gen
         state: SendState::Confirmed,
         document: Some(original.clone()),
         last_error: None,
+        first_error: None,
     };
     telegram_lifecycle::cancel(
         &transport,
@@ -952,6 +953,7 @@ async fn telegram_t4_cancel_cleanup_then_upload_uses_new_operation_and_messages(
             state: SendState::Confirmed,
             document: Some(document),
             last_error: None,
+            first_error: None,
         };
         telegram_lifecycle::cancel(
             &MemoryTransport(&net),
@@ -2461,6 +2463,7 @@ async fn canceling_an_unpublished_send_checks_identity_without_reading_its_body(
         state: SendState::Sending,
         document: None,
         last_error: None,
+        first_error: None,
     };
     let (_stop, rx) = tokio::sync::watch::channel(false);
     let io = Io::new(rx.clone(), rx, None);

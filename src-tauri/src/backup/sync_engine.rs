@@ -1570,9 +1570,21 @@ const RECOVER_NETWORK_OPERATIONS_SQL: &str = "UPDATE backup_operations SET attem
             WHERE space_id=? AND kind IN ('upload','delete') AND state IN ('blocked','retry_wait') AND phase<>'superseded'
             AND last_error IN ('TELEGRAM_CONNECTION_ERROR','TELEGRAM_TIMEOUT','TELEGRAM_NOT_CONNECTED','TELEGRAM_TRANSFER_TIMEOUT','BACKUP_NETWORK_ERROR','TELEGRAM_RECONNECTING')";
 
+// Give historical stuck albums one new attempt budget; keep all member send evidence.
+const RECOVER_ALBUM_OPERATIONS_SQL: &str = "UPDATE backup_operations SET state='pending',attempt=0,next_retry_at=NULL,last_error=NULL,
+    payload_json=json_set(payload_json,'$.album_send_recovery',1)
+    WHERE space_id=?1 AND kind='upload' AND state='blocked' AND phase<>'superseded'
+    AND last_error='TELEGRAM_SEND_UNCONFIRMED' AND json_extract(payload_json,'$.album_send_recovery') IS NULL
+    AND EXISTS(SELECT 1 FROM media_assets a WHERE a.asset_id=backup_operations.asset_id
+        AND a.asset_state='active' AND json_extract(a.metadata_json,'$.kind')='image_album')
+    AND EXISTS(SELECT 1 FROM telegram_album_sends s WHERE json_extract(s.entry_json,'$.envelope.asset_id')=backup_operations.asset_id
+        AND json_extract(s.entry_json,'$.target.scope.space_id')=backup_operations.space_id
+        AND json_extract(s.entry_json,'$.state')='sending')";
+
 fn recover_network_operations(core: &Core, space: &str) -> Result<()> {
     core.backup_db(|db| {
         db.execute(RECOVER_NETWORK_OPERATIONS_SQL, [space])?;
+        db.execute(RECOVER_ALBUM_OPERATIONS_SQL, [space])?;
         db.execute("UPDATE backup_operations SET payload_json=json_remove(payload_json,'$.cleanup_blocked','$.cleanup_attempt','$.cleanup_error'),next_retry_at=NULL
             WHERE space_id=? AND kind='upload' AND (state='canceled' OR state='blocked' AND last_error='BACKUP_ASSET_DELETED')
             AND json_extract(payload_json,'$.cleanup_error') IN ('TELEGRAM_CONNECTION_ERROR','TELEGRAM_TIMEOUT','TELEGRAM_NOT_CONNECTED','TELEGRAM_TRANSFER_TIMEOUT','BACKUP_NETWORK_ERROR')", [space])?;
@@ -1696,6 +1708,116 @@ pub fn request_upload_with(
 #[cfg(test)]
 mod claim_timing_tests {
     use super::*;
+    #[test]
+    fn album_recovery_requeues_only_active_stuck_albums_once_without_erasing_evidence() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,asset_id TEXT,space_id TEXT,kind TEXT,state TEXT,phase TEXT,attempt INTEGER,payload_json TEXT,next_retry_at INTEGER,last_error TEXT);
+            CREATE TABLE media_assets(asset_id TEXT PRIMARY KEY,asset_state TEXT,metadata_json TEXT);
+            CREATE TABLE telegram_album_sends(entry_json TEXT);").unwrap();
+        for (id, space, state, kind, active, media_kind, journal_state, phase) in [
+            (
+                "stuck",
+                "active",
+                "blocked",
+                "upload",
+                "active",
+                "image_album",
+                "sending",
+                "captured",
+            ),
+            (
+                "other",
+                "other",
+                "blocked",
+                "upload",
+                "active",
+                "image_album",
+                "sending",
+                "captured",
+            ),
+            (
+                "deleted",
+                "active",
+                "blocked",
+                "upload",
+                "deleted",
+                "image_album",
+                "sending",
+                "captured",
+            ),
+            (
+                "video", "active", "blocked", "upload", "active", "video", "sending", "captured",
+            ),
+            (
+                "canceled",
+                "active",
+                "canceled",
+                "upload",
+                "active",
+                "image_album",
+                "sending",
+                "captured",
+            ),
+            (
+                "superseded",
+                "active",
+                "blocked",
+                "upload",
+                "active",
+                "image_album",
+                "sending",
+                "superseded",
+            ),
+            (
+                "confirmed",
+                "active",
+                "blocked",
+                "upload",
+                "active",
+                "image_album",
+                "confirmed",
+                "captured",
+            ),
+        ] {
+            db.execute(
+                "INSERT INTO media_assets VALUES(?1,?2,?3)",
+                params![id, active, json!({"kind":media_kind}).to_string()],
+            )
+            .unwrap();
+            db.execute("INSERT INTO backup_operations VALUES(?1,?1,?2,?3,?4,?5,5,?6,99,'TELEGRAM_SEND_UNCONFIRMED')", params![id,space,kind,state,phase,json!({"resume_video":{"operation_id":id}}).to_string()]).unwrap();
+            db.execute("INSERT INTO telegram_album_sends VALUES(?1)", [json!({"envelope":{"asset_id":id},"target":{"scope":{"space_id":space}},"state":journal_state,"random_id":42}).to_string()]).unwrap();
+        }
+        let evidence: String = db
+            .query_row(
+                "SELECT group_concat(entry_json) FROM telegram_album_sends",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            db.execute(RECOVER_ALBUM_OPERATIONS_SQL, ["active"])
+                .unwrap(),
+            1
+        );
+        let (state, attempt, payload): (String,i64,serde_json::Value) = db.query_row("SELECT state,attempt,payload_json FROM backup_operations WHERE operation_id='stuck'", [], |r|Ok((r.get(0)?,r.get(1)?,serde_json::from_str(&r.get::<_,String>(2)?).unwrap()))).unwrap();
+        assert_eq!((state.as_str(), attempt), ("pending", 0));
+        assert_eq!(payload["resume_video"]["operation_id"], "stuck");
+        db.execute("UPDATE backup_operations SET state='blocked',last_error='TELEGRAM_SEND_UNCONFIRMED' WHERE operation_id='stuck'", []).unwrap();
+        assert_eq!(
+            db.execute(RECOVER_ALBUM_OPERATIONS_SQL, ["active"])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT group_concat(entry_json) FROM telegram_album_sends",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            evidence
+        );
+    }
     #[test]
     fn reconnect_recovers_only_network_operations_and_preserves_send_evidence() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
