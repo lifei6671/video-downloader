@@ -124,9 +124,22 @@ fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losi
         vec![vec![Value::Integer(0)]]
     );
     assert_eq!(
-        rows(&db, "SELECT account_auth, login_cookie FROM platform_settings"),
-        vec![vec![Value::Text("manual".into()), Value::Text(String::new())]]
+        rows(
+            &db,
+            "SELECT account_auth, login_cookie, login_device FROM platform_settings"
+        ),
+        vec![vec![
+            Value::Text("manual".into()),
+            Value::Text(String::new()),
+            Value::Null,
+        ]]
     );
+    assert!(db
+        .execute(
+            "UPDATE platform_settings SET login_device='invalid-json'",
+            []
+        )
+        .is_err());
     assert_eq!(
         rows(&db, "SELECT b.body FROM cover_refs r JOIN cover_blobs b USING(digest) WHERE r.owner='cache' AND r.owner_id='cached'"),
         vec![vec![Value::Blob(vec![1, 2])]]
@@ -158,7 +171,8 @@ fn master_upgrades_once_to_all_final_tables_indexes_and_constraints_without_losi
         .execute_batch(
             "ALTER TABLE platform_settings ADD COLUMN bypass_proxy INTEGER NOT NULL DEFAULT 0 CHECK(bypass_proxy IN (0,1));
              ALTER TABLE platform_settings ADD COLUMN login_cookie TEXT NOT NULL DEFAULT '';
-             ALTER TABLE platform_settings ADD COLUMN account_auth TEXT CHECK(account_auth IN ('login','manual'));",
+             ALTER TABLE platform_settings ADD COLUMN account_auth TEXT CHECK(account_auth IN ('login','manual'));
+             ALTER TABLE platform_settings ADD COLUMN login_device TEXT CHECK(login_device IS NULL OR json_valid(login_device));",
         )
         .unwrap();
     let objects: Vec<(String,String,String)> = expected.prepare(
