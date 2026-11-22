@@ -54,3 +54,5 @@ src-tauri/icons/tray-icon@2x.png
 
 output/
 .playwright-cli/
+
+tests/*.txt
