@@ -17,6 +17,7 @@ UPDATE platform_settings SET credential_ref=NULL;
 DELETE FROM telegram_account_bindings;
 DELETE FROM telegram_media_sends;
 DELETE FROM telegram_extra_sends;
+DELETE FROM telegram_album_sends;
 DELETE FROM telegram_transfer_cooldowns;
 DELETE FROM backup_probe_cleanup;
 DELETE FROM backup_credential_cleanup;

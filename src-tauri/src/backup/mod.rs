@@ -24,6 +24,7 @@ pub mod store;
 pub mod sync_delete;
 pub mod sync_engine;
 pub mod sync_read;
+mod telegram_album;
 mod telegram_database;
 mod telegram_lifecycle;
 #[cfg(test)]

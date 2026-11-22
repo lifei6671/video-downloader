@@ -77,7 +77,9 @@ pub(super) fn get(db: &Connection, operation: &str, kind: &str) -> Result<Option
     raw.map(|value| decode_entry(&value)).transpose()
 }
 fn send_table(kind: &str) -> &'static str {
-    if matches!(kind, "database" | "asset_archive") {
+    if kind == "album_file" {
+        "telegram_album_sends"
+    } else if matches!(kind, "database" | "asset_archive") {
         "telegram_extra_sends"
     } else {
         "telegram_media_sends"

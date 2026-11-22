@@ -172,8 +172,14 @@ impl Journal for TestJournal {
         db::failure(&self.0.lock().unwrap(), account, error)
     }
 }
+type MockDocument = (RemoteDocument, Vec<u8>);
 #[derive(Default)]
 struct Mock {
+    album_message: std::sync::atomic::AtomicI32,
+    album_documents: Mutex<HashMap<(i32, i64), MockDocument>>,
+    album_posts: AtomicUsize,
+    album_edits: AtomicUsize,
+    filenames: Mutex<Vec<String>>,
     documents: Mutex<HashMap<i32, (RemoteDocument, Vec<u8>)>>,
     uploads: AtomicUsize,
     prepare_failure: AtomicBool,
@@ -215,6 +221,18 @@ impl Transport for Mock {
             Ok(())
         })
     }
+    fn prepare_album_member<'a>(
+        &'a self,
+        envelope: &'a Envelope,
+        _source: &'a MediaSource,
+        message: Option<i32>,
+        _core: &'a crate::desktop_core::Core,
+        io: &'a Io,
+    ) -> ProviderFuture<'a, Self::Prepared> {
+        self.album_message
+            .store(message.unwrap_or_default(), Ordering::SeqCst);
+        self.prepare(envelope, io)
+    }
     fn max_bytes(&self) -> u64 {
         self.limit
     }
@@ -225,10 +243,11 @@ impl Transport for Mock {
         &'a self,
         reader: &'a mut (dyn AsyncRead + Unpin + Send),
         _: u64,
-        _: String,
+        name: String,
     ) -> ProviderFuture<'a, Vec<u8>> {
         Box::pin(async move {
             self.uploads.fetch_add(1, Ordering::SeqCst);
+            self.filenames.lock().unwrap().push(name);
             let mut body = vec![];
             let gate = self.upload_gate.lock().unwrap().take();
             if let Some((started, release)) = gate {
@@ -262,18 +281,36 @@ impl Transport for Mock {
             if let Some(code) = self.reject_once.lock().unwrap().take() {
                 bail!(code);
             }
-            self.documents.lock().unwrap().insert(
-                id,
-                (
-                    RemoteDocument {
-                        message_id: id,
-                        document_id: i64::from(id) + 1000,
-                        bytes: body.len() as u64,
-                        caption,
-                    },
-                    body,
-                ),
-            );
+            let envelope: Envelope = serde_json::from_str(&caption)?;
+            let message_id = if envelope.kind == "album_file" {
+                let anchor = self.album_message.load(Ordering::SeqCst);
+                if anchor == 0 {
+                    self.album_posts.fetch_add(1, Ordering::SeqCst);
+                    id
+                } else {
+                    self.album_edits.fetch_add(1, Ordering::SeqCst);
+                    anchor
+                }
+            } else {
+                id
+            };
+            let document = RemoteDocument {
+                message_id,
+                document_id: i64::from(id) + 1000,
+                bytes: body.len() as u64,
+                caption,
+            };
+            if envelope.kind == "album_file" {
+                self.album_documents
+                    .lock()
+                    .unwrap()
+                    .insert((message_id, document.document_id), (document, body));
+            } else {
+                self.documents
+                    .lock()
+                    .unwrap()
+                    .insert(message_id, (document, body));
+            }
             if let Some(cancel) = self.cancel_on_send.lock().unwrap().as_ref() {
                 cancel.send_replace(true);
             }
@@ -283,7 +320,7 @@ impl Transport for Mock {
             if self.lost_response.load(Ordering::SeqCst) {
                 bail!("TELEGRAM_CONNECTION_ERROR");
             }
-            Ok(Some(id))
+            Ok(Some(message_id))
         })
     }
     fn inspect(&self, id: i32) -> ProviderFuture<'_, RemoteDocument> {
@@ -297,6 +334,38 @@ impl Transport for Mock {
                 .context("TELEGRAM_MEDIA_MISSING")
         })
     }
+    fn inspect_document(&self, id: i32, document_id: i64) -> ProviderFuture<'_, RemoteDocument> {
+        Box::pin(async move {
+            if let Some((d, _)) = self.album_documents.lock().unwrap().get(&(id, document_id)) {
+                return Ok(d.clone());
+            }
+            let d = self.inspect(id).await?;
+            if d.document_id != document_id {
+                bail!("TELEGRAM_MEDIA_CHANGED");
+            }
+            Ok(d)
+        })
+    }
+    fn inspect_envelope<'a>(
+        &'a self,
+        id: i32,
+        envelope: &'a Envelope,
+    ) -> ProviderFuture<'a, RemoteDocument> {
+        Box::pin(async move {
+            if let Some((d, _)) = self
+                .album_documents
+                .lock()
+                .unwrap()
+                .values()
+                .find(|(d, _)| d.message_id == id && d.caption == envelope.caption().unwrap())
+            {
+                return Ok(d.clone());
+            }
+            let d = self.inspect(id).await?;
+            d.check(envelope)?;
+            Ok(d)
+        })
+    }
     fn find<'a>(
         &'a self,
         envelope: &'a Envelope,
@@ -308,6 +377,15 @@ impl Transport for Mock {
                 return Ok(None);
             }
             let caption = envelope.caption()?;
+            if let Some((d, _)) = self
+                .album_documents
+                .lock()
+                .unwrap()
+                .values()
+                .find(|(d, _)| d.caption == caption)
+            {
+                return Ok(Some(d.clone()));
+            }
             Ok(self
                 .documents
                 .lock()
@@ -325,6 +403,15 @@ impl Transport for Mock {
             self.downloads.fetch_add(1, Ordering::SeqCst);
             if self.expired.swap(false, Ordering::SeqCst) {
                 return Ok(Box::new(ExpiredReader) as Box<dyn AsyncRead + Unpin + Send>);
+            }
+            if let Some((_, body)) = self
+                .album_documents
+                .lock()
+                .unwrap()
+                .get(&(document.message_id, document.document_id))
+            {
+                return Ok(Box::new(std::io::Cursor::new(body.clone()))
+                    as Box<dyn AsyncRead + Unpin + Send>);
             }
             let mut body = self
                 .documents
@@ -1458,4 +1545,159 @@ async fn control_requests_keep_the_short_timeout() {
         .await;
     assert_eq!(result.unwrap_err().to_string(), "TELEGRAM_TRANSFER_TIMEOUT");
     assert_eq!(start.elapsed(), Duration::from_secs(60));
+}
+
+#[tokio::test]
+async fn album_backup_telegram_independent_originals_survive_lost_response_and_journal_restart() {
+    use crate::files::{AlbumFile, AlbumVideoFile};
+    let root = tempfile::tempdir().unwrap();
+    let album = root.path().join("album");
+    std::fs::create_dir(&album).unwrap();
+    let still = b"\xff\xd8\xff-original-photo";
+    let clip = b"\0\0\0\x18ftypisom\0\0\0\0isommp42";
+    std::fs::write(album.join("001.jpeg"), still).unwrap();
+    std::fs::write(album.join("001.mp4"), clip).unwrap();
+    let files = vec![AlbumFile {
+        filename: "001.jpeg".into(),
+        bytes: still.len() as u64,
+        sha256: format!("{:x}", Sha256::digest(still)),
+        width: Some(800),
+        height: Some(600),
+        quality_source: "original".into(),
+        video: Some(AlbumVideoFile {
+            filename: "001.mp4".into(),
+            bytes: clip.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(clip)),
+        }),
+    }];
+
+    let asset = crate::backup::model::Asset {
+        asset_id: "asset".into(),
+        task_id: None,
+        metadata: serde_json::json!({"kind":"image_album","album_files":files}),
+        original_filename: "album".into(),
+        content_sha256: None,
+        content_bytes: 0,
+        asset_state: "active".into(),
+        path: Some(album.clone()),
+        local_state: "present".into(),
+    };
+    let (hash, fingerprint) = crate::backup::album::fingerprint(&asset, || false).unwrap();
+    let mut media = source(root.path(), "album_file", b"unused");
+    media.path = album.clone();
+    media.video = None;
+    media.bytes = fingerprint["size"].as_u64().unwrap();
+    media.sha256 = hash;
+    media.container = "album".into();
+    let core = crate::desktop_core::Core::open(
+        &root.path().join("core.sqlite"),
+        root.path().join("downloads"),
+        "unused".into(),
+        vec![],
+        |_| {},
+    )
+    .unwrap();
+    let net = Mock::new();
+    let target = target();
+    let (_cancel, _stop, io) = io();
+    let journal_path = root.path().join("journal.sqlite");
+    let journal = TestJournal::open(&journal_path);
+    net.lost_response.store(true, Ordering::SeqCst);
+    assert!(crate::backup::telegram_album::upload(
+        &core,
+        &net,
+        &journal,
+        &target,
+        media.clone(),
+        files.clone(),
+        &io
+    )
+    .await
+    .is_err());
+    assert_eq!(net.sends.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        net.finds.load(Ordering::SeqCst),
+        0,
+        "Prepared sends need no uncertain-send lookup"
+    );
+    drop(journal);
+    net.lost_response.store(false, Ordering::SeqCst);
+    let journal = TestJournal::open(&journal_path);
+    let receipt = crate::backup::telegram_album::upload(
+        &core,
+        &net,
+        &journal,
+        &target,
+        media.clone(),
+        files.clone(),
+        &io,
+    )
+    .await
+    .unwrap();
+    let again = crate::backup::telegram_album::upload(
+        &core,
+        &net,
+        &journal,
+        &target,
+        media,
+        files.clone(),
+        &io,
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt.reference, again.reference);
+    assert_eq!(net.sends.load(Ordering::SeqCst), 2);
+    assert_eq!(net.uploads.load(Ordering::SeqCst), 2);
+    assert_eq!(net.album_posts.load(Ordering::SeqCst), 1);
+    assert_eq!(net.album_edits.load(Ordering::SeqCst), 1);
+    assert!(
+        net.finds.load(Ordering::SeqCst) >= 1,
+        "Sending evidence still reconciles the lost reply"
+    );
+    assert_eq!(*net.filenames.lock().unwrap(), vec!["001.jpeg", "001.mp4"]);
+    assert!(net
+        .video_attributes
+        .lock()
+        .unwrap()
+        .iter()
+        .all(Option::is_none));
+    let MediaLocation::TelegramAlbum { files: members } = &receipt.reference.location else {
+        panic!("independent album reference expected")
+    };
+    assert!(members
+        .iter()
+        .all(|m| target.message_id(&m.reference).unwrap()
+            == target.message_id(&members[0].reference).unwrap()));
+    assert_eq!(
+        members
+            .iter()
+            .map(|m| m.filename.as_str())
+            .collect::<Vec<_>>(),
+        vec!["001.jpeg", "001.mp4"]
+    );
+    for member in members {
+        let destination = root.path().join(format!("restored-{}", member.filename));
+        restore(
+            &net,
+            &journal,
+            &target,
+            &member.reference,
+            &destination,
+            &io,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(destination).unwrap(),
+            std::fs::read(album.join(&member.filename)).unwrap()
+        );
+    }
+    crate::backup::telegram_lifecycle::verify(&net, &target, &receipt.reference, &io)
+        .await
+        .unwrap();
+    let mut bad = receipt.reference.clone();
+    if let MediaLocation::TelegramAlbum { files: members } = &mut bad.location {
+        members.swap(0, 1);
+    }
+    assert!(crate::backup::album::validate_reference(&bad, &files).is_err());
 }

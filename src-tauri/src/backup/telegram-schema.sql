@@ -38,3 +38,8 @@ CREATE TABLE IF NOT EXISTS telegram_mapped_documents (
  message_id INTEGER NOT NULL, document_json TEXT NOT NULL, revision INTEGER, index_body BLOB
 );
 CREATE INDEX IF NOT EXISTS telegram_mapped_message ON telegram_mapped_documents(space_id,message_id);
+
+-- Independent original album files share the existing durable send journal.
+CREATE TABLE IF NOT EXISTS telegram_album_sends (
+ operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind='album_file'),
+ entry_json TEXT NOT NULL CHECK(json_valid(entry_json)));

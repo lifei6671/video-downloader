@@ -716,7 +716,8 @@ impl SyncEngine {
                 .context("BACKUP_HASH_PENDING")?;
             let path = capture.asset.path.clone().context("FILE_MISSING")?;
             let album = super::album::is_album(&capture.asset);
-            let packed = if album {
+            let direct_album = album && self.provider.scope().provider_type == ProviderType::Telegram;
+            let packed = if album && !direct_album {
                 let files = super::album::files(&capture.asset.metadata)?;
                 let cancel = self.core.backup_cancellation();
                 let (_guard, stop) = tokio::sync::watch::channel(false);
@@ -735,7 +736,9 @@ impl SyncEngine {
                 .as_ref()
                 .map(|p| p.path().to_owned())
                 .unwrap_or_else(|| capture.asset.path.clone().unwrap());
-            let container = if album {
+            let container = if direct_album {
+                "album".into()
+            } else if album {
                 "tar".into()
             } else {
                 std::path::Path::new(&capture.asset.original_filename)
@@ -920,8 +923,8 @@ impl SyncEngine {
             }),
             progress: progress.clone(),
         };
-        let upload = self.provider.upload_media(
-            MediaSource {
+        let direct_album = container == "album";
+        let source = MediaSource {
                 video,
                 base_revision: payload["capture"]["baseline"]["revision"].as_u64(),
                 recreate_revision: payload["capture"]["pending"]["recreate_revision"].as_u64(),
@@ -934,9 +937,11 @@ impl SyncEngine {
                 operation_id: operation.into(),
                 device_id: device.into(),
                 control: Some(Arc::new(control)),
-            },
-            persisted,
-        );
+            };
+        let upload = if direct_album {
+            let files = super::album::files(&payload["capture"]["asset"]["metadata"])?;
+            self.provider.upload_album(source, files, persisted)
+        } else { self.provider.upload_media(source, persisted) };
         tokio::pin!(upload);
         // The queue independently checks cancellation every 100 ms. UI polling is
         // once per second; changed progress needs only a small durable row update.
@@ -992,7 +997,10 @@ pub fn import_asset(db: &Connection, scope: &Scope, remote: &RemoteAsset) -> Res
         let source = snapshot.fields.get("source");
         let album = source.is_some_and(|s| s["kind"] == "image_album");
         if album { super::album::files(source.context("BACKUP_INVALID_ALBUM")?)?; }
-        if album != snapshot.media.as_ref().is_some_and(|m| m.container == "tar") { bail!("BACKUP_INVALID_ALBUM"); }
+        if album != snapshot.media.as_ref().is_some_and(|m| matches!(m.container.as_str(), "tar" | "album")) { bail!("BACKUP_INVALID_ALBUM"); }
+        if let Some(reference) = snapshot.media.as_ref().filter(|r| r.container == "album") {
+            super::album::validate_reference(reference, &super::album::files(source.context("BACKUP_INVALID_ALBUM")?)?)?;
+        }
     }
     let local = repository::bind_remote_asset(db, &scope.space_id, &snapshot.asset_id)?;
     let (previous,deleted,pending):(Option<String>,bool,String)=db.query_row("SELECT baseline_json,remote_deleted,pending_json FROM backup_space_assets WHERE space_id=?1 AND remote_asset_id=?2",params![scope.space_id,snapshot.asset_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;

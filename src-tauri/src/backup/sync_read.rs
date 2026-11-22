@@ -443,9 +443,12 @@ async fn transfer_once(
         .get("source")
         .is_some_and(|s| s["kind"] == "image_album");
     anyhow::ensure!(
-        album == (reference.container == "tar"),
+        album == matches!(reference.container.as_str(), "tar" | "album"),
         "BACKUP_INVALID_ALBUM"
     );
+    if reference.container == "album" {
+        return transfer_album(core, provider, local, record, reference, operation, payload, cancel).await;
+    }
     let directory = restore::staging_directory(&core.settings().download_directory)?;
     let part = directory.join(format!("{operation}.part"));
     if payload["part"]
@@ -504,73 +507,7 @@ async fn transfer_once(
             return Ok(target);
         }
     }
-    let mut offset = restore::regular(&part)?.map_or(0, |m| m.len());
-    if payload["reference"] != serde_json::to_value(reference)? || offset > reference.bytes {
-        offset = 0;
-    }
-    payload["reference"] = serde_json::to_value(reference)?;
-    payload["total_bytes"] = reference.bytes.into();
-    checkpoint(core, scope, operation, "downloading", payload)?;
-    if offset < reference.bytes {
-        let mut stream = provider.download_media(reference.clone(), offset).await?;
-        anyhow::ensure!(stream.offset <= offset, "BACKUP_INVALID_RANGE");
-        offset = stream.offset;
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(offset == 0)
-            .open(&part)
-            .await?;
-        file.set_len(offset).await?;
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
-        let mut buffer = vec![0; 256 * 1024];
-        let mut last = offset;
-        loop {
-            active(core, scope, operation)?;
-            let n = match tokio::time::timeout(
-                provider.media_read_timeout(),
-                stream.reader.read(&mut buffer),
-            )
-            .await
-            {
-                Ok(Ok(n)) => n,
-                Ok(Err(error))
-                    if scope.provider_type == ProviderType::Telegram
-                        && error.to_string().starts_with("TELEGRAM_") =>
-                {
-                    file.flush().await?;
-                    file.sync_all().await?;
-                    return Err(error.into());
-                }
-                _ => {
-                    file.flush().await?;
-                    file.sync_all().await?;
-                    bail!("BACKUP_NETWORK_ERROR");
-                }
-            };
-            if n == 0 {
-                break;
-            }
-            if offset + n as u64 > reference.bytes {
-                bail!("BACKUP_SIZE_MISMATCH");
-            }
-            file.write_all(&buffer[..n]).await?;
-            offset += n as u64;
-            if offset - last >= 1024 * 1024 {
-                file.flush().await?;
-                payload["completed_bytes"] = offset.into();
-                checkpoint(core, scope, operation, "downloading", payload)?;
-                last = offset;
-            }
-        }
-        file.flush().await?;
-        file.sync_all().await?;
-    }
-    payload["completed_bytes"] = offset.into();
-    checkpoint(core, scope, operation, "verifying", payload)?;
-    if offset != reference.bytes {
-        bail!("BACKUP_SIZE_MISMATCH");
-    }
+    download_part(core, provider, operation, reference, &part, payload, 0, reference.bytes).await?;
     let (hash, mut source) = match restore::fingerprint(
         part.clone(),
         core.backup_cancellation(),
@@ -661,6 +598,151 @@ async fn transfer_once(
     // A successfully committed local copy is retained if a tombstone arrives afterwards.
     core.commit_asset_file(local, &target, &hash, &source)?;
     core.backup_db(|db|{db.execute("UPDATE backup_operations SET state='completed',phase='completed',last_error=NULL WHERE operation_id=?",[operation])?;Ok(())})?;
+    Ok(target)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn transfer_album(
+    core: &Arc<Core>,
+    provider: &dyn BackupProvider,
+    local: &str,
+    record: &AssetSnapshot,
+    reference: &MediaRef,
+    operation: &str,
+    payload: &mut Value,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<PathBuf> {
+    let files = super::album::files(
+        record
+            .fields
+            .get("source")
+            .context("BACKUP_INVALID_ALBUM")?,
+    )?;
+    super::album::validate_reference(reference, &files)?;
+    let MediaLocation::TelegramAlbum { files: members } = &reference.location else {
+        bail!("BACKUP_INVALID_ALBUM");
+    };
+    let scope = provider.scope();
+    scope.check(&reference.scope)?;
+    let directory = restore::staging_directory(&core.settings().download_directory)?;
+    let staged = directory.join(format!("{operation}.album"));
+    if payload["album_part"]
+        .as_str()
+        .is_some_and(|p| Path::new(p) != staged)
+    {
+        bail!("BACKUP_RESTORE_DIRECTORY_CHANGED");
+    }
+    payload["album_part"] = staged.to_string_lossy().into_owned().into();
+    let existing = payload["target"].as_str().map(PathBuf::from);
+    if let Some(target) = &existing {
+        anyhow::ensure!(target.parent() == directory.parent(), "BACKUP_UNSAFE_FILE");
+    }
+    let committed = existing.filter(|p| p.exists());
+    if committed.is_none() {
+        match std::fs::create_dir(&staged) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(e) => return Err(e.into()),
+        }
+        super::album::directory(&staged)?;
+        if !payload["album_reference"].is_null()
+            && payload["album_reference"] != serde_json::to_value(reference)?
+        {
+            let old: MediaRef = serde_json::from_value(payload["album_reference"].clone())?;
+            old.validate_scope(scope)?;
+            if let MediaLocation::TelegramAlbum { files: old } = old.location {
+                for member in old {
+                    let path = staged.join(member.filename);
+                    if restore::regular(&path)?.is_some() {
+                        std::fs::remove_file(path)?;
+                    }
+                }
+            }
+            payload["reference"] = Value::Null;
+        }
+        payload["album_reference"] = serde_json::to_value(reference)?;
+        let total = members.iter().map(|m| m.reference.bytes).sum();
+        let mut completed = 0;
+        for member in members {
+            active(core, scope, operation)?;
+            let part = staged.join(&member.filename);
+            let complete =
+                if restore::regular(&part)?.is_some_and(|m| m.len() == member.reference.bytes) {
+                    let path = part.clone();
+                    let stop = cancel.clone();
+                    let shutdown = core.backup_cancellation();
+                    let (hash, _) = tokio::task::spawn_blocking(move || {
+                        super::repository::fingerprint_with_cancel(&path, || {
+                            *stop.borrow() || *shutdown.borrow() || stop.has_changed().is_err()
+                        })
+                    })
+                    .await??;
+                    hash == member.reference.sha256
+                } else {
+                    false
+                };
+            if !complete {
+                if restore::regular(&part)?.is_some_and(|m| m.len() == member.reference.bytes) {
+                    payload["reference"] = Value::Null;
+                }
+                download_part(
+                    core,
+                    provider,
+                    operation,
+                    &member.reference,
+                    &part,
+                    payload,
+                    completed,
+                    total,
+                )
+                .await?;
+            }
+            completed += member.reference.bytes;
+        }
+    }
+    let path = committed.clone().unwrap_or_else(|| staged.clone());
+    let mut asset = core
+        .backup_asset(local)?
+        .context("BACKUP_ASSET_NOT_FOUND")?;
+    asset.path = Some(path.clone());
+    let shutdown = core.backup_cancellation();
+    let stop = cancel.clone();
+    let (hash, fingerprint) = tokio::task::spawn_blocking(move || {
+        super::album::fingerprint(&asset, || {
+            *shutdown.borrow() || *stop.borrow() || stop.has_changed().is_err()
+        })
+    })
+    .await??;
+    if hash != reference.sha256 || fingerprint["size"] != reference.bytes {
+        bail!("BACKUP_CHECKSUM_MISMATCH");
+    }
+    let newest = latest(core, provider, local).await?;
+    if newest.snapshot.deleted {
+        bail!("BACKUP_ASSET_DELETED");
+    }
+    if newest.snapshot.media.as_ref() != Some(reference) {
+        bail!("BACKUP_SOURCE_CHANGED");
+    }
+    active(core, scope, operation)?;
+    let target = if let Some(target) = committed {
+        target
+    } else {
+        let filename = record
+            .fields
+            .get("original_filename")
+            .and_then(Value::as_str)
+            .context("BACKUP_INVALID_FILENAME")?;
+        let name = crate::naming::render("{content}", &json!({"title":filename}), "")?;
+        let target =
+            crate::naming::destination(directory.parent().context("IO_ERROR")?, &name, None)?;
+        payload["target"] = target.to_string_lossy().into_owned().into();
+        checkpoint(core, scope, operation, "committing", payload)?;
+        crate::files::move_noclobber(&staged, &target)?;
+        target
+    };
+    let source = super::album::source(&target, &files, reference.bytes)?;
+    core.commit_asset_file(local, &target, &hash, &source)?;
+    core.backup_db(|db| { db.execute("UPDATE backup_operations SET state='completed',phase='completed',last_error=NULL WHERE operation_id=?", [operation])?; Ok(()) })?;
     Ok(target)
 }
 
@@ -820,4 +902,86 @@ pub fn cached_cover(core: &Core, space: &str, local: &str) -> Result<Option<Vec<
         return Ok(Some(body));
     }
     Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_part(
+    core: &Arc<Core>,
+    provider: &dyn BackupProvider,
+    operation: &str,
+    reference: &MediaRef,
+    part: &Path,
+    payload: &mut Value,
+    completed: u64,
+    total: u64,
+) -> Result<()> {
+    let scope = provider.scope();
+    let mut offset = restore::regular(part)?.map_or(0, |m| m.len());
+    if payload["reference"] != serde_json::to_value(reference)? || offset > reference.bytes {
+        offset = 0;
+    }
+    payload["reference"] = serde_json::to_value(reference)?;
+    payload["total_bytes"] = total.into();
+    checkpoint(core, scope, operation, "downloading", payload)?;
+    if offset < reference.bytes {
+        let mut stream = provider.download_media(reference.clone(), offset).await?;
+        anyhow::ensure!(stream.offset <= offset, "BACKUP_INVALID_RANGE");
+        offset = stream.offset;
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(offset == 0)
+            .open(part)
+            .await?;
+        file.set_len(offset).await?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        let mut buffer = vec![0; 256 * 1024];
+        let mut last = offset;
+        loop {
+            active(core, scope, operation)?;
+            let n = match tokio::time::timeout(
+                provider.media_read_timeout(),
+                stream.reader.read(&mut buffer),
+            )
+            .await
+            {
+                Ok(Ok(n)) => n,
+                Ok(Err(error))
+                    if scope.provider_type == ProviderType::Telegram
+                        && error.to_string().starts_with("TELEGRAM_") =>
+                {
+                    file.flush().await?;
+                    file.sync_all().await?;
+                    return Err(error.into());
+                }
+                _ => {
+                    file.flush().await?;
+                    file.sync_all().await?;
+                    bail!("BACKUP_NETWORK_ERROR");
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            if offset + n as u64 > reference.bytes {
+                bail!("BACKUP_SIZE_MISMATCH");
+            }
+            file.write_all(&buffer[..n]).await?;
+            offset += n as u64;
+            if offset - last >= 1024 * 1024 {
+                file.flush().await?;
+                payload["completed_bytes"] = (completed + offset).into();
+                checkpoint(core, scope, operation, "downloading", payload)?;
+                last = offset;
+            }
+        }
+        file.flush().await?;
+        file.sync_all().await?;
+    }
+    payload["completed_bytes"] = (completed + offset).into();
+    checkpoint(core, scope, operation, "verifying", payload)?;
+    if offset != reference.bytes {
+        bail!("BACKUP_SIZE_MISMATCH");
+    }
+    Ok(())
 }

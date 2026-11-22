@@ -71,6 +71,10 @@ impl Target {
     pub(super) fn message_id(&self, reference: &MediaRef) -> Result<i32> {
         self.validate()?;
         reference.validate_scope(&self.scope)?;
+        if let MediaLocation::TelegramAlbum { files } = &reference.location {
+            for member in files { self.message_id(&member.reference)?; }
+            return self.message_id(&files.first().context("BACKUP_INVALID_ALBUM")?.reference);
+        }
         match &reference.location {
             MediaLocation::TelegramMessage {
                 account_id,
@@ -112,7 +116,7 @@ impl Envelope {
     fn source(target: &Target, source: &MediaSource) -> Result<Self> {
         if !matches!(
             source.kind.as_str(),
-            "video" | "cover" | "transcript" | "library" | "event" | "database" | "asset_archive"
+            "video" | "cover" | "transcript" | "library" | "event" | "database" | "asset_archive" | "album_file"
         ) || source.operation_id.is_empty()
             || source.asset_id.is_empty()
             || source.device_id.is_empty()
@@ -187,6 +191,16 @@ pub(super) trait Transport: Send + Sync {
         _io: &'a Io,
     ) -> ProviderFuture<'a, Self::Prepared> {
         Box::pin(async { Ok(Self::Prepared::default()) })
+    }
+    fn prepare_album_member<'a>(
+        &'a self,
+        envelope: &'a Envelope,
+        _source: &'a MediaSource,
+        _message: Option<i32>,
+        _core: &'a crate::desktop_core::Core,
+        io: &'a Io,
+    ) -> ProviderFuture<'a, Self::Prepared> {
+        self.prepare(envelope, io)
     }
     fn max_bytes(&self) -> u64;
     fn can_upload(&self) -> bool;
@@ -502,7 +516,7 @@ async fn source_unchanged(source: &MediaSource, io: &Io) -> Result<()> {
 }
 
 /// Recognize ISO BMFF metadata, including a trailing index, without changing original bytes.
-async fn mp4_has_metadata(path: &Path, io: &Io) -> Result<bool> {
+pub(super) async fn mp4_has_metadata(path: &Path, io: &Io) -> Result<bool> {
     let mut file = tokio::fs::File::open(path).await.context("IO_ERROR")?;
     let total = file.metadata().await.context("IO_ERROR")?.len();
     let (mut offset, mut ftyp, mut moov, mut mdat) = (0u64, false, false, false);
@@ -630,6 +644,42 @@ pub(super) async fn upload_with_timing(
     timing: super::delete_timing::IndexTiming<'_>,
     check: ReceiptCheck,
 ) -> Result<UploadReceipt> {
+    upload_inner(transport, journal, target, source, io, timing, check, None).await
+}
+
+pub(super) async fn upload_album_member(
+    transport: &impl Transport,
+    journal: &impl Journal,
+    target: &Target,
+    source: MediaSource,
+    io: &Io,
+    message: Option<i32>,
+    core: &crate::desktop_core::Core,
+) -> Result<UploadReceipt> {
+    upload_inner(
+        transport,
+        journal,
+        target,
+        source,
+        io,
+        Default::default(),
+        ReceiptCheck::ReadBack,
+        Some((message, core)),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_inner(
+    transport: &impl Transport,
+    journal: &impl Journal,
+    target: &Target,
+    source: MediaSource,
+    io: &Io,
+    timing: super::delete_timing::IndexTiming<'_>,
+    check: ReceiptCheck,
+    album: Option<(Option<i32>, &crate::desktop_core::Core)>,
+) -> Result<UploadReceipt> {
     allowed(journal, target)?;
     io.check()?;
     let envelope = Envelope::source(target, &source)?;
@@ -670,7 +720,12 @@ pub(super) async fn upload_with_timing(
             if source.bytes > transport.max_bytes() {
                 bail!("TELEGRAM_FILE_TOO_LARGE");
             }
-            let prepared = io.run(transport.prepare(&entry.envelope, io)).await?;
+            let prepared = if let Some((message, core)) = album {
+                io.run(transport.prepare_album_member(&entry.envelope, &source, message, core, io))
+                    .await?
+            } else {
+                io.run(transport.prepare(&entry.envelope, io)).await?
+            };
             source_unchanged(&source, io).await?;
             let mut video = if source.kind == "video" && source.container != "tar" {
                 Some(source.video.clone().context("VIDEO_METADATA_UNAVAILABLE")?)
@@ -699,7 +754,9 @@ pub(super) async fn upload_with_timing(
                         transport.upload_with_progress(
                             &mut reader,
                             source.bytes,
-                            format!("yingqu-{}.{}", source.kind, source.container),
+                            if source.kind == "album_file" {
+                                source.path.file_name().and_then(|s|s.to_str()).context("BACKUP_INVALID_FILENAME")?.to_owned()
+                            } else { format!("yingqu-{}.{}", source.kind, source.container) },
                             source
                                 .control
                                 .as_ref()

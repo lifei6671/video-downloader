@@ -34,6 +34,15 @@ async fn run(
     limit: Duration,
     cancel: impl Future<Output = ()>,
 ) -> Result<Vec<u8>> {
+    run_bounded(program, args, limit, 1024 * 1024, cancel).await
+}
+async fn run_bounded(
+    program: &Path,
+    args: &[OsString],
+    limit: Duration,
+    max_bytes: usize,
+    cancel: impl Future<Output = ()>,
+) -> Result<Vec<u8>> {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -66,8 +75,8 @@ async fn run(
         _=cancel=>Err(anyhow::anyhow!("CANCELED")),
         result=tokio::time::timeout(limit,async {
             let mut bytes=vec![];
-            output.take(1024*1024+1).read_to_end(&mut bytes).await.context("VIDEO_METADATA_UNAVAILABLE")?;
-            anyhow::ensure!(bytes.len()<=1024*1024,"VIDEO_METADATA_UNAVAILABLE");
+            output.take(max_bytes as u64+1).read_to_end(&mut bytes).await.context("VIDEO_METADATA_UNAVAILABLE")?;
+            anyhow::ensure!(bytes.len()<=max_bytes,"VIDEO_METADATA_UNAVAILABLE");
             let status=process.child.wait().await.context("VIDEO_METADATA_UNAVAILABLE")?;
             anyhow::ensure!(status.success(),"VIDEO_METADATA_UNAVAILABLE");
             Ok(bytes)
@@ -309,6 +318,73 @@ pub(crate) async fn probe(
     let bytes = run(&program, &args, Duration::from_secs(20), cancel).await?;
     attributes(&serde_json::from_slice(&bytes).context("VIDEO_METADATA_UNAVAILABLE")?)
 }
+/// A display derivative only; the original file remains the lossless backup source.
+pub(crate) async fn photo_preview(
+    source: &Path,
+    runtime: &Path,
+    cancel: impl Future<Output = ()>,
+) -> Result<Vec<u8>> {
+    local_file(source)?;
+    anyhow::ensure!(
+        std::fs::metadata(source)?.len() <= 32 * 1024 * 1024,
+        "COVER_UNAVAILABLE"
+    );
+    let extension = source
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if matches!(extension, "jpeg" | "png" | "webp") {
+        let source = source.to_owned();
+        return tokio::task::spawn_blocking(move || {
+            crate::telegram_cover::photo(&std::fs::read(source)?)
+        })
+        .await?;
+    }
+    tokio::pin!(cancel);
+    let program = tool("ffmpeg", runtime, &mut cancel).await?;
+    let mut args: Vec<OsString> = [
+        "-nostdin",
+        "-v",
+        "error",
+        "-protocol_whitelist",
+        "file,pipe",
+        "-i",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    args.push(source.as_os_str().into());
+    args.extend(
+        [
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=w='min(2560,iw)':h='min(2560,ih)':force_original_aspect_ratio=decrease,pad=w='max(iw,ceil(ih/20))':h='max(ih,ceil(iw/20))':x='(ow-iw)/2':y='(oh-ih)/2':color=white",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "3",
+            "-f",
+            "image2pipe",
+            "pipe:1",
+        ]
+        .into_iter()
+        .map(Into::into),
+    );
+    let bytes = run_bounded(
+        &program,
+        &args,
+        Duration::from_secs(20),
+        crate::telegram_cover::MAX_BYTES,
+        cancel,
+    )
+    .await?;
+    anyhow::ensure!(crate::telegram_cover::valid(&bytes), "COVER_UNAVAILABLE");
+    Ok(bytes)
+}
+
 pub(crate) async fn extract(
     source: &Path,
     runtime: &Path,
@@ -438,6 +514,54 @@ mod tests {
                     .is_err(),
                 "never overwrite an existing cover"
             );
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires existing FFmpeg; run explicitly for album photo acceptance"]
+    async fn album_photo_ffmpeg_preview_preserves_original_on_unicode_path() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let ffmpeg = tool("ffmpeg", root.path(), std::future::pending())
+            .await
+            .unwrap();
+        for (width, height) in [(64, 48), (100, 3000), (3000, 100)] {
+            let source = root.path().join(format!("原图 空格 {width}x{height}.gif"));
+            let mut args: Vec<OsString> = ["-nostdin", "-v", "error", "-f", "lavfi", "-i"]
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            args.extend([
+                format!("color=c=red:s={width}x{height}:r=1:d=1").into(),
+                "-frames:v".into(),
+                "1".into(),
+                source.as_os_str().into(),
+            ]);
+            run(
+                &ffmpeg,
+                &args,
+                Duration::from_secs(20),
+                std::future::pending(),
+            )
+            .await
+            .unwrap();
+            let before = Sha256::digest(std::fs::read(&source).unwrap());
+            let preview = photo_preview(&source, root.path(), std::future::pending())
+                .await
+                .unwrap();
+            assert_eq!(
+                image::guess_format(&preview).unwrap(),
+                image::ImageFormat::Jpeg
+            );
+            let decoded = image::load_from_memory(&preview).unwrap();
+            if width == 64 {
+                assert_eq!((decoded.width(), decoded.height()), (64, 48));
+            }
+            assert!(decoded.width() <= 2560 && decoded.height() <= 2560);
+            assert!(
+                decoded.width() <= decoded.height() * 20
+                    && decoded.height() <= decoded.width() * 20
+            );
+            assert_eq!(before, Sha256::digest(std::fs::read(&source).unwrap()));
         }
     }
     #[test]

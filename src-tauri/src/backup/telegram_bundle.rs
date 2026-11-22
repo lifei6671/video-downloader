@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(deny_unknown_fields)]
 struct Attachment {
     document_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    photo_id: Option<i64>,
     envelope: Envelope,
     #[serde(skip_serializing_if = "Option::is_none")]
     event_sequence: Option<u32>,
@@ -24,12 +26,15 @@ struct Bundle {
 struct Loaded {
     bundle: Bundle,
     documents: Vec<tl::types::Document>,
+    photos: Vec<tl::types::Photo>,
 }
 pub(crate) struct PreparedBundle {
     id: Option<i32>,
     loaded: Loaded,
     envelope: Envelope,
     already_present: bool,
+    pub(super) photo_preview: Option<Vec<u8>>,
+    pub(super) album_video: Option<VideoAttributes>,
 }
 pub(super) fn display_heading(title: Option<&str>, filename: Option<&str>) -> Option<String> {
     [title, filename]
@@ -63,11 +68,13 @@ impl Bundle {
             {
                 bail!("TELEGRAM_INDEX_INVALID");
             }
-            if !matches!(e.kind.as_str(), "video" | "cover" | "transcript" | "event")
+            if !matches!(e.kind.as_str(), "video" | "cover" | "transcript" | "album_file" | "event")
                 || e.yingqu_media != 2
                 || e.library_id != first.library_id
                 || e.asset_id != first.asset_id
                 || a.document_id == 0
+                || a.photo_id
+                    .is_some_and(|id| id == 0 || e.kind != "album_file" || e.container == "mp4")
                 || !kinds.insert((&e.operation_id, &e.kind))
                 || owners
                     .insert(&e.operation_id, &e.device_id)
@@ -233,7 +240,29 @@ fn load(bundle: Bundle, rich: &tl::types::RichMessage, grouped: bool) -> Result<
             documents.push(d);
         }
     }
-    Ok(Loaded { bundle, documents })
+    let expected: BTreeSet<_> = bundle
+        .attachments
+        .iter()
+        .filter_map(|a| a.photo_id)
+        .collect();
+    let photos = rich
+        .photos
+        .iter()
+        .filter_map(|photo| match photo {
+            tl::enums::Photo::Photo(p) => Some(p.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if photos.iter().map(|p| p.id).collect::<BTreeSet<_>>() != expected
+        || photos.len() != expected.len()
+    {
+        bail!("TELEGRAM_MEDIA_CHANGED");
+    }
+    Ok(Loaded {
+        bundle,
+        documents,
+        photos,
+    })
 }
 
 pub(super) fn documents(
@@ -297,6 +326,30 @@ fn page_caption(text: &str) -> tl::enums::PageCaption {
     }
     .into()
 }
+fn native_photo_response(
+    result: std::result::Result<tl::enums::MessageMedia, InvocationError>,
+) -> Result<Option<tl::types::Photo>> {
+    match result {
+        Err(InvocationError::Rpc(error))
+            if error.code == 400
+                && matches!(
+                    error.name.as_str(),
+                    "PHOTO_INVALID_DIMENSIONS"
+                        | "PHOTO_EXT_INVALID"
+                        | "IMAGE_PROCESS_FAILED"
+                        | "MEDIA_INVALID"
+                ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(rpc_error(error)),
+        Ok(tl::enums::MessageMedia::Photo(media)) => match media.photo {
+            Some(tl::enums::Photo::Photo(photo)) => Ok(Some(photo)),
+            _ => bail!("TELEGRAM_MEDIA_MISSING"),
+        },
+        Ok(_) => bail!("TELEGRAM_MEDIA_CHANGED"),
+    }
+}
 fn rich_input(loaded: &Loaded) -> Result<tl::enums::InputRichMessage> {
     let encoded = URL_SAFE_NO_PAD.encode(loaded.bundle.caption()?.as_bytes());
     let chunks = encoded.as_bytes().chunks(3072).collect::<Vec<_>>();
@@ -328,11 +381,18 @@ fn rich_input(loaded: &Loaded) -> Result<tl::enums::InputRichMessage> {
         latest.insert(&a.envelope.kind, i);
     }
     let mut history = vec![];
+    let mut originals = vec![];
+    let album = loaded
+        .bundle
+        .attachments
+        .iter()
+        .any(|a| a.envelope.kind == "album_file");
     for (i, a) in loaded.bundle.attachments.iter().enumerate() {
         let label = match a.envelope.kind.as_str() {
             "video" => "原视频",
             "cover" => "原始封面",
             "transcript" => "文案",
+            "album_file" => "原始文件",
             _ => "备份元数据",
         };
         let video = loaded
@@ -344,6 +404,45 @@ fn rich_input(loaded: &Loaded) -> Result<tl::enums::InputRichMessage> {
                     .iter()
                     .any(|v| matches!(v, tl::enums::DocumentAttribute::Video(_)))
             });
+        let document_block: tl::enums::PageBlock = tl::types::PageBlockDocument {
+            document_id: a.document_id,
+            caption: page_caption(label),
+        }
+        .into();
+        if a.envelope.kind == "album_file" {
+            if let Some(photo_id) = a.photo_id {
+                blocks.push(
+                    tl::types::PageBlockPhoto {
+                        spoiler: false,
+                        photo_id,
+                        caption: page_caption(""),
+                        url: None,
+                        webpage_id: None,
+                    }
+                    .into(),
+                );
+            } else if video {
+                blocks.push(
+                    tl::types::PageBlockVideo {
+                        autoplay: false,
+                        r#loop: false,
+                        spoiler: false,
+                        video_id: a.document_id,
+                        caption: page_caption(""),
+                    }
+                    .into(),
+                );
+            } else {
+                blocks.push(document_block);
+                continue;
+            }
+            originals.push(document_block);
+            continue;
+        }
+        if album {
+            originals.push(document_block);
+            continue;
+        }
         let block = if a.envelope.kind == "video" && video {
             tl::types::PageBlockVideo {
                 autoplay: false,
@@ -354,17 +453,26 @@ fn rich_input(loaded: &Loaded) -> Result<tl::enums::InputRichMessage> {
             }
             .into()
         } else {
-            tl::types::PageBlockDocument {
-                document_id: a.document_id,
-                caption: page_caption(label),
-            }
-            .into()
+            document_block
         };
         if latest[&a.envelope.kind] == i {
             blocks.push(block);
         } else {
             history.push(block);
         }
+    }
+    if !originals.is_empty() {
+        blocks.push(
+            tl::types::PageBlockDetails {
+                open: false,
+                blocks: originals,
+                title: tl::types::TextPlain {
+                    text: "无损原件与备份数据".into(),
+                }
+                .into(),
+            }
+            .into(),
+        );
     }
     if !history.is_empty() {
         blocks.push(
@@ -383,7 +491,20 @@ fn rich_input(loaded: &Loaded) -> Result<tl::enums::InputRichMessage> {
         rtl: false,
         noautolink: true,
         blocks,
-        photos: None,
+        photos: (!loaded.photos.is_empty()).then(|| {
+            loaded
+                .photos
+                .iter()
+                .map(|p| {
+                    tl::types::InputPhoto {
+                        id: p.id,
+                        access_hash: p.access_hash,
+                        file_reference: p.file_reference.clone(),
+                    }
+                    .into()
+                })
+                .collect()
+        }),
         documents: Some(
             loaded
                 .documents
@@ -554,7 +675,10 @@ impl GrammersTransport {
         envelope: &Envelope,
         io: &Io,
     ) -> Result<PreparedBundle> {
+        // prepare is called only for a durable Prepared send. New album members
+        // need no history scan; uncertain Sending sends still reconcile via find.
         let existing = if self.preferred_message.is_some()
+            || envelope.kind == "album_file"
             || (envelope.kind == "event"
                 && self.new_delete_operation.as_deref() == Some(&envelope.operation_id))
         {
@@ -604,6 +728,7 @@ impl GrammersTransport {
                         attachments: vec![],
                     },
                     documents: vec![],
+                    photos: vec![],
                 },
             ),
         };
@@ -621,6 +746,8 @@ impl GrammersTransport {
                 loaded,
                 envelope: envelope.clone(),
                 already_present: true,
+                photo_preview: None,
+                album_video: None,
             });
         }
         if loaded
@@ -636,6 +763,8 @@ impl GrammersTransport {
             loaded,
             envelope: envelope.clone(),
             already_present: false,
+            photo_preview: None,
+            album_video: None,
         })
     }
     pub(super) async fn send_bundle(
@@ -645,13 +774,17 @@ impl GrammersTransport {
         random_id: i64,
         video: Option<VideoAttributes>,
         before_publish: &mut (dyn FnMut() -> Result<()> + Send),
+        io: &Io,
     ) -> Result<Option<i32>> {
         let PreparedBundle {
             id,
             mut loaded,
             envelope,
             already_present,
+            photo_preview,
+            album_video,
         } = prepared;
+        let video = album_video.or(video);
         if already_present {
             return Ok(id);
         }
@@ -673,6 +806,53 @@ impl GrammersTransport {
         if u64::try_from(document.size).ok() != Some(envelope.bytes) {
             bail!("TELEGRAM_MEDIA_CHANGED");
         }
+        let photo_id = if let Some(body) = photo_preview {
+            let mut reader = std::io::Cursor::new(body);
+            let length = reader.get_ref().len() as u64;
+            let photo = io
+                .run_file(crate::telegram_transfer_engine::upload(
+                    &self.client,
+                    &self.transfer_budget,
+                    &mut reader,
+                    length,
+                    self.max_bytes,
+                    "preview.jpeg".into(),
+                    &|_| {},
+                ))
+                .await?;
+            let photo = io
+                .run(async {
+                    native_photo_response(
+                        self.client
+                            .invoke(&tl::functions::messages::UploadMedia {
+                                business_connection_id: None,
+                                peer: self.peer.into(),
+                                media: tl::types::InputMediaUploadedPhoto {
+                                    spoiler: false,
+                                    live_photo: false,
+                                    file: photo.raw,
+                                    stickers: None,
+                                    ttl_seconds: None,
+                                    video: None,
+                                }
+                                .into(),
+                            })
+                            .await,
+                    )
+                })
+                .await?;
+            if let Some(photo) = photo {
+                let id = photo.id;
+                if !loaded.photos.iter().any(|p| p.id == id) {
+                    loaded.photos.push(photo);
+                }
+                Some(id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let event_sequence = if envelope.kind == "event" {
             Some(
                 loaded
@@ -690,6 +870,7 @@ impl GrammersTransport {
         };
         loaded.bundle.attachments.push(Attachment {
             document_id: document.id,
+            photo_id,
             envelope,
             event_sequence,
         });
@@ -771,6 +952,13 @@ impl GrammersTransport {
             .attachments
             .retain(|a| a.document_id != expected.document_id);
         loaded.documents.retain(|d| d.id != expected.document_id);
+        loaded.photos.retain(|photo| {
+            loaded
+                .bundle
+                .attachments
+                .iter()
+                .any(|a| a.photo_id == Some(photo.id))
+        });
         if loaded.documents.is_empty() {
             self.client
                 .delete_messages(self.peer, &[expected.message_id])
@@ -799,6 +987,63 @@ impl GrammersTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn album_photo_rejection_keeps_original_documents_in_one_rich_message() {
+        for name in [
+            "PHOTO_INVALID_DIMENSIONS",
+            "PHOTO_EXT_INVALID",
+            "IMAGE_PROCESS_FAILED",
+            "MEDIA_INVALID",
+        ] {
+            let error = InvocationError::Rpc(
+                tl::types::RpcError {
+                    error_code: 400,
+                    error_message: name.into(),
+                }
+                .into(),
+            );
+            assert!(native_photo_response(Err(error)).unwrap().is_none());
+        }
+        for (code, name) in [
+            (403, "CHAT_WRITE_FORBIDDEN"),
+            (420, "FLOOD_WAIT_60"),
+            (500, "MEDIA_INVALID"),
+            (400, "FILE_PART_MISSING"),
+        ] {
+            let error = InvocationError::Rpc(
+                tl::types::RpcError {
+                    error_code: code,
+                    error_message: name.into(),
+                }
+                .into(),
+            );
+            assert!(
+                native_photo_response(Err(error)).is_err(),
+                "authentication, network and upload errors must propagate"
+            );
+        }
+        let mut f = fixture();
+        for a in f.bundle.attachments.iter_mut().take(3) {
+            a.envelope.kind = "album_file".into();
+            a.envelope.operation_id = uuid::Uuid::new_v4().to_string();
+            a.envelope.container = "webp".into();
+        }
+        for (i, d) in f.documents.iter_mut().take(3).enumerate() {
+            d.attributes = document_attributes(format!("{i:03}.webp"), None).1;
+        }
+        let raw = received(&f);
+        assert!(raw.photos.is_empty());
+        assert_eq!(raw.documents.len(), 4);
+        assert_eq!(
+            raw.blocks
+                .iter()
+                .filter(|b| matches!(b, tl::enums::PageBlock::Document(_)))
+                .count(),
+            3
+        );
+        let round_trip = load(manifest(&raw).unwrap().unwrap(), &raw, false).unwrap();
+        assert_eq!(round_trip.bundle.attachments.len(), 4);
+    }
     #[test]
     fn video_heading_prefers_title_and_falls_back_to_filename() {
         assert_eq!(
@@ -853,6 +1098,7 @@ mod tests {
             .enumerate()
             .map(|(i, kind)| Attachment {
                 document_id: 100 + i as i64,
+                photo_id: None,
                 event_sequence: (kind == "event").then_some(1),
                 envelope: Envelope {
                     generation: None,
@@ -904,6 +1150,7 @@ mod tests {
                 attachments,
             },
             documents,
+            photos: vec![],
         }
     }
     fn received(f: &Loaded) -> tl::types::RichMessage {
@@ -914,9 +1161,104 @@ mod tests {
             rtl: false,
             part: false,
             blocks: input.blocks,
-            photos: vec![],
+            photos: f.photos.iter().cloned().map(Into::into).collect(),
             documents: f.documents.iter().cloned().map(Into::into).collect(),
         }
+    }
+    #[test]
+    fn album_rich_message_shows_all_native_photos_and_playable_video_with_originals_folded() {
+        let mut loaded = fixture();
+        for (index, a) in loaded.bundle.attachments.iter_mut().take(3).enumerate() {
+            a.envelope.kind = "album_file".into();
+            a.envelope.operation_id = uuid::Uuid::new_v4().to_string();
+            a.envelope.container = if index == 1 { "mp4" } else { "webp" }.into();
+            a.photo_id = (index != 1).then_some(2000 + index as i64);
+        }
+        for (index, doc) in loaded.documents.iter_mut().take(3).enumerate() {
+            doc.attributes = if index == 1 {
+                document_attributes(
+                    "001.mp4".into(),
+                    Some(&VideoAttributes {
+                        duration_ms: 1200,
+                        width: 800,
+                        height: 600,
+                        supports_streaming: true,
+                    }),
+                )
+                .1
+            } else {
+                document_attributes(format!("{index:03}.webp"), None).1
+            };
+        }
+        loaded.photos = [2000, 2002]
+            .into_iter()
+            .map(|id| tl::types::Photo {
+                has_stickers: false,
+                id,
+                access_hash: 42,
+                file_reference: vec![1],
+                date: 0,
+                sizes: vec![],
+                video_sizes: None,
+                dc_id: 1,
+            })
+            .collect();
+        let received = received(&loaded);
+        assert_eq!(received.photos.len(), 2);
+        assert_eq!(received.documents.len(), 4);
+        assert_eq!(
+            received
+                .blocks
+                .iter()
+                .filter(|b| matches!(b, tl::enums::PageBlock::Photo(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            received
+                .blocks
+                .iter()
+                .filter(|b| matches!(b, tl::enums::PageBlock::Video(_)))
+                .count(),
+            1
+        );
+        assert!(
+            !received
+                .blocks
+                .iter()
+                .any(|b| matches!(b, tl::enums::PageBlock::Document(_))),
+            "no bare file cards in gallery"
+        );
+        let folded = received
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                tl::enums::PageBlock::Details(d) => Some(d),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!folded.open);
+        assert_eq!(
+            folded
+                .blocks
+                .iter()
+                .filter(|b| matches!(b, tl::enums::PageBlock::Document(_)))
+                .count(),
+            4
+        );
+        let round_trip = load(manifest(&received).unwrap().unwrap(), &received, false).unwrap();
+        assert_eq!(round_trip.photos.len(), 2);
+        assert_eq!(
+            round_trip
+                .documents
+                .iter()
+                .map(|d| d.id)
+                .collect::<Vec<_>>(),
+            loaded.documents.iter().map(|d| d.id).collect::<Vec<_>>()
+        );
+        let mut missing = received.clone();
+        missing.photos.pop();
+        assert!(load(manifest(&missing).unwrap().unwrap(), &missing, false).is_err());
     }
     fn append_transcript_update(f: &mut Loaded, sequence: u32) {
         let operation = uuid::Uuid::new_v4().to_string();

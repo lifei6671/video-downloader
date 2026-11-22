@@ -192,6 +192,13 @@ fn album_backup_archive_is_deterministic_and_rejects_corruption_cancel_and_forei
     let second = album::pack(&path, &files, || false).unwrap();
     let bytes = std::fs::read(first.path()).unwrap();
     assert_eq!(bytes, std::fs::read(second.path()).unwrap());
+    let asset = crate::backup::model::Asset { asset_id:"album".into(),task_id:None,
+        metadata:serde_json::json!({"kind":"image_album","album_files":files}),original_filename:"album".into(),
+        content_sha256:None,content_bytes:0,asset_state:"active".into(),path:Some(path.clone()),local_state:"present".into() };
+    let (hash, fingerprint)=album::fingerprint(&asset,||false).unwrap();
+    assert_eq!(hash,format!("{:x}",Sha256::digest(&bytes)),"streaming identity must match historical TAR bytes");
+    assert_eq!(fingerprint["size"],bytes.len() as u64);
+
     assert!(album::pack(&path, &files, || true).is_err());
     let target = tempfile::tempdir().unwrap();
     assert!(album::extract(first.path(), &files, target.path(), || true).is_err());

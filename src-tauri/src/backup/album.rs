@@ -1,5 +1,5 @@
-//! Lossless, deterministic album documents shared by S3 and Telegram.
-use super::{model::Asset, repository};
+//! Album integrity and legacy deterministic TAR documents.
+use super::model::Asset;
 use crate::files::AlbumFile;
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -65,7 +65,7 @@ pub fn validate_manifest(files: &[AlbumFile]) -> Result<()> {
     Ok(())
 }
 
-fn entries(files: &[AlbumFile]) -> impl Iterator<Item = (&str, u64, &str)> {
+pub(crate) fn entries(files: &[AlbumFile]) -> impl Iterator<Item = (&str, u64, &str)> {
     files.iter().flat_map(|f| {
         std::iter::once((f.filename.as_str(), f.bytes, f.sha256.as_str())).chain(
             f.video
@@ -112,8 +112,8 @@ impl<R: Read, F: Fn() -> bool> Read for Checked<'_, R, F> {
     }
 }
 
-fn append(
-    builder: &mut tar::Builder<&mut fs::File>,
+fn append<W: Write>(
+    builder: &mut tar::Builder<W>,
     name: &str,
     bytes: u64,
     reader: impl Read,
@@ -127,7 +127,7 @@ fn append(
     Ok(())
 }
 
-fn directory(path: &Path) -> Result<()> {
+pub(crate) fn directory(path: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(path).context("FILE_MISSING")?;
     ensure!(
         meta.is_dir() && !meta.file_type().is_symlink(),
@@ -191,6 +191,18 @@ pub fn pack(
     files: &[AlbumFile],
     stopped: impl Fn() -> bool,
 ) -> Result<tempfile::NamedTempFile> {
+    let mut result = tempfile::NamedTempFile::new()?;
+    write_archive(result.as_file_mut(), path, files, &stopped)?;
+    result.flush()?;
+    Ok(result)
+}
+
+fn write_archive(
+    output: impl Write,
+    path: &Path,
+    files: &[AlbumFile],
+    stopped: &impl Fn() -> bool,
+) -> Result<()> {
     ensure!(!stopped(), "CANCELED");
     validate_manifest(files)?;
     directory(path)?;
@@ -198,39 +210,73 @@ pub fn pack(
         version: 1,
         files: files.to_vec(),
     })?;
-    let mut result = tempfile::NamedTempFile::new()?;
-    {
-        let mut builder = tar::Builder::new(result.as_file_mut());
-        append(
-            &mut builder,
-            "album.json",
-            manifest.len() as u64,
-            manifest.as_slice(),
-        )?;
-        for (name, bytes, hash) in entries(files) {
-            let body = read_member(&path.join(name), bytes, hash, &stopped)?;
-            append(&mut builder, name, bytes, body.as_slice())?;
-        }
-        builder.finish()?;
+    let mut builder = tar::Builder::new(output);
+    append(
+        &mut builder,
+        "album.json",
+        manifest.len() as u64,
+        manifest.as_slice(),
+    )?;
+    for (name, bytes, hash) in entries(files) {
+        let body = read_member(&path.join(name), bytes, hash, stopped)?;
+        append(&mut builder, name, bytes, body.as_slice())?;
     }
-    result.flush()?;
+    builder.finish()?;
     ensure!(!stopped(), "CANCELED");
-    Ok(result)
+    Ok(())
+}
+
+#[derive(Default)]
+struct Fingerprint {
+    hash: Sha256,
+    bytes: u64,
+}
+impl Write for Fingerprint {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.hash.update(bytes);
+        self.bytes += bytes.len() as u64;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 pub fn fingerprint(asset: &Asset, stopped: impl Fn() -> bool) -> Result<(String, Value)> {
     let path = asset.path.as_deref().context("FILE_MISSING")?;
     let files = files(&asset.metadata)?;
-    let archive = pack(path, &files, &stopped)?;
-    let (hash, raw) = repository::fingerprint_with_cancel(archive.path(), &stopped)?;
+    // Keep historical content identities without creating a temporary TAR file.
+    let mut digest = Fingerprint::default();
+    write_archive(&mut digest, path, &files, &stopped)?;
     Ok((
-        hash,
-        source(
-            path,
-            &files,
-            raw["size"].as_u64().context("BACKUP_INVALID_SIZE")?,
-        )?,
+        format!("{:x}", digest.hash.finalize()),
+        source(path, &files, digest.bytes)?,
     ))
+}
+
+pub fn validate_reference(
+    reference: &super::provider::MediaRef,
+    files: &[AlbumFile],
+) -> Result<()> {
+    validate_manifest(files)?;
+    reference.validate_scope(&reference.scope)?;
+    let super::provider::MediaLocation::TelegramAlbum { files: members } = &reference.location
+    else {
+        anyhow::bail!("BACKUP_INVALID_ALBUM");
+    };
+    let expected: Vec<_> = entries(files).collect();
+    ensure!(members.len() == expected.len(), "BACKUP_INVALID_ALBUM");
+    for (member, (name, bytes, hash)) in members.iter().zip(expected) {
+        ensure!(
+            member.filename == name
+                && member.reference.bytes == bytes
+                && member.reference.sha256 == hash
+                && member.reference.container
+                    == name.rsplit_once('.').context("BACKUP_INVALID_ALBUM")?.1,
+            "BACKUP_INVALID_ALBUM"
+        );
+    }
+    Ok(())
 }
 
 pub fn extract(
@@ -313,10 +359,7 @@ pub fn member(asset: &Asset, index: usize, video: bool) -> Result<PathBuf> {
     let files = files(&asset.metadata)?;
     let file = files.get(index).context("FILE_MISSING")?;
     let (name, bytes) = if video {
-        let video = file
-            .video
-            .as_ref()
-            .context("FILE_MISSING")?;
+        let video = file.video.as_ref().context("FILE_MISSING")?;
         (&video.filename, video.bytes)
     } else {
         (&file.filename, file.bytes)

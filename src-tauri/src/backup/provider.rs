@@ -57,6 +57,16 @@ pub enum MediaLocation {
         message_id: i64,
         document_id: i64,
     },
+    TelegramAlbum {
+        files: Vec<AlbumMemberRef>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlbumMemberRef {
+    pub filename: String,
+    pub reference: MediaRef,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +78,14 @@ pub struct MediaRef {
     pub container: String,
 }
 impl MediaRef {
+    /// Physical documents owned by this reference; albums have no archive document.
+    pub(crate) fn documents(&self) -> Vec<&Self> {
+        match &self.location {
+            MediaLocation::TelegramAlbum { files } => files.iter().map(|f| &f.reference).collect(),
+            _ => vec![self],
+        }
+    }
+
     pub(crate) fn document_id(&self) -> Option<i64> {
         match &self.location {
             MediaLocation::TelegramMessage { document_id, .. } => Some(*document_id),
@@ -76,6 +94,44 @@ impl MediaRef {
     }
     pub fn validate_scope(&self, scope: &Scope) -> Result<()> {
         scope.check(&self.scope)?;
+        if let MediaLocation::TelegramAlbum { files } = &self.location {
+            anyhow::ensure!(
+                scope.provider_type == ProviderType::Telegram
+                    && self.container == "album"
+                    && !files.is_empty()
+                    && files.len() <= 128,
+                "BACKUP_MEDIA_PROVIDER_MISMATCH"
+            );
+            let mut names = std::collections::BTreeSet::new();
+            let mut documents = std::collections::BTreeSet::new();
+            for member in files {
+                anyhow::ensure!(
+                    matches!(
+                        member.reference.location,
+                        MediaLocation::TelegramMessage { .. }
+                    ) && names.insert(&member.filename)
+                        && !member.filename.contains(['/', '\\'])
+                        && member.filename != "."
+                        && member.filename != ".."
+                        && !member.filename.is_empty(),
+                    "BACKUP_INVALID_ALBUM"
+                );
+                member.reference.validate_scope(scope)?;
+                if let MediaLocation::TelegramMessage {
+                    account_id,
+                    channel_id,
+                    message_id,
+                    document_id,
+                } = &member.reference.location
+                {
+                    anyhow::ensure!(
+                        documents.insert((account_id, channel_id, message_id, document_id)),
+                        "BACKUP_INVALID_ALBUM"
+                    );
+                }
+            }
+            return Ok(());
+        }
         if !matches!(
             (&self.location, scope.provider_type),
             (MediaLocation::S3Object { .. }, ProviderType::S3)
@@ -332,6 +388,14 @@ pub enum DeleteCleanup {
 pub trait BackupProvider: Send + Sync {
     fn scope(&self) -> &Scope;
     fn capabilities(&self) -> ProviderCapabilities;
+    fn upload_album(
+        &self,
+        _source: MediaSource,
+        _files: Vec<crate::files::AlbumFile>,
+        _resume: Option<ResumeState>,
+    ) -> ProviderFuture<'_, UploadReceipt> {
+        Box::pin(async { bail!("BACKUP_INVALID_ALBUM") })
+    }
     fn open_library(&self, create: bool) -> ProviderFuture<'_, LibraryDescriptor>;
     fn pull_changes(&self, checkpoint: Option<Checkpoint>) -> ProviderFuture<'_, ChangeBatch>;
     fn read_asset(&self, asset_id: &str) -> ProviderFuture<'_, Option<RemoteAsset>>;

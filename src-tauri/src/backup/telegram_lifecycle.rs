@@ -215,7 +215,7 @@ pub(super) fn metadata(
         || envelope.bytes != reference.bytes
         || envelope.sha256 != reference.sha256
         || envelope.container != reference.container
-        || !matches!(envelope.kind.as_str(), "video" | "cover" | "transcript")
+        || !matches!(envelope.kind.as_str(), "video" | "cover" | "transcript" | "album_file")
         || matches!(&reference.location,MediaLocation::TelegramMessage{document_id:id,..} if *id!=document.document_id)
     {
         bail!("TELEGRAM_MEDIA_CHANGED");
@@ -228,7 +228,9 @@ pub(super) async fn verify(
     reference: &MediaRef,
     io: &Io,
 ) -> Result<()> {
-    verify_body(transport, target, reference, io, None).await
+    reference.validate_scope(&target.scope)?;
+    for reference in reference.documents() { verify_body(transport, target, reference, io, None).await?; }
+    Ok(())
 }
 
 async fn verify_body(
@@ -291,7 +293,7 @@ pub(super) fn candidate(
         serde_json::from_str(&document.caption).context("TELEGRAM_MEDIA_CHANGED")?;
     if envelope.library_id != target.scope.library_id
         || envelope.asset_id != asset
-        || !matches!(envelope.kind.as_str(), "video" | "cover" | "transcript")
+        || !matches!(envelope.kind.as_str(), "video" | "cover" | "transcript" | "album_file")
     {
         return Ok(None);
     }

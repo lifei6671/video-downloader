@@ -343,6 +343,7 @@ async fn database_backup_encrypted_wal_snapshot_and_cross_device_restore() {
                 "INSERT INTO platform_settings(platform,user_agent,cookie) VALUES('youtube','fixture','synthetic-cookie')",
                 [],
             )?;
+            db.execute("INSERT INTO telegram_album_sends VALUES('old-operation','album_file','{}')", [])?;
             Ok(())
         })
         .unwrap();
@@ -499,6 +500,8 @@ async fn database_backup_encrypted_wal_snapshot_and_cross_device_restore() {
         Some("DATABASE_RESTORE_INTERRUPTED")
     );
     assert_eq!(restored.list()[0].path, None);
+    assert_eq!(restored.backup_db(|db| Ok(db.query_row("SELECT COUNT(*) FROM telegram_album_sends", [], |r|r.get::<_,i64>(0))?)).unwrap(),0);
+
     assert!(restored
         .backup_asset(&f.id)
         .unwrap()

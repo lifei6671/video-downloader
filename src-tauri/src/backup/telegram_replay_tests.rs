@@ -397,6 +397,21 @@ impl BackupProvider for Provider {
             })
         })
     }
+    fn upload_album(&self, source:MediaSource, files:Vec<crate::files::AlbumFile>, _:Option<ResumeState>) -> ProviderFuture<'_,UploadReceipt> {
+        Box::pin(async move {
+            let mut members=vec![];
+            for (name,bytes,hash) in super::super::album::entries(&files) {
+                let mut child=source.clone();child.path=source.path.join(name);child.bytes=bytes;
+                child.sha256=hash.into();child.container=name.rsplit_once('.').unwrap().1.into();
+                child.kind="album_file".into();child.video=None;
+                child.operation_id=super::super::telegram_album::member_operation(&source.operation_id,name);
+                let receipt=self.upload_media(child,None).await?;
+                members.push(AlbumMemberRef{filename:name.into(),reference:receipt.reference});
+            }
+            Ok(UploadReceipt{reference:MediaRef{scope:self.scope().clone(),location:MediaLocation::TelegramAlbum{files:members},
+                bytes:source.bytes,sha256:source.sha256,container:"album".into()},operation_id:source.operation_id,device_id:source.device_id})
+        })
+    }
     fn upload_media(
         &self,
         source: MediaSource,
@@ -2461,4 +2476,125 @@ async fn canceling_an_unpublished_send_checks_identity_without_reading_its_body(
     assert!(!net.data.lock().unwrap().documents.contains_key(&10));
     assert_eq!(net.body_downloads.load(Ordering::SeqCst), 0);
     core.shutdown().await;
+}
+
+#[tokio::test]
+async fn album_backup_telegram_members_rebind_restore_retry_release_delete_and_keep_original_bytes()
+{
+    use crate::files::{AlbumFile, AlbumVideoFile};
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let core = open(a.path());
+    let net = Arc::new(Remote::default());
+    let p = setup(&core, net.clone(), None);
+    let path = a.path().join("album");
+    std::fs::create_dir(&path).unwrap();
+    let still = b"\xff\xd8\xff-original-photo";
+    let clip = b"\0\0\0\x18ftypisom\0\0\0\0isommp42";
+    std::fs::write(path.join("001.jpeg"), still).unwrap();
+    std::fs::write(path.join("002.jpeg"), still).unwrap();
+    std::fs::write(path.join("001.mp4"), clip).unwrap();
+    let mut files = vec![];
+    for index in 1..=2 {
+        files.push(AlbumFile {
+            filename: format!("{index:03}.jpeg"),
+            bytes: still.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(still)),
+            width: Some(800),
+            height: Some(600),
+            quality_source: "original".into(),
+            video: (index == 1).then(|| AlbumVideoFile {
+                filename: "001.mp4".into(),
+                bytes: clip.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(clip)),
+            }),
+        });
+    }
+    let asset = id();
+    let mut task:crate::desktop_core::Task=serde_json::from_value(json!({"id":asset,"revision":0,"status":"completed",
+        "video":{"kind":"image_album","platform":"douyin","video_id":"123","title":"原始图集"},"bytes":60,"total_bytes":60,
+        "speed_bps":null,"error":null,"path":path,"files":files,"created_at":1,"completed_at":2,"canceling":false})).unwrap();
+    core.backup_db(|db| repository::associate(db, &mut task))
+        .unwrap();
+    let engine = SyncEngine::new(core.clone(), p.clone());
+    engine.execute_upload(&claim(&core, &engine)).await.unwrap();
+    let record = p.read_asset(&asset).await.unwrap().unwrap().snapshot;
+    assert_eq!(record.media.as_ref().unwrap().container, "album");
+    let MediaLocation::TelegramAlbum { files: members } = &record.media.as_ref().unwrap().location
+    else {
+        panic!("independent files expected")
+    };
+    assert_eq!(members.len(), 3);
+    let projection = p.projection(None).unwrap();
+    assert_eq!(projection.references[&asset].len(), 3);
+    let other = open(b.path());
+    let q = setup(&other, net.clone(), Some(p.scope().library_id.clone()));
+    SyncEngine::new(other.clone(), q.clone())
+        .pull()
+        .await
+        .unwrap();
+    assert_eq!(
+        net.video_downloads.load(Ordering::SeqCst),
+        0,
+        "listing must not fetch Live Photo video"
+    );
+    let rebound = q
+        .read_asset(&asset)
+        .await
+        .unwrap()
+        .unwrap()
+        .snapshot
+        .media
+        .unwrap();
+    assert!(rebound
+        .documents()
+        .iter()
+        .all(|r| r.scope.space_id == q.scope().space_id));
+    let first = p.target.message_id(&members[0].reference).unwrap();
+    let original = net.data.lock().unwrap().media[&first].clone();
+    net.data.lock().unwrap().media.get_mut(&first).unwrap()[4] ^= 1;
+    assert!(sync_read::ensure(&other, q.as_ref(), &asset).await.is_err());
+    assert!(other.backup_asset(&asset).unwrap().unwrap().path.is_none());
+    let downloaded = net.video_downloads.load(Ordering::SeqCst);
+    net.data.lock().unwrap().media.insert(first, original);
+    let occupied = b.path().join("album");
+    std::fs::create_dir(&occupied).unwrap();
+    std::fs::write(occupied.join("keep.txt"), b"keep").unwrap();
+    let restored = sync_read::ensure(&other, q.as_ref(), &asset).await.unwrap();
+    assert_ne!(restored, occupied);
+    assert_eq!(
+        net.video_downloads.load(Ordering::SeqCst),
+        downloaded,
+        "retry reuses previously verified video"
+    );
+    for (name, _, _) in super::super::album::entries(&files) {
+        assert_eq!(
+            std::fs::read(restored.join(name)).unwrap(),
+            std::fs::read(path.join(name)).unwrap()
+        );
+    }
+    assert_eq!(std::fs::read(occupied.join("keep.txt")).unwrap(), b"keep");
+    super::super::sync_delete::release_with(&other, q.as_ref(), &asset)
+        .await
+        .unwrap();
+    assert!(!restored.exists());
+    net.network_changes.store(1, Ordering::SeqCst);
+    let restored = sync_read::ensure(&other, q.as_ref(), &asset).await.unwrap();
+    assert_eq!(std::fs::read(restored.join("001.mp4")).unwrap(), clip);
+    let deletion = super::super::sync_delete::intent(&core, &p.scope().space_id, &asset).unwrap();
+    delete_pass(&core, &p, &deletion).await.unwrap();
+    assert!(
+        net.data.lock().unwrap().media.is_empty(),
+        "all originals and Live Photo documents are deleted"
+    );
+    assert!(
+        p.read_asset(&asset)
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .deleted
+    );
+    core.shutdown().await;
+    other.shutdown().await;
 }

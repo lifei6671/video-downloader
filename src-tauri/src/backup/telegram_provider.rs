@@ -97,6 +97,36 @@ fn thumbnail_source(
     Ok(db.query_row("SELECT c.body FROM asset_covers c JOIN backup_space_assets b ON c.asset_id=b.local_asset_id WHERE b.space_id=?1 AND b.remote_asset_id=?2",rusqlite::params![space,remote],|row|row.get(0)).optional()?)
 }
 
+fn captured_album_reference(
+    db: &rusqlite::Connection,
+    target: &Target,
+    source: &MediaSource,
+) -> Result<Option<MediaRef>> {
+    let row:Option<(String,Option<String>)>=db.query_row(
+        "SELECT json_extract(o.payload_json,'$.video_receipt'),json_extract(COALESCE(c.capture_json,json_extract(o.payload_json,'$.capture')),'$.remote')
+         FROM backup_operations o LEFT JOIN backup_operation_captures c USING(operation_id)
+         WHERE o.operation_id=?1 AND o.space_id=?2 AND o.kind='upload' AND json_extract(o.payload_json,'$.video_receipt') IS NOT NULL",
+        rusqlite::params![source.operation_id,target.scope.space_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let Some((raw, asset)) = row else {
+        return Ok(None);
+    };
+    let receipt: UploadReceipt = serde_json::from_str(&raw)?;
+    if !matches!(
+        receipt.reference.location,
+        MediaLocation::TelegramAlbum { .. }
+    ) {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        asset.as_deref() == Some(&source.asset_id)
+            && receipt.operation_id == source.operation_id
+            && receipt.device_id == source.device_id,
+        "TELEGRAM_OPERATION_MISMATCH"
+    );
+    target.message_id(&receipt.reference)?;
+    Ok(Some(receipt.reference))
+}
+
 pub(super) fn for_upload(
     core: &Core,
     transport: &GrammersTransport,
@@ -124,7 +154,7 @@ pub(super) fn upload_destination(
     source: &MediaSource,
     projected: Option<&MediaRef>,
 ) -> Result<Option<i32>> {
-    if source.kind == "video" {
+    if matches!(source.kind.as_str(), "video" | "album_file") {
         return Ok(None);
     }
     if let Some(entry) = journal.get(&source.operation_id, "video")? {
@@ -147,6 +177,29 @@ pub(super) fn upload_destination(
     projected
         .map(|reference| target.message_id(reference))
         .transpose()
+}
+
+fn prepare_generation(projected: &Projection, source: &mut MediaSource) -> Result<()> {
+    let generation =
+        if let Some(generation) = projected.operation_generations.get(&source.operation_id) {
+            *generation
+        } else {
+            let generation = projected.last_deletions.get(&source.asset_id).copied();
+            if let Some(current) = projected.assets.get(&source.asset_id) {
+                if current.deleted {
+                    if source.recreate_revision != Some(current.revision) {
+                        bail!("BACKUP_ASSET_DELETED");
+                    }
+                } else if generation.is_some_and(|g| source.base_revision.is_none_or(|r| r < g)) {
+                    bail!("BACKUP_REUPLOAD_STALE");
+                }
+            } else if source.recreate_revision.is_some() {
+                bail!("BACKUP_REUPLOAD_STALE");
+            }
+            generation
+        };
+    source.recreate_revision = generation;
+    Ok(())
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1128,6 +1181,7 @@ impl BackupProvider for TelegramProvider {
                                     ReferenceChange::Set(r) => Some(r),
                                     _ => None,
                                 })
+                                .flat_map(|r| r.documents())
                             {
                                 let doc = io
                                     .run(transport.inspect_reference(&target, reference))
@@ -1220,6 +1274,49 @@ impl BackupProvider for TelegramProvider {
             .await
         })
     }
+    fn upload_album(
+        &self,
+        source: MediaSource,
+        files: Vec<crate::files::AlbumFile>,
+        resume: Option<ResumeState>,
+    ) -> ProviderFuture<'_, UploadReceipt> {
+        Box::pin(async move {
+            if let Some(resume) = resume {
+                self.scope().check(&resume.scope)?;
+            }
+            let target = self.target.clone();
+            self.request(
+                "upload_album",
+                source.control.clone(),
+                move |core, transport, io| {
+                    Box::pin(async move {
+                        let projected = Self::project(core, &target, transport, io, None).await?;
+                        let mut source = source;
+                        prepare_generation(&projected, &mut source)?;
+                        let presentation = core.backup_db(|db| {
+                            asset_presentation(db, &target.scope.space_id, &source.asset_id)
+                        })?;
+                        let title = presentation
+                            .as_ref()
+                            .and_then(|(metadata, _)| metadata["title"].as_str());
+                        super::telegram_album::upload(
+                            core,
+                            &transport
+                                .for_message(None)
+                                .with_heading(title, Some(&source.asset_id)),
+                            &CoreJournal(core),
+                            &target,
+                            source,
+                            files,
+                            io,
+                        )
+                        .await
+                    })
+                },
+            )
+            .await
+        })
+    }
     fn upload_media(
         &self,
         source: MediaSource,
@@ -1237,38 +1334,20 @@ impl BackupProvider for TelegramProvider {
                     Box::pin(async move {
                         let projected = Self::project(core, &target, transport, io, None).await?;
                         let mut source = source;
-                        let generation = if let Some(generation) =
-                            projected.operation_generations.get(&source.operation_id)
-                        {
-                            *generation
-                        } else {
-                            let generation =
-                                projected.last_deletions.get(&source.asset_id).copied();
-                            if let Some(current) = projected.assets.get(&source.asset_id) {
-                                if current.deleted {
-                                    if source.recreate_revision != Some(current.revision) {
-                                        bail!("BACKUP_ASSET_DELETED");
-                                    }
-                                } else if generation
-                                    .is_some_and(|g| source.base_revision.is_none_or(|r| r < g))
-                                {
-                                    bail!("BACKUP_REUPLOAD_STALE");
-                                }
-                            } else if source.recreate_revision.is_some() {
-                                bail!("BACKUP_REUPLOAD_STALE");
-                            }
-                            generation
-                        };
-                        source.recreate_revision = generation;
+                        prepare_generation(&projected, &mut source)?;
+                        let captured =
+                            core.backup_db(|db| captured_album_reference(db, &target, &source))?;
                         let destination = upload_destination(
                             &CoreJournal(core),
                             &target,
                             &source,
-                            projected
-                                .assets
-                                .get(&source.asset_id)
-                                .filter(|s| !s.deleted)
-                                .and_then(|s| s.media.as_ref()),
+                            captured.as_ref().or_else(|| {
+                                projected
+                                    .assets
+                                    .get(&source.asset_id)
+                                    .filter(|s| !s.deleted)
+                                    .and_then(|s| s.media.as_ref())
+                            }),
                         )?;
                         let mut destination = for_upload(
                             core,
@@ -1332,6 +1411,21 @@ impl BackupProvider for TelegramProvider {
             self.request("cancel_upload", None, move |core, transport, io| {
                 Box::pin(async move {
                     let journal = CoreJournal(core);
+                    if kind == "album" {
+                        let files: Vec<crate::files::AlbumFile> = serde_json::from_value(value["files"].clone())?;
+                        super::album::validate_manifest(&files)?;
+                        let projected = Self::project(core, &target, transport, io, None).await?;
+                        if projected.operations.contains_key(&operation) { return Ok(()); }
+                        for (name, _, _) in super::album::entries(&files) {
+                            let child = super::telegram_album::member_operation(&operation, name);
+                            if let Some(entry) = journal.get(&child, "album_file")? {
+                                anyhow::ensure!(entry.target == target && value["asset_id"] == entry.envelope.asset_id
+                                    && value["device_id"] == entry.envelope.device_id, "BACKUP_UPLOAD_NOT_OWNED");
+                                super::telegram_lifecycle::cancel(transport, &target, &entry, &projected, io).await?;
+                            }
+                        }
+                        return Ok(());
+                    }
                     let Some(entry) = journal.get(&operation, &kind)? else {
                         return Ok(());
                     };
@@ -1436,6 +1530,11 @@ impl BackupProvider for TelegramProvider {
         let operation = operation_id.to_owned();
         let target = self.target.clone();
         Box::pin(async move {
+            reference.validate_scope(&target.scope)?;
+            if matches!(reference.location, MediaLocation::TelegramAlbum {..}) {
+                for member in reference.documents() { self.delete_media(member.clone(), &operation).await?; }
+                return Ok(());
+            }
             uuid::Uuid::parse_str(&operation).context("BACKUP_INVALID_OPERATION")?;
             target.message_id(&reference)?;
             self.request("delete_media", None, move |core, transport, io| {
@@ -1595,6 +1694,139 @@ impl AsyncRead for StreamReader {
 #[cfg(test)]
 mod caption_tests {
     use super::*;
+    #[test]
+    fn album_caption_and_cover_reuse_captured_message_with_space_and_operation_isolation(
+    ) -> Result<()> {
+        let db = rusqlite::Connection::open_in_memory()?;
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT,space_id TEXT,kind TEXT,payload_json TEXT);
+            CREATE TABLE backup_operation_captures(operation_id TEXT PRIMARY KEY,capture_json TEXT NOT NULL)")?;
+        let target = Target {
+            scope: Scope {
+                space_id: "space".into(),
+                library_id: "library".into(),
+                provider_type: ProviderType::Telegram,
+                protocol: 2,
+            },
+            account_id: "1".into(),
+            channel_id: "2".into(),
+        };
+        let member = MediaRef {
+            scope: target.scope.clone(),
+            location: MediaLocation::TelegramMessage {
+                account_id: "1".into(),
+                channel_id: "2".into(),
+                message_id: 42,
+                document_id: 7,
+            },
+            bytes: 3,
+            sha256: "a".repeat(64),
+            container: "webp".into(),
+        };
+        let reference = MediaRef {
+            scope: target.scope.clone(),
+            location: MediaLocation::TelegramAlbum {
+                files: vec![AlbumMemberRef {
+                    filename: "001.webp".into(),
+                    reference: member,
+                }],
+            },
+            bytes: 1024,
+            sha256: "b".repeat(64),
+            container: "album".into(),
+        };
+        let receipt = UploadReceipt {
+            reference: reference.clone(),
+            operation_id: "operation".into(),
+            device_id: "device".into(),
+        };
+        db.execute(
+            "INSERT INTO backup_operations VALUES('operation','space','upload',?1)",
+            [
+                serde_json::json!({"capture":{"remote":"asset"},"video_receipt":receipt})
+                    .to_string(),
+            ],
+        )?;
+        let mut source = MediaSource {
+            video: None,
+            base_revision: None,
+            recreate_revision: None,
+            asset_id: "asset".into(),
+            kind: "cover".into(),
+            path: "cover.jpg".into(),
+            bytes: 3,
+            sha256: "c".repeat(64),
+            container: "jpg".into(),
+            operation_id: "operation".into(),
+            device_id: "device".into(),
+            control: None,
+        };
+        struct EmptyJournal;
+        impl Journal for EmptyJournal {
+            fn reserve(
+                &self,
+                _: super::super::telegram_transfer_journal::Entry,
+            ) -> Result<super::super::telegram_transfer_journal::Entry> {
+                unreachable!()
+            }
+            fn save(&self, _: &super::super::telegram_transfer_journal::Entry) -> Result<()> {
+                unreachable!()
+            }
+            fn cooldown(&self, _: &str) -> Result<i64> {
+                unreachable!()
+            }
+            fn failure(&self, _: &str, _: &str) -> Result<()> {
+                unreachable!()
+            }
+        }
+        for kind in ["cover", "transcript"] {
+            source.kind = kind.into();
+            let captured = captured_album_reference(&db, &target, &source)?;
+            assert_eq!(captured, Some(reference.clone()));
+            assert_eq!(
+                upload_destination(&EmptyJournal, &target, &source, captured.as_ref())?,
+                Some(42)
+            );
+        }
+        db.execute(
+            "INSERT INTO backup_operation_captures VALUES('operation',?1)",
+            [serde_json::json!({"remote":"asset"}).to_string()],
+        )?;
+        db.execute(
+            "UPDATE backup_operations SET payload_json=json_remove(payload_json,'$.capture')",
+            [],
+        )?;
+        assert_eq!(
+            captured_album_reference(&db, &target, &source)?,
+            Some(reference.clone())
+        );
+        assert_eq!(
+            upload_destination(
+                &EmptyJournal,
+                &target,
+                &source,
+                captured_album_reference(&db, &target, &source)?.as_ref()
+            )?,
+            Some(42)
+        );
+        let mut other = target.clone();
+        other.scope.space_id = "other-space".into();
+        assert!(captured_album_reference(&db, &other, &source)?.is_none());
+        for field in ["device", "asset"] {
+            let mut foreign = source.clone();
+            if field == "device" {
+                foreign.device_id = "other".into();
+            } else {
+                foreign.asset_id = "other".into();
+            }
+            assert_eq!(
+                captured_album_reference(&db, &target, &foreign)
+                    .unwrap_err()
+                    .to_string(),
+                "TELEGRAM_OPERATION_MISMATCH"
+            );
+        }
+        Ok(())
+    }
     #[test]
     fn video_archive_never_copies_another_videos_events() -> Result<()> {
         use super::super::telegram_transport::IndexDocument;

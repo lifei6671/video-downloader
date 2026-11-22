@@ -136,7 +136,7 @@ fn check_standalone_read(evidence: &RemoteDocument, document_id: i64) -> Result<
     if !envelope.has_supported_version()
         || !matches!(
             envelope.kind.as_str(),
-            "video" | "cover" | "transcript" | "event" | "library" | "database" | "asset_archive"
+            "video" | "cover" | "transcript" | "album_file" | "event" | "library" | "database" | "asset_archive"
         )
     {
         bail!("TELEGRAM_INDEX_INVALID");
@@ -702,7 +702,7 @@ impl GrammersTransport {
             bail!("TELEGRAM_MEDIA_CHANGED");
         }
         if !matches!(envelope.kind.as_str(), "library" | "event" | "asset_archive") {
-            if !matches!(envelope.kind.as_str(), "video" | "cover" | "transcript") {
+            if !matches!(envelope.kind.as_str(), "video" | "cover" | "transcript" | "album_file") {
                 bail!("TELEGRAM_INDEX_INVALID");
             }
             snapshot.media.push(evidence);
@@ -1044,6 +1044,52 @@ impl Transport for GrammersTransport {
             self.prepare_bundle(envelope, io).await.map(Some)
         })
     }
+    fn prepare_album_member<'a>(
+        &'a self,
+        envelope: &'a Envelope,
+        source: &'a super::provider::MediaSource,
+        message: Option<i32>,
+        core: &'a crate::desktop_core::Core,
+        io: &'a Io,
+    ) -> ProviderFuture<'a, Self::Prepared> {
+        Box::pin(async move {
+            let mut prepared = self
+                .for_message(message)
+                .prepare_bundle(envelope, io)
+                .await?;
+            if source.container == "mp4" {
+                let metadata = core
+                    .probe_video_metadata(&source.path, &source.operation_id, async {
+                        loop {
+                            if io.check().is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    })
+                    .await?;
+                let mut video = VideoAttributes::from_metadata(&metadata)
+                    .context("VIDEO_METADATA_UNAVAILABLE")?;
+                video.supports_streaming =
+                    super::telegram_transfer::mp4_has_metadata(&source.path, io).await?;
+                prepared.album_video = Some(video);
+            } else {
+                prepared.photo_preview = Some(
+                    core.album_photo_preview(&source.path, async {
+                        loop {
+                            if io.check().is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    })
+                    .await?,
+                );
+            }
+            io.check()?;
+            Ok(Some(prepared))
+        })
+    }
     fn max_bytes(&self) -> u64 {
         self.max_bytes
     }
@@ -1143,7 +1189,7 @@ impl Transport for GrammersTransport {
         caption: String,
         random_id: i64,
         video: Option<VideoAttributes>,
-        _io: &'a Io,
+        io: &'a Io,
         before_publish: &'a mut (dyn FnMut() -> Result<()> + Send),
     ) -> ProviderFuture<'a, Option<i32>> {
         Box::pin(async move {
@@ -1157,6 +1203,7 @@ impl Transport for GrammersTransport {
                         random_id,
                         video,
                         before_publish,
+                        io,
                     )
                     .await;
             }

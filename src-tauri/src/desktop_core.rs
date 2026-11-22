@@ -1300,6 +1300,13 @@ impl Core {
         }
         crate::local_media::probe(source, &self.runtime_directory, cancel).await
     }
+    pub(crate) async fn album_photo_preview(
+        &self,
+        source: &Path,
+        cancel: impl std::future::Future<Output = ()>,
+    ) -> Result<Vec<u8>> {
+        crate::local_media::photo_preview(source, &self.runtime_directory, cancel).await
+    }
     async fn extract_telegram_cover(
         &self,
         source: &Path,

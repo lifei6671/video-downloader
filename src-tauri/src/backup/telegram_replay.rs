@@ -29,6 +29,9 @@ fn references(
         })
     {
         apply(value)?;
+        if let MediaLocation::TelegramAlbum { files } = &mut value.location {
+            for member in files { apply(&mut member.reference)?; }
+        }
     }
     if let Some(base) = &mut change.base {
         for value in base
@@ -38,6 +41,9 @@ fn references(
             .chain(base.transcript.iter_mut())
         {
             apply(value)?;
+        if let MediaLocation::TelegramAlbum { files } = &mut value.location {
+            for member in files { apply(&mut member.reference)?; }
+        }
         }
     }
     for conflict in change
@@ -58,7 +64,7 @@ pub(super) fn media_references(change: &AssetChange) -> Result<Vec<MediaRef>> {
     let mut result = vec![];
     let mut copy = change.clone();
     references(&mut copy, |r| {
-        result.push(r.clone());
+        if !matches!(r.location, MediaLocation::TelegramAlbum {..}) { result.push(r.clone()); }
         Ok(())
     })?;
     Ok(result)
@@ -92,6 +98,7 @@ pub(super) fn validate_incarnation(
                 ReferenceChange::Set(r) => Some(r),
                 _ => None,
             })
+            .flat_map(|r| r.documents())
         {
             let deleted_message = if deleted.revision <= i32::MAX as u64 {
                 deleted.revision
