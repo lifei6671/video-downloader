@@ -5,6 +5,55 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn telegram_flood_wait(reason: &str) -> Option<u32> {
+    reason.strip_prefix("TELEGRAM_FLOOD_WAIT:")?.parse().ok()
+}
+
+pub(super) fn defer_telegram_flood_wait(
+    db: &rusqlite::Connection,
+    operation: &str,
+    reason: &str,
+) -> Result<bool> {
+    let Some(seconds) = telegram_flood_wait(reason) else {
+        return Ok(false);
+    };
+    // A server cooldown is scheduling, not a failed attempt. Keep send identities
+    // and resume evidence intact, including when the previous failure used the budget.
+    db.execute(
+        "UPDATE backup_operations SET state='retry_wait',last_error=?2,
+        attempt=max(0,attempt-1),next_retry_at=unixepoch()+?3
+        WHERE operation_id=?1 AND state='running'",
+        rusqlite::params![operation, reason, seconds.max(1)],
+    )?;
+    Ok(true)
+}
+
+pub(super) fn recover_telegram_flood_waits(db: &rusqlite::Connection, space: &str) -> Result<()> {
+    // Older versions exhausted the ordinary failure budget on server cooldowns.
+    // Preserve their deadline and all publication evidence when returning to the queue.
+    db.execute(
+        "UPDATE backup_operations SET state='retry_wait',attempt=0
+        WHERE space_id=?1 AND kind IN ('upload','delete') AND state='blocked'
+        AND phase<>'superseded' AND last_error GLOB 'TELEGRAM_FLOOD_WAIT:[0-9]*'",
+        [space],
+    )?;
+    db.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.cleanup_blocked',0,'$.cleanup_attempt',0)
+        WHERE space_id=?1 AND kind='upload' AND phase<>'cancel_cleaned'
+        AND (state='canceled' OR (state='blocked' AND last_error='BACKUP_ASSET_DELETED'))
+        AND json_extract(payload_json,'$.cleanup_blocked')=1
+        AND json_extract(payload_json,'$.cleanup_error') GLOB 'TELEGRAM_FLOOD_WAIT:[0-9]*'", [space])?;
+    db.execute("UPDATE backup_operations AS waiting SET state='retry_wait'
+        WHERE space_id=?1 AND kind='upload' AND state='blocked' AND last_error='BACKUP_CLEANUP_PENDING'
+        AND EXISTS(SELECT 1 FROM backup_operations cleanup
+            WHERE cleanup.operation_id=json_extract(waiting.payload_json,'$.cleanup_dependency')
+            AND cleanup.space_id=waiting.space_id AND cleanup.asset_id=waiting.asset_id
+            AND cleanup.kind='upload' AND cleanup.phase<>'cancel_cleaned'
+            AND (cleanup.state='canceled' OR (cleanup.state='blocked' AND cleanup.last_error='BACKUP_ASSET_DELETED'))
+            AND json_extract(cleanup.payload_json,'$.cleanup_blocked')=0
+            AND json_extract(cleanup.payload_json,'$.cleanup_error') GLOB 'TELEGRAM_FLOOD_WAIT:[0-9]*')", [space])?;
+    Ok(())
+}
+
 /// Delayed retries and background verification leave the foreground available for discovery.
 pub(super) fn foreground_delete_busy(db: &rusqlite::Connection, space: &str) -> Result<bool> {
     Ok(db.query_row(
@@ -267,10 +316,11 @@ pub(super) fn defer_upload_cleanup(core: &Core, op: &Operation, reason: &str) ->
             Ok(())
         });
     }
+    let flood_wait = telegram_flood_wait(reason);
     let attempt = op.payload["cleanup_attempt"]
         .as_u64()
         .unwrap_or(0)
-        .saturating_add(1);
+        .saturating_add(u64::from(flood_wait.is_none()));
     let blocked = attempt >= 5
         || matches!(
             reason,
@@ -283,10 +333,8 @@ pub(super) fn defer_upload_cleanup(core: &Core, op: &Operation, reason: &str) ->
                 | "TELEGRAM_DUPLICATE_OPERATION"
                 | "BACKUP_INVALID_RESUME_STATE"
         );
-    let delay = reason
-        .strip_prefix("TELEGRAM_FLOOD_WAIT:")
-        .and_then(|v| v.parse::<u32>().ok())
-        .map(i64::from)
+    let delay = flood_wait
+        .map(|seconds| i64::from(seconds.max(1)))
         .unwrap_or_else(|| (30_i64 * 2_i64.pow(attempt.min(4) as u32)).min(300));
     core.backup_db(|db| {
         let tx = db.unchecked_transaction()?;

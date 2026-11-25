@@ -16,6 +16,10 @@ async page => {
     await page.setViewportSize({width,height});await load();
     const before=await row('retry').evaluate(n=>n.getBoundingClientRect().height);
     check(await row('retry').getByRole('alert').count()===0,'automatic retry displayed its previous error');
+    await page.evaluate(()=>window.unifiedTest.change('op-retry',{last_error:'TELEGRAM_FLOOD_WAIT:1'}));
+    await row('retry').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor();
+    check(await row('retry').getByRole('alert').count()===0 && await errors().count()===0,'flood cooldown was presented as a failure');
+    await row('retry').getByRole('button',{name:'取消备份',exact:true}).waitFor();
     for(const attempt of [2,3]){
       await page.evaluate(attempt=>window.unifiedTest.change('op-retry',{attempt,last_error:attempt===2?'TELEGRAM_TIMEOUT':'TELEGRAM_CONNECTION_ERROR'}),attempt);
       await page.waitForTimeout(1100);
@@ -64,6 +68,10 @@ async page => {
   await page.evaluate(()=>window.unifiedTest.change('delete-asset-upload',{state:'retry_wait',attempt:2,last_error:'TELEGRAM_CONNECTION_ERROR'}));
   await page.waitForTimeout(1100);
   check(await errors().count()===0&&await row('upload').getByRole('alert').count()===0,'delete backoff displayed an intermediate error');
+  await page.evaluate(()=>window.unifiedTest.change('delete-asset-upload',{last_error:'TELEGRAM_FLOOD_WAIT:120'}));
+  await row('upload').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor();
+  check(await errors().count()===0 && await row('upload').getByRole('alert').count()===0,'delete flood cooldown was presented as a failure');
+  await page.evaluate(()=>window.unifiedTest.change('delete-asset-upload',{last_error:'TELEGRAM_CONNECTION_ERROR'}));
   await page.evaluate(()=>window.unifiedTest.change('delete-asset-upload',{state:'blocked',attempt:5,last_error:'TELEGRAM_CONNECTION_ERROR'}));
   await label('upload','删除失败');await row('upload').getByRole('alert').waitFor();
   check(await errors().count()===1,'actual terminal delete failure was hidden');

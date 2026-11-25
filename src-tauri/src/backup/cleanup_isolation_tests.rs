@@ -298,6 +298,67 @@ async fn cleanup_honors_flood_wait_and_network_change_remains_silent() {
         })
         .unwrap();
     assert!((1232..=1234).contains(&remaining));
+    for _ in 0..6 {
+        scheduler::defer_upload_cleanup(
+            &f.core,
+            &scheduler::operation(&f.core, &old).unwrap(),
+            "TELEGRAM_FLOOD_WAIT:1234",
+        )
+        .unwrap();
+    }
+    let waiting = scheduler::operation(&f.core, &old).unwrap();
+    assert_eq!(waiting.payload["cleanup_attempt"], 0);
+    assert_eq!(waiting.payload["cleanup_blocked"], 0);
+    let replacement = scheduler::operations(&f.core)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.operation_id != old && op.kind == "upload")
+        .unwrap();
+    assert_eq!(replacement.state, "retry_wait");
+    assert_eq!(waiting.payload["resume_cover"], original["resume_cover"]);
+    f.core.backup_db(|db| {
+        db.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.cleanup_attempt',5,'$.cleanup_blocked',1) WHERE operation_id=?", [&old])?;
+        db.execute("UPDATE backup_operations SET state='blocked' WHERE operation_id=?", [&replacement.operation_id])?;
+        scheduler::recover_telegram_flood_waits(db, &f.space.space_id)
+    }).unwrap();
+    assert_eq!(
+        scheduler::operation(&f.core, &replacement.operation_id)
+            .unwrap()
+            .state,
+        "retry_wait"
+    );
+    let recovered = scheduler::operation(&f.core, &old).unwrap();
+    assert_eq!(recovered.state, "canceled");
+    assert_eq!(recovered.payload["cleanup_attempt"], 0);
+    assert_eq!(recovered.payload["cleanup_blocked"], 0);
+    assert_eq!(
+        recovered.payload["cleanup_error"],
+        waiting.payload["cleanup_error"]
+    );
+    f.core.backup_db(|db| {
+        db.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.cleanup_attempt',4) WHERE operation_id=?", [&old])?;
+        Ok(())
+    }).unwrap();
+    scheduler::defer_upload_cleanup(
+        &f.core,
+        &scheduler::operation(&f.core, &old).unwrap(),
+        "TELEGRAM_FLOOD_WAIT:1234",
+    )
+    .unwrap();
+    assert_eq!(
+        scheduler::operation(&f.core, &old).unwrap().payload["cleanup_attempt"],
+        4
+    );
+    scheduler::defer_upload_cleanup(
+        &f.core,
+        &scheduler::operation(&f.core, &old).unwrap(),
+        "TELEGRAM_CHANNEL_FORBIDDEN",
+    )
+    .unwrap();
+    assert_eq!(
+        scheduler::operation(&f.core, &old).unwrap().payload["cleanup_blocked"],
+        1
+    );
     f.core.backup_db(|db| {
         db.execute("UPDATE backup_operations SET state='canceled' WHERE operation_id<>?1 AND kind='upload'",[&old])?;
         db.execute("UPDATE backup_operations SET state='blocked',last_error='BACKUP_ASSET_DELETED',next_retry_at=NULL WHERE operation_id=?",[&old])?;

@@ -1487,12 +1487,17 @@ async fn queue_loop(
                     if reason == "TASK_BUSY" && db.execute(TASK_BUSY_RETRY_SQL, [&operation])? != 0 {
                         return Ok(());
                     }
+                    if engine.provider.scope().provider_type == ProviderType::Telegram
+                        && scheduler::defer_telegram_flood_wait(db, &operation, &reason)?
+                    {
+                        return Ok(());
+                    }
                     if engine.provider.scope().provider_type==ProviderType::Telegram && (reason=="TELEGRAM_NETWORK_CHANGED" || crate::telegram_reconnect::network_error(&reason)) {
                         db.execute(NETWORK_RETRY_SQL, [&operation])?;
                         return Ok(());
                     }
                     let state=if op.attempt>=5 || (engine.provider.scope().provider_type==ProviderType::Telegram && reason=="BACKUP_CHECKSUM_MISMATCH") || matches!(reason.as_str(),"BACKUP_ACCESS_DENIED"|"BACKUP_ASSET_DELETED"|"BACKUP_SOURCE_CHANGED"|"BACKUP_INVALID_OPERATION"|"BACKUP_REUPLOAD_STALE"|"BACKUP_DELETE_UNSUPPORTED"|"BACKUP_MEDIA_IN_USE"|"BACKUP_TOMBSTONE_REQUIRED"|"TELEGRAM_MEDIA_CHANGED"|"TELEGRAM_MEDIA_MISSING"|"TELEGRAM_AUTH_REQUIRED"|"TELEGRAM_ACCOUNT_MISMATCH"|"TELEGRAM_CHANNEL_FORBIDDEN"|"TELEGRAM_INDEX_INVALID"|"TELEGRAM_INDEX_CHANGED"|"TELEGRAM_OPERATION_MISMATCH"|"TELEGRAM_FILE_TOO_LARGE") {"blocked"} else {"retry_wait"};
-                    db.execute("UPDATE backup_operations SET state=?2,last_error=?3,next_retry_at=unixepoch()+?4 WHERE operation_id=?1 AND state='running'",params![operation,state,reason,reason.strip_prefix("TELEGRAM_FLOOD_WAIT:").and_then(|v|v.parse::<u32>().ok()).map(i64::from).unwrap_or_else(||(2i64.pow(op.attempt.min(8) as u32)).min(300))])?;
+                    db.execute("UPDATE backup_operations SET state=?2,last_error=?3,next_retry_at=unixepoch()+?4 WHERE operation_id=?1 AND state='running'",params![operation,state,reason,(2i64.pow(op.attempt.min(8) as u32)).min(300)])?;
                     Ok(())
                 })?;
                 if engine.provider.scope().provider_type == ProviderType::Telegram && crate::telegram_reconnect::network_error(&reason) {
@@ -1583,6 +1588,7 @@ const RECOVER_ALBUM_OPERATIONS_SQL: &str = "UPDATE backup_operations SET state='
 
 fn recover_network_operations(core: &Core, space: &str) -> Result<()> {
     core.backup_db(|db| {
+        scheduler::recover_telegram_flood_waits(db, space)?;
         db.execute(RECOVER_NETWORK_OPERATIONS_SQL, [space])?;
         db.execute(RECOVER_ALBUM_OPERATIONS_SQL, [space])?;
         db.execute("UPDATE backup_operations SET payload_json=json_remove(payload_json,'$.cleanup_blocked','$.cleanup_attempt','$.cleanup_error'),next_retry_at=NULL
@@ -1708,6 +1714,149 @@ pub fn request_upload_with(
 #[cfg(test)]
 mod claim_timing_tests {
     use super::*;
+    #[test]
+    fn flood_wait_preserves_budget_evidence_deadline_and_cancellation() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,phase TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER,next_retry_at INTEGER,last_error TEXT)").unwrap();
+        let evidence =
+            json!({"video_receipt":{"message_id":123},"capture":{"operation_id":"same-send"}})
+                .to_string();
+        for kind in ["upload", "delete"] {
+            db.execute("DELETE FROM backup_operations", []).unwrap();
+            db.execute("INSERT INTO backup_operations VALUES('same-send',?1,'running','publishing',5,?2,unixepoch(),NULL,NULL)", params![kind,evidence]).unwrap();
+            for _ in 0..6 {
+                assert!(scheduler::defer_telegram_flood_wait(
+                    &db,
+                    "same-send",
+                    "TELEGRAM_FLOOD_WAIT:120"
+                )
+                .unwrap());
+                let (state, attempt, payload, phase, remaining): (String, i64, String, String, i64) = db.query_row(
+                    "SELECT state,attempt,payload_json,phase,next_retry_at-unixepoch() FROM backup_operations", [],
+                    |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+                ).unwrap();
+                assert_eq!(
+                    (state.as_str(), attempt, payload.as_str(), phase.as_str()),
+                    ("retry_wait", 4, evidence.as_str(), "publishing")
+                );
+                assert!((119..=120).contains(&remaining));
+                assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 0);
+                db.execute(
+                    "UPDATE backup_operations SET next_retry_at=unixepoch()-1",
+                    [],
+                )
+                .unwrap();
+                assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 1);
+            }
+            assert!(
+                !scheduler::defer_telegram_flood_wait(&db, "same-send", "TELEGRAM_TIMEOUT")
+                    .unwrap()
+            );
+            db.execute("UPDATE backup_operations SET state='canceled'", [])
+                .unwrap();
+            scheduler::defer_telegram_flood_wait(&db, "same-send", "TELEGRAM_FLOOD_WAIT:120")
+                .unwrap();
+            assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 0);
+            let state: String = db
+                .query_row("SELECT state FROM backup_operations", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(state, "canceled");
+        }
+    }
+
+    #[test]
+    fn flood_wait_recovery_only_requeues_rate_limited_work_in_current_space() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,space_id TEXT,kind TEXT,state TEXT,phase TEXT,attempt INTEGER,payload_json TEXT,next_retry_at INTEGER,last_error TEXT,asset_id TEXT)").unwrap();
+        let evidence =
+            json!({"video_receipt":{"message_id":123},"operation_nonce":"original"}).to_string();
+        for (id, space, kind, state, phase, error) in [
+            (
+                "upload",
+                "current",
+                "upload",
+                "blocked",
+                "publishing",
+                "TELEGRAM_FLOOD_WAIT:120",
+            ),
+            (
+                "delete",
+                "current",
+                "delete",
+                "blocked",
+                "cleanup",
+                "TELEGRAM_FLOOD_WAIT:120",
+            ),
+            (
+                "permission",
+                "current",
+                "upload",
+                "blocked",
+                "publishing",
+                "TELEGRAM_CHANNEL_FORBIDDEN",
+            ),
+            (
+                "canceled",
+                "current",
+                "upload",
+                "canceled",
+                "publishing",
+                "TELEGRAM_FLOOD_WAIT:120",
+            ),
+            (
+                "superseded",
+                "current",
+                "upload",
+                "blocked",
+                "superseded",
+                "TELEGRAM_FLOOD_WAIT:120",
+            ),
+            (
+                "other",
+                "other",
+                "upload",
+                "blocked",
+                "publishing",
+                "TELEGRAM_FLOOD_WAIT:120",
+            ),
+        ] {
+            db.execute(
+                "INSERT INTO backup_operations VALUES(?1,?2,?3,?4,?5,5,?6,unixepoch()+120,?7,'asset')",
+                params![id, space, kind, state, phase, evidence, error],
+            )
+            .unwrap();
+        }
+        scheduler::recover_telegram_flood_waits(&db, "current").unwrap();
+        scheduler::recover_telegram_flood_waits(&db, "current").unwrap();
+        for id in [
+            "upload",
+            "delete",
+            "permission",
+            "canceled",
+            "superseded",
+            "other",
+        ] {
+            let (state, attempt, payload, remaining): (String, i64, String, i64) = db.query_row(
+                "SELECT state,attempt,payload_json,next_retry_at-unixepoch() FROM backup_operations WHERE operation_id=?", [id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+            ).unwrap();
+            let recovered = matches!(id, "upload" | "delete");
+            assert_eq!(
+                state,
+                if recovered {
+                    "retry_wait"
+                } else if id == "canceled" {
+                    "canceled"
+                } else {
+                    "blocked"
+                }
+            );
+            assert_eq!(attempt, if recovered { 0 } else { 5 });
+            assert_eq!(payload, evidence);
+            assert!((119..=120).contains(&remaining));
+        }
+    }
+
     #[test]
     fn album_recovery_requeues_only_active_stuck_albums_once_without_erasing_evidence() {
         let db = rusqlite::Connection::open_in_memory().unwrap();

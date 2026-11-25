@@ -18,6 +18,9 @@ import { toast } from 'sonner';
 
 type SyncStatus = Pick<CardStatus, 'label' | 'variant' | 'operation'> & { error?: string | null };
 
+const floodWaiting = (error?: string | null) => /^TELEGRAM_FLOOD_WAIT:\d+$/.test(error ?? '');
+const floodWaitMessage = 'Telegram 请求受限，等待后自动继续';
+
 function deletionFinished(operation: BackupOperation) {
   return operation.kind === 'delete' && operation.phase !== 'superseded' && (operation.payload.local_cleanup_done === true || operation.state === 'completed' && operation.phase === 'completed');
 }
@@ -220,7 +223,7 @@ export function backupDeletion(backup: BackupTasks, assetId: string) {
   const failed = !!error || !!backupFailure(operation, backup.assetsById.has(assetId) ? [backup.assetsById.get(assetId)!] : [], backup.operationsByAsset.get(assetId) ?? []);
   const phase = complete ? 'complete' : operation?.phase === 'finalizing' ? 'finalizing' : operation?.phase === 'local_cleanup' ? 'local' : 'remote';
   const reconnecting = operation?.state === 'retry_wait' && operation.last_error === 'TELEGRAM_RECONNECTING';
-  const label = reconnecting ? '等待连接，恢复后继续删除' : complete ? '删除完成' : failed ? phase === 'local' ? '本地文件删除失败' : phase === 'finalizing' ? '记录移除失败' : '远端备份删除失败' : submitting && !operation ? '正在提交删除' : phase === 'local' ? '正在删除本地文件' : phase === 'finalizing' ? '正在移除记录' : operation && ['pending','retry_wait'].includes(operation.state) ? '等待删除远端备份' : '正在删除远端备份';
+  const label = operation?.state === 'retry_wait' && floodWaiting(operation.last_error) ? floodWaitMessage : reconnecting ? '等待连接，恢复后继续删除' : complete ? '删除完成' : failed ? phase === 'local' ? '本地文件删除失败' : phase === 'finalizing' ? '记录移除失败' : '远端备份删除失败' : submitting && !operation ? '正在提交删除' : phase === 'local' ? '正在删除本地文件' : phase === 'finalizing' ? '正在移除记录' : operation && ['pending','retry_wait'].includes(operation.state) ? '等待删除远端备份' : '正在删除远端备份';
   return {operation, failed, phase, label, error};
 }
 
@@ -362,7 +365,9 @@ function backupTaskPresentation(backup: BackupTasks, assetId: string, busy = fal
   const disabled = busy || draining || awaitingCleanup || completeInCurrent || !backup.settings.enabled || (!restoring && !needsDownload && (!backup.settings.enabled || deleting && !retryDelete && !reupload || !asset?.path && !deleting));
   const destinations = locations.map(value => value.display_name);
   const backedUpHint = destinations.length ? `已备份至：${destinations.join('、')}` : '';
-  const message = [backedUpHint, failure && !startingUpload ? errorText(failure) : complete && backedUpHint ? '' : state].filter(Boolean).join('。');
+  const cleanup = backupUploadCleanup(uploadState.operation, backup.operationsByAsset.get(assetId) ?? [], backup.settings.space_id);
+  const cooling = !failure && (op?.state === 'retry_wait' && floodWaiting(op.last_error) || cleanup && !cleanup.blocked && floodWaiting(cleanup.error));
+  const message = [backedUpHint, cooling ? floodWaitMessage : failure && !startingUpload ? errorText(failure) : complete && backedUpHint ? '' : state].filter(Boolean).join('。');
   return {asset, op, restoring, waitingRestore, uploading, failure, uploadState, needsDownload, completeInCurrent, complete, deleting, reupload, retryDelete, startingUpload, waitingUpload, draining, progress, label, state, disabled, message};
 }
 
@@ -393,7 +398,7 @@ export function BackupTaskFeedback({ backup, assetId, syncStatus }: { backup: Ba
     const {operation, error} = syncStatus;
     if (error) {
       const message = error === 'TELEGRAM_RECONNECTING'
-        ? '正在重连 Telegram，连接恢复后自动继续' : errorText(error);
+        ? '正在重连 Telegram，连接恢复后自动继续' : syncStatus.variant !== 'destructive' && floodWaiting(error) ? floodWaitMessage : errorText(error);
       return syncStatus.variant === 'destructive' || isBackupUnconfirmed(error)
         ? <TaskCardNotice message={message} warning={syncStatus.variant === 'warning'} />
         : <TaskCardMessage message={message} />;
