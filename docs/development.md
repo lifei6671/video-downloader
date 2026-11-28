@@ -178,7 +178,9 @@ git push --atomic origin master v1.3.0
 
 工作流分别在 Windows x64、macOS Intel、macOS Apple Silicon 原生 runner 上安装 Node 24、Python 3.12 和 Rust stable，执行锁文件安装、离线测试、PyInstaller onedir 打包、隔离 cwd/PATH 的引擎启动检查，以及 Tauri 前端/桌面安装器构建。安装包包含整个 `video-engine/` 目录；Release 使用应用资源路径，不依赖构建机源码位置。命令行探针 `m1-probe` 仅在开发和 CI 测试时通过 Cargo 的 `probe` feature 构建，桌面打包使用 `desktop` feature。Windows 安装结束时删除目标安装目录中旧版遗留的 `m1-probe.exe`。
 
-三个构建全部成功后，使用仓库自带 `GITHUB_TOKEN` 创建草稿、上传 Windows NSIS `.exe` 和两种 macOS `.dmg`，随后公开 Release。创建时通过 `--notes-from-tag` 将附注标签中的 Markdown 原样作为 Release 正文，软件“检查更新”也会读取这份正文；不再自动生成仅含提交记录的说明。务必使用附注标签，轻量标签会退回到提交信息。构建失败不发布；已有同名 Release 不覆盖。若上传中断留下草稿，先检查并删除该草稿，再重跑失败的发布 job。Actions artifacts 保留 14 天。仓库/组织策略须允许该 workflow 的 `contents: write`，无需新增发布 Token。
+三个构建全部成功后，使用仓库自带 `GITHUB_TOKEN` 创建草稿、上传 Windows NSIS `.exe`、两种 macOS `.dmg` 和静态更新清单 `update.json`，随后公开 Release。创建时通过 `--notes-from-tag` 将附注标签中的 Markdown 原样作为 Release 正文，软件“检查更新”从清单读取同一份 Markdown 正文；不再自动生成仅含提交记录的说明。务必使用附注标签，轻量标签会退回到提交信息。构建失败不发布；已有同名 Release 不覆盖。若上传中断留下草稿，先检查并删除该草稿，再重跑失败的发布 job。Actions artifacts 保留 14 天。仓库/组织策略须允许该 workflow 的 `contents: write`，无需新增发布 Token。
+
+`scripts/generate_update_manifest.py <tag> <安装包目录>` 在发布 job 中、安装包重命名完成后生成 `update.json`。脚本要求该版本的三平台安装包各一份、文件非空且不超过 1 GiB，读取 `docs/releases/<tag>.md`，从实际文件计算大小与 SHA-256，不依赖 GitHub API 元数据。客户端读取 `/releases/latest/download/update.json`；下载前读取已选 tag 的同名清单，保留版本、域名、大小、摘要和取消校验。旧版客户端仍可通过既有 API 获取新 Release。首次按新流程发布前，旧 Release 没有清单，预览会显示“更新信息暂不可用”，并保留发行页入口；不回退到匿名 API。GitHub 静态下载仍需网络可达，403 与 429 分别展示拒绝访问和请求过于频繁。
 
 三个构建 job 在打包后、上传前分别为 Windows `.exe`、macOS Intel `.dmg` 和 macOS Apple Silicon `.dmg` 生成 SLSA 构建证明。证明由 GitHub 保存，任一平台签发失败都会阻止发布。发布时重命名不改变文件摘要。下载后可用 `gh attestation verify <安装包路径> --repo lifei6671/video-downloader --signer-workflow lifei6671/video-downloader/.github/workflows/release.yml --source-ref refs/tags/<发布标签>` 验证文件与发布工作流和标签的关联。
 

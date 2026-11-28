@@ -1,0 +1,20 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"></head>
+<body><div id="root"></div><script type="module">
+import React from 'react';
+import {createRoot} from 'react-dom/client';
+import {api} from '/src/api';
+import {About} from '/src/components/about';
+import {TooltipProvider} from '/src/components/ui/tooltip';
+import {Toaster} from '/src/components/ui/sonner';
+import '/src/style.css';
+// Synthetic IPC only: no account, update network, installer execution or clipboard.
+const state={error:null,opened:[],started:[],canceled:[],result:{has_update:true,current_version:'1.0.0',latest_version:'1.2.0',release_tag:'v1.2.0',published_at:'2026-10-18T00:00:00Z',release_notes:'## 静态清单更新说明\n- 修复下载问题',installer:{name:'Yingqu-windows-x64-setup-1.2.0.exe',size:4096}}};
+window.updateManifestTest=state;
+api.updateDownload=async()=>null;
+api.subscribeUpdateDownload=async()=>()=>{};
+api.checkForUpdates=async()=>{if(state.error)throw state.error;return structuredClone(state.result)};
+api.startUpdateDownload=async tag=>{state.started.push(tag);return {id:'fixture-download',revision:1,release:structuredClone(state.result),phase:'downloading',downloaded_bytes:1024,total_bytes:4096,filename:state.result.installer.name,error:null}};
+api.cancelUpdateDownload=async id=>{state.canceled.push(id);return {id,revision:2,release:structuredClone(state.result),phase:'canceled',downloaded_bytes:1024,total_bytes:4096,filename:state.result.installer.name,error:null}};
+createRoot(document.getElementById('root')).render(React.createElement(TooltipProvider,null,
+  React.createElement('main',{className:'p-6'},React.createElement(About,{busy:false,openPage:(page,tag)=>state.opened.push({page,tag}),copyVersion:()=>{}})),React.createElement(Toaster,{position:'top-center'})));
+</script></body></html>

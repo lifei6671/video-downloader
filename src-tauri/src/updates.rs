@@ -3,7 +3,8 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const RELEASE_API: &str = "https://api.github.com/repos/lifei6671/video-downloader/releases/latest";
+const UPDATE_MANIFEST: &str =
+    "https://github.com/lifei6671/video-downloader/releases/latest/download/update.json";
 const RELEASES_PAGE: &str = "https://github.com/lifei6671/video-downloader/releases/tag/";
 
 #[derive(Clone, Debug, Serialize)]
@@ -25,6 +26,7 @@ pub struct InstallerInfo {
 
 #[derive(Deserialize)]
 pub(crate) struct Release {
+    schema_version: u32,
     pub tag_name: String,
     draft: bool,
     prerelease: bool,
@@ -119,20 +121,19 @@ fn network_error(error: reqwest::Error) -> String {
 pub(crate) async fn fetch_release_data(client: &Client, endpoint: &str) -> Result<Release, String> {
     let response = client
         .get(endpoint)
-        .header("Accept", "application/vnd.github+json")
+        .header("Accept", "application/json")
         .send()
         .await
         .map_err(network_error)?;
     match response.status() {
         StatusCode::OK => {}
-        StatusCode::NOT_FOUND => return Err("UPDATE_NO_RELEASE".into()),
-        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => {
-            return Err("UPDATE_RATE_LIMITED".into());
-        }
+        StatusCode::NOT_FOUND => return Err("UPDATE_MANIFEST_UNAVAILABLE".into()),
+        StatusCode::FORBIDDEN => return Err("UPDATE_ACCESS_DENIED".into()),
+        StatusCode::TOO_MANY_REQUESTS => return Err("UPDATE_RATE_LIMITED".into()),
         _ => return Err("UPDATE_SERVICE_ERROR".into()),
     }
     let release: Release = response.json().await.map_err(network_error)?;
-    if release.draft || release.prerelease {
+    if release.schema_version != 1 || release.draft || release.prerelease {
         return Err("UPDATE_INVALID_RESPONSE".into());
     }
     stable_version(&release.tag_name)?;
@@ -210,8 +211,7 @@ async fn fetch_release(
 
 pub(crate) async fn installer_for_tag(tag: &str, current: &str) -> Result<InstallerAsset, String> {
     let client = check_client(current)?;
-    let endpoint =
-        format!("https://api.github.com/repos/lifei6671/video-downloader/releases/tags/{tag}");
+    let endpoint = manifest_for_tag(tag)?;
     let release = fetch_release_data(&client, &endpoint).await?;
     if release.tag_name != tag {
         return Err("UPDATE_INVALID_RESPONSE".into());
@@ -219,18 +219,50 @@ pub(crate) async fn installer_for_tag(tag: &str, current: &str) -> Result<Instal
     select_installer(&release, std::env::consts::OS, std::env::consts::ARCH)
 }
 
+fn manifest_for_tag(tag: &str) -> Result<String, String> {
+    stable_version(tag)?;
+    Ok(format!(
+        "https://github.com/lifei6671/video-downloader/releases/download/{tag}/update.json"
+    ))
+}
+
+pub(crate) fn allowed_redirect(url: &url::Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && matches!(
+            url.host_str(),
+            Some(
+                "github.com"
+                    | "release-assets.githubusercontent.com"
+                    | "objects.githubusercontent.com"
+            )
+        )
+}
+
+pub(crate) fn release_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 5 || !allowed_redirect(attempt.url()) {
+            attempt.error("untrusted update redirect")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
 fn check_client(current: &str) -> Result<Client, String> {
     Client::builder()
         .user_agent(format!("Yingqu/{current}"))
         .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(release_redirect_policy())
         .build()
         .map_err(|_| "UPDATE_NETWORK_ERROR".into())
 }
 
 pub async fn check(current: &str) -> Result<UpdateCheck, String> {
     let client = check_client(current)?;
-    fetch_release(&client, RELEASE_API, current).await
+    fetch_release(&client, UPDATE_MANIFEST, current).await
 }
 
 #[cfg(test)]
@@ -254,7 +286,7 @@ mod tests {
             let mut request = [0; 4096];
             let size = socket.read(&mut request).await.unwrap();
             let request = String::from_utf8_lossy(&request[..size]).to_lowercase();
-            assert!(request.contains("accept: application/vnd.github+json"));
+            assert!(request.contains("accept: application/json"));
             assert!(!request.contains("cookie:"));
             assert!(!request.contains("authorization:"));
             tokio::time::sleep(delay).await;
@@ -265,7 +297,7 @@ mod tests {
     }
 
     fn release(tag: &str) -> serde_json::Value {
-        json!({"tag_name": tag, "draft": false, "prerelease": false,
+        json!({"schema_version": 1, "tag_name": tag, "draft": false, "prerelease": false,
             "body": "## 更新说明\n- 修复下载问题", "published_at": "2026-10-18T00:00:00Z"})
     }
 
@@ -277,6 +309,87 @@ mod tests {
             "digest": format!("sha256:{}", "a".repeat(64)),
             "browser_download_url": format!("https://github.com/lifei6671/video-downloader/releases/download/v1.2.0/{name}"),
         })
+    }
+
+    #[tokio::test]
+    async fn generated_manifest_contract_preserves_notes_and_all_three_installers() {
+        use sha2::{Digest, Sha256};
+        let body = include_str!("../../tests/fixtures/update-manifest.json");
+        let result = lookup(200, body.into(), "1.0.0").await.unwrap();
+        assert!(result.has_update);
+        assert_eq!(result.release_tag, "v1.2.0");
+        assert_eq!(result.release_notes, "## 更新说明\n- 修复下载问题");
+        let manifest: Release = serde_json::from_str(body).unwrap();
+        for (os, arch, name) in [
+            ("windows", "x86_64", "Yingqu-windows-x64-setup-1.2.0.exe"),
+            ("macos", "x86_64", "Yingqu-darwin-x64-1.2.0.dmg"),
+            ("macos", "aarch64", "Yingqu-darwin-aarch64-1.2.0.dmg"),
+        ] {
+            let selected = select_installer(&manifest, os, arch).unwrap();
+            assert_eq!(selected.asset.name, name);
+            assert_eq!(selected.asset.size, name.len() as u64);
+            assert_eq!(
+                selected.sha256,
+                format!("{:x}", Sha256::digest(name.as_bytes()))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn api_responses_and_unknown_manifest_versions_are_rejected() {
+        let mut value = release("v2.0.0");
+        value.as_object_mut().unwrap().remove("schema_version");
+        assert_eq!(
+            lookup(200, value.to_string(), "1.0.0").await.unwrap_err(),
+            "UPDATE_INVALID_RESPONSE"
+        );
+        for version in [0, 2] {
+            value["schema_version"] = json!(version);
+            assert_eq!(
+                lookup(200, value.to_string(), "1.0.0").await.unwrap_err(),
+                "UPDATE_INVALID_RESPONSE"
+            );
+        }
+    }
+
+    #[test]
+    fn checks_and_download_metadata_use_static_release_assets() {
+        assert_eq!(
+            UPDATE_MANIFEST,
+            "https://github.com/lifei6671/video-downloader/releases/latest/download/update.json"
+        );
+        assert_eq!(
+            manifest_for_tag("v1.2.0").unwrap(),
+            "https://github.com/lifei6671/video-downloader/releases/download/v1.2.0/update.json"
+        );
+        for tag in [
+            "v1.2.0/../../",
+            "https://example.com",
+            "v1.2.0?x=y",
+            "v1.2.0-rc.1",
+        ] {
+            assert!(manifest_for_tag(tag).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn manifest_client_rejects_redirects_outside_release_hosts() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/update.json", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let received = socket.read(&mut request).await.unwrap();
+            assert!(received > 0);
+            socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://example.invalid/update.json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(release_redirect_policy())
+            .build()
+            .unwrap();
+        assert!(client.get(endpoint).send().await.unwrap_err().is_redirect());
+        task.await.unwrap();
     }
 
     #[test]
@@ -392,8 +505,8 @@ mod tests {
     #[tokio::test]
     async fn errors_never_become_latest() {
         for (status, expected) in [
-            (404, "UPDATE_NO_RELEASE"),
-            (403, "UPDATE_RATE_LIMITED"),
+            (404, "UPDATE_MANIFEST_UNAVAILABLE"),
+            (403, "UPDATE_ACCESS_DENIED"),
             (429, "UPDATE_RATE_LIMITED"),
             (500, "UPDATE_SERVICE_ERROR"),
             (302, "UPDATE_SERVICE_ERROR"),

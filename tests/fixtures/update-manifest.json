@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "tag_name": "v1.2.0",
+  "draft": false,
+  "prerelease": false,
+  "body": "## 更新说明\n- 修复下载问题",
+  "published_at": "2026-10-18T00:00:00Z",
+  "assets": [
+    {
+      "name": "Yingqu-windows-x64-setup-1.2.0.exe",
+      "size": 34,
+      "state": "uploaded",
+      "digest": "sha256:5d97cedb9a10e24b4cdb8716dec672aefc48e3fe40428b70d168f00243d7aa7a",
+      "browser_download_url": "https://github.com/lifei6671/video-downloader/releases/download/v1.2.0/Yingqu-windows-x64-setup-1.2.0.exe"
+    },
+    {
+      "name": "Yingqu-darwin-x64-1.2.0.dmg",
+      "size": 27,
+      "state": "uploaded",
+      "digest": "sha256:e6039c1266fe9a5635beebe49e53e66d62a46930e92012f3f6a6e908196cda95",
+      "browser_download_url": "https://github.com/lifei6671/video-downloader/releases/download/v1.2.0/Yingqu-darwin-x64-1.2.0.dmg"
+    },
+    {
+      "name": "Yingqu-darwin-aarch64-1.2.0.dmg",
+      "size": 31,
+      "state": "uploaded",
+      "digest": "sha256:2f0f4ff5ebb4302b26b865f197d644e9eb09af8f694a3e1bcec5a9312db96ba2",
+      "browser_download_url": "https://github.com/lifei6671/video-downloader/releases/download/v1.2.0/Yingqu-darwin-aarch64-1.2.0.dmg"
+    }
+  ]
+}

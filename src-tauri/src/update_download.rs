@@ -432,34 +432,13 @@ fn download_error(error: reqwest::Error) -> String {
     }
 }
 
-fn allowed_redirect(url: &url::Url) -> bool {
-    url.scheme() == "https"
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port_or_known_default() == Some(443)
-        && matches!(
-            url.host_str(),
-            Some(
-                "github.com"
-                    | "release-assets.githubusercontent.com"
-                    | "objects.githubusercontent.com"
-            )
-        )
-}
-
 fn download_client(current: &str) -> Result<Client, String> {
     Client::builder()
         .user_agent(format!("Yingqu/{current}"))
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(15 * 60))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 || !allowed_redirect(attempt.url()) {
-                attempt.error("untrusted update redirect")
-            } else {
-                attempt.follow()
-            }
-        }))
+        .redirect(updates::release_redirect_policy())
         .build()
         .map_err(|_| "UPDATE_DOWNLOAD_FAILED".into())
 }
@@ -862,7 +841,7 @@ mod tests {
             "https://release-assets.githubusercontent.com/signed?token=public",
             "https://objects.githubusercontent.com/file",
         ] {
-            assert!(allowed_redirect(&url::Url::parse(value).unwrap()));
+            assert!(updates::allowed_redirect(&url::Url::parse(value).unwrap()));
         }
         for value in [
             "http://github.com/file",
@@ -872,7 +851,7 @@ mod tests {
             "https://github.com:8443/file",
             "file:///C:/arbitrary.exe",
         ] {
-            assert!(!allowed_redirect(&url::Url::parse(value).unwrap()));
+            assert!(!updates::allowed_redirect(&url::Url::parse(value).unwrap()));
         }
     }
 

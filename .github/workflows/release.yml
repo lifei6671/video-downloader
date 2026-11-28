@@ -124,6 +124,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v8
         with:
           pattern: installer-*
@@ -158,5 +161,7 @@ jobs:
           mv -- "${windows[0]}" "${assets[0]}"
           mv -- "${intel[0]}" "${assets[1]}"
           mv -- "${apple[0]}" "${assets[2]}"
+          python scripts/generate_update_manifest.py "$RELEASE_TAG" installers
+          assets+=("installers/update.json")
           gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --draft --title "映取 $RELEASE_TAG" --notes-from-tag
           gh release edit "$RELEASE_TAG" --draft=false

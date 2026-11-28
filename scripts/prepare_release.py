@@ -5,12 +5,17 @@ import sys
 from pathlib import Path
 
 
-def prepare(root: Path, tag: str) -> str:
+def release_version(tag: str) -> str:
     if not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag):
         raise ValueError('Release tag must be vMAJOR.MINOR.PATCH, for example v1.2.3')
     version = tag[1:]
     if any(int(part) > 65535 for part in version.split('.')):
         raise ValueError('Windows installer version components must not exceed 65535')
+    return version
+
+
+def prepare(root: Path, tag: str) -> str:
+    version = release_version(tag)
     for name in ('package.json', 'package-lock.json', 'src-tauri/tauri.conf.json'):
         path = root / name
         data = json.loads(path.read_text(encoding='utf-8'))

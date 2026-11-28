@@ -382,13 +382,13 @@ Telegram 原始视频通过 Rust grammers 直接读取消息与媒体，默认�
 
 ### 关于页手动检查更新
 
-Rust 使用 reqwest（系统 TLS 与系统代理支持）请求固定 GitHub 公共端点，不使用平台 Cookie、代理凭据或下载引擎，不请求镜像或重试。semver 比较正式版本，排除草稿与预发布；版本以 Tauri package_info 为准。检查过程仅在按钮内显示动画和进行中文案，不增加页面提示；无需更新使用顶部居中 Sonner Toast，检查失败在页面持续显示。前端发现更新后打开 shadcn/ui Dialog，通过 react-markdown 与 remark-gfm 渲染可滚动的更新说明，支持标题、列表、加粗、代码、引用、表格及只读任务列表；跳过原始 HTML，图片仅保留替代文字。仅 HTTP/HTTPS 链接可通过已有 Tauri opener 在系统默认浏览器打开，opener capability 同样限定这两种协议，失败在弹窗显示；其他链接只显示文字。关闭后恢复检查按钮焦点。
+Rust 使用 reqwest（系统 TLS 与系统代理支持）读取固定静态清单 `https://github.com/lifei6671/video-downloader/releases/latest/download/update.json`，不调用 GitHub REST API，不使用平台 Cookie、代理凭据或下载引擎，不请求镜像或重试。清单协议 `schema_version=1`，保存正式版本标签、Markdown 说明、生成时间及三平台安装包的名称、大小、固定下载地址和 SHA-256。清单与安装包共用已有的 HTTPS GitHub / Release CDN 重定向边界；读取超时仍为 15 秒。404 表示更新信息暂不可用，403 表示拒绝访问，只有 429 提示请求过于频繁；缺少或不支持的清单协议、无效内容均明确失败。semver 比较正式版本，排除草稿与预发布；版本以 Tauri package_info 为准。检查过程仅在按钮内显示动画和进行中文案，不增加页面提示；无需更新使用顶部居中 Sonner Toast，检查失败在页面持续显示。前端发现更新后打开 shadcn/ui Dialog，通过 react-markdown 与 remark-gfm 渲染可滚动的更新说明，支持标题、列表、加粗、代码、引用、表格及只读任务列表；跳过原始 HTML，图片仅保留替代文字。仅 HTTP/HTTPS 链接可通过已有 Tauri opener 在系统默认浏览器打开，opener capability 同样限定这两种协议，失败在弹窗显示；其他链接只显示文字。关闭后恢复检查按钮焦点。
 
 ### 用户触发的更新安装包下载
 
-`updates.rs` 从同一 Release 的附件中按版本与系统架构精确匹配 `Yingqu-windows-x64-setup-{version}.exe`、`Yingqu-darwin-x64-{version}.dmg` 或 `Yingqu-darwin-aarch64-{version}.dmg`。仅当对应新文件名缺席时，才查找同平台的历史下划线命名。选中的附件必须唯一，且具备该仓库该 tag 的 HTTPS 下载地址、uploaded 状态、正数且不超过 1 GiB 的大小及完整 SHA-256。没有可验证的安装包时，保留具体发行页入口。
+`updates.rs` 从同一 Release 静态清单的附件记录中按版本与系统架构精确匹配 `Yingqu-windows-x64-setup-{version}.exe`、`Yingqu-darwin-x64-{version}.dmg` 或 `Yingqu-darwin-aarch64-{version}.dmg`。仅当对应新文件名缺席时，才查找同平台的历史下划线命名。选中的附件必须唯一，且具备该仓库该 tag 的 HTTPS 下载地址、uploaded 状态、正数且不超过 1 GiB 的大小及完整 SHA-256。没有可验证的安装包时，保留具体发行页入口。
 
-`update_download.rs` 是更新下载状态权威，与媒体任务队列隔离。`start_update_download(release_tag)` 只接受实际检查到的新版本；下载前重新获取该 tag 的元数据。更新下载单槽位，采用应用 updates 目录下独占 `.part` 文件、流式保存和增量 SHA-256，验证大小与摘要、刷新文件后才以不覆盖方式提交。初始地址固定于本仓库，重定向仅允许 HTTPS 的 GitHub 与官方 Release CDN；连接超时 15 秒、读取等待 30 秒、整体上限 15 分钟，不增加重试或镜像。
+`update_download.rs` 是更新下载状态权威，与媒体任务队列隔离。`start_update_download(release_tag)` 只接受实际检查到的新版本；下载前重新读取该 tag 的 `releases/download/<tag>/update.json` 并核对标签，避免最新版本变化影响已选版本；此步骤同样不调用 GitHub REST API。更新下载单槽位，采用应用 updates 目录下独占 `.part` 文件、流式保存和增量 SHA-256，验证大小与摘要、刷新文件后才以不覆盖方式提交。初始地址固定于本仓库，重定向仅允许 HTTPS 的 GitHub 与官方 Release CDN；连接超时 15 秒、读取等待 30 秒、整体上限 15 分钟，不增加重试或镜像。
 
 `get_update_download` 返回当前快照，`update_download` 事件携带单调 revision，前端忽略迟到旧事件或快照。取消命令按下载 ID 作用于当前操作，取消传播至 HTTP future，临时文件随操作回收；提交与取消在同一状态锁下决定终态。关停先禁止新请求，取消并等待更新下载回收，再完成应用既有退出流程。关闭弹窗或切换页面不取消下载，返回关于页可恢复状态；应用重启不恢复下载。
 
