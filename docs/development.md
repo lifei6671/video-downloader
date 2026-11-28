@@ -15,7 +15,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --features probe --all-targets
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-pytest 包含 Rust/Python 进程集成测试，必须先构建探针；测试使用隔离 HTTP fixture，不访问真实平台。运行依赖固定 yt-dlp 2026.10.26 与 DTK 5.1.10 白名单切片，协议 v3，具体版本见锁文件。
+pytest 包含 Rust/Python 进程集成测试，必须先构建探针；测试使用隔离 HTTP fixture，不访问真实平台。运行依赖固定 yt-dlp 2026.11.23 与 DTK 5.1.13 白名单切片，协议 v3，具体版本见锁文件。
 
 ## macOS 开发与打包
 

@@ -1,4 +1,6 @@
 import hashlib
+import io
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -8,6 +10,104 @@ import engine
 import dtk_adapter
 import media_album
 from yt_dlp import YoutubeDL
+from cookie_scope import scoped_jar
+
+
+def test_tiktok_uses_session_device_id_and_refreshed_signing_cookie(monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+    ua = engine.DEFAULT_UA
+    requests = []
+    fresh_token = 'fresh-' + 'a' * 128
+    with YoutubeDL({'quiet': True, 'http_headers': {'User-Agent': ua}}) as ydl:
+        ydl.cookiejar = scoped_jar()
+        engine.add_cookies(ydl.cookiejar, {'msToken': 'old-token', 'sid_tt': 'synthetic-login'}, 'tiktok', login_session=True)
+
+        def open_request(request):
+            requests.append(request)
+            if request.url == 'https://www.tiktok.com/':
+                engine.add_cookies(ydl.cookiejar, {'msToken': fresh_token, 'tt_chain_token': 'synthetic-chain'}, 'tiktok', login_session=True)
+                state = {'__DEFAULT_SCOPE__': {'webapp.app-context': {'wid': '1234567890123456789'}}}
+                return io.BytesIO(('<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">' + json.dumps(state) + '</script>').encode())
+            query = parse_qs(urlsplit(request.url).query)
+            assert query['device_id'] == ['1234567890123456789']
+            assert query['msToken'] == [fresh_token]
+            assert query['itemId'] == ['123']
+            assert 'X-Gnarly' in query and 'X-Dynosaur' in query
+            assert ydl.cookiejar.get_cookie_header(request.url).find('msToken=' + fresh_token) >= 0
+            assert not ydl.cookiejar.get_cookie_header('https://p.tiktokcdn.com/image.webp')
+            return io.BytesIO(b'{"statusCode":0}')
+
+        monkeypatch.setattr(ydl, 'urlopen', open_request)
+        assert dtk_adapter.request_json(ydl, dtk_adapter.TIKTOK, 'tiktok.content_detail', ua,
+            {'msToken': 'old-token'}, None, item_id='123') == {'statusCode': 0}
+    assert len(requests) == 2 and all(request.headers['User-Agent'] == ua for request in requests)
+    assert all('Cookie' not in request.headers for request in requests)
+
+
+@pytest.mark.parametrize('page', [b'challenge page', b'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">{}</script>', b'x' * (4 * 1024 * 1024 + 1)], ids=['missing', 'empty', 'oversized'])
+def test_tiktok_missing_session_device_id_does_not_send_random_identity(monkeypatch, page):
+    with YoutubeDL({'quiet': True}) as ydl:
+        requests = []
+        def open_request(request):
+            requests.append(request.url)
+            return io.BytesIO(page)
+        monkeypatch.setattr(ydl, 'urlopen', open_request)
+        with pytest.raises(engine.EngineError, match='UPSTREAM_CHANGED'):
+            dtk_adapter.request_json(ydl, dtk_adapter.TIKTOK, 'tiktok.content_detail', engine.DEFAULT_UA,
+                None, None, item_id='123')
+    assert requests == ['https://www.tiktok.com/']
+
+
+def test_tiktok_withheld_shop_video_is_unsupported_not_schema_failure(monkeypatch):
+    monkeypatch.setattr(dtk_adapter, 'request_json', lambda *args, **kwargs: {'itemInfo': {'itemStruct': {
+        'id': '123', 'desc': 'shop', 'isECVideo': 1, 'author': {'id': 'author', 'uniqueId': 'shop', 'nickname': 'Shop'},
+        'video': {'playAddr': '', 'downloadAddr': ''}, 'stats': {}}}})
+    with pytest.raises(engine.EngineError, match='UNSUPPORTED_CONTENT'):
+        dtk_adapter.extract(None, 'tiktok', '123', engine.DEFAULT_UA, None, None)
+
+
+def test_upstream_media_access_referer_reaches_video_downloader():
+    item = live_album()
+    item = item.model_copy(update={'kind': 'video',
+        'media': item.media.model_copy(update={'video': item.media.images[0].video})})
+    assert dtk_adapter.video_info(item)['http_headers'] == {'Referer': 'https://www.douyin.com/'}
+
+
+def tiktok_video():
+    return dtk_adapter.TIKTOK.parse_content({'itemInfo': {'itemStruct': {
+        'id': '123', 'desc': 'video', 'author': {'id': 'author', 'uniqueId': 'name', 'nickname': 'Name'},
+        'video': {'id': 'video', 'playAddr': 'https://v16-webapp-prime.tiktok.com/video.mp4?tk=tt_chain_token',
+                  'width': 720, 'height': 1280, 'duration': 1}, 'stats': {}}}}, fetched_at=datetime.now(UTC))
+
+
+def test_tiktok_bound_media_only_sends_chain_cookie_to_tiktok_domains():
+    from network import TargetGuard
+    from urllib.request import Request
+    item = tiktok_video()
+    assert item.media.access.session_bound
+    with YoutubeDL({'quiet': True}) as ydl:
+        ydl.cookiejar = scoped_jar()
+        engine.add_cookies(ydl.cookiejar, {'tt_chain_token': 'synthetic-chain', 'sid_tt': 'synthetic-login',
+            'sessionid': 'synthetic-session'}, 'tiktok', login_session=True)
+        assert ydl.cookiejar.get_cookie_header(item.media.video.url) is None
+        info = dtk_adapter.video_info(item, ydl)
+        assert info['http_headers'] == {'Referer': 'https://www.tiktok.com/'}
+        for url in [item.media.video.url, 'https://other.tiktok.com/redirect-target.mp4']:
+            request = Request(url, headers={'Cookie': 'sid_tt=must-be-stripped'})
+            TargetGuard('tiktok').https_request(request)
+            ydl.cookiejar.add_cookie_header(request)
+            assert request.get_header('Cookie') == 'tt_chain_token=synthetic-chain'
+        for url in ['https://p.tiktokcdn.com/image.webp', 'https://v.tiktokv.com/video.mp4',
+                    'https://www.tiktok.com.evil.test/video.mp4', 'http://v16-webapp-prime.tiktok.com/video.mp4']:
+            assert not ydl.cookiejar.get_cookie_header(url)
+        assert 'sid_tt=synthetic-login' in ydl.cookiejar.get_cookie_header('https://www.tiktok.com/')
+
+
+def test_tiktok_bound_media_requires_the_current_session_chain():
+    with YoutubeDL({'quiet': True}) as ydl:
+        ydl.cookiejar = scoped_jar()
+        with pytest.raises(engine.EngineError, match='ACCESS_DENIED'):
+            dtk_adapter.video_info(tiktok_video(), ydl)
 
 
 def content(originals=None):

@@ -23,6 +23,7 @@
 - [文案提取验证](nano-cuda-validation.md)：Nano Windows 真实模型、Tauri、回归与跨平台验收边界。
 - [macOS 验证记录](macos-validation.md)：Apple Silicon 安装包、双平台 GUI 下载及正常重启恢复，以及 Intel / 旧系统验收边界。
 - [解析缓存验收](parse-cache-validation.md)：SQLite 元数据/图片缓存、链接别名、重启预览及下载重新解析。
+- [双引擎稳定版升级记录](dual-engine-stable-upgrade-validation.md)：yt-dlp 2026.11.23 / DTK 5.1.13 的适配与本机验收。
 - [双引擎与图集验收](dual-engine-validation.md)：正式 macOS GUI、文件校验、重启及平台验收边界。
 - [DTK 双解析引擎方案与试验](dtk-dual-engine-plan.md)：正式底层切片、导入补丁、图集任务契约和上游升级流程。
 - [抖音作者作品批量下载技术方案](douyin-author-download-plan.md)：登录 Cookie、作者作品分页、下载队列接入与上游并发证据。

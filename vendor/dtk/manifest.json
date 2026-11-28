@@ -1,12 +1,12 @@
 {
   "repository": "https://github.com/Evil0ctal/Douyin_TikTok_Download_API",
-  "upstream_commit": "26299ef8649a12be82c3769b05b316fdeec8d40d",
-  "upstream_version": "5.1.10",
+  "upstream_commit": "50f89e8ba23c205e06bfeed78246daf81583276b",
+  "upstream_version": "5.1.13",
   "files": [
     {
       "path": "src/dtk/__init__.py",
-      "sha256": "c9662bb511ada9975dd8bf41491f66fe5cea2e4af704cdd61f4268cd665b73b1",
-      "installed_sha256": "c9662bb511ada9975dd8bf41491f66fe5cea2e4af704cdd61f4268cd665b73b1"
+      "sha256": "42f1803a75dcbdb164b205ed8c435e171d5ecfd599b66d2874d0b51407a3f124",
+      "installed_sha256": "42f1803a75dcbdb164b205ed8c435e171d5ecfd599b66d2874d0b51407a3f124"
     },
     {
       "path": "src/dtk/core/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "path": "src/dtk/core/errors.py",
-      "sha256": "e56e70d306bbd758ce9842a89387f235798f578607fef7bff2caebd6eb9ac139",
-      "installed_sha256": "e56e70d306bbd758ce9842a89387f235798f578607fef7bff2caebd6eb9ac139"
+      "sha256": "eee85950606398cc2e389508afe8f70c79aaebbedd465165b894a375dfe39d00",
+      "installed_sha256": "eee85950606398cc2e389508afe8f70c79aaebbedd465165b894a375dfe39d00"
     },
     {
       "path": "src/dtk/core/logging.py",
@@ -30,13 +30,13 @@
     },
     {
       "path": "src/dtk/models/__init__.py",
-      "sha256": "0cc4431633d249af2bcef19eab7195654d972b95ca60fd7c8989ab83d346452b",
-      "installed_sha256": "0cc4431633d249af2bcef19eab7195654d972b95ca60fd7c8989ab83d346452b"
+      "sha256": "c45257b6957a60b097334585b0c01d9d88242168a388be61c80615ac6a81432b",
+      "installed_sha256": "c45257b6957a60b097334585b0c01d9d88242168a388be61c80615ac6a81432b"
     },
     {
       "path": "src/dtk/models/content.py",
-      "sha256": "dc5f4d618d7b64a9e6c2936f3e4bddff62689addd8789ef2d6decb0262d91e09",
-      "installed_sha256": "dc5f4d618d7b64a9e6c2936f3e4bddff62689addd8789ef2d6decb0262d91e09"
+      "sha256": "316cec611c9a82c9c2af3b2074fae169ba0281ed98ea5da40a0dfb6fa5534132",
+      "installed_sha256": "316cec611c9a82c9c2af3b2074fae169ba0281ed98ea5da40a0dfb6fa5534132"
     },
     {
       "path": "src/dtk/platforms/__init__.py",
@@ -45,8 +45,8 @@
     },
     {
       "path": "src/dtk/platforms/base.py",
-      "sha256": "1cc65c259db8c790a4e221f74be7940aa0521d716629b188636476a7b7be86b8",
-      "installed_sha256": "1cc65c259db8c790a4e221f74be7940aa0521d716629b188636476a7b7be86b8"
+      "sha256": "16df068676b69f035c60b0933255ca4ffdbd2e732182497aca74d601b0c51c60",
+      "installed_sha256": "16df068676b69f035c60b0933255ca4ffdbd2e732182497aca74d601b0c51c60"
     },
     {
       "path": "src/dtk/platforms/common.py",
@@ -60,8 +60,8 @@
     },
     {
       "path": "src/dtk/platforms/douyin/adapter.py",
-      "sha256": "d3e1e90a0af7652854c27dffccc5fe20a6aed73ae186e717d8869dc2ab1b53fd",
-      "installed_sha256": "d3e1e90a0af7652854c27dffccc5fe20a6aed73ae186e717d8869dc2ab1b53fd"
+      "sha256": "0dcf1c95736f0eb3132d23223a62f3955ac7a29d92be99a8803dec77391ff9ee",
+      "installed_sha256": "0dcf1c95736f0eb3132d23223a62f3955ac7a29d92be99a8803dec77391ff9ee"
     },
     {
       "path": "src/dtk/platforms/douyin/endpoints.py",
@@ -75,8 +75,8 @@
     },
     {
       "path": "src/dtk/platforms/douyin/parser.py",
-      "sha256": "92fa2214bac96a755caf0632415b22c1fea6ef5fb50b0eb5cbc22c4c40337d5c",
-      "installed_sha256": "92fa2214bac96a755caf0632415b22c1fea6ef5fb50b0eb5cbc22c4c40337d5c"
+      "sha256": "a127bdddfab5a316c13c6aa7417f03086f6a68e0351d9956beb8f0f592e5ce8a",
+      "installed_sha256": "a127bdddfab5a316c13c6aa7417f03086f6a68e0351d9956beb8f0f592e5ce8a"
     },
     {
       "path": "src/dtk/platforms/registry.py",
@@ -90,27 +90,27 @@
     },
     {
       "path": "src/dtk/platforms/tiktok/adapter.py",
-      "sha256": "b746bd939cd4c7cf5897c3ac50df631d2f18ff1632d5f4c1cc06ec7fb13ea401",
-      "installed_sha256": "b746bd939cd4c7cf5897c3ac50df631d2f18ff1632d5f4c1cc06ec7fb13ea401"
+      "sha256": "3bcc7e8a180a4067e01d7147e0afdfed699aee8194b3d32c2337ea28397c41ed",
+      "installed_sha256": "3bcc7e8a180a4067e01d7147e0afdfed699aee8194b3d32c2337ea28397c41ed"
     },
     {
       "path": "src/dtk/platforms/tiktok/endpoints.py",
-      "sha256": "76292fbf9e2f7bc474d3ef93077761d0b9f8e8d7f880becb200d9ef4d37b9f4d",
-      "installed_sha256": "76292fbf9e2f7bc474d3ef93077761d0b9f8e8d7f880becb200d9ef4d37b9f4d"
+      "sha256": "ef1c014e45a3c9f5e173d38fe92ea606dce4863201dc56bf576e57b1ad00dc27",
+      "installed_sha256": "ef1c014e45a3c9f5e173d38fe92ea606dce4863201dc56bf576e57b1ad00dc27"
     },
     {
       "path": "src/dtk/platforms/tiktok/params.py",
-      "sha256": "050d8cf1d08a0c98de956b30d51874e480c2e042e88a24d845a119704d613620",
-      "installed_sha256": "050d8cf1d08a0c98de956b30d51874e480c2e042e88a24d845a119704d613620"
+      "sha256": "5f898ec6b10214ae17f7a817fe077b0aa03da305be1d8f49f34350e452f8300e",
+      "installed_sha256": "5f898ec6b10214ae17f7a817fe077b0aa03da305be1d8f49f34350e452f8300e"
     },
     {
       "path": "src/dtk/platforms/tiktok/parser.py",
-      "sha256": "71db5a2e7fa7c3db7b347369a88f516a281480f5341592902d1effd9717a65b1",
-      "installed_sha256": "71db5a2e7fa7c3db7b347369a88f516a281480f5341592902d1effd9717a65b1"
+      "sha256": "2a77a120a7fca68279973e080435685775ca8cf25d9d8a6fba74855985981397",
+      "installed_sha256": "2a77a120a7fca68279973e080435685775ca8cf25d9d8a6fba74855985981397"
     },
     {
       "path": "src/dtk/signing/__init__.py",
-      "sha256": "7d9baed4ef315e710cb970c8d6ce493c321406e067dfb7eaa5432a87a767b1ed",
+      "sha256": "1d6ec3f6672a884250946ce1e8a017d50e6933de8369f974fcbe2a00932fc2b0",
       "installed_sha256": "2dbdfa4173c7423f014c1eb9673d2bd03455828a2c0d1aef2ea4021fc301a8e4"
     },
     {
@@ -135,13 +135,13 @@
     },
     {
       "path": "src/dtk/signing/native/sm3.py",
-      "sha256": "6ad3947e11670a2bdb1fd33980f1d3da007b76421b79c95a1586455c02069669",
-      "installed_sha256": "6ad3947e11670a2bdb1fd33980f1d3da007b76421b79c95a1586455c02069669"
+      "sha256": "a5705e61612b90109f763bb859fe0b226a55ff2e76c48b00735624d86246d0b6",
+      "installed_sha256": "a5705e61612b90109f763bb859fe0b226a55ff2e76c48b00735624d86246d0b6"
     },
     {
       "path": "src/dtk/signing/native/tiktok_sign.py",
-      "sha256": "405cb4a56070ceef9fafada3a4045ffb9a8509872eb38a45d1f258860db61547",
-      "installed_sha256": "405cb4a56070ceef9fafada3a4045ffb9a8509872eb38a45d1f258860db61547"
+      "sha256": "f398197a4cfaa210ecc8b5f1829571ca2e7a1c242cc1714430e4208a2c7b5030",
+      "installed_sha256": "f398197a4cfaa210ecc8b5f1829571ca2e7a1c242cc1714430e4208a2c7b5030"
     },
     {
       "path": "src/dtk/signing/native/tokens.py",
@@ -182,7 +182,7 @@
   "patches": [
     {
       "path": "patches/desktop-imports.patch",
-      "sha256": "fa37c1532a81f76b587f3e16c03448bf504cfef95506c688a7b7d5b0d45fc744"
+      "sha256": "e0ef683ca4f66cf10338fb63f0d37a85102f8432ac9d123a2868deadb4bb2f62"
     }
   ],
   "runtime_imports": [

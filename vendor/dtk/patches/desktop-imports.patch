@@ -1,6 +1,6 @@
 --- a/src/dtk/signing/__init__.py
 +++ b/src/dtk/signing/__init__.py
-@@ -1,64 +1,4 @@
+@@ -1,66 +1,4 @@
 -"""Request signing: the algorithms, the fallback chain, and the contracts.
 +"""Desktop subset: native signing only, no registry or browser RPC imports.
 -
@@ -36,6 +36,7 @@
 -    RiskRateSource,
 -    RiskSample,
 -    ShadowResult,
+-    ShadowSkip,
 -    SignerRegistry,
 -    SlidingRiskWindow,
 -)
@@ -54,6 +55,7 @@
 -    "RiskSample",
 -    "RpcSigner",
 -    "ShadowResult",
+-    "ShadowSkip",
 -    "SignatureAlgorithm",
 -    "SignedParams",
 -    "Signer",

@@ -123,13 +123,14 @@ COVER_FORMAT: Final = "2"
 #: not have to be a real one: a random 19-digit number works exactly as well as
 #: the one the browser had been issued.
 #:
-#: It is generated per call rather than per identity, which is a compromise
-#: worth naming: a real device id is stable for the life of a browser, so an
-#: identity whose device changes every request is not perfectly plausible. The
-#: alternative available at this layer - one value shared by every identity -
-#: would be worse, because it would link them to each other. Making it properly
-#: per-identity needs the identity to reach the parameter builder, which it does
-#: not today.
+#: Any 19 digits get data, but not media anyone can play. TikTok binds a video
+#: link to the device id it was asked with and the session's tt_chain_token
+#: together, so a made-up id hands back links that answer 403 to every cookie
+#: there is (#831, measured 2026-11-20: the session's own id opened them, an
+#: unrelated one did not). An identity's real id - TikTok's `wid`, which the
+#: fetch service reads once off a page and keeps in the fingerprint - is sent
+#: whenever it is known. A random one is the fallback for an identity whose id
+#: has not been read yet, and for a caller that builds a request without one.
 DEVICE_ID_DIGITS: Final = 19
 
 
@@ -154,7 +155,7 @@ def base_params(profile: ClientProfile = DEFAULT_PROFILE) -> dict[str, str]:
         "browser_version": profile.browser_version,
         "channel": CHANNEL,
         "cookie_enabled": "true",
-        "device_id": _device_id(),
+        "device_id": profile.device_id or _device_id(),
         "device_platform": "web_pc",
         "focus_state": "true",
         "from_page": "user",
@@ -592,6 +593,11 @@ def _keyword(keyword: str) -> str:
     return text
 
 
+#: ``<offset>`` or ``<offset>:<search_id>``, as `parse_search_posts` issues it.
+#: The id is the previous page's ``log_pb.impr_id``, an alphanumeric string.
+SEARCH_CURSOR: Final = re.compile(r"(\d{1,9})(?::([0-9A-Za-z]{1,64}))?")
+
+
 def search_posts_params(
     *,
     keyword: str,
@@ -599,14 +605,36 @@ def search_posts_params(
     count: int = DEFAULT_PAGE_SIZE,
     profile: ClientProfile = DEFAULT_PROFILE,
 ) -> dict[str, str]:
-    """Parameters for ``/api/search/item/full/``. The page pages it by ``offset``."""
-    return {
+    """Parameters for ``/api/search/item/full/``: an ``offset``, and past page one
+    the ``search_id`` of the search being continued.
+
+    Without the id, page two is an empty list and ``search_nil_info`` - which
+    is what "a guest gets no paging" in the endpoint's notes was, and what a
+    signed-in account got too (measured 2026-11-08, the comment under #819).
+    The cursor carries both halves, and a cursor this API never issued is
+    refused rather than forwarded into the query.
+    """
+    params = {
         **base_params(profile),
         "keyword": _keyword(keyword),
-        "offset": _cursor(cursor),
+        "offset": "0",
         "count": str(count),
         "search_source": SEARCH_SOURCE,
     }
+    text = (cursor or "").strip()
+    if not text:
+        return params
+    match = SEARCH_CURSOR.fullmatch(text)
+    if match is None:
+        raise InvalidParam(
+            "pass back the cursor a previous page of this search returned",
+            details={"endpoint": "tiktok.search_posts", "field": "cursor"},
+        )
+    offset, search_id = match.groups()
+    params["offset"] = offset
+    if search_id:
+        params["search_id"] = search_id
+    return params
 
 
 def search_authors_params(
@@ -828,6 +856,7 @@ __all__ = [
     "COVER_FORMAT",
     "DEFAULT_PAGE_SIZE",
     "DEFAULT_PROFILE",
+    "SEARCH_CURSOR",
     "author_bookmarks_params",
     "author_collections_params",
     "author_posts_params",

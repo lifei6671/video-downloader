@@ -67,6 +67,21 @@ def image_choices(content):
 
 def request_json(ydl, adapter, endpoint, ua, cookies, proxy, **arguments):
     from engine import EngineError
+    device_id = None
+    if str(adapter.platform) == 'tiktok':
+        # The media URLs bind the device id to this same visitor's cookie jar.
+        # Read the upstream page through our existing guarded transport; never
+        # persist the id or substitute a random id when the page is unavailable.
+        with ydl.urlopen(Request(adapter.device_id_page(), headers={'User-Agent': ua})) as response:
+            page = response.read(4 * 1024 * 1024 + 1)
+        if len(page) > 4 * 1024 * 1024:
+            raise EngineError('UPSTREAM_CHANGED', 'dtk_device_id')
+        device_id = adapter.read_device_id(page.decode('utf-8', errors='replace'))
+        if device_id is None:
+            raise EngineError('UPSTREAM_CHANGED', 'dtk_device_id')
+        # The home page can refresh msToken; sign with the cookies actually sent,
+        # rather than the original imported snapshot.
+        cookies = None
     environment = getattr(ydl, '_yingqu_browser_environment', {})
     memory = environment.get('device_memory', 8)
     if type(memory) is float and memory.is_integer(): memory = int(memory)
@@ -75,7 +90,8 @@ def request_json(ydl, adapter, endpoint, ua, cookies, proxy, **arguments):
     profile = adapter.profile_for(SimpleNamespace(
         user_agent=ua, platform=environment.get('platform') or ('MacIntel' if 'Macintosh' in ua else 'Win32'),
         screen=screen, language=environment.get('language') or 'zh-CN', timezone=environment.get('timezone') or 'Asia/Shanghai',
-        hardware_concurrency=environment.get('hardware_concurrency', 8), device_memory=memory))
+        hardware_concurrency=environment.get('hardware_concurrency', 8), device_memory=memory,
+        **({'device_id': device_id} if device_id is not None else {})))
     request = adapter.build_request(endpoint, profile=profile, **arguments)
     spec = RequestSpec(request['method'], request['url'], request['params'], request['headers'])
     if cookies is None:
@@ -101,7 +117,8 @@ def extract(ydl, platform, video_id, ua, cookies, proxy):
         content = adapter.parse_content(payload, fetched_at=datetime.now(UTC))
     except DtkError as error:
         code = {'UPSTREAM_RISK_CONTROL': 'RISK_CONTROL', 'CONTENT_PRIVATE': 'ACCESS_DENIED',
-                'NOT_FOUND': 'NOT_FOUND', 'UNSUPPORTED_CONTENT': 'UNSUPPORTED_CONTENT'}.get(
+                'NOT_FOUND': 'NOT_FOUND', 'UNSUPPORTED_CONTENT': 'UNSUPPORTED_CONTENT',
+                'MEDIA_WITHHELD': 'UNSUPPORTED_CONTENT'}.get(
                     str(error.code), 'UPSTREAM_CHANGED')
         raise EngineError(code, 'dtk') from None
     if content.content_id != video_id or content.is_deleted or content.is_private:
@@ -138,10 +155,10 @@ def metadata(content):
     return result
 
 
-def video_info(content):
+def video_info(content, ydl=None):
     """Expose only DTK's single-file streams to our existing yt-dlp selector."""
     from urllib.parse import urlsplit
-    from engine import EngineError
+    from engine import EngineError, add_cookies
     formats = []
     for index, stream in enumerate([content.media.video, *content.media.streams]):
         if stream is None or stream.watermark:
@@ -153,7 +170,18 @@ def video_info(content):
     if not formats:
         raise EngineError('UNSUPPORTED_CONTENT', 'format')
     details = metadata(content)
+    access = getattr(content.media, 'access', None)
+    if str(content.platform) == 'tiktok' and access and access.session_bound and ydl is not None:
+        cookies = {cookie.name: cookie.value for cookie in ydl.cookiejar.get_cookies_for_url('https://www.tiktok.com/')}
+        token = cookies.get('tt_chain_token')
+        if not token:
+            raise EngineError('ACCESS_DENIED', 'dtk_media_session')
+        # Follow upstream BOUND_COOKIES: only this anonymous chain cookie may
+        # reach TikTok video subdomains. Login cookies remain host-only, and
+        # the existing guard/jar still removes it on redirects outside tiktok.com.
+        add_cookies(ydl.cookiejar, {'tt_chain_token': token}, 'tiktok')
     return dict(id=content.content_id, webpage_url=content.web_url, title=content.title,
+                http_headers={'Referer': access.referer} if access and access.referer else {},
                 timestamp=details.get('published_at'),
                 _yingqu_douyin_covers=cover_candidates(content.raw) if str(content.platform) == 'douyin' else [],
                 _yingqu_author=details['author_profile'],

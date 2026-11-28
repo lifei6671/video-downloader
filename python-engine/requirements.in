@@ -1,4 +1,4 @@
-yt-dlp==2026.10.26
+yt-dlp==2026.11.23
 yt-dlp-ejs==0.8.0
 certifi==2026.10.23
 pydantic==2.14.1

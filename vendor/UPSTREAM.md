@@ -20,15 +20,15 @@ grammers 使用 MIT OR Apache-2.0。新增解析依赖（含 Tokio 必要升级�
 
 两个直接依赖均关闭默认 features，`grammers-client` 开启原生 `proxy`，`grammers-session` 只开启 `serde`；不引入默认 `libsql` SQLite 存储，与应用现有 `rusqlite` 保持独立。SDK 要求 Tokio 至少 1.53.3，当前锁定 1.54.1。会话适配器仅把非持久缓存留在内存，授权数据通过独立系统凭据服务保存；不读取 tdl 或 Telegram Desktop 的会话。真实传输、文件限制、扫码和跨平台验收见实施记录，依赖编译成功不代表这些能力通过。
 
-当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。抖音与 TikTok 默认由 yt-dlp 解析视频、DTK 解析图集，小红书视频与图集使用 yt-dlp 适配，用户也可明确选择适用引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.10.26` 的运行时版本为 `2026.10.26`；协议 v3，引擎版本 `0.15.5`。
+当前使用 yt-dlp + DTK 双解析引擎，共用 yt-dlp 网络与 HTTP 下载器。抖音与 TikTok 默认由 yt-dlp 解析视频、DTK 解析图集，小红书视频与图集使用 yt-dlp 适配，用户也可明确选择适用引擎；失败不会自动切换。官方 Python 包 `yt-dlp==2026.11.23` 的运行时版本为 `2026.11.23`；协议 v3，引擎版本 `0.17.0`。
 
-小红书网页及 App 分享页适配沿用 [yt-dlp 小红书提取器](https://github.com/yt-dlp/yt-dlp/blob/2026.10.26/yt_dlp/extractor/xiaohongshu.py) 的页面数据与视频原档入口，图文采用 [media-parser 记录的 CDN 地址形式](https://github.com/ucmao/media-parser/blob/main/docs/parsers/xiaohongshu.md#32-图文原图去水印与-livephoto-提取) 请求高清 JPEG。未增加第三方依赖。
+小红书网页及 App 分享页适配沿用 [yt-dlp 小红书提取器](https://github.com/yt-dlp/yt-dlp/blob/2026.11.23/yt_dlp/extractor/xiaohongshu.py) 的页面数据与视频原档入口，图文采用 [media-parser 记录的 CDN 地址形式](https://github.com/ucmao/media-parser/blob/main/docs/parsers/xiaohongshu.md#32-图文原图去水印与-livephoto-提取) 请求高清 JPEG。未增加第三方依赖。
 
-- 来源：https://github.com/yt-dlp/yt-dlp/tree/2026.10.26
-- PyPI：https://pypi.org/project/yt-dlp/2026.10.26/
-- 官方 wheel：`yt_dlp-2026.10.26-py3-none-any.whl`
-- wheel SHA-256：`a05c5b5d8562f7e8a62f5334348b406af4930d56d3a65f8021d14af0e22339ae`（PyPI 发布元数据核对）
-- sdist SHA-256：`abe5c6b94c3b2f0560500add1c42e0a97641752743a5b65588ac2007a6e23eb6`
+- 来源：https://github.com/yt-dlp/yt-dlp/tree/2026.11.23
+- PyPI：https://pypi.org/project/yt-dlp/2026.11.23/
+- 官方 wheel：`yt_dlp-2026.11.23-py3-none-any.whl`
+- wheel SHA-256：`e9188e0c559905f7ee05acc1ba0b6fb3f310e7565bf6dea5f62b5300e0775e35`（PyPI 发布元数据核对）
+- sdist SHA-256：`1db83772a8de7855a2dab551a94d7f617c88629dfdf506531c06b369b47f88a4`
 - Unlicense 原文保留于 `yt-dlp-LICENSE`，从已安装的对应 wheel 许可证复制。
 
 不修改已安装的 yt-dlp 包；经用户明确批准，在自有适配层覆盖 DouyinIE 的单一详情请求构造，补丁范围见下文。`python-engine/engine.py` 使用 `YoutubeDL` 嵌入接口；`network.py` 为本应用的双平台网络边界适配，固定依赖该版本的 `UrllibRH`、`HTTPHandler` 和请求 director。沿用上游 Cookie、HTTP 解码、重定向及 SOCKS 实现，只增加逐跳目标校验与直连 DNS 结果固定；按 2026-10-14 用户 TUN 决策，不检查 DNS 返回 IP 的公网属性，私有/保留地址交由系统路由；升级须重测这些内部接入点。显式 HTTP 代理由适配层设置路由，避免环境 NO_PROXY 或系统 bypass 改走直连；SOCKS 保留上游实现。远端 DNS 代理的实际目的 IP 无法由本客户端验证。
@@ -43,13 +43,15 @@ PyInstaller 使用官方 yt-dlp hook，收集 DTK 的具体平台模块、完整
 
 ## DTK 固定切片与补丁
 
-- 来源：[Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/tree/26299ef8649a12be82c3769b05b316fdeec8d40d)，版本 5.1.10，提交 `26299ef8649a12be82c3769b05b316fdeec8d40d`。
+- 来源：[Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/tree/50f89e8ba23c205e06bfeed78246daf81583276b)，版本 5.1.13，提交 `50f89e8ba23c205e06bfeed78246daf81583276b`。
 - [manifest](dtk/manifest.json) 保存 33 个 Python 文件及 LICENSE / NOTICE 的原始、安装后 SHA-256，补丁 SHA-256 和允许的运行依赖。
-- [desktop-imports.patch](dtk/patches/desktop-imports.patch) 仅隔离 signing 包初始化的 registry / RPC 聚合导入；签名算法、参数构造和 parser 保留上游原文。自有业务编排位于 `python-engine/dtk_adapter.py`。
+- [desktop-imports.patch](dtk/patches/desktop-imports.patch) 已按 5.1.13 的导出更新，仅隔离 signing 包初始化的 registry / RPC 聚合导入；签名算法、参数构造和 parser 保留上游原文。自有业务编排位于 `python-engine/dtk_adapter.py`。
 - `vendor/dtk/upstream/` 由 [同步脚本](../scripts/update_dtk_vendor.py) 生成，不手改。`_desktop_revision.py` 是脚本生成的版本文件。
 - 实况照片复用该版本已有的 `AlbumImage.video`，由自有适配层同时下载静态图及每张图附带的原始 MP4，按同一编号保存，不转码、不使用作品级背景音乐地址。MP4 纳入图集文件清单、大小和 SHA-256 校验、提交恢复及本地删除；片段失败时整个图集失败。解析预览使用静态图，已下载实况在图集查看器中播放本地 MP4。没有修改 vendored parser 或增加依赖。
 - 更新先校验已安装源文件，再从指定完整 commit 读取白名单、校验原始 hash、执行补丁 apply --check、审计导入与语法；全部通过才替换源码和 manifest。冲突、未审核依赖或本地修改不会被覆盖。
 - 更新命令、补丁升级及门禁见 [开发文档](../docs/development.md#解析模块同步与补丁升级)。CI 和 Release 构建均离线执行 `--check`，不在用户运行时拉取模块。
+
+当前桌面适配在 TikTok 详情请求前通过已有 GuardedRH 读取同一会话主页，复用上游 `read_device_id`，将真实设备 ID 传入 `ClientProfile`；主页刷新 Cookie 后从当前 CookieJar 取签名 token，缺少设备 ID 时明确失败，不使用随机设备 ID。媒体 Referer 沿用上游 `MediaAccess`；session-bound TikTok 视频仅把同会话匿名 `tt_chain_token` 放入 secure `.tiktok.com` Cookie，遵循上游 `BOUND_COOKIES` 的域约束，不扩散到 tiktokcdn/tiktokv，登录 Cookie 保持原 host-only 范围。`MEDIA_WITHHELD` 映射为既有 `UNSUPPORTED_CONTENT`，不再当作提取器结构变化。升级验证见[双引擎稳定版升级记录](../docs/dual-engine-stable-upgrade-validation.md)。
 
 正式图集 GUI、文件格式、重启及对应安装包验证见 [双引擎验收](../docs/dual-engine-validation.md)；初始独立试验与设计见 [双引擎方案](../docs/dtk-dual-engine-plan.md)。旧单引擎 Windows/macOS 证据不能替代此次双引擎对应平台验收。
 

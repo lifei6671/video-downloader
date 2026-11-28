@@ -39,7 +39,7 @@ from dtk.core.errors import DtkError
 
 ENGINE_VERSION = '0.17.0'
 PROTOCOL_VERSION = 3
-YTDLP_VERSION = '2026.10.26'
+YTDLP_VERSION = '2026.11.23'
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0')
 
@@ -675,7 +675,7 @@ def operate(method, params, emit):
                     if (preview or fetch_batch_avatar) and content.author.avatar:
                         avatar = content.author.avatar.url
                 else:
-                    info = ydl.process_ie_result(dtk_adapter.video_info(content), download=False)
+                    info = ydl.process_ie_result(dtk_adapter.video_info(content, ydl), download=False)
             elif note is not None:
                 if xhs_album:
                     album = xiaohongshu.image_choices(note, media_album.MAX_IMAGES)
