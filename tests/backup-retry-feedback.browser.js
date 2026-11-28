@@ -16,10 +16,36 @@ async page => {
     await page.setViewportSize({width,height});await load();
     const before=await row('retry').evaluate(n=>n.getBoundingClientRect().height);
     check(await row('retry').getByRole('alert').count()===0,'automatic retry displayed its previous error');
-    await page.evaluate(()=>window.unifiedTest.change('op-retry',{last_error:'TELEGRAM_FLOOD_WAIT:1'}));
+    await page.evaluate(()=>{
+      const deadline=Math.floor(Date.now()/1000)+120;
+      window.unifiedTest.change('op-upload',{state:'retry_wait',last_error:'TELEGRAM_FLOOD_WAIT:120',next_retry_at:deadline});
+      window.unifiedTest.change('op-retry',{last_error:null,next_retry_at:deadline});
+    });
+    await row('upload').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor();
+    await label('retry','等待重试');
+    check(await row('retry').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).count()===0,'account cooldown spread flood notice to another video');
+    check(await row('pending').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).count()===0,'queued video displayed flood notice');
+    await page.evaluate(()=>window.unifiedTest.change('op-upload',{state:'running',last_error:null,next_retry_at:null}));
+    await row('upload').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor({state:'hidden'});
+    await page.evaluate(()=>window.unifiedTest.change('op-retry',{last_error:'TELEGRAM_FLOOD_WAIT:120',next_retry_at:Math.floor(Date.now()/1000)+120}));
     await row('retry').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor();
     check(await row('retry').getByRole('alert').count()===0 && await errors().count()===0,'flood cooldown was presented as a failure');
     await row('retry').getByRole('button',{name:'取消备份',exact:true}).waitFor();
+    for (const patch of [
+      {next_retry_at:Math.floor(Date.now()/1000)-1},
+      {next_retry_at:null},
+      {state:'running',next_retry_at:Math.floor(Date.now()/1000)+120},
+      {state:'pending'},
+      {last_error:'TELEGRAM_FLOOD_WAIT:0'},
+    ]) {
+      await page.evaluate(()=>window.unifiedTest.change('op-retry',{state:'retry_wait',last_error:'TELEGRAM_FLOOD_WAIT:120',next_retry_at:Math.floor(Date.now()/1000)+120}));
+      await row('retry').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor();
+      await page.evaluate(patch=>window.unifiedTest.change('op-retry',patch),patch);
+      await row('retry').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor({state:'hidden'});
+    }
+    await page.evaluate(()=>window.unifiedTest.change('op-retry',{state:'retry_wait',last_error:'TELEGRAM_FLOOD_WAIT:120',next_retry_at:Date.now()/1000+2}));
+    await row('retry').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor();
+    await row('retry').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor({state:'hidden'});
     for(const attempt of [2,3]){
       await page.evaluate(attempt=>window.unifiedTest.change('op-retry',{attempt,last_error:attempt===2?'TELEGRAM_TIMEOUT':'TELEGRAM_CONNECTION_ERROR'}),attempt);
       await page.waitForTimeout(1100);
@@ -68,9 +94,10 @@ async page => {
   await page.evaluate(()=>window.unifiedTest.change('delete-asset-upload',{state:'retry_wait',attempt:2,last_error:'TELEGRAM_CONNECTION_ERROR'}));
   await page.waitForTimeout(1100);
   check(await errors().count()===0&&await row('upload').getByRole('alert').count()===0,'delete backoff displayed an intermediate error');
-  await page.evaluate(()=>window.unifiedTest.change('delete-asset-upload',{last_error:'TELEGRAM_FLOOD_WAIT:120'}));
+  await page.evaluate(()=>window.unifiedTest.change('delete-asset-upload',{last_error:'TELEGRAM_FLOOD_WAIT:120',next_retry_at:Date.now()/1000+2}));
   await row('upload').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor();
   check(await errors().count()===0 && await row('upload').getByRole('alert').count()===0,'delete flood cooldown was presented as a failure');
+  await row('upload').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor({state:'hidden'});
   await page.evaluate(()=>window.unifiedTest.change('delete-asset-upload',{last_error:'TELEGRAM_CONNECTION_ERROR'}));
   await page.evaluate(()=>window.unifiedTest.change('delete-asset-upload',{state:'blocked',attempt:5,last_error:'TELEGRAM_CONNECTION_ERROR'}));
   await label('upload','删除失败');await row('upload').getByRole('alert').waitFor();
@@ -91,5 +118,29 @@ async page => {
   check(await page.evaluate(()=>window.unifiedTest.assets.some(a=>a.asset_id==='asset-retry'&&a.asset_state==='active'&&!a.remote_deleted)),'history counterexample lacks a new active asset');
   check(await row('retry').locator('.backup-sync-glyph svg.lucide-circle-alert').count()===1,'new generation terminal failure kept the spinner');
   results.push('completed delete history cannot suppress a new active upload generation failure');
+  await load();
+  await page.evaluate(()=>window.unifiedTest.change('op-cleaning',{payload:{cleanup_error:'TELEGRAM_FLOOD_WAIT:120'},next_retry_at:Date.now()/1000+2}));
+  await row('cleaning').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor();
+  await row('cleaning').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor({state:'hidden'});
+  await page.evaluate(()=>window.unifiedTest.change('old-dependency',{payload:{cleanup_error:'TELEGRAM_FLOOD_WAIT:120',cleanup_blocked:false},next_retry_at:Date.now()/1000+2}));
+  await label('dependency','清理中');
+  check(await row('dependency').getByText('Telegram 请求受限，等待后自动继续',{exact:true}).count()===0,'replacement upload inherited a previous cleanup flood notice');
+  results.push('only the original cleanup shows its own flood notice; dependent upload remains a normal wait');
+  const remote=page.locator('[data-asset-id="remote-upload"]');
+  await page.evaluate(()=>window.unifiedTest.change('op-remote-upload',{state:'retry_wait',last_error:'TELEGRAM_FLOOD_WAIT:120',next_retry_at:Date.now()/1000+2}));
+  await remote.getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor();
+  await remote.getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor({state:'hidden'});
+  await page.evaluate(()=>window.unifiedTest.change('op-remote-upload',{state:'running',next_retry_at:Math.floor(Date.now()/1000)+120}));
+  await remote.getByText('备份中 40%',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'切换为列表',exact:true}).focus();
+  await page.keyboard.press('Enter');
+  await page.getByLabel('按状态筛选下载任务').getByLabel('同步中',{exact:true}).click();
+  await remote.getByText('上传进度 40%',{exact:true}).waitFor();
+  await page.evaluate(()=>window.unifiedTest.change('op-remote-upload',{state:'retry_wait',next_retry_at:Date.now()/1000+2}));
+  await remote.getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor();
+  await remote.getByText('Telegram 请求受限，等待后自动继续',{exact:true}).waitFor({state:'hidden'});
+  await page.evaluate(()=>window.unifiedTest.change('op-remote-upload',{state:'running',next_retry_at:Math.floor(Date.now()/1000)+120}));
+  await remote.getByText('上传进度 40%',{exact:true}).waitFor();
+  results.push('cloud asset sync feedback hides expired and historical flood errors after resuming');
   return {passed:results.length,results};
 }

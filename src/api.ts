@@ -91,7 +91,7 @@ export interface DatabaseBackupSnapshot {
 export interface BackupConflict { image: number[] | null; id: string; field: string; value: string; device_id: string; can_adopt: boolean }
 export interface BackupLocalData { title: string; transcript: string | null; pending: boolean; remote_deleted: boolean; conflicts: BackupConflict[] }
 export interface DeleteActivity { operation_id: string; companion: string | null; step: string }
-export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number; transfer_started?: boolean; local_cleanup_done?: boolean; archive_next?: string; cleanup_dependency?: string; cleanup_error?: string; cleanup_blocked?: boolean }; attempt: number; last_error: string | null }
+export interface BackupOperation { operation_id: string; space_id: string; asset_id: string | null; kind: string; state: string; phase: string; payload: { completed_bytes?: number; transfer_started?: boolean; local_cleanup_done?: boolean; archive_next?: string; cleanup_dependency?: string; cleanup_error?: string; cleanup_blocked?: boolean }; attempt: number; last_error: string | null; next_retry_at?: number | null }
 export interface BackupLocation { space_id: string; profile: 'r2' | 's3' | 'telegram'; display_name: string; channel_title: string | null }
 export interface BackupAsset { in_current_space?: boolean; backup_locations?: BackupLocation[]; asset_id: string; task_id: string | null; metadata: Partial<Video> & { album_files?: ImageMeta[] }; original_filename: string; content_sha256: string | null; content_bytes: number; asset_state: 'active' | 'deleted'; path: string | null; local_state: string; space_id: string; remote_state: string; has_cover: boolean; has_transcript: boolean; remote_revision: number; remote_deleted: boolean; has_pending_local_changes: boolean; conflict_count: number }
 export interface AssetTranscript { asset_id: string; content_sha256: string | null; text: string; model_revision: string; model_name: string | null; pipeline_revision: string; completed_at: number }
@@ -482,6 +482,7 @@ const errors: Record<string, string> = {
   PLAYBACK_SOURCE_FAILED: '无法读取本地视频，正在尝试系统播放器',
 };
 export const errorText = (error: unknown) => {
+  if (/^TELEGRAM_COOLDOWN_WAIT:\d+$/.test(String(error))) return 'Telegram 请求等待中，请稍后重试';
   const wait = /^TELEGRAM_FLOOD_WAIT:(\d+)$/.exec(String(error));
   const rejected = /^DATABASE_BACKUP_TELEGRAM_REJECTED:(-?\d+):([A-Z_]+)$/.exec(String(error));
   if (rejected) return `Telegram 拒绝了数据库备份请求（${rejected[2]}，${rejected[1]}）`;

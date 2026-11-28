@@ -191,7 +191,10 @@ impl Budget {
         if let Some(until) = *self.cooldown.lock().expect("transfer cooldown") {
             let left = until.saturating_duration_since(Instant::now());
             if !left.is_zero() {
-                bail!("TELEGRAM_FLOOD_WAIT:{}", left.as_secs().saturating_add(1));
+                bail!(
+                    "TELEGRAM_COOLDOWN_WAIT:{}",
+                    left.as_secs().saturating_add(1)
+                );
             }
         }
         Ok(())

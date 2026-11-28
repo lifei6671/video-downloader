@@ -999,7 +999,10 @@ pub fn import_asset(db: &Connection, scope: &Scope, remote: &RemoteAsset) -> Res
         if album { super::album::files(source.context("BACKUP_INVALID_ALBUM")?)?; }
         if album != snapshot.media.as_ref().is_some_and(|m| matches!(m.container.as_str(), "tar" | "album")) { bail!("BACKUP_INVALID_ALBUM"); }
         if let Some(reference) = snapshot.media.as_ref().filter(|r| r.container == "album") {
-            super::album::validate_reference(reference, &super::album::files(source.context("BACKUP_INVALID_ALBUM")?)?)?;
+            super::album::validate_reference(
+                reference,
+                &super::album::files(source.context("BACKUP_INVALID_ALBUM")?)?,
+            )?;
         }
     }
     let local = repository::bind_remote_asset(db, &scope.space_id, &snapshot.asset_id)?;
@@ -1488,7 +1491,7 @@ async fn queue_loop(
                         return Ok(());
                     }
                     if engine.provider.scope().provider_type == ProviderType::Telegram
-                        && scheduler::defer_telegram_flood_wait(db, &operation, &reason)?
+                        && scheduler::defer_telegram_wait(db, &operation, &reason)?
                     {
                         return Ok(());
                     }
@@ -1627,10 +1630,7 @@ pub async fn maintenance_once(
     }
     tokio::select! {_=cancel.changed()=>bail!("CANCELED"),result=work=>result}
 }
-async fn maintenance_loop(
-    core: Arc<Core>,
-    mut cancel: tokio::sync::watch::Receiver<bool>,
-) {
+async fn maintenance_loop(core: Arc<Core>, mut cancel: tokio::sync::watch::Receiver<bool>) {
     while !*cancel.borrow() {
         if let Err(error) = maintenance_once(&mut cancel, super::spaces::cleanup_probes(&core)).await {
             if error.to_string() != "CANCELED" {
@@ -1715,6 +1715,43 @@ pub fn request_upload_with(
 mod claim_timing_tests {
     use super::*;
     #[test]
+    fn shared_cooldown_only_marks_the_operation_rejected_by_telegram() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,phase TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER,next_retry_at INTEGER,last_error TEXT)").unwrap();
+        for kind in ["upload", "delete"] {
+            db.execute("DELETE FROM backup_operations", []).unwrap();
+            for id in ["trigger", "waiting"] {
+                db.execute("INSERT INTO backup_operations VALUES(?1,?2,'running','captured',1,'{\"nonce\":\"keep\"}',unixepoch(),NULL,NULL)", params![id,kind]).unwrap();
+            }
+            scheduler::defer_telegram_wait(&db, "trigger", "TELEGRAM_FLOOD_WAIT:120").unwrap();
+            scheduler::defer_telegram_wait(&db, "waiting", "TELEGRAM_COOLDOWN_WAIT:120").unwrap();
+            for (id, expected) in [
+                ("trigger", Some("TELEGRAM_FLOOD_WAIT:120")),
+                ("waiting", None),
+            ] {
+                let (state, attempt, error, remaining, payload): (String, i64, Option<String>, i64, String) = db.query_row(
+                    "SELECT state,attempt,last_error,next_retry_at-unixepoch(),payload_json FROM backup_operations WHERE operation_id=?", [id],
+                    |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+                assert_eq!(state, "retry_wait");
+                assert_eq!(attempt, 0);
+                assert_eq!(error.as_deref(), expected);
+                assert!((119..=120).contains(&remaining));
+                assert_eq!(payload, "{\"nonce\":\"keep\"}");
+                assert_eq!(db.execute(CLAIM_OPERATION_SQL, [id]).unwrap(), 0);
+            }
+            db.execute("UPDATE backup_operations SET next_retry_at=unixepoch()-1 WHERE operation_id='waiting'", []).unwrap();
+            assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["waiting"]).unwrap(), 1);
+            db.execute(
+                "UPDATE backup_operations SET state='canceled' WHERE operation_id='waiting'",
+                [],
+            )
+            .unwrap();
+            scheduler::defer_telegram_wait(&db, "waiting", "TELEGRAM_COOLDOWN_WAIT:120").unwrap();
+            assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["waiting"]).unwrap(), 0);
+        }
+    }
+
+    #[test]
     fn flood_wait_preserves_budget_evidence_deadline_and_cancellation() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE backup_operations(operation_id TEXT PRIMARY KEY,kind TEXT,state TEXT,phase TEXT,attempt INTEGER,payload_json TEXT,created_at INTEGER,next_retry_at INTEGER,last_error TEXT)").unwrap();
@@ -1725,7 +1762,7 @@ mod claim_timing_tests {
             db.execute("DELETE FROM backup_operations", []).unwrap();
             db.execute("INSERT INTO backup_operations VALUES('same-send',?1,'running','publishing',5,?2,unixepoch(),NULL,NULL)", params![kind,evidence]).unwrap();
             for _ in 0..6 {
-                assert!(scheduler::defer_telegram_flood_wait(
+                assert!(scheduler::defer_telegram_wait(
                     &db,
                     "same-send",
                     "TELEGRAM_FLOOD_WAIT:120"
@@ -1748,14 +1785,10 @@ mod claim_timing_tests {
                 .unwrap();
                 assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 1);
             }
-            assert!(
-                !scheduler::defer_telegram_flood_wait(&db, "same-send", "TELEGRAM_TIMEOUT")
-                    .unwrap()
-            );
+            assert!(!scheduler::defer_telegram_wait(&db, "same-send", "TELEGRAM_TIMEOUT").unwrap());
             db.execute("UPDATE backup_operations SET state='canceled'", [])
                 .unwrap();
-            scheduler::defer_telegram_flood_wait(&db, "same-send", "TELEGRAM_FLOOD_WAIT:120")
-                .unwrap();
+            scheduler::defer_telegram_wait(&db, "same-send", "TELEGRAM_FLOOD_WAIT:120").unwrap();
             assert_eq!(db.execute(CLAIM_OPERATION_SQL, ["same-send"]).unwrap(), 0);
             let state: String = db
                 .query_row("SELECT state FROM backup_operations", [], |r| r.get(0))

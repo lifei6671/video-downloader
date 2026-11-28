@@ -466,7 +466,7 @@ fn allowed(journal: &impl Journal, target: &Target) -> Result<()> {
     target.validate()?;
     let wait = journal.cooldown(&target.account_id)?.saturating_sub(now());
     if wait > 0 {
-        bail!("TELEGRAM_FLOOD_WAIT:{wait}");
+        bail!("TELEGRAM_COOLDOWN_WAIT:{wait}");
     }
     Ok(())
 }
@@ -842,6 +842,7 @@ async fn upload_inner(
                             | "TELEGRAM_UPLOAD_PART_MISSING"
                     ) || code
                         .strip_prefix("TELEGRAM_FLOOD_WAIT:")
+                        .or_else(|| code.strip_prefix("TELEGRAM_COOLDOWN_WAIT:"))
                         .is_some_and(|v| v.parse::<u32>().is_ok())
                         || error
                             .downcast_ref::<super::telegram_session::RejectedRpc>()

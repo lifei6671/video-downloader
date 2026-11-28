@@ -346,7 +346,9 @@ impl TestJournal {
         Self(Mutex::new(db))
     }
     fn entry(&self, source: &MediaSource) -> Entry {
-        self.get(&source.operation_id, &source.kind).unwrap().unwrap()
+        self.get(&source.operation_id, &source.kind)
+            .unwrap()
+            .unwrap()
     }
 }
 impl Journal for TestJournal {
@@ -1313,13 +1315,16 @@ async fn telegram_transfer_flood_wait_is_durable_and_prevents_network_calls() {
     drop(journal);
     let journal = TestJournal::open(&path);
     let net = Mock::new();
+    let deadline = journal.cooldown("123").unwrap();
     let (_cancel, _stop, io) = io();
     let source = source(root.path(), "cover", b"cover");
-    assert!(upload(&net, &journal, &target(), source, &io)
+    let reason = upload(&net, &journal, &target(), source, &io)
         .await
         .unwrap_err()
-        .to_string()
-        .starts_with("TELEGRAM_FLOOD_WAIT:"));
+        .to_string();
+    assert!(reason.starts_with("TELEGRAM_COOLDOWN_WAIT:"));
+    journal.failure("123", &reason).unwrap();
+    assert_eq!(journal.cooldown("123").unwrap(), deadline);
     assert_eq!(net.uploads.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]

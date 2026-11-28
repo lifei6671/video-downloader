@@ -295,7 +295,7 @@ async fn account_budget_is_shared_and_limits_all_dcs() {
         .await
         .unwrap_err()
         .to_string()
-        .starts_with("TELEGRAM_FLOOD_WAIT:"));
+        .starts_with("TELEGRAM_COOLDOWN_WAIT:"));
 }
 
 #[tokio::test]
@@ -309,7 +309,7 @@ async fn flood_cooldown_survives_the_last_transfer_lease() {
         .await
         .unwrap_err()
         .to_string()
-        .starts_with("TELEGRAM_FLOOD_WAIT:"));
+        .starts_with("TELEGRAM_COOLDOWN_WAIT:"));
 }
 
 #[test]
@@ -407,7 +407,7 @@ async fn covers_do_not_bypass_file_budget_or_server_cooldown() {
     })
     .await
     .unwrap_err();
-    assert!(error.to_string().starts_with("TELEGRAM_FLOOD_WAIT:"));
+    assert!(error.to_string().starts_with("TELEGRAM_COOLDOWN_WAIT:"));
     assert_eq!(polled.load(Ordering::Relaxed), 0);
 }
 
@@ -730,7 +730,7 @@ async fn native_adapter_retries_disconnect_and_server_failure_but_not_flood_wait
             .await
             .unwrap_err()
             .to_string()
-            .starts_with("TELEGRAM_FLOOD_WAIT:"));
+            .starts_with("TELEGRAM_COOLDOWN_WAIT:"));
         assert_eq!(mock.calls.lock().unwrap().len(), 1);
     }
 }

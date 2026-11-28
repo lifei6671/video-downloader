@@ -27,7 +27,7 @@ export function backupUploadCleanup(operation: BackupOperation | undefined, oper
   if (operation?.state === 'completed' ||
       !(dependency || operation?.state === 'canceled' && !['queued', 'cancel_cleaned'].includes(operation.phase))) return;
   const cleanup = dependency ? operations.find(op => op.operation_id === dependency && (!spaceId || op.space_id === spaceId)) : operation;
-  return { error: cleanup?.payload.cleanup_error, blocked: cleanup?.payload.cleanup_blocked };
+  return { error: cleanup?.payload.cleanup_error, blocked: cleanup?.payload.cleanup_blocked, operation: cleanup };
 }
 
 /** Project existing task/operation facts into a badge; never mutate their state. */

@@ -284,6 +284,17 @@ async fn cleanup_honors_flood_wait_and_network_change_remains_silent() {
     scheduler::defer_upload_cleanup(
         &f.core,
         &scheduler::operation(&f.core, &old).unwrap(),
+        "TELEGRAM_COOLDOWN_WAIT:120",
+    )
+    .unwrap();
+    let shared_wait = scheduler::operation(&f.core, &old).unwrap();
+    assert!(shared_wait.payload["cleanup_error"].is_null());
+    assert_eq!(shared_wait.payload["cleanup_attempt"], 0);
+    assert_eq!(shared_wait.payload["cleanup_blocked"], 0);
+    assert!(shared_wait.next_retry_at.unwrap() > crate::backup::telegram_transfer::now());
+    scheduler::defer_upload_cleanup(
+        &f.core,
+        &scheduler::operation(&f.core, &old).unwrap(),
         "TELEGRAM_FLOOD_WAIT:1234",
     )
     .unwrap();

@@ -15,6 +15,7 @@ async fn wait_flood<T, F: std::future::Future<Output = Result<T>>>(
                 let code = error.to_string();
                 let Some(seconds) = code
                     .strip_prefix("TELEGRAM_FLOOD_WAIT:")
+                    .or_else(|| code.strip_prefix("TELEGRAM_COOLDOWN_WAIT:"))
                     .and_then(|s| s.parse::<u64>().ok())
                 else {
                     return Err(error);

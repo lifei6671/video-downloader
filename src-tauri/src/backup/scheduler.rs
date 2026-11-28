@@ -5,25 +5,34 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-fn telegram_flood_wait(reason: &str) -> Option<u32> {
-    reason.strip_prefix("TELEGRAM_FLOOD_WAIT:")?.parse().ok()
+fn telegram_wait(reason: &str) -> Option<u32> {
+    reason
+        .strip_prefix("TELEGRAM_FLOOD_WAIT:")
+        .or_else(|| reason.strip_prefix("TELEGRAM_COOLDOWN_WAIT:"))?
+        .parse()
+        .ok()
 }
 
-pub(super) fn defer_telegram_flood_wait(
+pub(super) fn defer_telegram_wait(
     db: &rusqlite::Connection,
     operation: &str,
     reason: &str,
 ) -> Result<bool> {
-    let Some(seconds) = telegram_flood_wait(reason) else {
+    let Some(seconds) = telegram_wait(reason) else {
         return Ok(false);
     };
-    // A server cooldown is scheduling, not a failed attempt. Keep send identities
-    // and resume evidence intact, including when the previous failure used the budget.
+    // Both waits are scheduling, not a failed attempt. Only the rejected request
+    // owns a flood error; siblings waiting on the account deadline stay neutral.
+    // Keep send identities and resume evidence intact.
     db.execute(
         "UPDATE backup_operations SET state='retry_wait',last_error=?2,
         attempt=max(0,attempt-1),next_retry_at=unixepoch()+?3
         WHERE operation_id=?1 AND state='running'",
-        rusqlite::params![operation, reason, seconds.max(1)],
+        rusqlite::params![
+            operation,
+            (!reason.starts_with("TELEGRAM_COOLDOWN_WAIT:")).then_some(reason),
+            seconds.max(1)
+        ],
     )?;
     Ok(true)
 }
@@ -128,6 +137,7 @@ pub struct Operation {
     pub payload: Value,
     pub attempt: i64,
     pub last_error: Option<String>,
+    pub next_retry_at: Option<i64>,
 }
 
 pub fn operations(core: &Core) -> Result<Vec<Operation>> {
@@ -144,8 +154,9 @@ pub fn operations_for_display(core: &Core, space: Option<&str>) -> Result<Vec<Op
         };
         let mut query = db.prepare(&format!(
             "SELECT operation_id,space_id,asset_id,kind,state,phase,
-            summary_json,attempt,last_error,progress_bytes,progress_started
-            FROM backup_operation_display{filter} ORDER BY created_at DESC,sequence DESC"
+            summary_json,attempt,last_error,progress_bytes,progress_started,
+            (SELECT next_retry_at FROM backup_operations WHERE operation_id=display.operation_id)
+            FROM backup_operation_display display{filter} ORDER BY created_at DESC,sequence DESC"
         ))?;
         let rows = query.query_map(rusqlite::params_from_iter(space), |row| {
             Ok((
@@ -160,6 +171,7 @@ pub fn operations_for_display(core: &Core, space: Option<&str>) -> Result<Vec<Op
                 row.get(8)?,
                 row.get::<_, Option<i64>>(9)?,
                 row.get::<_, Option<bool>>(10)?,
+                row.get(11)?,
             ))
         })?;
         rows.map(|row| {
@@ -175,6 +187,7 @@ pub fn operations_for_display(core: &Core, space: Option<&str>) -> Result<Vec<Op
                 last_error,
                 bytes,
                 started,
+                next_retry_at,
             ) = row?;
             let mut values: [Value; 7] = serde_json::from_str(&projection)?;
             if let Some(bytes) = bytes {
@@ -207,6 +220,7 @@ pub fn operations_for_display(core: &Core, space: Option<&str>) -> Result<Vec<Op
                 payload: Value::Object(payload),
                 attempt,
                 last_error,
+                next_retry_at,
             })
         })
         .collect()
@@ -316,7 +330,7 @@ pub(super) fn defer_upload_cleanup(core: &Core, op: &Operation, reason: &str) ->
             Ok(())
         });
     }
-    let flood_wait = telegram_flood_wait(reason);
+    let flood_wait = telegram_wait(reason);
     let attempt = op.payload["cleanup_attempt"]
         .as_u64()
         .unwrap_or(0)
@@ -341,7 +355,7 @@ pub(super) fn defer_upload_cleanup(core: &Core, op: &Operation, reason: &str) ->
         let changed = tx.execute("UPDATE backup_operations SET payload_json=json_set(payload_json,'$.cleanup_attempt',?2,'$.cleanup_error',?3,'$.cleanup_blocked',?4),
             next_retry_at=unixepoch()+?5,updated_at=unixepoch()
             WHERE operation_id=?1 AND (state='canceled' OR (state='blocked' AND last_error='BACKUP_ASSET_DELETED'))",
-            rusqlite::params![op.operation_id,i64::try_from(attempt)?,reason,blocked,delay])?;
+            rusqlite::params![op.operation_id,i64::try_from(attempt)?,(!reason.starts_with("TELEGRAM_COOLDOWN_WAIT:")).then_some(reason),blocked,delay])?;
         if changed == 0 { return Ok(()); }
         tx.execute("UPDATE backup_operations SET state=?4,last_error=?5,next_retry_at=unixepoch()+?6,
             payload_json=json_set(payload_json,'$.cleanup_dependency',?1),updated_at=unixepoch()
@@ -373,9 +387,9 @@ fn select_operations(
     params: impl rusqlite::Params,
 ) -> Result<Vec<Operation>> {
     core.backup_db(|db| {
-        let mut q=db.prepare(&format!("SELECT operation_id,space_id,asset_id,kind,state,phase,payload_json,attempt,last_error FROM backup_operations {clause}"))?;
-        let rows=q.query_map(params,|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get::<_,String>(6)?,r.get(7)?,r.get(8)?)))?;
-        rows.map(|r|{let(operation_id,space_id,asset_id,kind,state,phase,payload,attempt,last_error)=r?;Ok(Operation{operation_id,space_id,asset_id,kind,state,phase,payload:serde_json::from_str(&payload)?,attempt,last_error})}).collect()
+        let mut q=db.prepare(&format!("SELECT operation_id,space_id,asset_id,kind,state,phase,payload_json,attempt,last_error,next_retry_at FROM backup_operations {clause}"))?;
+        let rows=q.query_map(params,|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get::<_,String>(6)?,r.get(7)?,r.get(8)?,r.get(9)?)))?;
+        rows.map(|r|{let(operation_id,space_id,asset_id,kind,state,phase,payload,attempt,last_error,next_retry_at)=r?;Ok(Operation{operation_id,space_id,asset_id,kind,state,phase,payload:serde_json::from_str(&payload)?,attempt,last_error,next_retry_at})}).collect()
     })
 }
 
@@ -489,6 +503,45 @@ mod display_tests {
         result
             .expect("cancel waited for the display reader")
             .unwrap();
+    }
+
+    #[test]
+    fn display_retry_deadline_tracks_queue_without_changing_recovery_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::open(
+            &root.path().join("app.sqlite"),
+            root.path().join("downloads"),
+            "unused".into(),
+            vec![],
+            |_| {},
+        )
+        .unwrap();
+        core.backup_db(|db| {
+            db.execute("INSERT INTO backup_spaces VALUES('space','library','','','','',0)", [])?;
+            db.execute("INSERT INTO backup_operations(operation_id,space_id,kind,state,phase,payload_json,last_error,next_retry_at)
+                VALUES('wait','space','upload','retry_wait','captured','{\"capture\":\"keep\"}','TELEGRAM_FLOOD_WAIT:120',unixepoch()+120)", [])?;
+            Ok(())
+        }).unwrap();
+        let original = operation(&core, "wait").unwrap();
+        let display = operations_for_display(&core, Some("space")).unwrap();
+        assert_eq!(display[0].next_retry_at, original.next_retry_at);
+        assert!(display[0].next_retry_at.unwrap() > super::super::telegram_transfer::now());
+        // Updating only the deadline must reach the UI, including after it expires.
+        for deadline in [Some(1_i64), None] {
+            core.backup_db(|db| {
+                db.execute(
+                    "UPDATE backup_operations SET next_retry_at=? WHERE operation_id='wait'",
+                    [deadline],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            let display = operations_for_display(&core, Some("space")).unwrap();
+            assert_eq!(display[0].next_retry_at, deadline);
+            let raw = operation(&core, "wait").unwrap();
+            assert_eq!(raw.payload, original.payload);
+            assert_eq!(raw.last_error, original.last_error);
+        }
     }
 
     #[test]

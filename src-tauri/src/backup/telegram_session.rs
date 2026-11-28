@@ -1090,7 +1090,7 @@ impl TelegramSession {
             .cooldown(&target.account_id)?
             .saturating_sub(transfer::now());
         if wait > 0 {
-            bail!("TELEGRAM_FLOOD_WAIT:{wait}");
+            bail!("TELEGRAM_COOLDOWN_WAIT:{wait}");
         }
         let io = transfer::Io::new(cancel, stop.clone(), control)
             .with_session_stops(stop.clone(), binding_stop)
@@ -1254,7 +1254,7 @@ impl TelegramSession {
             .cooldown(&target.account_id)?
             .saturating_sub(super::telegram_transfer::now());
         if wait > 0 {
-            bail!("TELEGRAM_FLOOD_WAIT:{wait}");
+            bail!("TELEGRAM_COOLDOWN_WAIT:{wait}");
         }
 
         let io = super::telegram_transfer::Io::new(cancel, generation_stop, control)
